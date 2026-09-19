@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frames grandchild</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 1rem; }
+</style>
+</head>
+<body>
+<h2 id="grandchild-heading">Grandchild frame (depth 2)</h2>
+<p>This document is framed by the same-origin child, which is itself framed by the top document.</p>
+<button type="button" id="child-btn" onclick="document.getElementById('child-echo').textContent = 'grandchild clicked'">Grandchild action</button>
+<label for="child-input">Grandchild note</label>
+<input type="text" id="child-input" name="child-input" placeholder="type here">
+<p id="child-echo">not clicked</p>
+</body>
+</html>

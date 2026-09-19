@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OOPIF fixture</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  iframe { width: 100%; height: 240px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="oopif-heading">OOPIF fixture</h1>
+<p>
+  One child, on a genuinely different <em>site</em> from this page - <code>localhost</code> framed
+  from <code>127.0.0.1</code>, same port - which Chrome's site isolation puts in its own process (an
+  out-of-process iframe, an OOPIF). `frames.html`'s "cross-origin" child is the same host on a
+  different port: cross-origin, but the same site, and never an OOPIF.
+</p>
+<iframe id="oopif-frame" title="out-of-process child" src="__OOPIF_ORIGIN__/frames-child"></iframe>
+</body>
+</html>

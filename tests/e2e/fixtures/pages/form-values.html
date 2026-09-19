@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Form-values fixture</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  label { display: block; margin: 0.5rem 0; }
+  fieldset { margin: 1rem 0; }
+</style>
+</head>
+<body>
+<h1>Form-values fixture</h1>
+<p>
+  A form the owner has already half filled in. A page read should say what each field holds the
+  way a person looking at the screen would - and say <strong>redacted</strong>, with no value, for
+  the password and the card number.
+</p>
+<form id="order" action="#" onsubmit="return false">
+  <label for="fullname">Full name</label>
+  <input id="fullname" name="fullname" type="text" value="Ada Lovelace">
+
+  <label for="email">Email</label>
+  <input id="email" name="email" type="email" value="ada@example.test">
+
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" value="hunter2-secret">
+
+  <label for="card">Card number</label>
+  <input id="card" name="card" type="text" autocomplete="cc-number" value="4111 1111 1111 1111">
+
+  <label for="size">Size</label>
+  <select id="size" name="size">
+    <option value="s">Small</option>
+    <option value="m">Medium</option>
+    <option value="l" selected>Large</option>
+  </select>
+
+  <label for="toppings">Toppings</label>
+  <select id="toppings" name="toppings" multiple size="4">
+    <option value="bacon" selected>Bacon</option>
+    <option value="cheese">Extra cheese</option>
+    <option value="onion" selected>Onion</option>
+    <option value="mushroom">Mushroom</option>
+  </select>
+
+  <label for="notes">Delivery notes</label>
+  <textarea id="notes" name="notes" rows="3">Ring twice.
+Leave at the door.</textarea>
+
+  <fieldset>
+    <legend>Options</legend>
+    <label><input type="checkbox" name="gift" checked> Gift wrap</label>
+    <label><input type="checkbox" name="newsletter"> Send me the newsletter</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Delivery</legend>
+    <label><input type="radio" name="delivery" value="standard"> Standard</label>
+    <label><input type="radio" name="delivery" value="express" checked> Express</label>
+    <label><input type="radio" name="delivery" value="pickup"> Pickup</label>
+  </fieldset>
+
+  <label for="empty">Empty field</label>
+  <input id="empty" name="empty" type="text">
+
+  <button type="submit">Place order</button>
+</form>
+</body>
+</html>

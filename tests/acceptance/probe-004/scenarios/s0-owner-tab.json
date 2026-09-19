@@ -1,0 +1,60 @@
+{
+  "id": "s0-owner-tab",
+  "slice": "S0",
+  "evidence": "E3",
+  "page": "https://example.com/",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry.\n\nA tab showing https://example.com/ is already open in this browser. You did NOT open it: the owner did.\n\nStep 1. Call mcp__hallpass__tabs_context once, with no arguments. Do not create any tab.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry: tool = the exact tool name, outcome = the tool result verbatim (or its error text), truncated to 400 characters.\n- In observed: write \"owner-tab-listed\" if the returned tab list contains a tab whose url is example.com. Write \"owner-tab-missing\" if the call succeeded but that tab is not in the list. If the call failed, write the failure reason exactly as reported.\n- In notes: write how many tabs the call returned.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "owner-tab-listed"
+  },
+  "expectedAfterFix": "the owner’s own tabs appear in tabs_context with a holder of \"none\" (FR-060–FR-062)",
+  "setup": {
+    "openOwnerTab": "https://example.com/"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 240000
+}

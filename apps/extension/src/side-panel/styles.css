@@ -1,0 +1,208 @@
+:root {
+  color: #202124;
+  background: #fff;
+  font: 13px/1.45 "Segoe UI", Roboto, Arial, sans-serif;
+  --blue: #1a73e8;
+  --blue-hover: #1765cc;
+  --border: #dadce0;
+  --muted: #5f6368;
+  --surface: #f8fafd;
+  --surface-strong: #f1f3f4;
+  --danger: #b3261e;
+  --success: #137333;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { width: 100%; height: 100%; margin: 0; }
+body { min-width: 280px; overflow: hidden; }
+button, textarea, input { font: inherit; }
+button { cursor: pointer; }
+button:disabled, textarea:disabled { cursor: not-allowed; opacity: .58; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.app-shell {
+  display: flex;
+  min-height: 0;
+  height: 100dvh;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.available-shell, .signed-in-shell {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.available-shell > section:first-child {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.available-shell > section:first-child h1 { margin: 0; flex: 1; font-size: 15px; }
+.available-shell > section:first-child p { margin: 0; color: var(--muted); }
+.available-shell > section:first-child button {
+  border: 0;
+  border-radius: 18px;
+  padding: 7px 11px;
+  background: var(--surface-strong);
+  color: #3c4043;
+}
+
+.workspace-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.workspace, .task-shell { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+.task-content {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.task-state { display: grid; flex: 1; min-height: 180px; place-items: center; padding: 24px 18px; }
+.task-content-review .task-state { min-height: 96px; flex: 0 0 auto; }
+.task-state-terminal { place-items: start stretch; }
+.empty-state, .state-card { max-width: 360px; text-align: center; }
+.terminal-state { width: min(100%, 640px); text-align: left; }
+.empty-state h2, .terminal-state h2, .state-card h2 { margin: 12px 0 4px; font-size: 17px; }
+.empty-state p, .state-card p { margin: 0; color: var(--muted); }
+.terminal-summary {
+  margin: 0;
+  color: #202124;
+  font-size: 15px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.terminal-status {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.terminal-status::before { content: "•"; font-size: 16px; line-height: 1; }
+.state-icon {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e8f0fe;
+  color: var(--blue);
+  font-size: 22px;
+}
+
+.service-card { margin: auto; padding: 28px 20px; }
+.plan-step-exclude { display: flex; align-items: center; gap: 8px; margin: 6px 0 0; color: var(--muted); }
+.terminal-excluded { margin: 6px 0 0; color: var(--muted); }
+.terminal-run { display: flex; flex-wrap: wrap; gap: 0 6px; margin: 6px 0 0; color: var(--muted); }
+.plan-step.excluded > strong, .plan-step.excluded > p { text-decoration: line-through; opacity: .55; }
+.service-details, .review-details { margin: 18px 0; text-align: left; }
+.service-details div, .review-details div { display: grid; grid-template-columns: minmax(88px, .7fr) 1fr; gap: 10px; padding: 7px 0; }
+dt { color: var(--muted); }
+dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+code { font: 12px/1.45 Consolas, monospace; }
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #c2d7f7;
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+.state-icon.spinner { width: 40px; height: 40px; border-width: 3px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; border-color: var(--blue); } }
+
+.progress-state { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.terminal-success .terminal-status { color: var(--success); }
+.terminal-success .terminal-status::before { content: "✓"; }
+.terminal-failure .terminal-status,
+.terminal-attention-required .terminal-status { color: var(--danger); }
+.terminal-failure .terminal-status::before,
+.terminal-attention-required .terminal-status::before { content: "!"; }
+
+.task-composer {
+  display: grid;
+  flex: 0 0 auto;
+  margin: 0;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: #fff;
+}
+.task-composer textarea {
+  height: 44px;
+  min-height: 44px;
+  max-height: 120px;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 22px;
+  padding: 11px 14px;
+  line-height: 20px;
+  overflow-y: auto;
+}
+.task-composer .primary-button { min-height: 44px; border-radius: 22px; padding: 0 18px; }
+
+.primary-button, .secondary-button, .danger-button, .stop-button {
+  min-height: 36px;
+  border-radius: 18px;
+  padding: 7px 15px;
+}
+.primary-button { border: 1px solid var(--blue); background: var(--blue); color: #fff; }
+.primary-button:hover:not(:disabled) { background: var(--blue-hover); }
+.secondary-button { border: 1px solid var(--border); background: #fff; color: var(--blue); }
+.danger-button, .stop-button { border: 1px solid #f2b8b5; background: #fff; color: var(--danger); }
+.stop-button { margin: 0 12px 12px; align-self: flex-end; }
+
+.review-card, .context-card {
+  margin: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.review-card h2, .context-card h2 { margin: 0 0 8px; font-size: 15px; }
+.review-card ol { padding-left: 22px; }
+.review-copy { display: grid; gap: 8px; margin: 12px 0 16px; }
+.review-copy p { margin: 0; overflow-wrap: anywhere; }
+.review-copy p:not(:first-child) { color: var(--muted); }
+.review-value-list { display: grid; gap: 4px; margin: 0; padding-left: 18px; }
+.button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (max-width: 320px) {
+  .service-details div, .review-details div { grid-template-columns: 1fr; gap: 2px; }
+  .task-composer { grid-template-columns: 1fr; }
+  .primary-button { width: 100%; }
+}

@@ -1,0 +1,584 @@
+openapi: 3.1.0
+info:
+  title: Chrome AI Browser Assistant POC Product API
+  version: 1.0.0
+  description: |
+    Provider-neutral HTTPS bootstrap and safety contract. Task progress and capability exchange use the
+    separately documented task-scoped WSS channel. This API exposes no task-history, conversation-list,
+    telemetry, attachment, schedule, export, connector, hosted-assistant, or enterprise endpoint.
+    Every /v1 response is served with Cache-Control: no-store; successful security-bearing responses
+    also declare that header explicitly below.
+    Every /v1 request must carry an Origin header naming the build-configured Extension Origin. A
+    request without one is refused with 403 cors.origin-missing before routing, and an Origin that
+    is not on the allow list with 403 cors.origin-denied. /health is exempt: it is the deployment
+    probe and has no origin to send.
+    Error responses are closed: the body carries a code from ErrorResponse.code and nothing else -
+    no message, no detail, no stack. An unknown route answers 404 route.not-found, an unreadable
+    body 400 request.invalid, and an unhandled service failure 503 service.unavailable.
+  x-traceability:
+    product-requirements: [PR-002, PR-003, PR-004, PR-007, PR-008]
+    functional-requirements: [FR-002, FR-003, FR-004, FR-007, FR-008]
+    constraints: [CT-004, CT-005, CT-006, CT-007, CT-009, CT-011, CT-013]
+    success-criteria: [SC-002, SC-003, SC-004, SC-005, SC-006]
+servers:
+  - url: https://product-api.invalid
+    description: Build-configured product-controlled origin; placeholder is never a runtime default.
+tags:
+  - name: Authorization
+  - name: Tasks
+  - name: OriginSafety
+  - name: Operations
+paths:
+  /v1/auth/authorization:
+    post:
+      tags: [Authorization]
+      operationId: beginAuthorization
+      summary: Create a product authorization URL for a PKCE flow
+      description: The product service accepts S256 only and emits code_challenge_method=S256.
+      x-traceability: [PR-002, FR-002, CT-006]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizationStartRequest'
+      responses:
+        '200':
+          description: Authorization URL created
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizationStartResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/PolicyBlocked'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/auth/exchange:
+    post:
+      tags: [Authorization]
+      operationId: exchangeAuthorizationCode
+      summary: Exchange a validated authorization redirect for a product session
+      x-traceability: [PR-002, FR-002, CT-006, CT-007]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizationExchangeRequest'
+      responses:
+        '200':
+          description: Product session established
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCredentials'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PolicyBlocked'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/auth/refresh:
+    post:
+      tags: [Authorization]
+      operationId: refreshProductSession
+      summary: Renew the same product account scope when renewal is permitted
+      x-traceability: [PR-002, FR-002, CT-006, CT-007]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Product session renewed without account switching
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionCredentials'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PolicyBlocked'
+        '409':
+          description: Renewal would change the bound account or organization; client clears local credentials/account binding and projects reauthentication-required with auth.account-mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/auth/session:
+    get:
+      tags: [Authorization]
+      operationId: getProductSessionState
+      summary: Validate and project the currently stored product session without returning credentials
+      x-traceability: [PR-002, FR-002, CT-006, CT-007, CT-011]
+      responses:
+        '200':
+          description: Product session is currently active for the same account binding
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorizedSessionView'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PolicyBlocked'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      tags: [Authorization]
+      operationId: revokeProductSession
+      summary: Revoke the current product session
+      x-traceability: [PR-002, FR-002, CT-006, CT-007]
+      responses:
+        '204':
+          description: Session absent or revoked; operation is idempotent
+        '401':
+          description: Credential is already invalid; client still clears local session state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTransientTask
+      summary: Start one transient user-triggered task and mint a single-use WSS ticket
+      x-traceability: [PR-003, FR-003, CT-006, CT-007, CT-009, CT-011, SC-004]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+      responses:
+        '201':
+          description: Transient task and WSS lease created
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Must include no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskBootstrap'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/PolicyBlocked'
+        '409':
+          description: |
+            An active task already owns the client runtime lease (task.lease-held). One session
+            drives one task at a time; the lease is released when the task reaches a terminal
+            state, is cancelled, or its runtime epoch is replaced.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /v1/tasks/{taskId}/cancel:
+    post:
+      tags: [Tasks]
+      operationId: cancelTransientTask
+      summary: Idempotent remote cancellation fallback after local Stop
+      x-traceability: [PR-007, FR-007, CT-009, CT-011, SC-005, SC-006]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelRequest'
+      responses:
+        '204':
+          description: Task absent, terminal, or cancellation recorded
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Task not found; client remains locally stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/origin-assessments:
+    post:
+      tags: [OriginSafety]
+      operationId: assessUnknownCanonicalOrigin
+      summary: Classify a locally unknown canonical origin without account or task metadata
+      x-traceability: [PR-004, PR-008, FR-004, FR-008, CT-004, CT-005, CT-013, SC-002, SC-003]
+      description: |
+        Client must omit Authorization, cookies, referrer, task/account identifiers, correlation IDs,
+        URL path/query/fragment, title, page content, form values, selected-option state, and local
+        sensitivity/classifier metadata. The request body contains exactly one field.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OriginAssessmentRequest'
+      responses:
+        '200':
+          description: Assessment returned; only allow can pass the safety gate and it is not consent
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Must include no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OriginAssessmentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /health:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      summary: Report process readiness without account, task, page, or provider data
+      x-traceability: [CT-009, CT-013]
+      security: []
+      responses:
+        '204':
+          description: Process is ready to accept requests
+components:
+  headers:
+    NoStore:
+      description: Response is not stored by browsers, intermediaries, or application caches
+      schema:
+        type: string
+        const: no-store
+  securitySchemes:
+    ProductSession:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-product-session
+  parameters:
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+  schemas:
+    AuthorizationStartRequest:
+      type: object
+      additionalProperties: false
+      required: [redirectUri, codeChallenge, state]
+      properties:
+        redirectUri:
+          type: string
+          format: uri
+          pattern: '^https://[a-p]{32}\.chromiumapp\.org/auth/callback$'
+          description: Exact result of chrome.identity.getRedirectURL('auth/callback') for an allowlisted stable Extension ID
+        codeChallenge:
+          type: string
+          minLength: 43
+          maxLength: 43
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: Unpadded base64url SHA-256 digest of an RFC 7636 verifier; plain PKCE is rejected
+        state:
+          type: string
+          minLength: 1
+          format: oauth-state
+          pattern: '^[A-Za-z0-9._~-]+$'
+          description: Extension-generated high-entropy unpredictable opaque single-use value, bound to redirect URI, S256 challenge, auth transaction, and finite server expiry
+    AuthorizationStartResponse:
+      type: object
+      additionalProperties: false
+      required: [authorizationUrl]
+      properties:
+        authorizationUrl:
+          type: string
+          format: uri
+          pattern: '^https://'
+          description: HTTPS authorization URL bound to the submitted state, redirect URI, S256 challenge, and code_challenge_method=S256
+    AuthorizationExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [redirectUri, authorizationCode, codeVerifier, state]
+      properties:
+        redirectUri:
+          type: string
+          format: uri
+          pattern: '^https://[a-p]{32}\.chromiumapp\.org/auth/callback$'
+          description: Must exactly match the redirect URI bound to the authorization state and stable Extension ID
+        authorizationCode:
+          type: string
+          minLength: 1
+        codeVerifier:
+          type: string
+          minLength: 43
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._~-]{43,128}$'
+          description: RFC 7636 high-entropy verifier whose S256 challenge must match the authorization transaction
+        state:
+          type: string
+          minLength: 1
+          format: oauth-state
+          pattern: '^[A-Za-z0-9._~-]+$'
+          description: Must exactly match one unexpired unused authorization transaction and is atomically consumed on exchange
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [sessionId, refreshCredential, expectedAccountId]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+        refreshCredential:
+          type: string
+          minLength: 1
+        expectedAccountId:
+          type: string
+          minLength: 1
+        expectedOrganizationId:
+          type: string
+    SessionCredentials:
+      type: object
+      additionalProperties: false
+      required: [sessionId, account, accessCredential, accessExpiresAt]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+        account:
+          $ref: '#/components/schemas/AccountView'
+        accessCredential:
+          type: string
+          minLength: 1
+        refreshCredential:
+          type: string
+          minLength: 1
+        accessExpiresAt:
+          type: string
+          format: date-time
+    AuthorizedSessionView:
+      type: object
+      additionalProperties: false
+      required: [sessionId, account, state, accessExpiresAt]
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+        account:
+          $ref: '#/components/schemas/AccountView'
+        state:
+          type: string
+          const: active
+        accessExpiresAt:
+          type: string
+          format: date-time
+    AccountView:
+      type: object
+      additionalProperties: false
+      required: [accountId]
+      properties:
+        accountId:
+          type: string
+          minLength: 1
+        organizationId:
+          type: string
+        accountLabel:
+          type: string
+    TaskCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [clientTaskId, runtimeEpochId, locale, userRequest]
+      properties:
+        clientTaskId:
+          type: string
+          minLength: 1
+        runtimeEpochId:
+          type: string
+          minLength: 1
+        locale:
+          type: string
+          enum: [en-US, zh-TW]
+        userRequest:
+          type: string
+          minLength: 1
+          description: DataCategory user.request; no tab, URL, origin, title, page content, or context handle is included at bootstrap
+    TaskBootstrap:
+      type: object
+      additionalProperties: false
+      required: [taskId, protocolVersion, channelUrl, connectionTicket, ticketExpiresAt]
+      properties:
+        taskId:
+          type: string
+          minLength: 1
+        protocolVersion:
+          type: string
+          const: '1'
+        channelUrl:
+          type: string
+          format: uri
+          pattern: '^wss://'
+        connectionTicket:
+          type: string
+          minLength: 1
+        ticketExpiresAt:
+          type: string
+          format: date-time
+    CancelRequest:
+      type: object
+      additionalProperties: false
+      required: [clientRequestId, reason]
+      properties:
+        clientRequestId:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          enum: [user-stop, panel-disconnect, lifecycle-interruption, logout]
+    OriginAssessmentRequest:
+      type: object
+      additionalProperties: false
+      required: [canonicalOrigin]
+      properties:
+        canonicalOrigin:
+          type: string
+          format: uri
+          pattern: '^https?://(?:\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::[1-9][0-9]{0,4})?$'
+          description: |
+            Exact lower-case ASCII/punycode WHATWG URL.origin serialization: scheme, host, and
+            non-default effective port only. No username, password, path, query, fragment, or trailing
+            slash. The server parses the value, validates the port, and requires parsed URL.origin to
+            equal the submitted string before classification.
+    OriginAssessmentResponse:
+      type: object
+      additionalProperties: false
+      required: [decision, validUntil]
+      properties:
+        decision:
+          type: string
+          enum: [allow, deny, unknown]
+        validUntil:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: |
+            Stable non-localized code rendered through Extension dictionaries. The set is closed:
+            a failure carries one of these and nothing else, so it can never become a channel for
+            internal state.
+          enum:
+            - auth.invalid-request
+            - auth.invalid-grant
+            - auth.unauthorized
+            - auth.account-mismatch
+            - cors.origin-missing
+            - cors.origin-denied
+            - cors.method-denied
+            - cors.headers-denied
+            - cors.private-network-denied
+            - origin.invalid
+            - origin.invalid-response
+            - origin.unavailable
+            - task.invalid-request
+            - task.not-found
+            - task.lease-held
+            - request.invalid
+            - route.not-found
+            - service.unavailable
+        retryable:
+          type: boolean
+  responses:
+    BadRequest:
+      description: Invalid request; no protected effect occurred
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing, expired, rejected, or account-mismatched product session
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    PolicyBlocked:
+      description: |
+        Product-account or organization policy blocks protected work. This is a Core authorization
+        state, not adoption of the deferred enterprise-policy feature. The Extension shows
+        policy-blocked, starts no protected work, and keeps Logout reachable.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unavailable:
+      description: |
+        Required service unavailable; caller fails closed where safety is involved. An unhandled
+        adapter rejection reaches the caller as service.unavailable and carries no failure text.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    OriginRequired:
+      description: |
+        Service-wide, applied to every /v1 path before routing and therefore not repeated per path.
+        The request carried no Origin, or one that is not the build-configured Extension Origin.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RouteNotFound:
+      description: |
+        Service-wide, not repeated per path. No such route; the response names no route and
+        carries no message.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/NoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+security:
+  - ProductSession: []

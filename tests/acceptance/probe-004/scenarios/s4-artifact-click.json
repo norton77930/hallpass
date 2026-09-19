@@ -1,0 +1,79 @@
+{
+  "id": "s4-artifact-click",
+  "slice": "S4",
+  "evidence": "T129",
+  "page": "https://developer.chrome.com/docs/devtools/overview",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://developer.chrome.com/docs/devtools/overview.\nStep 2. Call mcp__hallpass__wait on that tab with forMs 6000.\nStep 3. Call mcp__hallpass__read_page on that tab with filter \"interactive\". This is the read BEFORE the click. Write down how many nodes it returned, and find the node named \"Play video\" - record its `frame` field.\nStep 4. Call mcp__hallpass__find on that tab with query \"Play video\". Take the ref of the match whose role is button.\nStep 5. Call mcp__hallpass__click on that tab with target {\"ref\": <that ref>}.\nStep 6. Call mcp__hallpass__wait on that tab with forMs 2500. The player swaps its controls in after the click, not on it.\nStep 7. Call mcp__hallpass__read_page on that tab with filter \"interactive\". This is the read AFTER the click.\n\nThe embedded video player is a document on a second origin (www.youtube.com), boxed inside the article at an offset from the top-left of the page. Its own \"Play video\" button starts playback only when the click lands inside that frame at the button's real position; a click that ignored the frame's offset would land elsewhere in the frame or miss it, and the button would still say \"Play video\" afterwards.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, outcome = the result, and for each read_page the number of nodes it returned. For step 5 put the click tool's whole answer, verbatim, in outcome.\n- In targetFrame: the `frame` field you recorded in step 3 for the \"Play video\" node.\n- In removedAfterClick: every `name` that appeared in the step 3 read and does not appear in the step 7 read, verbatim, once each.\n- In addedAfterClick: every `name` that appears in the step 7 read and did not appear in the step 3 read, verbatim, once each.\n- In observed: write \"click-landed\" if addedAfterClick contains \"Pause video\" OR \"Show player controls\". Both exist only while the video is playing: \"Pause video\" while the player still shows its controls, \"Show player controls\" once it has auto-hidden them a few seconds into playback (before the click the toggle reads \"Hide player controls\"). Whether \"Play video\" also disappears depends on which player UI YouTube served and is not part of the claim. Write \"click-missed\" if addedAfterClick contains neither. If a call did not end ok, write its outcome and reason exactly as the tool reported them, in the form \"<outcome>/<reason>\".\n- In notes: the two node counts, and the click tool's own `verdict`, `verified` and `documentChanged` fields.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed",
+      "targetFrame",
+      "removedAfterClick",
+      "addedAfterClick"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "targetFrame": {
+        "type": "string"
+      },
+      "removedAfterClick": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "addedAfterClick": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "click-landed"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 300000,
+  "expectedAfterFix": "SC-033's act half: a click inside a cross-origin frame lands with the frame's offset applied, turning that frame's own \"Play video\" control into \"Pause video\" and the rest of the player's controls.",
+  "note": "T129 (B58). **The pinned artifact page cannot carry this half of SC-033.** B57 measured it free and found no interactive role anywhere inside the artifact's own frame (heading, paragraph, table, list, main only) - nothing there for a click to land on. The main session's decision (2026-09-10) was to keep the read half pinned to that page (it is the oracle for the owner's E4 failure) and move the act half to a different real page, chosen the way the hover and typing pages were: measured free first, against the same three points - genuinely cross-origin, a real control a click visibly changes, and a non-zero frame offset.\n\nMeasured free over CDP on 2026-09-10, connecting Playwright to the same attached Chrome (`chromium.connectOverCDP(\"http://127.0.0.1:9222\")`) rather than guessing: `https://developer.chrome.com/docs/devtools/overview`, Google's own DevTools documentation overview, embeds exactly one video, `https://www.youtube.com/embed/t1c5tNPpXjs...` - a different origin from `developer.chrome.com` and the only frame on the page, so `find(\"Play video\")` resolves to one match rather than meeting the ambiguity a page with two embeds (`developers.google.com/youtube/iframe_api_reference`, tried first) has, since both of its players answer the same generic \"Play video\" name. The frame's own bounding box came back `{x: 329.58, y: 478.23, width: 853.85, height: 480.29}` and its \"Play video\" button's box `{x: 720.78, y: 682.23, width: 72, height: 72}` - both well off the top-left corner, so the offset is real and the whole point of the claim is measurable. A real click on that button (Playwright's real-input click over the same CDP session, the same class of trusted input B54 used for the hover page) took the frame's accessible tree from `button \"Play video\"` plus the paused overlay to `button \"Pause video\"` plus the full control set (`Mute`, `Subtitles/CC turned on`, `Playback Settings`, `Rewind 10 seconds`, `Fast forward 10 seconds`, `Enter full screen`, `Seek slider`) and live caption text - an unmistakable, page-authored state change no bulk DOM edit would produce on its own, the same class of evidence the hover scenario's four added menu items is. The site's mode is set to skip-checks as an environment step (T129b), the same reason `s4-hover-nav` and `s4-wikipedia-typing` set it: the effect this scenario measures would otherwise reach an owner prompt nobody is there to answer, and `binding.site` is keyed to the tab's own site (`developer.chrome.com`), not the frame's, so setting it here reaches the click regardless of which frame it lands in.\n\nT168 (2026-09-13, main session, measured free on the attached Chrome 152 after the 17/18 run). The `click-missed` history (4 fails, 2 passes, 3 fails) was YouTube serving two embed UIs. The newer one (`BUTTON.ytmCuedOverlayPlayButton`, player in `unstarted-mode`) keeps its \"Play video\" label in the tree after the video starts and draws \"Pause video\" beside it; the older one (`ytp-large-play-button`, B58's measurement) removes \"Play video\". A real click at the page point (iframe offset + button centre, the product's own route) took the player to `playing-mode`, `video.paused === false`, and added \"Pause video\", \"Mute\", \"Subtitles/CC\", \"Playback Settings\", \"Rewind/Fast forward 10 seconds\", \"Enter full screen\" - so the click lands in both UIs and only the removal half of the old judgement was UI-specific. The judgement now keys on \"Pause video\" alone. The product's `verdict: \"target-missed\", role: \"div\"` on the same click was the confirmation hit-testing after the cued overlay had swapped itself for the controls: the target was gone, the point resolved to the replacement. The content runtime now answers `stale-target` for a ref that has left the document, which the worker reports as `target-unconfirmed` - not a miss it never observed.\n\nT168, second measurement (2026-09-13, through the product's own tools with pointer listeners installed in the embed frame): the product's click landed at (350.8, 197.2) in frame coordinates - the button's centre to the pixel - the video went to `playing-mode`, `video.paused === false`, and the click was still reported `target-missed`, because the confirmation hit-tested the point *after* the click and found the play/pause control the player had drawn over it. The click family now confirms its point before delivery (the check is about the arithmetic, not the effect); the same click answers `verified`. The paid S4 run of the same day judged `click-missed` with the video playing: its second read came a few seconds later than the probe spec's, after YouTube had auto-hidden the controls, so \"Pause video\" was gone and \"Show player controls\" stood in its place - hence the two-word judgement above."
+}

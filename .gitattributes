@@ -1,0 +1,13 @@
+docs/reference-*.md export-ignore
+tests/acceptance/probe-004/reports/** export-ignore
+.specify/** export-ignore
+.claude/** export-ignore
+.agents/** export-ignore
+CLAUDE-CODE-HANDOFF.md export-ignore
+.mcp.json export-ignore
+.scratch/** export-ignore
+tests/acceptance/*checkpoint*.md export-ignore
+tests/acceptance/owner-remaining-runbook.md export-ignore
+tests/acceptance/local-run-checklist.md export-ignore
+tests/acceptance/evidence-index.md export-ignore
+tests/acceptance/browser-matrix.md export-ignore

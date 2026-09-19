@@ -1,0 +1,61 @@
+{
+  "id": "s5-github-refs",
+  "slice": "S5",
+  "evidence": "T137",
+  "page": "https://github.com/anthropics/claude-code",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://github.com/anthropics/claude-code.\nStep 2. Call mcp__hallpass__wait on that tab with forMs 6000.\nStep 3. Call mcp__hallpass__read_page on that tab with no filter argument. This is the FIRST read. From its nodes pick the one whose name is \"Code\" and whose role is a link or a tab, or, if there is none, the first node that has a ref. Write down that ref exactly; call it REF1. Do not use any other ref for the rest of this scenario.\nStep 4. Call mcp__hallpass__read_page on that tab again, with no filter argument. This is the SECOND read. Ignore every ref it returns.\nStep 5. Call mcp__hallpass__hover on that tab with target {\"ref\": REF1} - the ref from the FIRST read, not from the second.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, args = the ref you passed where there was one, outcome = the result. For step 5 put the tool's whole answer, verbatim, in outcome.\n- In observed: write \"first-read-ref-resolved\" if the step 5 hover answered ok and its observation says the element was hovered. Write \"first-read-ref-stale\" if the call was answered `stale` or its reason names a stale or unknown reference. If it ended any other way, write the outcome and reason exactly as the tool reported them, in the form \"<outcome>/<reason>\".\n- In notes: REF1, the name and role of the node it came from, and how many nodes each read returned.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "first-read-ref-resolved"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 300000,
+  "expectedAfterFix": "SC-035 / FR-066: a second read no longer replaces the page's refs, so a ref minted by the first read still reaches its element after it.",
+  "note": "T137 (B49). The second read is the whole point: 003's recorded limitation was that a find or a read_page replaced the page's refs, and FR-066 removes it, so the claim can only be measured by using a ref that a later read had every opportunity to invalidate. The effect is a hover because it is the least invasive one that still has to resolve the ref. Measured free over the real MCP server on 2026-09-10: an effect on a site whose mode the owner has not decided is held for an owner prompt and answers `timed-out`/`no-answer` when nobody is there to answer it, so this scenario reports that outcome verbatim rather than reading it as a ref failure. The site's mode is set to skip-checks as an environment step (T129b): the effect this scenario measures would otherwise reach an owner prompt that nobody is there to answer, and the scenario would record a timeout instead of the capability."
+}

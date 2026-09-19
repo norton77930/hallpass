@@ -1,0 +1,58 @@
+{
+  "id": "s0-first-call",
+  "slice": "S0",
+  "evidence": "E1",
+  "page": "about:blank",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry. Perform exactly ONE step.\n\nStep 1. Call mcp__hallpass__tabs_context once, with no arguments.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry: tool = the exact tool name, outcome = the tool result verbatim (or its error text), truncated to 400 characters.\n- In observed: write \"ok\" if the call returned a tab list (even an empty one). If the call failed, write the failure reason exactly as the tool reported it, for example \"bridge-unavailable\", \"timed-out\", \"not-paired\". If the tool was not callable at all, write \"no-such-tool\".\n- Do NOT call the tool a second time under any circumstance.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "ok"
+  },
+  "expectedAfterFix": "all three concurrent sessions report ok (FR-055, FR-056)",
+  "concurrency": 3,
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 240000
+}

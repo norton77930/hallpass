@@ -1,0 +1,58 @@
+{
+  "id": "s0-baseline-source",
+  "slice": "S0",
+  "evidence": "T085",
+  "page": "about:blank",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain, do not ask questions, just act and answer.\n\nStep 1. List which MCP tools you can actually call right now. Look for two families: tools whose name contains `hallpass` and tools whose name contains `claude-in-chrome` (the Claude in Chrome reference extension).\nStep 2. Try to call the CLAUDE IN CHROME reference extension's `tabs_context` tool (any name matching mcp__claude-in-chrome__*). If no such tool exists, say so.\nStep 3. Try to call the CLAUDE IN CHROME reference extension's `read_page` tool on the page about:blank. If no such tool exists, say so.\n\nAnswer with JSON only, matching the schema. In `steps`, put one entry per tool you attempted, with `tool` set to the exact tool name you tried and `outcome` set to what happened (`ok`, `no-such-tool`, or the error text). In `observed`, write `reference-reachable` if you were able to call BOTH reference tools successfully, otherwise `reference-unreachable`. In `notes`, list the exact names of every MCP tool you could see, comma separated.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "reference-unreachable"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 240000,
+  "expectedAfterFix": "unchanged: the reference publishes no MCP server, so the baseline stays browser-tree",
+  "note": "Expectation corrected by T117a (2026-09-10) from \"reference-reachable\" to the established fact. The S0 run of 2026-09-09 proved the Claude in Chrome reference publishes no callable MCP interface, and the spec's acceptance standard was amended to a two-tier baseline because of it, so the reachable expectation was stale against a fact this feature has since recorded. No product claim rides on it: what this scenario now records is which baseline source the run is entitled to use."
+}

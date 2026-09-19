@@ -1,0 +1,55 @@
+/*
+ * The agent panel's token set (006 R-129, D-006-8): every colour, type size, spacing and radius the
+ * shell uses, declared once. Light is the default; dark redefines the colours under the browser's
+ * own scheme. No component sets a literal colour (FR-091), and `tests/panel-a11y.test.tsx` reads
+ * this file as text to check every text/surface pair at 4.5:1 in both themes (FR-092) - so every
+ * colour here stays a 6-digit hex, one per line.
+ *
+ * The ground is neutral with a slight cool cast; the one accent is a deep teal; success, warning
+ * and danger are their own hues and never the accent. Only the agent build imports this file: the
+ * narrow build's `styles.css` is untouched (FR-090).
+ */
+:root {
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --surface-2: #e9edf2;
+  --text: #1b2430;
+  --text-2: #4f5b6b;
+  --line: #d3d9e1;
+  --accent: #1f6f78;
+  --accent-text: #ffffff;
+  --ok: #1f7a4d;
+  --warn: #8a5300;
+  --danger: #b3261e;
+  --focus: #1f6f78;
+
+  --fs-1: 12px;
+  --fs-2: 13px;
+  --fs-3: 14px;
+  --fs-4: 16px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+
+  --r-1: 4px;
+  --r-2: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161c;
+    --surface: #1a1f27;
+    --surface-2: #242a34;
+    --text: #e6eaf0;
+    --text-2: #a3adbb;
+    --line: #333b47;
+    --accent: #5fb7c0;
+    --accent-text: #0b1517;
+    --ok: #5cc48a;
+    --warn: #e3a94b;
+    --danger: #f08a82;
+    --focus: #7fd0d8;
+  }
+}

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Combobox fixture</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  ul#suggestions { list-style: none; margin: .5rem 0; padding: 0; border: 1px solid #999; min-height: 2rem; }
+  ul#suggestions:empty { border-style: dashed; }
+  ul#suggestions li { padding: .25rem .5rem; }
+</style>
+</head>
+<body>
+<h1>Combobox fixture</h1>
+<p>
+  The suggestion list is rebuilt on every <code>keydown</code>, and
+  <code>document.body.dataset.keystrokes</code> counts the keys that arrived. A value written
+  straight into the field leaves the count at 0 and the list empty, which is exactly the difference
+  this fixture exists to show.
+</p>
+<label for="query">Search</label>
+<input type="text" id="query" name="query" aria-label="Search" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="suggestions" placeholder="type a fruit">
+<ul id="suggestions" role="listbox" aria-label="Suggestions"></ul>
+<p>Keys seen: <span id="keystroke-count">0</span></p>
+<script>
+  (function () {
+    var terms = ["apple", "apricot", "banana", "blackberry", "cherry", "cranberry", "date", "fig", "grape"];
+    var field = document.getElementById("query");
+    var list = document.getElementById("suggestions");
+    var readout = document.getElementById("keystroke-count");
+    var keystrokes = 0;
+    document.body.dataset.keystrokes = "0";
+
+    field.addEventListener("keydown", function (event) {
+      keystrokes += 1;
+      document.body.dataset.keystrokes = String(keystrokes);
+      readout.textContent = String(keystrokes);
+      // The list reflects the value the key is about to produce, so it changes per keystroke.
+      var typed = event.key.length === 1 ? field.value + event.key : field.value;
+      list.replaceChildren();
+      if (typed === "") {
+        field.setAttribute("aria-expanded", "false");
+        return;
+      }
+      var matches = terms.filter(function (term) { return term.indexOf(typed.toLowerCase()) === 0; });
+      matches.forEach(function (term) {
+        var item = document.createElement("li");
+        item.id = "suggestion-" + term;
+        item.setAttribute("role", "option");
+        item.textContent = term;
+        list.append(item);
+      });
+      field.setAttribute("aria-expanded", matches.length > 0 ? "true" : "false");
+    });
+  })();
+</script>
+</body>
+</html>

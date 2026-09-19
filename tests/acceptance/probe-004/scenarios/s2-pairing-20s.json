@@ -1,0 +1,62 @@
+{
+  "id": "s2-pairing-20s",
+  "slice": "S2",
+  "evidence": "SC-031",
+  "page": "about:blank",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry. Perform exactly ONE step.\n\nStep 1. Call mcp__hallpass__tabs_context once, with no arguments. This is the first call of a freshly unpaired agent, so it will raise a pairing prompt; the probe accepts that prompt about 20 seconds later. Wait for the call to return whatever it returns.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry: tool = the exact tool name, outcome = the tool result verbatim (or its error text), truncated to 400 characters.\n- In observed: write \"paired-same-call\" if this very first call succeeded after the pairing was accepted. Otherwise write the failure reason exactly as reported, for example \"timed-out\", \"not-paired\", \"bridge-unavailable\".\n- Do NOT call the tool a second time under any circumstance: whether the FIRST call survives the pairing wait is the entire measurement.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "paired-same-call"
+  },
+  "expectedAfterFix": "SC-031: with the owner accepting 20 s after the prompt appears, the triggering call succeeds in the same call (FR-059, R-112)",
+  "repeat": 5,
+  "setup": {
+    "resetPairing": true,
+    "acceptPairingAfterMs": 20000
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 240000
+}

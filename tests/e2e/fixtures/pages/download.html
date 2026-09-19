@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Download fixture</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  a.button { display: inline-block; padding: 0.5rem 1rem; border: 1px solid #333; border-radius: 4px; }
+</style>
+</head>
+<body>
+<h1>Download fixture</h1>
+<p>
+  A page that produces a file when a link is clicked: the <code>download</code> attribute makes the
+  browser save the data URL as <code>report.csv</code> instead of showing it. The extension is only
+  told that it happened - name, source, state - and never touches the file.
+</p>
+<p>
+  <a id="report" class="button" download="report.csv" href="data:text/csv;charset=utf-8,name%2Cqty%0Awidget%2C3%0Agadget%2C5%0A">Download report</a>
+</p>
+</body>
+</html>
