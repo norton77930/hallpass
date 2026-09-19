@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Canvas fixture</title>
+<style>
+  html, body { margin: 0; padding: 0; }
+  body { font: 16px/1.6 system-ui, sans-serif; }
+  /* Fixed positions and fixed sizes: the toolbar buttons sit at viewport coordinates a
+     coordinate-based click can be written down in advance and still hit after a reload.
+       select  (20,20)-(120,60)   centre (70,40)
+       draw   (140,20)-(240,60)   centre (190,40)
+       erase  (260,20)-(360,60)   centre (310,40) */
+  #toolbar button {
+    position: fixed;
+    top: 20px;
+    width: 100px;
+    height: 40px;
+    margin: 0;
+    padding: 0;
+    font: inherit;
+  }
+  #tool-select { left: 20px; }
+  #tool-draw { left: 140px; }
+  #tool-erase { left: 260px; }
+  #board { position: fixed; top: 80px; left: 20px; border: 1px solid #999; }
+  #readout { position: fixed; top: 400px; left: 20px; }
+</style>
+</head>
+<body data-active-tool="none">
+<div id="toolbar" role="toolbar" aria-label="Drawing tools">
+  <button type="button" id="tool-select">Select</button>
+  <button type="button" id="tool-draw">Draw</button>
+  <button type="button" id="tool-erase">Erase</button>
+</div>
+<canvas id="board" width="600" height="300"></canvas>
+<p id="readout">active tool: <span id="active-tool">none</span></p>
+<script>
+  (function () {
+    var context = document.getElementById("board").getContext("2d");
+    context.font = "20px system-ui";
+    context.fillText("This drawing surface exists only as pixels.", 20, 40);
+    context.fillText("The toolbar above it is ordinary DOM.", 20, 80);
+
+    var readout = document.getElementById("active-tool");
+    [["tool-select", "select"], ["tool-draw", "draw"], ["tool-erase", "erase"]].forEach(function (pair) {
+      document.getElementById(pair[0]).addEventListener("click", function () {
+        document.body.dataset.activeTool = pair[1];
+        readout.textContent = pair[1];
+      });
+    });
+  })();
+</script>
+</body>
+</html>

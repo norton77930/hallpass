@@ -1,0 +1,8 @@
+export const TEST_EXTENSION_ID = "adgpccmmbgnchnphfaoabfflfcepbopd" as const;
+
+export const TEST_EXTENSION_PUBLIC_KEY =
+  "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3F4BFMcog4B3m6v/DoxOzA/e8Fw37m+V70tF5YM5kvoC6T+VOfS+CRum4qMWNLLth61tAXff244WZcdBb7hytAsZ9f1y387YRlYi8c8n56wzCN0hC+Xvu2d0bH0UIi5HgcCX3ZTKc8rWzjxOVPGAzHWQI3ztkSkJCXyXc1uE+zlV+2Ruyj30VSVuHXqeqUu0+5KcXd/NTHNasye6OZMzGcPJ+MfyRwVvDninCPmr5Ro4WdCIoSxG4pfPhmkCVAfPhHIHhhJhRDTbd233Q2rN8xm51d4iNmXVfHaRRePpwzq7NUtFxhZwHL2sJL0BjiwC2Xe2VYbiTPHxr8SB29EDrwIDAQAB" as const;
+
+export const TEST_PAGE_ALLOW_PORT = 19443 as const;
+export const TEST_PAGE_DENY_PORT = 19444 as const;
+export const TEST_PAGE_UNKNOWN_PORT = 19445 as const;

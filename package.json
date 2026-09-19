@@ -1,0 +1,53 @@
+{
+  "name": "hallpass",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "workspaces": [
+    "apps/extension",
+    "packages/agent-host",
+    "packages/contracts",
+    "packages/domain",
+    "packages/test-kit"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b && tsc -p apps/extension --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "test": "vitest run --project unit --project extension-ui",
+    "test:contract": "vitest run --project contract",
+    "build": "tsc -b && npm run build -w @hallpass/extension",
+    "dev:test-pages": "node --experimental-strip-types tests/harness/page-fixtures.ts",
+    "build:extension": "npm run build -w @hallpass/extension",
+    "build:extension:agent": "npm run build -w @hallpass/extension",
+    "agent-host:install": "node packages/agent-host/dist/install/cli.js install",
+    "agent-host:uninstall": "node packages/agent-host/dist/install/cli.js uninstall",
+    "package": "node --experimental-strip-types scripts/package.ts",
+    "snapshot:check": "node --experimental-strip-types scripts/snapshot-check.ts",
+    "test:config:verify": "vitest run --project contract tests/contract/test-environment.contract.test.ts",
+    "test:e2e:extension-core": "playwright test --config playwright.extension.config.ts",
+    "test:e2e:agent": "playwright test --config playwright.extension.config.ts tests/e2e/packaged/agent-",
+    "test:e2e:release-matrix": "node --experimental-strip-types tests/release/run-p1-matrix.ts",
+    "probe:004": "node --experimental-strip-types tests/acceptance/probe-004/run.ts",
+    "test:certs:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-pki.ps1 -Action install",
+    "test:certs:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-pki.ps1 -Action verify",
+    "test:certs:clean-stale": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-pki.ps1 -Action clean-stale",
+    "test:certs:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-pki.ps1 -Action remove"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.6",
+    "@types/chrome": "0.2.7",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "axe-core": "4.13.0",
+    "jsdom": "27.4.0",
+    "playwright": "1.62.1",
+    "typescript": "5.9.3",
+    "vitest": "5.0.0-rc.2"
+  }
+}

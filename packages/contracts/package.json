@@ -1,0 +1,23 @@
+{
+  "name": "@hallpass/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "//sideEffects": "Every module here only defines constants and schemas; importing one changes nothing outside it. Saying so lets a bundler drop the modules an entry re-exports but never reads - which is how the narrow artefact stops carrying the agent path's contracts (003 M2 review A7).",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  }
+}

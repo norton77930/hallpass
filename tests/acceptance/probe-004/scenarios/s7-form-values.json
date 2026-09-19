@@ -1,0 +1,79 @@
+{
+  "id": "s7-form-values",
+  "slice": "S7",
+  "evidence": "T175",
+  "page": "https://httpbin.org/forms/post",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://httpbin.org/forms/post.\nStep 2. Call mcp__hallpass__wait on that tab with forMs 4000.\nStep 3. Call mcp__hallpass__read_page on that tab with filter \"all\". This is the read BEFORE any input. Note the ref of the textbox named \"custname\", the ref of the radio named \"size\" whose type is radio and that is listed second (Medium), and the ref of the first checkbox named \"topping\" (Bacon).\nStep 4. Call mcp__hallpass__type on that tab with target {\"ref\": <the custname ref>} and text \"Ada Lovelace\".\nStep 5. Call mcp__hallpass__click on that tab with target {\"ref\": <the second size radio's ref>}.\nStep 6. Call mcp__hallpass__click on that tab with target {\"ref\": <the first topping checkbox's ref>}.\nStep 7. Call mcp__hallpass__read_page on that tab with filter \"all\". This is the read AFTER the input.\n\nEach node of a read_page answer may carry the field's current state: `value` for a text entry or a select, `checked` for a checkbox or radio, `redacted: true` for a field whose content is hidden.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, outcome = the result, and for each read_page the number of nodes it returned.\n- In custname: the `value` the step 7 read carries on the custname textbox, verbatim, or the string \"(absent)\" if the node has no value.\n- In checkedOn: every node of the step 7 read that has `checked: true`, one string each in the form \"<role> <name> <ref>\".\n- In checkedOff: every node of the step 7 read that has `checked: false`, one string each in the same form.\n- In observed: write \"values-read\" if all of the following hold: custname is exactly \"Ada Lovelace\"; checkedOn has exactly two entries, one being the size radio you clicked and the other the topping checkbox you clicked; and checkedOff lists every other radio named size and every other checkbox named topping (the page has three size radios and four topping checkboxes, so checkedOff has exactly five entries). Write \"value-missing\" if custname is \"(absent)\". Write \"checked-missing\" if any size radio or topping checkbox in the step 7 read carries neither `checked: true` nor `checked: false`. Write \"wrong-state\" if every node carries a state but the states do not match what you did. If a call did not end ok, write its outcome and reason exactly as the tool reported them, in the form \"<outcome>/<reason>\".\n- In notes: the two node counts, the type tool's `charactersChanged` and `verdict`, both click verdicts, and whether the step 3 read carried `checked: false` on the toggles before you touched them.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed",
+      "custname",
+      "checkedOn",
+      "checkedOff"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "custname": {
+        "type": "string"
+      },
+      "checkedOn": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "checkedOff": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "values-read"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 300000,
+  "expectedAfterFix": "SC-039: after typing into the customer-name field and clicking one size and one topping, the read_page answer carries the typed text as that field's value, the two clicked toggles as checked: true, and every other toggle as checked: false - before 005 a read named the fields and said nothing about what they held.",
+  "note": "T175 (005/US1). httpbin's order form is the page the acceptance standard names for field values: plain text inputs, a radio group (size: small, medium, large) and a checkbox group (topping: bacon, extra cheese, onion, mushroom), all named by their `name` attribute, which is what the read names them by. The judgement is on the second read alone, against what the probe itself did in between, so a pre-filled field can never be mistaken for a value the read carried: the form starts empty, the custname value is one the page cannot have, and the two toggles are chosen by position so the answer can be checked against the page without a second look. The site's mode is set to skip-checks as an environment step (T129b): the type and the two clicks would otherwise reach an owner prompt nobody is there to answer, and the scenario would record a timeout instead of the capability. The reads use filter \"all\" rather than \"interactive\" so the radios and checkboxes are never left out of the answer for being below the fold on a small viewport."
+}

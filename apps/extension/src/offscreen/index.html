@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Recording encoder</title>
+  </head>
+  <body>
+    <!--
+      Nothing is shown here and nothing ever will be: this document exists because encoding a GIF
+      needs a canvas and a service worker has no lifetime to hold one (FR-103). It is opened at the
+      first `start` and closed when the last recording is gone.
+    -->
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

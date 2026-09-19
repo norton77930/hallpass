@@ -1,0 +1,40 @@
+{
+  "id": "s10-dialogs",
+  "slice": "S10",
+  "evidence": "T237 (008/US3)",
+  "page": "https://localhost:19443/dialogs",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call. The page opens native browser dialogs (alert / confirm / prompt) when its buttons are pressed; the bridge reports them to you and lets you answer them with the tool mcp__hallpass__dialog.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://localhost:19443/dialogs and remember the tabId.\nStep 2. Call mcp__hallpass__find with query \"Ask to confirm\" and mcp__hallpass__click that ref. The answer should be ok and carry a `dialog` object (type \"confirm\", a `message`). Record whether it did.\nStep 3. Call mcp__hallpass__get_page_text on the tab. Expected: it does NOT end ok but answers with reason \"blocked-by-dialog\" and the same dialog object. Record the outcome and reason exactly.\nStep 4. Call mcp__hallpass__dialog with tabId, action \"dismiss\". Expected ok.\nStep 5. Call mcp__hallpass__get_page_text. The text should contain \"confirm:false\".\nStep 6. Call mcp__hallpass__find with query \"Confirm shortly after the click\" and click that ref. The dialog opens about 300 ms after the click, so the click answer may or may not carry `dialog`. Then call mcp__hallpass__wait on the tab with forMs 700. Then call mcp__hallpass__dialog with action \"accept\" (no promptText). Expected ok.\nStep 7. Call mcp__hallpass__get_page_text. The text should contain \"confirm:true\".\nStep 8. Call mcp__hallpass__find with query \"Ask for a name\" and click that ref. Then call mcp__hallpass__dialog with action \"accept\" and promptText \"probe ten\". Expected ok.\nStep 9. Call mcp__hallpass__get_page_text. The text should contain \"prompt:probe ten\".\nStep 10. Call mcp__hallpass__dialog with action \"dismiss\" once more while no dialog is open. Expected: not ok, reason \"no-dialog\".\n\nAnswer with JSON only, matching the schema.\n- In steps, one entry per call: tool = exact tool name, outcome = the result (for the blocked call, \"<outcome>/<reason>\"; for dialog-carrying answers, \"ok dialog=<type>\").\n- In blockedReason: the reason string the step-3 call answered, verbatim, or \"(none)\" if it ended ok.\n- In results: the three page texts' relevant fragments in order, e.g. \"confirm:false | confirm:true | prompt:probe ten\".\n- In observed: write \"dialogs-handled\" if all of the following hold: step 2's click carried a dialog of type confirm; step 3 answered blocked-by-dialog; steps 4, 6 and 8's dialog calls ended ok; the three page texts contained confirm:false, confirm:true and prompt:probe ten respectively; and step 10 answered no-dialog. Write \"not-reported\" if step 2's click carried no dialog AND step 3 was not blocked either. Write \"not-blocked\" if step 3 ended ok while a dialog was open. Write \"wrong-result\" if a page text did not contain the expected fragment (say which in notes). If any other call did not end ok, write \"<outcome>/<reason>\" exactly as reported.\n- In notes: the dialog objects' `message` texts verbatim, and the step-6 click answer verbatim.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["scenario", "steps", "observed", "blockedReason", "results"],
+    "properties": {
+      "scenario": { "type": "string" },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "outcome"],
+          "properties": {
+            "tool": { "type": "string" },
+            "args": { "type": "string" },
+            "outcome": { "type": "string" }
+          }
+        }
+      },
+      "observed": { "type": "string" },
+      "blockedReason": { "type": "string" },
+      "results": { "type": "string" },
+      "notes": { "type": "string" }
+    }
+  },
+  "expect": { "kind": "observed-equals", "value": "dialogs-handled" },
+  "setup": { "siteMode": "skip-checks" },
+  "maxTurns": 30,
+  "maxBudgetUsd": 0.6,
+  "timeoutMs": 420000,
+  "expectedAfterFix": "SC-058: a real coding agent sees a page's confirm in the click's answer (FR-110), is blocked with the dialog's text while it is open (FR-111), dismisses, accepts, and answers a prompt with text (FR-112), and gets no-dialog when nothing is open. Before 008 the first confirm stalled the session until the 25 s timeout.",
+  "note": "T237 (008/S6). Runs under skip-checks because a scripted caller cannot press the owner's consent card; the ask-mode chained-notice / unchained-card behaviour is proven by the attach gate `agent-dialogs.spec.ts` through the panel's own CDP session. The page is the harness's dialog fixture on the packaged gate's page server (start it with `npm run dev:test-pages`); the chained button opens its confirm ~300 ms after the click, which is why step 6 waits 700 ms before accepting - the wait tool is one of the four that are never blocked by an open dialog (FR-111)."
+}

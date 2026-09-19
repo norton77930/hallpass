@@ -1,0 +1,60 @@
+{
+  "id": "s2-owner-tab",
+  "slice": "S2",
+  "evidence": "SC-032",
+  "page": "https://example.com/",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call.\n\nA tab showing https://example.com/ is already open in this browser. You did NOT open it: the owner did.\n\nStep 1. Call mcp__hallpass__tabs_context once, with no arguments. Find the tab whose url is example.com and note its tabId and its holder.\nStep 2. Call mcp__hallpass__tabs_claim once with that tabId.\nStep 3. Call mcp__hallpass__get_page_text once with that tabId.\nStep 4. Call mcp__hallpass__tabs_release once with that tabId.\nStep 5. Call mcp__hallpass__get_page_text once with that same tabId again, now that you have released it.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, outcome = the tool result or its error text, truncated to 300 characters.\n- In observed: write \"owner-tab-worked\" only if step 1 listed the example.com tab with holder \"none\", step 2 succeeded, step 3 returned the page's text, step 4 succeeded, and step 5 was REFUSED with the reason \"not-yours\". Otherwise write the failure reason exactly as the tool reported it, for example \"owner-tab-missing\" if step 1 did not list it, \"claim-refused\", \"read-refused\", \"release-refused\", \"bridge-unavailable\", \"not-paired\", or \"read-after-release-succeeded\" if step 5 returned page text.\n- In notes: write the tabId, the holder step 1 reported, how many characters step 3 returned, and the exact refusal reason from step 5.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "owner-tab-worked"
+  },
+  "expectedAfterFix": "SC-032: an owner-opened tab is listed with holder \"none\", taken in one call and read; once released the same tab is refused as \"not-yours\" (FR-060-FR-062). The indicator's own two halves are not part of this scenario because they are deliberately invisible to the agent - it is excluded from both the element collection and the visible-text clone - so they are measured by the packaged journey's CDP checks (T110) instead.",
+  "setup": {
+    "openOwnerTab": "https://example.com/"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 240000
+}

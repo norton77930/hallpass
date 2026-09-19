@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frames child</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 1rem; }
+  iframe { width: 100%; height: 220px; border: 1px solid #999; }
+  /* 004/T129 (B81): the real target is a <button> with a descendant covering its centre (an
+     icon), not a bare button - this mirrors that shape so a confirmation bug tied to it would
+     show up here, locally. */
+  #child-btn { position: relative; }
+  #child-btn .child-btn-icon { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<h2 id="child-heading">Child frame</h2>
+<p>This document lives in a frame of the frames fixture, not in the top document.</p>
+<button type="button" id="child-btn" onclick="document.getElementById('child-echo').textContent = 'child clicked'"><span class="child-btn-icon" aria-hidden="true"></span>Child action</button>
+<label for="child-input">Child note</label>
+<input type="text" id="child-input" name="child-input" placeholder="type here" oninput="document.getElementById('child-typed').textContent = 'typed: ' + this.value">
+<p id="child-echo">not clicked</p>
+<p id="child-typed">not typed yet</p>
+<iframe id="grandchild-frame" title="grandchild" src="/frames-grandchild"></iframe>
+</body>
+</html>

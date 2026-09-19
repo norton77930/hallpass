@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frames fixture</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  iframe { width: 100%; height: 320px; border: 1px solid #999; }
+  section { margin: 1.5rem 0; }
+</style>
+</head>
+<body>
+<h1 id="frames-heading">Frames fixture</h1>
+<p>
+  Three documents in one tab: this one, a same-origin child that itself frames a grandchild
+  (depth 2), and a child on a second origin. Every framed document carries a
+  <code>#child-btn</code> and a <code>#child-input</code>, so the same request reaches a different
+  document depending on which frame it is addressed to.
+</p>
+<button type="button" id="top-btn" onclick="document.getElementById('top-echo').textContent = 'top clicked'">Top action</button>
+<label for="top-input">Top note</label>
+<input type="text" id="top-input" name="top-input" placeholder="type here">
+<p id="top-echo">not clicked</p>
+<section>
+  <h2>Same-origin child</h2>
+  <iframe id="same-origin-frame" title="same-origin child" src="/frames-child"></iframe>
+</section>
+<section>
+  <h2>Cross-origin child</h2>
+  <iframe id="cross-origin-frame" title="cross-origin child" src="__CROSS_ORIGIN__/frames-child"></iframe>
+</section>
+</body>
+</html>

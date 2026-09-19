@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Shadow-host fixture</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; margin: 2rem auto; max-width: 46rem; padding: 0 1rem; }
+  .hosts { display: flex; gap: 2rem; }
+  .hosts > div { border: 1px solid #999; padding: 1rem; flex: 1; }
+</style>
+</head>
+<body>
+<h1>Shadow-host fixture</h1>
+<p>
+  Two hosts side by side. The left one's shadow root is <strong>open</strong>, so a page read can
+  descend into it; the right one's is <strong>closed</strong>, so it cannot, and the honest answer is
+  to say the content is unreachable rather than to report an empty element.
+</p>
+<div class="hosts">
+  <div>
+    <h2>Open shadow root</h2>
+    <hallpass-open-shadow id="open-host"></hallpass-open-shadow>
+  </div>
+  <div>
+    <h2>Closed shadow root</h2>
+    <hallpass-closed-shadow id="closed-host"></hallpass-closed-shadow>
+  </div>
+</div>
+<p id="shadow-echo">not clicked</p>
+<script>
+  (function () {
+    var echo = document.getElementById("shadow-echo");
+
+    var openRoot = document.getElementById("open-host").attachShadow({ mode: "open" });
+    openRoot.innerHTML =
+      "<h3>Open shadow content</h3><p>Reachable through the open root.</p>" +
+      "<button type='button' id='open-btn'>Open shadow action</button>" +
+      "<input type='text' id='open-input' placeholder='inside the open root'>";
+    openRoot.getElementById("open-btn").addEventListener("click", function () {
+      echo.textContent = "open shadow clicked";
+    });
+
+    var closedRoot = document.getElementById("closed-host").attachShadow({ mode: "closed" });
+    closedRoot.innerHTML =
+      "<h3>Closed shadow content</h3><p>Only reachable from inside this script.</p>" +
+      "<button type='button' id='closed-btn'>Closed shadow action</button>" +
+      "<input type='text' id='closed-input' placeholder='inside the closed root'>";
+    closedRoot.getElementById("closed-btn").addEventListener("click", function () {
+      echo.textContent = "closed shadow clicked";
+    });
+  })();
+</script>
+</body>
+</html>

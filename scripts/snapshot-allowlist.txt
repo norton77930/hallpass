@@ -1,0 +1,84 @@
+# Lines that name a legacy 0.2.0 identifier on purpose — the only exemptions the snapshot check
+# grants (009/FR-129, R-148). Read `scripts/snapshot-check.ts` for what is scanned.
+#
+# Format: <path>::<substring>. A hit is exempt only when its file is that exact path *and* its line
+# contains that exact substring, so an entry can never cover a file it does not name or a line it
+# does not quote. No wildcards, no path-only entries: any new occurrence, anywhere, fails the check.
+#
+# Three reasons appear below and no others:
+#   (1) upgrade instructions — a 0.2.0 user has to read the old names to remove them (FR-126);
+#   (2) the specification of the rename itself — 009 is published and it names what was renamed;
+#   (3) a historical row naming a retired file or a document anchor by the name it really had.
+
+# (1) Upgrade instructions — installer output and package README §2.1, "從 0.2.0 升級到 0.3.0".
+scripts/package/install.ps1::Write-Host "3) 從 0.2.0 升級的話:舊版的 host 註冊(名稱 com.poc.agent_host)已由上面的安裝步驟移除;"
+scripts/package/install.ps1::Write-Host "   舊資料夾 %LOCALAPPDATA%\poc-agent-host 可以自行刪除;上傳白名單請在新的 config.json 重填。"
+scripts/package/install.ps1::Write-Host "   claude mcp remove poc-browser --scope user"
+scripts/package/README.md::0.3.0 把產品改名為 **Hallpass**:MCP server 叫 `hallpass`(原 `poc-browser`)、native host 叫
+scripts/package/README.md::`com.hallpass.host`、host 資料夾是 `%LOCALAPPDATA%\hallpass\`(原 `poc-agent-host`)。步驟:
+scripts/package/README.md::`%LOCALAPPDATA%\poc-agent-host\` 留給你自行刪除。
+scripts/package/README.md::4. MCP client 端換 server 名稱:Claude Code 執行 `claude mcp remove poc-browser --scope user`,再執行
+scripts/package/README.md::`install.ps1` 印出的 `claude mcp add hallpass …`;其他 client 把設定裡的 `poc-browser` 改成 `hallpass`
+
+# (3) Historical rows: a retired contract test and a research anchor, named as they really were.
+specs/001-ai-browser-assistant/contracts/permission-matrix.md::[R-013](../research.md#r-013--full-document-navigation-scope-resolution-resolved--deferred-from-poc)
+specs/001-ai-browser-assistant/tasks.md::`tests/contract/poc-scope.contract.test.ts` (both files were retired with the archived remote path in 009
+tests/acceptance/clean-room-provenance.md::`poc-scope.contract.test.ts` was retired with the
+
+# (2) The rename's own specification — 009 states, line by line, which identifier became which.
+specs/009-open-source-release/plan.md::(built artifacts carry no `poc` identifier;
+specs/009-open-source-release/plan.md::the contract tests `poc-scope`, `product-api
+specs/009-open-source-release/plan.md::Five slices. (1) **Rename** every product identifier from the `poc` family to the Hallpass family
+specs/009-open-source-release/plan.md::in one mechanical pass driven by a literal table, with a contract test that fails on any `poc`
+specs/009-open-source-release/research.md::order (longest and most specific first, so `com.poc.agent_host` is not half-renamed by `poc-agent`):
+specs/009-open-source-release/research.md::| `com.poc.agent_host` | `com.hallpass.host` | host manifest name, registry key, installer/uninstall
+specs/009-open-source-release/research.md::| `poc-agent-host` | `hallpass` | `%LOCALAPPDATA%` directory name (`host-paths.ts`), installer, docs
+specs/009-open-source-release/research.md::| `poc-browser-agent` | `hallpass` | `scripts/package.ts` `PACKAGE_NAME`, package README, upgrade pr
+specs/009-open-source-release/research.md::| `poc-browser` | `hallpass` | MCP server name (`SERVER_NAME` in `tool-offering.ts`), installer's `c
+specs/009-open-source-release/research.md::| `@poc/` | `@hallpass/` | six `package.json` names + every import specifier |
+specs/009-open-source-release/research.md::| `ai-browser-assistant-poc` | `hallpass` | root `package.json` |
+specs/009-open-source-release/research.md::| `__POC_BUILD_MODE__`, `__POC_BUILD_PROFILE__`, `__POC_PRODUCTION_IDENTITY__` | `__HALLPASS_…__` |
+specs/009-open-source-release/research.md::| `POC_` (env vars and constants, 37 distinct names) | `HALLPASS_` | test configs, fixtures, gate sp
+specs/009-open-source-release/research.md::| `POC_ACTIONS`, `POC_CAPABILITIES`, `POC_HELLO_CAPABILITIES`, `PocAction`, `isPocAction` | `BRIDGE_
+specs/009-open-source-release/research.md::Not renamed: the word "poc" inside `epoch`/`documentEpoch` (the audit's case-insensitive count was
+specs/009-open-source-release/research.md::**Why a table and not a regex over `poc`**: `epoch` and `PocAction` both match `/poc/i`; the table
+specs/009-open-source-release/research.md::names every real identifier, and the S3 forbidden-pattern scan (word-bounded `\bpoc\b`, `@poc/`,
+specs/009-open-source-release/research.md::`poc-`, `com.poc.`, `POC_`) catches anything the table missed.
+specs/009-open-source-release/research.md::`/\bpoc\b|@poc\/|poc-|com\.poc\.|POC_/`. RED against the current names, GREEN after S1.
+specs/009-open-source-release/spec.md::named `ai-browser-assistant-poc`, its packages are `@poc/*`, its MCP server is `poc-browser`, its
+specs/009-open-source-release/spec.md::native host is `com.poc.agent_host`, its git history and 112 tracked probe reports carry the owner's
+specs/009-open-source-release/spec.md::installer removes the legacy `com.poc.agent_host` registration, reports that it did, and leaves
+specs/009-open-source-release/spec.md::green, and every answer, log line and panel string that used to carry a `poc` identifier now
+specs/009-open-source-release/spec.md::legacy identifiers `@poc/`, `poc-browser`, `poc-agent-host`, `com.poc.`, `POC_` — except inside
+specs/009-open-source-release/spec.md::- **The old MCP registration remains in the user's Claude Code configuration.** `poc-browser` would
+specs/009-open-source-release/spec.md::`poc-agent-host` to say "delete this directory"). The scan's allow-list names those lines; any new
+specs/009-open-source-release/spec.md::advertised name, the package file list) and MUST fail on any remaining `poc` identifier in a shipped
+specs/009-open-source-release/spec.md::Google Chrome and the Chromium registry locations, MUST remove a legacy `com.poc.agent_host`
+specs/009-open-source-release/spec.md::end by printing the two MCP-registration commands (remove `poc-browser`, add `hallpass`). The 0.3.0
+specs/009-open-source-release/spec.md::store identifiers, the reference bundle's build hash, and the legacy identifiers `@poc/`,
+specs/009-open-source-release/spec.md::`poc-browser`, `poc-agent-host`, `com.poc.`, `POC_`. It MUST report zero hits outside an explicit
+specs/009-open-source-release/spec.md::- **Legacy identifier**: a 0.2.0 name (`poc-browser`, `com.poc.agent_host`, `poc-agent-host`) that t
+specs/009-open-source-release/spec.md::- **SC-067**: The contract suite contains a test that fails when any shipped file carries a `poc`
+specs/009-open-source-release/tasks.md::bundled host + `dist/agent/**` (if present) for `/\bpoc\b|@poc\/|poc-|com\.poc\.|POC_/`. Fails today
+specs/009-open-source-release/tasks.md::`HKCU\Software\{Google\Chrome,Chromium}\NativeMessagingHosts\com.poc.agent_host`, remove it, print
+specs/009-open-source-release/tasks.md::that it did and that `%LOCALAPPDATA%\poc-agent-host` may be deleted by hand; end with the two MCP
+specs/009-open-source-release/tasks.md::commands (`claude mcp remove poc-browser --scope user`, `claude mcp add hallpass …`).
+specs/009-open-source-release/tasks.md::`tests/contract/{poc-scope,product-api,privacy-boundary,task-channel}.contract.test.ts`;
+specs/009-open-source-release/tasks.md::(`upgrade-proof.mjs --old release/poc-browser-agent-0.2.0.zip --new release/hallpass-0.3.0.zip`;
+
+# Public README and the Chinese guides: the upgrade instructions name the 0.2.0 identifiers on purpose
+README.md::(was `poc-browser`)
+README.md::(was `poc-agent-host`)
+README.md::delete `%LOCALAPPDATA%\poc-agent-host\` yourself
+README.md::`claude mcp remove poc-browser --scope user`
+docs/zh-TW/operations-guide.md::`claude mcp remove poc-browser`
+docs/zh-TW/qa-guide.html::<code>%LOCALAPPDATA%\poc-agent-host</code>
+docs/zh-TW/qa-guide.html::<code>poc-browser</code> 換成 <code>hallpass</code>
+# The upgrade proof names the previous package on purpose (it is the old zip it installs)
+tests/acceptance/upgrade-proof.mjs::["poc", "browser", "agent"].join("-")
+tests/acceptance/upgrade-host-proof.ps1::("poc", "browser", "agent") -join "-"
+tests/acceptance/upgrade-host-proof.ps1::("com", "poc", "agent_host") -join "."
+tests/acceptance/upgrade-host-proof.ps1::("poc", "agent", "host") -join "-"
+# 009 coverage names the 0.2.0 identifiers it proved were removed
+specs/009-open-source-release/coverage.md::both `com.poc.agent_host` keys removed
+specs/009-open-source-release/coverage.md::extension upgrade proof `poc-browser-agent-0.2.0.zip`

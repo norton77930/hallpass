@@ -1,0 +1,61 @@
+{
+  "id": "s6-excalidraw",
+  "slice": "S6",
+  "evidence": "T141",
+  "page": "https://excalidraw.com/",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://excalidraw.com/.\nStep 2. Call mcp__hallpass__wait on that tab with forMs 3000.\nStep 3. Call mcp__hallpass__computer on that tab with action \"left_click\", x 533.6, y 40. That point is the centre of the toolbar's selection tool (the arrow icon, 3rd from the left). This is a RESET click: the app remembers the last tool used in this browser profile, so the tool that looks active on first paint is not guaranteed - this click forces a known starting state regardless.\nStep 4. Call mcp__hallpass__computer on that tab with action \"screenshot\". This is the BEFORE image. The app's drawing canvas fills the page and has no accessibility tree at all - the toolbar along the top is the only thing to act on, and it must be acted on by position, not by name or ref. Confirm the selection tool (3rd icon) is the one shown as active/highlighted here; if a different icon is highlighted instead, write that exact discrepancy in notes and still continue to Step 5.\nStep 5. Call mcp__hallpass__computer on that tab with action \"left_click\", x 577.6, y 40. That point is the centre of the toolbar's rectangle-drawing tool (the 4th icon from the left, one to the right of the selection tool). A click that lands correctly moves the active/highlighted state from the selection tool to the rectangle tool.\nStep 6. Call mcp__hallpass__computer on that tab with action \"screenshot\". This is the AFTER image.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, args = a short description of the arguments, outcome = the result.\n- In observed: look at the BEFORE and AFTER screenshots yourself. Write \"toolbar-tool-changed\" if the AFTER image visibly shows a different toolbar icon highlighted/selected (a distinct highlighted or filled background around one icon) than the BEFORE image did, at the position of the icon you clicked in Step 5. Write \"no-visible-change\" if the two screenshots look the same in the toolbar area. If any call failed outright, write its outcome and reason exactly as the tool reported them, in the form \"<outcome>/<reason>\".\n- In notes: describe in one sentence what changed (or did not) between the two screenshots in the toolbar area, and note any discrepancy from Step 4's check.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "toolbar-tool-changed"
+  },
+  "maxBudgetUsd": 0.5,
+  "timeoutMs": 300000,
+  "expectedAfterFix": "SC-037: a position-based `computer` click on the drawing-board page's toolbar changes the active tool, visible in the after-screenshot, on a page whose canvas carries no accessibility tree at all.",
+  "note": "T141 (B95). Measured free over CDP on 2026-09-10, before any paid session: excalidraw.com's toolbar sits outside the canvas in ordinary DOM (`.App-toolbar [data-testid^=toolbar-]`, each `aria-pressed`), so the app's own state is directly readable for scenario design even though the drawing surface itself is a bare canvas with nothing in the accessibility tree - exactly the case the `computer` tool exists for. The rectangle tool's button centres at (577.6, 40) and the selection tool's at (533.6, 40) in this browser window; a `computer` `left_click` on the rectangle point flips `toolbar-selection`'s `aria-pressed` to `\"false\"` and `toolbar-rectangle`'s to `\"true\"`, and the tool's own before/after `screenshot` outputs differ (`clicked.observed.verdict: \"verified\"`). Coordinates are pinned to this measurement rather than discovered per run, the same pattern `s5-shadow-page.json` uses for its query - a real agent locates the click visually from a screenshot, but pinning here keeps the click itself deterministic if the layout has not moved.\n\nFirst live run (2026-09-10) failed on a precondition, not the claim: excalidraw persists the last-used tool in this browser profile's local storage, so the page loaded with the rectangle tool already active from this same measurement session's own free clicks, and the agent correctly reported no change (it had nothing to change into). Added a Step 3 reset click on the selection tool before the BEFORE screenshot so the starting state is forced rather than assumed; the agent still checks and reports it in notes.\n\nOne infra finding worth recording: the `computer` tool hangs to `timed-out/no-answer` on a site left in the default `ask` mode, because it is a consent-gated effect and nothing answers the prompt outside a real side panel - not a product defect, but every ad hoc script or scenario against a fresh site needs `setSiteMode`/`setup.siteMode` first, the same as every other effect tool. `s6-excalidraw.json` sets `skip-checks` for that reason; T140's own `ask`-mode claim already covers consent and is not repeated here."
+}

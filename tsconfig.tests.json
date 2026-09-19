@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node", "chrome"],
+    "allowImportingTsExtensions": false
+  },
+  "include": [
+    "tests/**/*.ts",
+    "packages/*/src/**/*.test.ts",
+    "packages/*/tests/**/*.ts",
+    "tests/**/*.tsx",
+    "vitest.config.ts",
+    "playwright.extension.config.ts"
+  ]
+}
