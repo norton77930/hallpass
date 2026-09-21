@@ -138,6 +138,12 @@ publish `.specify/` and `.claude/skills`+`agents` after the snapshot check passe
 contain no personal data; the constitution names the reference extensions only generically), keep
 `.claude/settings.local.json`, `.claude/worktrees` and memory out.
 
+**Resolved (owner, 2026-09-21)**: publish the tooling. `.specify/**`, `.claude/skills/**` and
+`.agents/skills/**` (the Codex mirror of the same skills, referenced by `.specify/integrations/codex.manifest.json`)
+leave the export-ignore set; `.claude/scheduled_tasks.lock`, `.claude/settings*.json` and
+`.claude/worktrees/**` take their place. The forbidden-pattern scan over the 42 added files: 0 hits.
+There is no `.claude/agents` directory in this repository; the earlier wording assumed one.
+
 ## R-150 — Design notes replace evidence citations
 
 91 citation sites across the spec trees point at a private evidence document or one of its sections. **Decision**:
