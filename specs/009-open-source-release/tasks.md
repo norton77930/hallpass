@@ -137,11 +137,14 @@ Slice review by `code-reviewer` for S2 and S3 only.
 - [X] T260 [S5] Gate: all `agent-*` specs on the renamed build, Chromium headed, private LOCALAPPDATA,
   `HALLPASS_FOREIGN_AGENT_SERVERS=allow` — counts to coverage.
   B: 29/31 then 31/31 after the ask-row helper fix (pre-existing since 2026-09-16) (d6020c6).
-- [ ] T261 [S5] Snapshot proof: `git archive HEAD` → empty temp dir → `npm ci`, typecheck, unit,
+- [X] T261 [S5] Snapshot proof: `git archive HEAD` → empty temp dir → `npm ci`, typecheck, unit,
   contract, package → exit codes + zip SHA-256 to coverage.
-- [ ] T262 [S5] `gh repo create hallpass --private` (stop if it exists), push the snapshot as one commit
+  B: run 1 exposed the probe harness reading `.mcp.json` (fixed 25740ad); run 2 exposed the archive needing git and `.gitattributes` (fixed a64f5d2); final run on a64f5d2 all green, zip SHA-256 ea3f7ab7… (coverage.md).
+- [X] T262 [S5] `gh repo create hallpass --private` (stop if it exists), push the snapshot as one commit
   on `main`, wait for CI, `gh release create v0.3.0 release/hallpass-0.3.0.zip`, issue #1; URLs to
   coverage.
-- [ ] T263 [S5] QA guide republished to its existing page; `coverage.md` written; memory updated;
+  B: repo https://github.com/norton77930/hallpass (private) created; snapshot of 53d6bca pushed as the single commit 333a13a; CI run 35453517002 success; tag v0.3.0 + release with the zip (hash re-checked after download); issue #1 opened.
+- [X] T263 [S5] QA guide republished to its existing page; `coverage.md` written; memory updated;
   final commit on the branch. Owner owes: merge to `main` (worktree guard), switch the repository to
   public, and the R-149 decision.
+  B: QA guide republished (artifact 9m9cgsUus4x4z8vNm47ts3 v5); coverage.md written; memory `feature-009-progress` updated. Owner owes: merge, switch to public, R-149, own 0.2.0 → 0.3.0 upgrade.

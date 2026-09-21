@@ -1,8 +1,8 @@
 docs/reference-*.md export-ignore
 tests/acceptance/probe-004/reports/** export-ignore
-.specify/** export-ignore
-.claude/** export-ignore
-.agents/** export-ignore
+.claude/scheduled_tasks.lock export-ignore
+.claude/settings*.json export-ignore
+.claude/worktrees/** export-ignore
 CLAUDE-CODE-HANDOFF.md export-ignore
 .mcp.json export-ignore
 .scratch/** export-ignore

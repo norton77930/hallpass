@@ -177,8 +177,9 @@ and the from-scratch build proof, both scripted, both with a report.
 
 1. **Given** `main` after this feature, **When** the archive command exports it, **Then** the export
    contains none of: `docs/reference-*.md` (all seven),
-   `tests/acceptance/probe-004/reports/**`, `apps/server/**`, `.specify/**`, `.claude/**`,
-   `CLAUDE-CODE-HANDOFF.md`, `.mcp.json`, `.scratch/**`, `tests/acceptance/*checkpoint*.md`,
+   `tests/acceptance/probe-004/reports/**`, `apps/server/**`, `.claude/scheduled_tasks.lock`,
+   `.claude/settings*.json`, `.claude/worktrees/**` (the speckit tooling under `.specify/`, `.claude/skills`
+   and `.agents/skills` ships — R-149, owner decision 2026-09-21), `CLAUDE-CODE-HANDOFF.md`, `.mcp.json`, `.scratch/**`, `tests/acceptance/*checkpoint*.md`,
    `tests/acceptance/owner-remaining-runbook.md`, `tests/acceptance/local-run-checklist.md`.
 2. **Given** the export, **When** every file in it is scanned, **Then** there are zero occurrences of
    the maintainer's Windows username, the private checkout's drive path (either slash style), the

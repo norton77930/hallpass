@@ -48,10 +48,10 @@ repository's first CI run.
 | Item | Value |
 | --- | --- |
 | Repository | https://github.com/norton77930/hallpass (private until the owner switches it) |
-| First commit | recorded in the private archive's copy of this file after the push |
-| CI run | recorded in the private archive's copy of this file after the push |
+| First commit | `333a13ac13ccf78d8845b131a6a3793f5c5c1cef` on `main` (snapshot of private 53d6bca; 483 files) |
+| CI run | https://github.com/norton77930/hallpass/actions/runs/35453517002 — success on the first run (typecheck, unit, build, contract, snapshot check on windows-latest) |
 | Tag / release | `v0.3.0` — https://github.com/norton77930/hallpass/releases/tag/v0.3.0 |
-| Release asset SHA-256 | `ea3f7ab7968958299b0fa3245bc8e4f17c6f122e46a45a774b4430b8dfcff005` (`hallpass-0.3.0.zip`, 614 603 bytes, built by the final from-scratch run on a64f5d2; zip timestamps make each build's hash differ while the bundles do not) |
+| Release asset SHA-256 | `ea3f7ab7968958299b0fa3245bc8e4f17c6f122e46a45a774b4430b8dfcff005` (`hallpass-0.3.0.zip`, 614 603 bytes, built by the final from-scratch run on a64f5d2, re-downloaded from the release and hash-checked; zip timestamps make each build's hash differ while the bundles do not) |
 | Issue #1 (macOS / Linux) | https://github.com/norton77930/hallpass/issues/1 |
 | QA guide page | https://claude.ai/artifact/9m9cgsUus4x4z8vNm47ts3 |
 
@@ -60,8 +60,8 @@ repository's first CI run.
 1. Merge `feature-009-open-source` into `main` in the private checkout (the worktree guard keeps this
    session off `main`): `git merge --ff-only feature-009-open-source`.
 2. Switch the public repository to public after reading the README on the web.
-3. Decide R-149: publish `.specify/` and `.claude/skills`+`agents` (one line each in `.gitattributes`)
-   so the speckit workflow runs in the public repository, or keep developing specs privately.
+3. ~~Decide R-149~~ — decided 2026-09-21: the speckit tooling ships (`.specify/`, `.claude/skills`,
+   `.agents/skills`); see research.md R-149. The public repository receives it as its second commit.
 4. Your everyday Chrome still runs 0.2.0 from the main checkout: after the merge, rebuild, run
    `npm run agent-host:install` (it removes the 0.2.0 registration), reload the extension and
    re-register the MCP server as `hallpass`. This session's own `com.hallpass.host` registration

@@ -31,7 +31,9 @@ describe("T248 the path rule reads the private set", () => {
   it("matches the private paths", () => {
     expect(isForbiddenPath("docs/reference-anything.md")).toBe(true);
     expect(isForbiddenPath("tests/acceptance/probe-004/reports/run-1.json")).toBe(true);
-    expect(isForbiddenPath(".claude/agents/implementer.md")).toBe(true);
+    expect(isForbiddenPath(".claude/scheduled_tasks.lock")).toBe(true);
+    expect(isForbiddenPath(".claude/settings.local.json")).toBe(true);
+    expect(isForbiddenPath(".claude/worktrees/x/package.json")).toBe(true);
     expect(isForbiddenPath(".mcp.json")).toBe(true);
     expect(isForbiddenPath("tests/acceptance/us1-checkpoint.md")).toBe(true);
   });
@@ -41,6 +43,10 @@ describe("T248 the path rule reads the private set", () => {
     expect(isForbiddenPath("tests/acceptance/probe-004/scenarios.test.ts")).toBe(false);
     expect(isForbiddenPath("scripts/snapshot-check.ts")).toBe(false);
     expect(isForbiddenPath("package.json")).toBe(false);
+    // R-149 (owner, 2026-09-21): the speckit tooling ships so the workflow runs in the public repository.
+    expect(isForbiddenPath(".specify/memory/constitution.md")).toBe(false);
+    expect(isForbiddenPath(".claude/skills/speckit-plan/SKILL.md")).toBe(false);
+    expect(isForbiddenPath(".agents/skills/speckit-plan/SKILL.md")).toBe(false);
   });
 });
 
