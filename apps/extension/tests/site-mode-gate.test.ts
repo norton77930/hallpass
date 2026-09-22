@@ -154,6 +154,12 @@ describe("T024 per-site gate", () => {
     for (const tool of ["dialog", "navigate", "tabs_close"] as const) {
       expect(requiresGate(tool), tool).toBe(true);
     }
+    // 013/FR-174: putting a file into the page is one kind of change whichever end the bytes came
+    // from - the owner's disk or a screenshot this session took - so the two are gated together or
+    // the newer one would arrive on an `ask` site without a card.
+    for (const tool of ["file_upload", "upload_image"] as const) {
+      expect(requiresGate(tool), tool).toBe(true);
+    }
     for (const tool of ["find", "tabs_context", "tabs_create", "get_page_text", "wait"] as const) {
       expect(requiresGate(tool), tool).toBe(false);
     }

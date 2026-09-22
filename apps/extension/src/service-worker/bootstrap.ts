@@ -16,6 +16,9 @@ export function bindServiceWorker(agentPath: AgentPath): void {
     return;
   }
   bindActionEntry();
+  // `sidePanel.setPanelBehavior({ openPanelOnActionClick: true })` is deliberately not set (011
+  // review L1, 2026-09-21): Chrome then opens the panel *instead of* firing `action.onClicked`, and
+  // the listener above is what scopes the panel to the clicked tab before opening it.
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name === agentPath.portName) {
       agentPath.accept(port);

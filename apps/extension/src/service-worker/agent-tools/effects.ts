@@ -3,14 +3,13 @@ import {
   isAgentEffectTool,
   type AgentEffectObservation,
   type AgentEffectVerdict,
-  type AgentNativeRequest,
   type AgentNativeResponse,
   type AgentToolName,
   type CurrentDialog,
   type RuntimeAction,
   type SiteMode,
 } from "@hallpass/contracts";
-import type { captureTab, CaptureDeps, CaptureRegion } from "../../chrome-adapters/capture.js";
+import type { captureTab, CaptureDeps, CaptureFrame, CaptureRegion } from "../../chrome-adapters/capture.js";
 import {
   clearFrameNonce,
   enumerateFrameOffsets,
@@ -59,8 +58,9 @@ import {
 } from "./computer.js";
 import type { AgentPageBinding, AgentPageBindings } from "./page-binding.js";
 import { photographTab } from "./photograph.js";
-import type { AgentPromptController } from "./prompts.js";
+import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { findOnTab, resolveRef, type AgentTarget } from "./refs.js";
+import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 
@@ -185,6 +185,16 @@ export type AgentEffectDeps = {
   captureDeps?: CaptureDeps;
   listTabs?: typeof queryTabSnapshots;
   /**
+   * The emulated size a session gave this tab, when it gave it one (012/T311, FR-158, R-166).
+   *
+   * Both pictures this runner takes need it for the same reason the `screenshot` tool does: under
+   * an emulated viewport `captureVisibleTab` photographs the *window*, so a `computer screenshot`
+   * and the crop the owner is shown would be pictures of something other than the page the agent
+   * is working on. The command travels over `attachments`, which this runner already has - the
+   * emulation is holding that attachment open for exactly as long as it lasts.
+   */
+  currentViewport?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /**
    * How `computer`'s `wait` waits.
    *
    * Injected for the same reason every other clock in this worker is: a test should not have to
@@ -205,7 +215,7 @@ export type AgentEffectDeps = {
 export type AgentEffectRunner = {
   /** Whether this runner answers the tool at all; the dispatch table asks before routing. */
   handles(tool: AgentToolName): boolean;
-  run(request: AgentNativeRequest): Promise<AgentNativeResponse>;
+  run(request: AgentToolRequest): Promise<AgentNativeResponse>;
 };
 
 /** The 002 settle window, reused: the same page needs the same time whoever asked. */
@@ -989,6 +999,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         ...(deps.capture ? { capture: deps.capture } : {}),
         ...(deps.listTabs ? { listTabs: deps.listTabs } : {}),
         ...(deps.captureDeps ? { captureDeps: deps.captureDeps } : {}),
+        // The emulated frame and the way to photograph it (012/T311): the same two facts the
+        // `screenshot` tool is given, so the two tools cannot answer different pictures of one tab.
+        ...(deps.currentViewport ? { currentViewport: deps.currentViewport } : {}),
+        send: (id, method, params) => deps.attachments.send(id, method, params),
+        // 012/S2c F2: after an eviction the record says "emulated" while this worker holds no
+        // attachment; the emulation's own holder is claimed rather than the picture being refused.
+        ensureAttached: (id) => deps.attachments.acquire(id, "viewport"),
       },
     );
   }
@@ -1671,15 +1688,31 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     if (action === "screenshot") {
       const photo = await photograph(binding.tabId);
       if (!photo.ok) {
+        // The attachment's refusal in the attachment's own words (012/S2c F2), exactly as every
+        // other action in this file answers one.
+        if (photo.reason === "input-unavailable") return inputUnavailable(callId, photo.unavailableReason);
         return answer(callId, photo.reason === "tab-gone" ? "stale" : "not-readable", photo.reason);
       }
       // The `screenshot` tool's own shape, so an agent that took one either way reads one answer.
       // `cropped` is false because this action never asks for a region: the field says whether a
-      // requested rectangle was applied, and there was none to apply.
+      // requested rectangle was applied, and there was none to apply - which is also why `coverage`
+      // is always the viewport here. The rest are 012's fields, carried when they are known: the
+      // frame says which pixels the coordinates this tool takes are in, and that is the one thing
+      // an agent aiming a click at a picture has to be told.
       return {
         callId,
         outcome: "ok",
-        result: { mimeType: "image/png", data: photo.image.data, cropped: false },
+        result: {
+          mimeType: "image/png",
+          data: photo.image.data,
+          cropped: false,
+          ...(photo.image.width === undefined || photo.image.height === undefined
+            ? {}
+            : { width: photo.image.width, height: photo.image.height }),
+          scale: photo.image.scale,
+          ...(photo.frame === undefined ? {} : { frame: photo.frame }),
+          coverage: "viewport",
+        },
       };
     }
 
@@ -1729,7 +1762,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     deps.onApproved?.(tabId, tool);
   }
 
-  async function runEffect(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function runEffect(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId, tool } = request;
     const context = deps.context.forCall(request.sessionId, callId);
     const parsed = agentToolArgSchemas[tool].safeParse(request.args);
@@ -1794,6 +1827,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         // Whose question this is (B5): the host giving up on *this* call takes it down, and a
         // backstop for some other call leaves it standing.
         callId,
+        // And which call the host knows it as, when this effect is a batch step (011 review H1).
+        hostCallId: request.hostCallId,
         sessionId: request.sessionId,
         site: binding.site,
         tool,
@@ -1805,8 +1840,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       });
       if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
       if (asked.decision === "timed-out") {
-        // FR-043: nothing ran. The prompt is dead, so a late Allow cannot start it either.
-        return answer(callId, "timed-out", "no-answer");
+        // FR-043: nothing ran. The prompt is dead, so a late Allow cannot start it either. And if
+        // it was raised where nobody could see it, the answer says where to click (011 FR-146).
+        return noAnswerResponse(callId, asked);
       }
       // 006 FR-087: the owner's Stop reaches a parked call in the same word an in-flight wait gets.
       if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");

@@ -137,9 +137,39 @@ listeners and nothing else.
   browser assistant does these, and the agent could not see a native menu anyway.
 - **Silent frame dropping, in-memory frames, unmasked typed text** in recordings (§2).
 - **Auto-answering "leave this site?"** — we default to staying and let the agent decide (§3).
-- **A viewport override, page zoom and image upload** are planned, not skipped.
+- **A viewport override and zoom** shipped in 0.4.0: the viewport is *emulated* rather than the
+  owner's window resized (the window is theirs, and a layout check is no reason to move it), the
+  picture of an emulated tab is taken through the protocol at that viewport, a region is cropped at
+  the picture's own density and `scale` asks for a smaller one; the emulation is cleared before the
+  attachment is dropped on every release path, because we measured that a browser keeps it past a
+  detach.
+- **Image upload** shipped in 0.5.0, and it is the session's own screenshots rather than arbitrary
+  bytes: every screenshot answer carries an id, the local MCP server keeps those bytes in its own
+  process memory for five minutes under a per-session budget (nothing is written to disk, the
+  browser never stores them, and another session is another process), and the agent quotes the id
+  to put the picture into a page. Two delivery forms, because pages take a file in two ways: into a
+  `<input type="file">` named by a reference — including one the page hides behind its own button —
+  or as a drag-and-drop sequence at a viewport coordinate, one level into a same-origin frame. The
+  upload is a page change, so it passes the same per-site consent a click does.
 - **Background visibility toggling and raw protocol pass-through** are out of scope by design: a
   tool that runs arbitrary protocol commands would undo the consent model.
+
+## §8 A question the person cannot see
+
+**Ours.** Pairing and consent are answered in the side panel, and Chrome opens the side panel only
+on a user gesture (we measured a worker-initiated open being refused in every form). So when a
+question is raised while no panel is open, three things happen: the agent is sent a fixed sentence
+it can relay to the person at the terminal — the panel is closed, click the toolbar icon or press
+Alt+A; the toolbar icon carries a red badge until the question is answered, expires or the panel
+opens; and the question waits two minutes instead of the usual 25 or 45 seconds, with a progress
+notice every five seconds so the agent's client sees activity. A question the person does answer
+in time completes the original call; one they do not ends it as timed out with the same sentence.
+
+**Why.** The first call of a new user is exactly when the panel is closed, and a timeout with no
+instruction is the worst first impression a consent model can make. Both browser assistants keep
+their pairing and permission UI inside the panel and have no mechanism for the closed case; we
+chose the two zero-permission forms (words to the agent, a badge) over a system notification,
+which would add a permission for a benefit the terminal already gives.
 
 ## Permissions
 

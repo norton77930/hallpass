@@ -42,6 +42,8 @@ describe("T005 agent tools contract", () => {
       "tabs_release",
       "navigate",
       "resize_window",
+      // 012: an emulated viewport for the tab, which is not the owner's window.
+      "viewport",
       "get_page_text",
       "read_page",
       "find",
@@ -64,6 +66,8 @@ describe("T005 agent tools contract", () => {
       "read_network",
       "evaluate",
       "file_upload",
+      // 013: the same delivery, for a picture this session took rather than a file on disk.
+      "upload_image",
       // 005: the browser's downloads, listed for the session that caused them.
       "downloads_context",
       // 008: recording the session as a GIF, and answering the dialogs a page opens.

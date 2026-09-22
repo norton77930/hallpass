@@ -83,13 +83,20 @@ export type InputAttachment = {
 };
 
 /**
- * Who wants the attachment. All three keep it alive; only `diagnostics` may enable a domain.
+ * Who wants the attachment. All four keep it alive; only `diagnostics` may enable a domain.
  *
  * `recording` is 008's frame capture (T218, R-133): it sends `Page.captureScreenshot` and
  * `Page.getLayoutMetrics`, which are *commands* - one answer each, to the caller that sent them -
  * and it enables nothing at all, so the invariant this module states is untouched by it.
+ *
+ * `viewport` is 012's emulated viewport (T306, FR-159, R-166): it sends
+ * `Emulation.setDeviceMetricsOverride` and its clear - *commands*, one answer each to the caller
+ * that sent them - and enables nothing at all. It exists for the lifetime rather than the
+ * capability: R-166 measured that a detach does **not** drop an emulation, so the attachment has
+ * to outlast every other holder on a tab whose page is being laid out at a size this session
+ * chose, or there is nothing left to send the clear over.
  */
-export type AttachmentHolder = "input" | "diagnostics" | "recording";
+export type AttachmentHolder = "input" | "diagnostics" | "recording" | "viewport";
 
 export type AttachmentOutcome = { ok: true } | { ok: false; unavailableReason: InputUnavailableReason };
 
@@ -124,6 +131,22 @@ export type AgentInputAttachments = {
   state(tabId: number): InputAttachment | undefined;
   onEvent(listener: (tabId: number, method: string, params: Record<string, unknown>) => void): void;
   onDetach(listener: (tabId: number) => void): void;
+  /**
+   * Told after a tab was attached and its per-attachment setup is done (012/T306, R-167).
+   *
+   * `acquire` is the only place in this worker that attaches a debugger, so it is the only place
+   * that can say "this tab has one now" - which is what a state Chrome kept across an MV3 eviction
+   * has to hear before anything else is sent over the new attachment.
+   */
+  onAttached(listener: (tabId: number) => Promise<void> | void): void;
+  /**
+   * Told before a tab's attachment is detached, and awaited (012/T306, FR-159, R-166).
+   *
+   * The five release sites in `agent-runtime.ts` become one hook here, because what has to happen
+   * first - clearing an emulation Chrome would otherwise keep after the detach - is a *command over
+   * the attachment*, and after the detach there is nothing to send it over.
+   */
+  onBeforeRelease(listener: (tabId: number) => Promise<void> | void): void;
   /**
    * How many consumers each fan-out has (008/T230, D-008-5).
    *
@@ -224,6 +247,30 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
    */
   const eventListeners: Array<(tabId: number, method: string, params: Record<string, unknown>) => void> = [];
   const detachListeners: Array<(tabId: number) => void> = [];
+  /** 012/T306: what has to happen on either side of an attachment, registered at composition. */
+  const attachedListeners: Array<(tabId: number) => Promise<void> | void> = [];
+  const beforeReleaseListeners: Array<(tabId: number) => Promise<void> | void> = [];
+
+  /**
+   * Runs the hooks for one tab, and never lets one of them decide the caller's answer.
+   *
+   * A listener that threw has failed at its own job - a size that could not be re-applied, a clear
+   * that went nowhere - and neither is a reason to refuse an effect or, worse, to leave a debugger
+   * attached to a tab that is going back to the owner. The failure is a diagnostic, as every other
+   * best-effort protocol call in this module reports one.
+   */
+  async function fanOut(
+    listeners: Array<(tabId: number) => Promise<void> | void>,
+    tabId: number,
+  ): Promise<void> {
+    for (const listener of listeners) {
+      try {
+        await listener(tabId);
+      } catch {
+        deps.reportDiagnostic?.("agent.attachment.hook-failed");
+      }
+    }
+  }
 
   function debug(): DebuggerAdapter {
     adapter ??= deps.debug ?? createChromeDebuggerAdapter();
@@ -370,6 +417,10 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
       } catch {
         deps.reportDiagnostic?.("agent.dialog.page-enable-failed");
       }
+      // 012/T306: the attachment is ready, and whatever Chrome kept about this tab across an
+      // eviction is re-applied here - after the setup above, because a listener's own command
+      // would otherwise race `Page.enable` on the same session.
+      await fanOut(attachedListeners, tabId);
       if (holder === "diagnostics") await domains(tabId, "enable");
       return { ok: true };
     },
@@ -392,12 +443,27 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
     },
     async release(tabId) {
       unavailable.delete(tabId);
+      /**
+       * 012/T306, FR-159, and 012/S2c F1: before the detach, and before this worker's own
+       * bookkeeping gets a say.
+       *
+       * R-166 measured that Chrome keeps an emulation the detach was assumed to drop, so a command
+       * sent afterwards has no attachment to go over. The hook also runs for a tab this map does
+       * not list, because that is the ordinary state after an MV3 eviction - Chrome kept the
+       * emulation *and* the debugger, and this worker kept neither. A release that returned early
+       * there would hand the owner back a page still laid out for the agent, and the listener is
+       * the one thing that can attach for the clear (`decideClear`).
+       */
+      await fanOut(beforeReleaseListeners, tabId);
       if (!tabs.has(tabId)) return;
       await detach(tabId);
     },
     async releaseAll() {
       unavailable.clear();
-      for (const tabId of [...tabs.keys()]) await detach(tabId);
+      for (const tabId of [...tabs.keys()]) {
+        await fanOut(beforeReleaseListeners, tabId);
+        await detach(tabId);
+      }
     },
     async send(tabId, method, params, sessionId) {
       if (!tabs.has(tabId)) throw new Error("input-not-attached");
@@ -426,6 +492,12 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
     },
     onDetach(listener) {
       detachListeners.push(listener);
+    },
+    onAttached(listener) {
+      attachedListeners.push(listener);
+    },
+    onBeforeRelease(listener) {
+      beforeReleaseListeners.push(listener);
     },
     listenerCount() {
       return { event: eventListeners.length, detach: detachListeners.length };

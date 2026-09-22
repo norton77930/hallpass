@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
+import { captureTab } from "../src/chrome-adapters/capture.js";
 import { createAgentEffects } from "../src/service-worker/agent-tools/effects.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
@@ -38,9 +39,11 @@ function fakeAttachments(): { attachments: AgentInputAttachments; commands: Comm
       commands.push({ tabId, method, params: params ?? {} });
       // The one geometry query the position tool makes: the tab's own viewport, which is what a
       // refusal has to be able to name.
-      return method === "Page.getLayoutMetrics"
-        ? { cssLayoutViewport: { clientWidth: VIEWPORT.width, clientHeight: VIEWPORT.height } }
-        : {};
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: VIEWPORT.width, clientHeight: VIEWPORT.height } };
+      }
+      // 012/T311: the picture of an emulated tab comes over this attachment, not off the window.
+      return method === "Page.captureScreenshot" ? { data: "cHJvdG9jb2w=" } : {};
     },
     attached: () => [],
     state: () => undefined,
@@ -92,7 +95,7 @@ function installChrome(): void {
 function harness(overrides: Partial<Parameters<typeof createAgentEffects>[0]> = {}) {
   const fake = fakeAttachments();
   const siteModes = createSiteModeStore();
-  const capture = vi.fn(async () => ({ data: "UE5H", cropped: true }));
+  const capture = vi.fn(async () => ({ data: "UE5H", cropped: true, scale: 1 }));
   const runner = createAgentEffects({
     context: testSessionContexts(),
     siteModes,
@@ -231,7 +234,58 @@ describe("T138 acting by position", () => {
     const response = await runner.run(request({ action: "screenshot" }));
 
     expect(response.outcome).toBe("ok");
-    expect(response.result).toEqual({ mimeType: "image/png", data: "UE5H", cropped: false });
+    expect(response.result).toEqual({
+      mimeType: "image/png",
+      data: "UE5H",
+      cropped: false,
+      // 012/FR-158: the same fields the `screenshot` tool answers with, so an agent that took a
+      // picture either way reads one answer. The frame is absent here because this fake tab has no
+      // size Chrome will report.
+      scale: 1,
+      coverage: "viewport",
+    });
+  });
+
+  it("photographs an emulated tab over its attachment rather than off the window", async () => {
+    const visibleTab = vi.fn(async () => "data:image/png;base64,UE5H");
+    const { runner, siteModes, commands } = harness({
+      capture: captureTab,
+      captureDeps: {
+        captureVisibleTab: visibleTab,
+        activateTab: async () => undefined,
+        measure: async () => ({ width: 2560, height: 1440 }),
+      },
+      currentViewport: async () => ({ width: 2560, height: 1440 }),
+    });
+    await allowed(siteModes);
+
+    const response = await runner.run(request({ action: "screenshot" }));
+
+    // R-166: under emulation `captureVisibleTab` photographs the *window* - the emulated page
+    // cropped to what fits, at the display's density - so this action has to take the same
+    // protocol path the `screenshot` tool takes, or the two tools answer different pictures.
+    expect(commands.filter((command) => command.method === "Page.captureScreenshot")).toEqual([
+      {
+        tabId: AGENT_TAB,
+        method: "Page.captureScreenshot",
+        params: {
+          format: "png",
+          fromSurface: true,
+          clip: { x: 0, y: 0, width: 2560, height: 1440, scale: 1 },
+        },
+      },
+    ]);
+    expect(visibleTab).not.toHaveBeenCalled();
+    expect(response.result).toEqual({
+      mimeType: "image/png",
+      data: "cHJvdG9jb2w=",
+      cropped: false,
+      scale: 1,
+      width: 2560,
+      height: 1440,
+      frame: { width: 2560, height: 1440 },
+      coverage: "viewport",
+    });
   });
 
   /**

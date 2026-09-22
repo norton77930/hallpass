@@ -1,70 +1,20 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 import { hostDataDirectory, hostManifestPath, launcherPath } from "../host-paths.js";
 import { uploadConfigPath, UPLOAD_CONFIG_TEMPLATE } from "../upload-policy.js";
-import {
-  AGENT_HOST_ALLOWED_ORIGINS,
-  AGENT_HOST_NAME,
-  createLauncherScript,
-  createNativeHostManifest,
-  resolveRelayEntryPath,
-} from "./manifest.js";
-import {
-  isLegacyRegistration,
-  NATIVE_MESSAGING_REGISTRY_KEYS,
-  NATIVE_MESSAGING_ROOTS,
-  parseRegistrySubkeys,
-  registryAddArguments,
-  registryDeleteArguments,
-  registryListArguments,
-  registryQueryArguments,
-  runReg,
-} from "./windows.js";
-
-/**
- * Registrations an earlier version of this host left under either root (009/FR-126).
- *
- * Each subkey's default value is a manifest path; the manifest decides (`isLegacyRegistration`).
- * The key is removed; the manifest's directory is reported and left for the owner to delete, since
- * it may still hold their `config.json` and logs from the old version.
- */
-async function removeLegacyRegistrations(): Promise<string[]> {
-  const removedDirectories = new Set<string>();
-  for (const root of NATIVE_MESSAGING_ROOTS) {
-    const listing = await runReg(registryListArguments(root));
-    if (!listing.ok) continue;
-    for (const name of parseRegistrySubkeys(root, listing.output)) {
-      if (name === AGENT_HOST_NAME) continue;
-      const key = `${root}\\${name}`;
-      const value = await runReg(registryQueryArguments(key));
-      const manifestPath = value.ok ? /REG_SZ\s+(.+)$/m.exec(value.output)?.[1]?.trim() : undefined;
-      if (!manifestPath) continue;
-      let manifest: unknown;
-      try {
-        manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      } catch {
-        continue;
-      }
-      if (typeof manifest !== "object" || manifest === null) continue;
-      if (!isLegacyRegistration(manifest as { name?: unknown; allowed_origins?: unknown }, AGENT_HOST_ALLOWED_ORIGINS, AGENT_HOST_NAME)) {
-        continue;
-      }
-      await runReg(registryDeleteArguments(key));
-      removedDirectories.add(dirname(manifestPath));
-      process.stdout.write(`  removed earlier version's registration: ${key}\n`);
-    }
-  }
-  return [...removedDirectories];
-}
+import { createLauncherScript, createNativeHostManifest, resolveRelayEntryPath } from "./manifest.js";
+import { registerAll, removeLegacyRegistrations, unregisterAll } from "./registration.js";
+import { nativeMessagingKey, NATIVE_MESSAGING_ROOTS, registryQueryArguments, runReg } from "./windows.js";
 
 /**
  * The machine-side install of the native-messaging host: two files in the per-user data directory
- * and two registry values pointing Chrome at them (R-101).
+ * and one registry value per browser root pointing that browser at them (R-101, 010/FR-139).
  *
- * Everything decided here is a value produced by `manifest.ts`/`windows.ts` and unit-tested there;
- * this file only touches the machine. `install` is idempotent - it overwrites both files and passes
- * `/f` to `reg` - because the ordinary way to fix a stale registration is to run it again.
+ * Everything decided here is a value produced by `manifest.ts`/`windows.ts`/`registration.ts` and
+ * unit-tested there; this file only touches the machine and prints
+ * (`specs/010-multi-browser-host/contracts/installer-output.md`). `install` is idempotent - it
+ * overwrites both files and passes `/f` to `reg` - because the ordinary way to fix a stale
+ * registration is to run it again.
  */
 
 async function install(): Promise<number> {
@@ -89,43 +39,47 @@ async function install(): Promise<number> {
     await writeFile(configPath, `${UPLOAD_CONFIG_TEMPLATE}\n`, "utf8");
   }
 
-  let failures = 0;
-  for (const key of NATIVE_MESSAGING_REGISTRY_KEYS) {
-    const result = await runReg(registryAddArguments(key, manifestPath));
-    if (!result.ok) {
-      failures += 1;
-      process.stderr.write(`agent-host: failed to register ${key}\n${result.output}\n`);
-    }
-  }
+  const outcomes = await registerAll(runReg, manifestPath);
 
   process.stdout.write(`agent-host installed\n  launcher: ${launcher}\n  manifest: ${manifestPath}\n`);
-  for (const key of NATIVE_MESSAGING_REGISTRY_KEYS) {
-    process.stdout.write(`  registry: ${key}\n`);
+  // Only what was actually written is listed: a root named on stdout is a promise that the browser
+  // will find the host there, and a failed root has to break that promise loudly (010/FR-140).
+  for (const { browser, key, outcome } of outcomes) {
+    if (outcome === "written") process.stdout.write(`  registry: <${browser}> ${key}\n`);
   }
+  for (const { browser, key, outcome, reason } of outcomes) {
+    if (outcome !== "failed") continue;
+    process.stderr.write(`agent-host: failed to register <${browser}> ${key}\n${reason ?? ""}\n`);
+  }
+
   // `--keep-legacy` leaves an earlier version's registration alone: a developer registering a
   // checkout beside a QA install of 0.2.0 on the same machine wants both to keep working.
-  const legacyDirectories = process.argv.includes("--keep-legacy") ? [] : await removeLegacyRegistrations();
-  for (const directory of legacyDirectories) {
+  const legacy = process.argv.includes("--keep-legacy")
+    ? { removedKeys: [], directories: [] }
+    : await removeLegacyRegistrations(runReg, (path) => readFile(path, "utf8"));
+  for (const key of legacy.removedKeys) {
+    process.stdout.write(`  removed earlier version's registration: ${key}\n`);
+  }
+  for (const directory of legacy.directories) {
     if (directory.toLowerCase() === dataDir.toLowerCase()) continue;
     process.stdout.write(`  earlier version's files may be deleted by hand: ${directory}\n`);
   }
-  return failures === 0 ? 0 : 1;
+  return outcomes.some(({ outcome }) => outcome === "failed") ? 1 : 0;
 }
 
 async function uninstall(): Promise<number> {
   const manifestPath = hostManifestPath();
   const launcher = launcherPath();
 
-  for (const key of NATIVE_MESSAGING_REGISTRY_KEYS) {
-    // A key that was never there is not a failure: uninstall's job is that it is gone afterwards.
-    await runReg(registryDeleteArguments(key));
-  }
+  // A key that was never there is not a failure: uninstall's job is that it is gone afterwards.
+  const outcomes = await unregisterAll(runReg);
   await rm(manifestPath, { force: true });
   await rm(launcher, { force: true });
 
   process.stdout.write(`agent-host uninstalled\n  removed: ${launcher}\n  removed: ${manifestPath}\n`);
-  for (const key of NATIVE_MESSAGING_REGISTRY_KEYS) {
-    process.stdout.write(`  removed: ${key}\n`);
+  for (const { browser, key, outcome } of outcomes) {
+    const label = outcome === "removed" ? "removed:" : "absent: ";
+    process.stdout.write(`  ${label} <${browser}> ${key}\n`);
   }
   return 0;
 }
@@ -136,9 +90,10 @@ async function status(): Promise<number> {
   process.stdout.write(`agent-host status\n`);
   process.stdout.write(`  launcher: ${existsSync(launcher) ? "present" : "missing"} ${launcher}\n`);
   process.stdout.write(`  manifest: ${existsSync(manifestPath) ? "present" : "missing"} ${manifestPath}\n`);
-  for (const key of NATIVE_MESSAGING_REGISTRY_KEYS) {
+  for (const { browser, root } of NATIVE_MESSAGING_ROOTS) {
+    const key = nativeMessagingKey(root);
     const result = await runReg(registryQueryArguments(key));
-    process.stdout.write(`  registry: ${result.ok ? "present" : "missing"} ${key}\n`);
+    process.stdout.write(`  registry: ${result.ok ? "present" : "missing"} <${browser}> ${key}\n`);
   }
   return 0;
 }

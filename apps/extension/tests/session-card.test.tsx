@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentPanelCommandSchema, type AgentPanelState } from "@hallpass/contracts";
+import { lookup } from "../src/locales/catalog.js";
+import { activityText } from "../src/side-panel/agent/SessionCard.js";
 import {
   IDLE,
   installAgentPort,
@@ -291,6 +293,88 @@ describe("T191 session card", () => {
       ui("agent.activity.restore").replace("{state}", ui("agent.activity.windowMaximized")),
     );
     expect(item?.textContent).toContain(ui("agent.activity.restored"));
+    expect(item?.textContent).not.toContain("{site}");
+  });
+
+  /**
+   * 012/T308 — the emulated viewport, on the card (FR-159).
+   *
+   * The owner has no other way of knowing: the window is untouched and the page simply looks
+   * different, so the line is what tells them a session is laying one of their tabs out at a size
+   * it chose - and that it gave the page back. The worker sends `"WxH"`, the panel writes the
+   * sentence, as it does for every other kind.
+   */
+  it("says a tab was given an emulated viewport, and that it was cleared", () => {
+    const t = (key: string): string => lookup(key, "en-US");
+    // The two templates, written from the pieces the worker sends: a size for the set and nothing
+    // at all for the clear, which is a fact about the tab rather than about a size.
+    expect(activityText({ at: 1_700_000_003_000, kind: "viewport", outcome: "set", message: "375x812" }, t)).toBe(
+      "Viewport set to 375x812",
+    );
+    expect(activityText({ at: 1_700_000_004_000, kind: "viewport", outcome: "cleared" }, t)).toBe("Viewport cleared");
+
+    renderShell();
+    project(port, {
+      ...IDLE,
+      sessions: [
+        {
+          sessionId: "session-v",
+          agentId: "agent-1",
+          tabs: [],
+          sites: [],
+          state: "working",
+          activity: [
+            { at: 1_700_000_004_000, kind: "viewport", outcome: "cleared" },
+            { at: 1_700_000_003_000, kind: "viewport", outcome: "set", message: "375x812" },
+          ],
+        },
+      ],
+    });
+
+    const items = within(card("session-v")).getAllByRole("listitem");
+    expect(items[0]?.textContent).toContain("Viewport cleared");
+    expect(items[1]?.textContent).toContain("Viewport set to 375x812");
+    expect(items[1]?.textContent).not.toContain("{size}");
+  });
+
+  /**
+   * 013/T337 — the picture a session put into the owner's page, on the card (FR-174).
+   *
+   * FR-174 asks for it beside the consent card: an upload the owner waved through in `skip-checks`
+   * is over in a moment, and this line is the only trace of it afterwards. Two sentences, because
+   * a file handed to a form and a file dropped on a page are two different things to read about;
+   * the worker sends the delivery word and the host name, and the panel writes both sentences.
+   */
+  it("says a screenshot was put into a form, and that one was dropped on a page", () => {
+    const t = (key: string): string => lookup(key, "en-US");
+    const DELIVERED = { at: 1_700_000_005_000, kind: "upload", outcome: "delivered" } as const;
+    expect(activityText({ ...DELIVERED, site: "fixtures.test", message: "input" }, t)).toBe(
+      "Screenshot put into a form on fixtures.test",
+    );
+    expect(activityText({ ...DELIVERED, site: "fixtures.test", message: "drop" }, t)).toBe(
+      "Screenshot dropped on fixtures.test",
+    );
+    // A site the worker could not name leaves no hole: the panel has its own word for the page.
+    expect(activityText({ ...DELIVERED, message: "drop" }, t)).toBe("Screenshot dropped on the page");
+
+    renderShell();
+    project(port, {
+      ...IDLE,
+      sessions: [
+        {
+          sessionId: "session-u",
+          agentId: "agent-1",
+          tabs: [],
+          sites: [],
+          state: "working",
+          activity: [{ ...DELIVERED, site: "fixtures.test", message: "input" }],
+        },
+      ],
+    });
+
+    const item = within(card("session-u")).getAllByRole("listitem")[0];
+    expect(item?.textContent).toContain("Screenshot put into a form on fixtures.test");
+    expect(item?.textContent).toContain(ui("agent.activity.delivered"));
     expect(item?.textContent).not.toContain("{site}");
   });
 

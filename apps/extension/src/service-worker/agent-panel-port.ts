@@ -44,10 +44,37 @@ export type AgentPanelPort = {
   accept(port: AgentPanelPortLike): { accepted: boolean };
   /** Re-reads the projection and pushes it to every connected panel, if there is any. */
   publish(): Promise<void>;
+  /**
+   * Whether the owner has any panel open right now (011 R-163).
+   *
+   * The set has always been here; this is what makes it readable by the two parts of the worker
+   * that need it - the question's bound, chosen once when the question is raised, and the toolbar
+   * badge, which is on exactly while something is waiting where nobody can see it.
+   */
+  isConnected(): boolean;
+  /**
+   * Told on every connect and every disconnect, with the answer `isConnected` would give.
+   *
+   * Every event rather than only the transitions through zero: a listener that wants the
+   * transition can compare against what it last did, and one that wants each event back cannot
+   * recover an event it was never told about.
+   */
+  onPresenceChange(listener: (connected: boolean) => void): void;
 };
 
 export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort {
   const connected = new Set<AgentPanelPortLike>();
+  const presenceListeners: Array<(connected: boolean) => void> = [];
+
+  function announcePresence(): void {
+    for (const listener of presenceListeners) listener(connected.size > 0);
+  }
+
+  /** The one place a port leaves the set, so no route out of it can forget to say so. */
+  function drop(port: AgentPanelPortLike): void {
+    if (!connected.delete(port)) return;
+    announcePresence();
+  }
   /**
    * Which `publish` is the newest. Two can overlap - a panel connecting while a change is being
    * projected, a burst of changes - and their projections resolve in any order; only the newest
@@ -85,7 +112,7 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
         // left connected on Chrome's side, it would be a live port never written to again - the
         // blind panel by another route - and its document's own reconnect only runs on a drop.
         input.reportDiagnostic?.("agent.panel.send-failed");
-        connected.delete(port);
+        drop(port);
         try {
           port.disconnect();
         } catch {
@@ -112,8 +139,9 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
         return { accepted: false };
       }
       connected.add(port);
+      announcePresence();
       port.onDisconnect.addListener(() => {
-        connected.delete(port);
+        drop(port);
       });
       port.onMessage.addListener((raw) => {
         if (!connected.has(port)) {
@@ -191,5 +219,11 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
       return { accepted: true };
     },
     publish,
+    isConnected() {
+      return connected.size > 0;
+    },
+    onPresenceChange(listener) {
+      presenceListeners.push(listener);
+    },
   };
 }

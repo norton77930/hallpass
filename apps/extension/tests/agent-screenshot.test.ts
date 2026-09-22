@@ -32,11 +32,23 @@ function tabs(agentActive: boolean): FakeTab[] {
   ];
 }
 
+/**
+ * The frame every answer here is in (012/T310, R-166): a 1 200x800 window on a DPR 1.25 display
+ * reports this viewport, and a region is asked for in these pixels rather than the picture's.
+ */
+const FRAME = { width: 1187, height: 707 };
+
 function harness(input: {
   agentActive?: boolean;
   captureDeps?: Parameters<typeof createAgentReads>[0]["captureDeps"];
+  /** 012: what `viewport set` recorded for this tab, when a session set one. */
+  currentViewport?: Parameters<typeof createAgentReads>[0]["currentViewport"];
+  sendOverAttachment?: Parameters<typeof createAgentReads>[0]["sendOverAttachment"];
+  tabSize?: Parameters<typeof createAgentReads>[0]["tabSize"];
+  ensureAttached?: Parameters<typeof createAgentReads>[0]["ensureAttached"];
 }) {
   const listTabs = vi.fn(async () => tabs(input.agentActive ?? false));
+  const diagnostics: string[] = [];
   const runner = createAgentReads({
     context: testSessionContexts(),
     bindings: createAgentPageBindings(),
@@ -44,9 +56,14 @@ function harness(input: {
       tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" },
     listTabs: listTabs as unknown as typeof import("../src/chrome-adapters/tabs.js").queryTabSnapshots,
     capture: captureTab,
+    tabSize: input.tabSize ?? (async () => FRAME),
+    reportDiagnostic: (code) => void diagnostics.push(code),
     ...(input.captureDeps ? { captureDeps: input.captureDeps } : {}),
+    ...(input.currentViewport ? { currentViewport: input.currentViewport } : {}),
+    ...(input.sendOverAttachment ? { sendOverAttachment: input.sendOverAttachment } : {}),
+    ...(input.ensureAttached ? { ensureAttached: input.ensureAttached } : {}),
   });
-  return { runner };
+  return { runner, diagnostics };
 }
 
 function request(args: Record<string, unknown>): AgentNativeRequest {
@@ -78,7 +95,16 @@ describe("T035 agent screenshot", () => {
     expect(response).toEqual({
       callId: "call-1",
       outcome: "ok",
-      result: { mimeType: "image/png", data: "iVBORw0KGgo=", cropped: false },
+      result: {
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+        cropped: false,
+        // 012/FR-158: the CSS size the picture is of, and which of it the picture covers. Without
+        // the pair an agent measuring the image has no way to know which pixels its numbers are in.
+        scale: 1,
+        frame: FRAME,
+        coverage: "viewport",
+      },
     });
     // Forward, then back. The owner's window is not the agent's to leave rearranged.
     expect(activated).toEqual([AGENT_TAB, OWNER_TAB]);
@@ -118,22 +144,60 @@ describe("T035 agent screenshot", () => {
   });
 
   it("crops in the worker when a region is asked for", async () => {
-    const regions: unknown[] = [];
+    const requests: unknown[] = [];
     const { runner } = harness({
       captureDeps: {
         captureVisibleTab: async () => PNG,
         activateTab: async () => undefined,
-        crop: async (_dataUrl, region) => {
-          regions.push(region);
-          return "Y3JvcHBlZA==";
+        crop: async (_dataUrl, cropRequest) => {
+          requests.push(cropRequest);
+          return { data: "Y3JvcHBlZA==", width: 125, height: 63 };
         },
       },
     });
 
-    const response = await runner.run(request({ tabId: AGENT_TAB, region: { x: 4, y: 8, width: 100, height: 50 } }));
+    const response = await runner.run(
+      request({ tabId: AGENT_TAB, region: { x: 4, y: 8, width: 100, height: 50 }, scale: 0.5 }),
+    );
 
-    expect(response.result).toEqual({ mimeType: "image/png", data: "Y3JvcHBlZA==", cropped: true });
-    expect(regions).toEqual([{ x: 4, y: 8, width: 100, height: 50 }]);
+    expect(response.result).toEqual({
+      mimeType: "image/png",
+      data: "Y3JvcHBlZA==",
+      cropped: true,
+      width: 125,
+      height: 63,
+      scale: 0.5,
+      frame: FRAME,
+      coverage: "region",
+      region: { x: 4, y: 8, width: 100, height: 50 },
+    });
+    // The canvas pass is handed the frame as well as the region (012/FR-163): the density it crops
+    // at is the picture's own, `image.width / frame.width`, and only the frame says what that is.
+    expect(requests).toEqual([{ frame: FRAME, region: { x: 4, y: 8, width: 100, height: 50 }, scale: 0.5 }]);
+  });
+
+  it("refuses a region that is not inside the frame, before it photographs anything", async () => {
+    const captured: number[] = [];
+    const { runner } = harness({
+      captureDeps: {
+        captureVisibleTab: async (windowId) => {
+          captured.push(windowId);
+          return PNG;
+        },
+        activateTab: async () => undefined,
+      },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB, region: { x: 1100, y: 0, width: 200, height: 100 } }));
+
+    // 012/FR-164: the silent clamp is gone. A rectangle the viewport does not contain is a question
+    // about somewhere the agent cannot see, and the frame is what the next attempt is aimed with.
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "region-outside-viewport (frame 1187x707)",
+    });
+    expect(captured).toEqual([]);
   });
 
   it("returns the whole viewport, and says so, when it could not crop", async () => {
@@ -147,13 +211,25 @@ describe("T035 agent screenshot", () => {
       },
     });
 
-    const response = await runner.run(request({ tabId: AGENT_TAB, region: { x: 0, y: 0, width: 10, height: 10 } }));
+    const response = await runner.run(
+      request({ tabId: AGENT_TAB, region: { x: 0, y: 0, width: 10, height: 10 }, scale: 0.5 }),
+    );
 
-    expect(response.result).toEqual({ mimeType: "image/png", data: "iVBORw0KGgo=", cropped: false });
+    // And the scale it could not apply is reported as the 1 it actually is, rather than as the 0.5
+    // that was asked for: the picture is the size it is.
+    expect(response.result).toEqual({
+      mimeType: "image/png",
+      data: "iVBORw0KGgo=",
+      cropped: false,
+      scale: 1,
+      frame: FRAME,
+      coverage: "viewport",
+      region: { x: 0, y: 0, width: 10, height: 10 },
+    });
   });
 
-  it("refuses one image too large for a native-messaging frame, rather than breaking the link", async () => {
-    const huge = "A".repeat(SCREENSHOT_MAX_BASE64_CHARS + 1);
+  it("refuses one image too large for a native-messaging frame, and names the scale that fits", async () => {
+    const huge = "A".repeat(SCREENSHOT_MAX_BASE64_CHARS * 2);
     const { runner } = harness({
       captureDeps: {
         captureVisibleTab: async () => `data:image/png;base64,${huge}`,
@@ -163,7 +239,130 @@ describe("T035 agent screenshot", () => {
 
     const response = await runner.run(request({ tabId: AGENT_TAB }));
 
-    expect(response).toEqual({ callId: "call-1", outcome: "failed", reason: "screenshot-too-large" });
+    // 012/FR-162: still refused for this one call, but the refusal now says what would fit. The
+    // hint is what makes `scale` discoverable at all.
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "screenshot-too-large; retry with scale ≤ 0.7",
+    });
+  });
+
+  it("photographs an emulated tab over its attachment and answers in the emulated frame", async () => {
+    const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const { runner } = harness({
+      // The record as storage hands it back - session, tab and time included. Only the size may
+      // reach the answer (012 gate run 1 leaked the whole record as `frame`).
+      currentViewport: async () =>
+        ({ width: 2560, height: 1440, sessionId: "session-a", tabId: AGENT_TAB, setAt: 1 }) as never,
+      sendOverAttachment: async (_tabId, method, params) => {
+        sent.push({ method, ...(params === undefined ? {} : { params }) });
+        return { data: "cHJvdG9jb2w=" };
+      },
+      captureDeps: {
+        // R-166: under emulation this photographs the *window*, so the visible-tab path would hand
+        // back a picture of something other than what the agent asked to see.
+        captureVisibleTab: async () => {
+          throw new Error("captureVisibleTab must not be used under emulation");
+        },
+        activateTab: async () => undefined,
+        measure: async () => ({ width: 150, height: 50 }),
+      },
+    });
+
+    const response = await runner.run(
+      request({ tabId: AGENT_TAB, region: { x: 100, y: 200, width: 300, height: 100 }, scale: 0.5 }),
+    );
+
+    expect(response.result).toEqual({
+      mimeType: "image/png",
+      data: "cHJvdG9jb2w=",
+      cropped: true,
+      width: 150,
+      height: 50,
+      scale: 0.5,
+      frame: { width: 2560, height: 1440 },
+      coverage: "region",
+      region: { x: 100, y: 200, width: 300, height: 100 },
+    });
+    expect(sent).toEqual([
+      // R-174: the clip is in document coordinates, so where the viewport sits is asked for first.
+      { method: "Page.getLayoutMetrics" },
+      {
+        method: "Page.captureScreenshot",
+        params: {
+          format: "png",
+          fromSurface: true,
+          clip: { x: 100, y: 200, width: 300, height: 100, scale: 0.5 },
+        },
+      },
+    ]);
+  });
+
+  /**
+   * 012/S2c F2 - the eviction case again, from the picture's side.
+   *
+   * The record outlives the worker, so a screenshot taken after an eviction knows the tab is
+   * emulated and this worker holds no attachment to photograph it over. The attachment is made for
+   * the picture - as the viewport's own holder, which is the one the emulation is entitled to -
+   * rather than the call failing with a word about the *page* not being readable.
+   */
+  it("attaches for the picture when the emulated tab's attachment was lost", async () => {
+    const attachedFor: number[] = [];
+    const sent: string[] = [];
+    const { runner } = harness({
+      currentViewport: async () => ({ width: 2560, height: 1440 }),
+      ensureAttached: async (tabId) => {
+        attachedFor.push(tabId);
+        return { ok: true as const };
+      },
+      sendOverAttachment: async (_tabId, method) => {
+        sent.push(method);
+        return { data: "cHJvdG9jb2w=" };
+      },
+      captureDeps: {
+        captureVisibleTab: async () => {
+          throw new Error("captureVisibleTab must not be used under emulation");
+        },
+        activateTab: async () => undefined,
+      },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(attachedFor).toEqual([AGENT_TAB]);
+    expect(sent).toContain("Page.captureScreenshot");
+    expect(response.outcome).toBe("ok");
+  });
+
+  it("says why when Chrome will not attach for an emulated tab's picture", async () => {
+    const sent: string[] = [];
+    const { runner } = harness({
+      currentViewport: async () => ({ width: 2560, height: 1440 }),
+      ensureAttached: async () => ({ ok: false as const, unavailableReason: "devtools-open" as const }),
+      sendOverAttachment: async (_tabId, method) => {
+        sent.push(method);
+        return { data: "cHJvdG9jb2w=" };
+      },
+      captureDeps: {
+        captureVisibleTab: async () => {
+          throw new Error("captureVisibleTab must not be used under emulation");
+        },
+        activateTab: async () => undefined,
+      },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    // The attachment's own refusal, in the attachment's own words: `not-readable` would say the
+    // page cannot be photographed, when what happened is that the owner has devtools open on it.
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "input-unavailable",
+      refusal: { reason: "input-unavailable", unavailableReason: "devtools-open" },
+    });
+    expect(sent).toEqual([]);
   });
 
   it("refuses a tab the session does not own", async () => {

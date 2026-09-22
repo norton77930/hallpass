@@ -33,6 +33,10 @@ export function startAgentPath(input: { extensionId: string; sidePanelUrl: strin
     // investigation of 2026-09-16 had nothing to read.
     reportDiagnostic: reportTestDiagnostic,
   });
+  // The two halves are introduced here because neither can be built with the other in hand: the
+  // panel port is built from the runtime, and the runtime needs to know whether anybody is looking
+  // (011 R-163). Before `start`, so the first derivation of the badge reads a real answer.
+  runtime.bindPanelPresence(panel);
   runtime.start();
   return {
     portName: AGENT_PANEL_PORT_NAME,

@@ -4,6 +4,7 @@ import {
   agentNativeRequestSchema,
   type AgentNativeRequest,
   type AgentNativeResponse,
+  type PromptWaitingFrame,
 } from "@hallpass/contracts";
 
 /**
@@ -85,6 +86,16 @@ export type AgentBridgeDeps = {
   connectNative: () => AgentPortLike | undefined;
   /** The owner's answer, immediate for an already-paired agent and a prompt for a new one. */
   decidePairing: (request: AgentPairingRequest) => Promise<boolean>;
+  /**
+   * Which run of the browser is answering (013/R-184, FR-168), carried on the pairing answer.
+   *
+   * Injected like every other fact the bridge does not own: the id lives in
+   * `chrome.storage.session` (`browser-run.ts`) because its lifetime has to be the browser's, and
+   * the transport neither mints it nor interprets it. Absent - or an id that cannot be read - leaves
+   * the field off the frame, which is what an extension from before this field looks like to the
+   * host: it keeps clearing its retained screenshots on the link, as 013/S1 did.
+   */
+  browserRunId?: () => Promise<string | undefined>;
   /** Answers one tool call. Everything it may refuse is refused inside it, never here. */
   callTool: (request: AgentNativeRequest) => Promise<AgentNativeResponse>;
   /**
@@ -153,6 +164,15 @@ export type AgentBridge = {
    * multiplexer before it reaches anybody (T094a).
    */
   notifyUnpaired(agentId: string, sessionId: string): void;
+  /**
+   * Says that one question is still waiting (011 R-162, FR-148).
+   *
+   * It is the second frame the worker originates unasked, and it is passed through untouched: the
+   * router re-arms a call's backstop from `boundMs - waitedMs` and the server turns the same two
+   * numbers into the person's progress message, so anything this module added or rounded would be
+   * arithmetic nobody chose. Composed by the runtime, which is where the question lives.
+   */
+  sendWaiting(frame: PromptWaitingFrame): void;
   disconnect(): void;
 };
 
@@ -293,18 +313,41 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     switch (control.data.type) {
       case "pair-request": {
         const pairing = control.data;
-        void deps
-          .decidePairing({
+        /**
+         * The browser run, asked for beside the decision and never instead of it (013/R-184).
+         *
+         * A storage failure resolves to `undefined` rather than rejecting, because the answer the
+         * server is waiting on is the owner's: a pairing left unanswered over an id the host treats
+         * as optional would hold the agent's call for the whole pairing bound.
+         */
+        const browserRun = (async () => {
+          try {
+            return await deps.browserRunId?.();
+          } catch {
+            deps.reportDiagnostic?.("agent.bridge.browser-run-unreadable");
+            return undefined;
+          }
+        })();
+        void Promise.all([
+          deps.decidePairing({
             agentId: pairing.agentId,
             displayName: pairing.displayName,
             origin: pairing.origin,
             sessionId: pairing.sessionId,
-          })
+          }),
+          browserRun,
+        ])
           // The session is echoed from the request, on both arms. It is what the relay addresses
           // the answer by, so an answer that omitted it - which is what 003's shape did - is
           // dropped as unaddressed and the server waits out its whole pairing bound for nothing.
-          .then((accepted) =>
-            send({ type: "pair-result", agentId: pairing.agentId, sessionId: pairing.sessionId, accepted }),
+          .then(([accepted, browserRunId]) =>
+            send({
+              type: "pair-result",
+              agentId: pairing.agentId,
+              sessionId: pairing.sessionId,
+              accepted,
+              ...(browserRunId === undefined ? {} : { browserRunId }),
+            }),
           )
           .catch(() =>
             send({
@@ -389,6 +432,11 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     },
     notifyUnpaired(agentId: string, sessionId: string): void {
       send({ type: "pair-result", agentId, sessionId, accepted: false });
+    },
+    sendWaiting(frame: PromptWaitingFrame): void {
+      // `send` is a no-op with no port: a tick that lands in the moment between the link going away
+      // and the runtime cancelling the question it was about is lost, which is what it is.
+      send(frame);
     },
     disconnect(): void {
       const open = port;

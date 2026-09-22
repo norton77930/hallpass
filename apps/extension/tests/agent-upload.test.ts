@@ -221,3 +221,220 @@ describe("T062 agent file upload", () => {
     expect(setFiles).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * 013/T334 — `upload_image`, `file_upload`'s sibling (FR-169, FR-173, FR-174).
+ *
+ * Same boundary: the worker receives *bytes* the host already vetted (a screenshot this session
+ * took), never an id it could look up. Same consent: putting a picture into a page is an effect the
+ * site's mode decides. What differs is the target - an input by ref, or a drop point - and the
+ * answer, which names how the page received it.
+ */
+describe("T334 agent upload_image", () => {
+  const PICTURE = { name: "screenshot.png", type: "image/png", bytesBase64: "iVBORw0KGgo=" };
+
+  function imageHarness(overrides: Partial<Parameters<typeof createAgentUpload>[0]> = {}) {
+    const deliverImage = vi.fn(async () => ({
+      ok: true as const,
+      delivery: "input" as const,
+      file: { name: "screenshot.png", size: 8 },
+    }));
+    const setFiles = vi.fn();
+    const siteModes = createSiteModeStore();
+    const prompts = createAgentPromptController({ timeoutMs: 60 });
+    const runner = createAgentUpload({
+      context: testSessionContexts(),
+      siteModes,
+      bindings: createAgentPageBindings(),
+      prompts,
+      tabOwnership: async (_sessionId, tabId) =>
+        tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" },
+      setFiles: setFiles as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["setFiles"]>,
+      deliverImage: deliverImage as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["deliverImage"]>,
+      ...overrides,
+    });
+    return { runner, deliverImage, setFiles, siteModes, prompts };
+  }
+
+  function imageRequest(
+    target: { ref: string } | { coordinate: { x: number; y: number } } = { ref: "t_zone" },
+    tabId = AGENT_TAB,
+  ): AgentNativeRequest {
+    return {
+      callId: "call-2",
+      sessionId: "session-h1",
+      tool: "upload_image",
+      tabId,
+      args: { tabId, target, file: PICTURE },
+    };
+  }
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("is handled by the upload runner", () => {
+    const { runner } = imageHarness();
+    expect(runner.handles("upload_image")).toBe(true);
+  });
+
+  it("refuses a tab the session does not own, before anything reaches a page", async () => {
+    const { runner, deliverImage, siteModes } = imageHarness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(imageRequest({ ref: "t_zone" }, 99));
+
+    expect(response).toEqual({ callId: "call-2", outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } });
+    expect(deliverImage).not.toHaveBeenCalled();
+  });
+
+  it("asks the owner first on an `ask` site with a summary that names the target, and delivers nothing if they refuse", async () => {
+    const { runner, deliverImage, prompts } = imageHarness();
+
+    const pending = runner.run(imageRequest({ coordinate: { x: 40, y: 50 } }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({
+      site: SITE,
+      tool: "upload_image",
+      argsSummary: "drop a screenshot the agent took onto a point on the page",
+    });
+    expect(deliverImage).not.toHaveBeenCalled();
+
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(pending).resolves.toEqual({ callId: "call-2", outcome: "denied", reason: "owner-denied" });
+    expect(deliverImage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * S2c review F3 — the owner's Release tabs, under a standing question (006 FR-087).
+   *
+   * The card's two buttons reach a call that is parked on a consent prompt, and the picture must
+   * not land on a page the owner has just taken back. `not-yours` rather than `denied/owner-denied`
+   * is the honest answer: they did not refuse the upload, they ended the session's claim on the
+   * tab - and it is the answer `click` gives in the same situation.
+   */
+  it("refuses with not-yours when the owner takes the tabs back while the question stands", async () => {
+    let held = true;
+    const { runner, deliverImage, prompts } = imageHarness({
+      tabOwnership: async (_sessionId, tabId) =>
+        held && tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" },
+    });
+
+    const pending = runner.run(imageRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    held = false;
+    prompts.cancelSession("session-h1", "released");
+
+    await expect(pending).resolves.toEqual({
+      callId: "call-2",
+      outcome: "denied",
+      reason: "not-yours",
+      refusal: { reason: "not-yours" },
+    });
+    expect(prompts.current()).toBeUndefined();
+    expect(deliverImage).not.toHaveBeenCalled();
+  });
+
+  it("proceeds on a `skip-checks` site and hands a ref to the page as a handle", async () => {
+    const { runner, deliverImage, siteModes } = imageHarness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(imageRequest({ ref: "t_zone" }));
+
+    expect(response).toEqual({
+      callId: "call-2",
+      outcome: "ok",
+      result: { delivery: "input", file: { name: "screenshot.png", size: 8 } },
+    });
+    expect(deliverImage).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { handle: "t_zone" }, file: PICTURE, tab: AGENT_TAB }),
+    );
+    expect(deliverImage).toHaveBeenCalledWith(expect.not.objectContaining({ frameId: expect.anything() }));
+  });
+
+  it("threads the ref's frame into the delivery (the 004/T160 rule holds for pictures)", async () => {
+    const discoverFrame = vi.fn(async () => ({
+      frameId: 3,
+      documentEpoch: "doc-frame-3",
+      canonicalOrigin: "https://embed.test",
+    }));
+    const { runner, deliverImage, siteModes } = imageHarness({
+      discoverFrame: discoverFrame as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["discoverFrame"]>,
+    });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    await runner.run(imageRequest({ ref: "t_zone" }));
+
+    expect(discoverFrame).toHaveBeenCalledWith(expect.anything(), expect.anything(), "t_zone");
+    expect(deliverImage).toHaveBeenCalledWith(
+      expect.objectContaining({ frameId: 3, documentEpoch: "doc-frame-3", frameOrigin: "https://embed.test" }),
+    );
+  });
+
+  it("sends a coordinate to the top frame without asking which frame owns anything", async () => {
+    const discoverFrame = vi.fn();
+    const deliverImage = vi.fn(async () => ({
+      ok: true as const,
+      delivery: "drop" as const,
+      file: { name: "screenshot.png", size: 8 },
+      point: { x: 40, y: 50 },
+    }));
+    const { runner, siteModes } = imageHarness({
+      discoverFrame: discoverFrame as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["discoverFrame"]>,
+      deliverImage: deliverImage as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["deliverImage"]>,
+    });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(imageRequest({ coordinate: { x: 40, y: 50 } }));
+
+    expect(discoverFrame).not.toHaveBeenCalled();
+    expect(deliverImage).toHaveBeenCalledWith(
+      expect.objectContaining({ target: { point: { x: 40, y: 50 } }, documentEpoch: "doc-1" }),
+    );
+    expect(deliverImage).toHaveBeenCalledWith(expect.not.objectContaining({ frameId: expect.anything() }));
+    expect(response).toEqual({
+      callId: "call-2",
+      outcome: "ok",
+      result: { delivery: "drop", file: { name: "screenshot.png", size: 8 }, point: { x: 40, y: 50 } },
+    });
+  });
+
+  it("maps what the page answered onto the tool's outcomes", async () => {
+    for (const [reason, outcome] of [
+      ["stale-target", "stale"],
+      ["stale-context", "stale"],
+      ["not-a-drop-target", "not-actionable"],
+      ["point-outside-viewport (frame 1280x720)", "not-actionable"],
+      ["not-reachable", "not-actionable"],
+      ["unsupported", "failed"],
+    ] as const) {
+      const { runner, siteModes } = imageHarness({
+        deliverImage: (async () => ({ ok: false, reason })) as unknown as NonNullable<
+          Parameters<typeof createAgentUpload>[0]["deliverImage"]
+        >,
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      await expect(runner.run(imageRequest())).resolves.toEqual({ callId: "call-2", outcome, reason });
+    }
+  });
+
+  it("refuses a frame that still carries an image id, both targets, or no file", async () => {
+    const { runner, deliverImage, siteModes } = imageHarness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    for (const args of [
+      { tabId: AGENT_TAB, imageId: "img_abcdefghij", target: { ref: "t_zone" }, file: PICTURE },
+      { tabId: AGENT_TAB, target: { ref: "t_zone", coordinate: { x: 1, y: 2 } }, file: PICTURE },
+      { tabId: AGENT_TAB, target: { ref: "t_zone" } },
+    ]) {
+      const response = await runner.run({ callId: "call-2", sessionId: "session-h1", tool: "upload_image", tabId: AGENT_TAB, args });
+      expect(response).toEqual({ callId: "call-2", outcome: "failed", reason: "invalid-arguments" });
+    }
+    expect(deliverImage).not.toHaveBeenCalled();
+  });
+});

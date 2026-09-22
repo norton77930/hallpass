@@ -24,7 +24,7 @@ import {
  */
 
 const EXTENSION_ID = "aaaabbbbccccddddeeeeffffgggghhhh";
-const WATERMARK = "Hallpass 0.3.0";
+const WATERMARK = "Hallpass 0.5.0";
 
 type Harness = {
   deps: RouterDeps;

@@ -85,6 +85,15 @@ const PAGE_FILES = [
   "canvas",
   "form-values",
   "download",
+  // 012/T316: a page whose layout is decided by the viewport it is given, and nothing else.
+  "viewport",
+  /**
+   * 013/T340: the places a picture can be delivered to, each at a coordinate the page decides - two
+   * file inputs (one not rendered), a drop zone, and the same zone one same-origin document down.
+   * Every element is absolutely positioned because half of what the gate asserts is a *point*.
+   */
+  "upload-image",
+  "upload-image-child",
 ] as const;
 
 type PageFileName = (typeof PAGE_FILES)[number];

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Viewport fixture</title>
+<style>
+  /* 012/T316 — a page whose *layout* is the evidence.
+     Everything here is decided by the viewport the page is laid out in, and by nothing else: no
+     script sizes anything, no image is fetched, and the only colours are named so a screenshot of
+     this page is comparable across machines. The gate reads three facts off it -
+     what the page says its size is, which layout the breakpoint chose, and whether a block that
+     exists only on a wide viewport can be clicked. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font: 16px/1.6 system-ui, sans-serif; }
+
+  /* The breakpoint. Below 768 px the bar is red and the menu has a box; at and above it the bar is
+     green and the menu has none. One property, two values, no ambiguity in a screenshot. */
+  #bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 40px;
+    background: rgb(220, 0, 0);
+  }
+  #menu {
+    position: absolute;
+    top: 50px;
+    left: 10px;
+    display: block;
+  }
+  @media (min-width: 768px) {
+    #bar { background: rgb(0, 140, 0); }
+    #menu { display: none; }
+  }
+
+  /* Laid out only on a viewport at least 1900 px wide, and placed at x 2000 so it is inside a
+     2560x1440 emulated viewport and outside a 1366x768 one in both directions. */
+  #wide-only {
+    display: none;
+    position: absolute;
+    top: 300px;
+    left: 2000px;
+    width: 300px;
+    height: 80px;
+    font: inherit;
+  }
+  @media (min-width: 1900px) {
+    #wide-only { display: block; }
+  }
+
+  /* The region a capture is asked for: 300x100 at (100, 200), monospace at 11 px on white, so a
+     crop taken at the wrong density is visibly the wrong text rather than merely the wrong size. */
+  #text {
+    position: absolute;
+    left: 100px;
+    top: 200px;
+    width: 300px;
+    height: 100px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background: #fff;
+    color: #000;
+    font: 11px/14px "Courier New", monospace;
+    white-space: pre;
+  }
+
+  /* Far enough down and right that it is inside a large emulated viewport and inside no ordinary
+     window: the block a region past the frame is asked about. */
+  #far {
+    position: absolute;
+    left: 2000px;
+    top: 1200px;
+    width: 200px;
+    height: 100px;
+    background: rgb(0, 0, 220);
+  }
+
+  #size { position: absolute; left: 100px; top: 120px; margin: 0; font: 14px/1.4 system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<button type="button" id="menu" aria-label="Menu">Menu</button>
+<p id="size">size unknown</p>
+<pre id="text">1234567890abcdef
+The quick brown fox
+jumps over the lazy
+dog. 11px monospace.</pre>
+<button type="button" id="wide-only" aria-label="Wide only">Wide only</button>
+<div id="far"></div>
+<script>
+  (function () {
+    // What the page itself believes it is, reported in the document so a read, a screenshot and a
+    // scripted evaluation all see the same three numbers.
+    var size = document.getElementById("size");
+    function report() {
+      var facts = [window.innerWidth, window.innerHeight, window.devicePixelRatio];
+      window.__viewport = facts;
+      document.body.dataset.viewport = facts[0] + "x" + facts[1] + "@" + facts[2];
+      size.textContent = "viewport " + facts[0] + "x" + facts[1] + " dpr " + facts[2];
+    }
+    report();
+    window.addEventListener("resize", report);
+
+    // The click on the wide-only block leaves a mark the gate can read without asking the page a
+    // question: an emulated viewport that only *looked* wide would never record one.
+    var wide = document.getElementById("wide-only");
+    wide.addEventListener("click", function () {
+      wide.dataset.clicked = "1";
+      window.__clicked = true;
+      size.textContent = size.textContent + " (wide-only clicked)";
+    });
+  })();
+</script>
+</body>
+</html>

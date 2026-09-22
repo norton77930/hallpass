@@ -49,10 +49,20 @@ function fakePort(name: string): FakePort {
   return port;
 }
 
-function fakeChrome() {
+function fakeChrome(options: { sidePanel?: boolean } = {}) {
   const connectListeners: Array<(port: unknown) => void> = [];
   const tabUpdateListeners: Array<(...args: unknown[]) => void> = [];
+  const behaviors: unknown[] = [];
   const chromeStub = {
+    ...(options.sidePanel === false
+      ? {}
+      : {
+          sidePanel: {
+            async setPanelBehavior(behavior: unknown) {
+              behaviors.push(behavior);
+            },
+          },
+        }),
     runtime: {
       onConnect: {
         addListener(listener: (port: unknown) => void) {
@@ -70,7 +80,7 @@ function fakeChrome() {
       },
     },
   };
-  return { chromeStub, connectListeners, tabUpdateListeners };
+  return { chromeStub, connectListeners, tabUpdateListeners, behaviors };
 }
 
 function fakeAgentPath(): AgentPath & { accepted: string[] } {
@@ -105,6 +115,34 @@ describe("bindServiceWorker", () => {
     expect(agentPath.accepted).toEqual([AGENT_PANEL_PORT_NAME]);
     expect(strangerPort.posted).toEqual([]);
     expect(strangerPort.listeners).toBe(0);
+  });
+
+  /**
+   * 011 review L1 — the icon's click stays ours (R-160).
+   *
+   * `openPanelOnActionClick` makes Chrome open the panel *instead of* firing `action.onClicked`, so
+   * setting it would take the click away from `action-entry.ts` - and with it the per-tab
+   * `setSidePanelOptions` that decides which document the panel shows. The listener already opens
+   * the panel on that same click, which is the whole of what the badge asks the person to do.
+   */
+  it("never takes the icon's click away from the listener that opens the panel", () => {
+    const { chromeStub, behaviors } = fakeChrome();
+    vi.stubGlobal("chrome", chromeStub);
+
+    bindServiceWorker(fakeAgentPath());
+
+    expect(behaviors).toEqual([]);
+  });
+
+  it("still serves the panel's port in a browser with no side-panel API at all", () => {
+    const { chromeStub, connectListeners } = fakeChrome({ sidePanel: false });
+    vi.stubGlobal("chrome", chromeStub);
+    const agentPath = fakeAgentPath();
+
+    bindServiceWorker(agentPath);
+
+    connectListeners[0]?.(fakePort(AGENT_PANEL_PORT_NAME));
+    expect(agentPath.accepted).toEqual([AGENT_PANEL_PORT_NAME]);
   });
 
   it("registers no tab-update listener", () => {

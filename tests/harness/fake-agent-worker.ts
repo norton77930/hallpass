@@ -53,6 +53,14 @@ export type FakeAgentWorkerOptions = {
    * Stands in for a server that did not read this relay's record.
    */
   token?: string;
+  /**
+   * The browser run this worker says it belongs to, carried on its pairing answer (013/R-184).
+   *
+   * Absent is a worker from before the field existed, which is what every test that does not name
+   * one exercises. Two fake workers started in one test with the *same* id are one browser whose
+   * relay was respawned - a recycled service worker - and with different ids they are two browsers.
+   */
+  browserRunId?: string;
 };
 
 export type FakeAgentWorker = {
@@ -141,6 +149,8 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
             // so an answer that named none would be dropped before it reached this server.
             sessionId: control.data.sessionId,
             accepted: pairing === "accept",
+            // 013/R-184: the worker's own answer is the frame that says which browser run this is.
+            ...(options.browserRunId === undefined ? {} : { browserRunId: options.browserRunId }),
           });
         }
       },

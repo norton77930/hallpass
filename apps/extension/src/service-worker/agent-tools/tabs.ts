@@ -15,18 +15,22 @@ import {
   navigateTab,
   queryTabSnapshots,
   removeTab,
+  tabContentSize,
   watchTabSettle,
 } from "../../chrome-adapters/tabs.js";
 import { resizeWindow } from "../../chrome-adapters/windows.js";
 import type { AgentTabManager } from "../agent-tab-manager.js";
 import { siteOfUrl, type SiteModeStore } from "../site-mode-store.js";
 import type { WindowRestoreRecord } from "../window-restore.js";
+import type { ViewportEmulation } from "../viewport-emulation.js";
 import type { AgentSessionContexts } from "./context.js";
 import type { BeforeunloadOutcome } from "./dialogs.js";
 import { decideGate, type StatedPlan } from "./gate.js";
+import { inputUnavailable } from "./input.js";
 import { ownershipRefusal } from "./ownership.js";
 import type { AgentPageBindings } from "./page-binding.js";
-import type { AgentPromptController } from "./prompts.js";
+import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import type { AgentToolRequest } from "./stop.js";
 
 /**
  * The tab tools (003/T042, US4, FR-044..FR-046).
@@ -103,6 +107,15 @@ export type AgentTabToolDeps = {
    * tabs rather than about this call.
    */
   windowRestores?: { remember(record: WindowRestoreRecord): Promise<void> };
+  /**
+   * The emulated viewport `viewport` puts on a tab and takes off again (012/US1, FR-156, FR-159).
+   *
+   * Required rather than optional, unlike the two above: a tool cannot answer "the page is now
+   * 375 wide" out of a module that was not composed, and the compiler asking for it here is what
+   * keeps the runtime's wiring and this dispatch one thing. The clearing on every release path is
+   * the module's own business (`onBeforeRelease`), not this tool's.
+   */
+  viewport: Pick<ViewportEmulation, "set" | "reset">;
   siteModes?: Pick<SiteModeStore, "get" | "set">;
   prompts?: Pick<AgentPromptController, "ask">;
   statedPlan?: (site: string) => StatedPlan | undefined;
@@ -112,7 +125,7 @@ export type AgentTabToolDeps = {
 
 export type AgentTabToolRunner = {
   handles(tool: AgentToolName): boolean;
-  run(request: AgentNativeRequest): Promise<AgentNativeResponse>;
+  run(request: AgentToolRequest): Promise<AgentNativeResponse>;
 };
 
 /**
@@ -148,6 +161,8 @@ const TAB_TOOL_NAMES = [
   "tabs_release",
   "navigate",
   "resize_window",
+  // 012: the page's size rather than the window's, decided by the same ownership check.
+  "viewport",
 ] as const;
 
 type TabToolName = (typeof TAB_TOOL_NAMES)[number];
@@ -271,7 +286,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
    * it that way: the page may already be holding a prompt, and nothing in it will answer.
    */
   async function decideForce(
-    request: AgentNativeRequest,
+    request: AgentToolRequest,
     tool: TabToolName,
     tabId: number,
     args: Record<string, unknown>,
@@ -300,6 +315,8 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     }
     const asked = await deps.prompts.ask({
       callId,
+      // Which call the host knows it as, when this navigation is a batch step (011 review H1).
+      hostCallId: request.hostCallId,
       sessionId: request.sessionId,
       site,
       tool,
@@ -309,7 +326,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       kind: "beforeunload-force",
     });
     if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
-    if (asked.decision === "timed-out") return answer(callId, "timed-out", "no-answer");
+    if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
     if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
     if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
     const held = await deps.tabs.ownership(request.sessionId, tabId);
@@ -349,7 +366,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     });
   }
 
-  async function runTool(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function runTool(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId } = request;
     const tool = request.tool as TabToolName;
     const sessionId = request.sessionId;
@@ -496,6 +513,45 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     if (!tab) {
       return answer(callId, "stale", "tab-gone");
     }
+
+    if (tool === "viewport") {
+      /**
+       * 012/US1 — the page is laid out at a size this session chose, and the window is not touched.
+       *
+       * Not an effect: nothing on the page changes, nothing is typed or clicked, and the owner's
+       * own window is where they left it - so it is governed by the lease alone, like every other
+       * tool in this file (FR-161). The refusal it can meet is the attachment's: Chrome will not
+       * let an extension debug a tab with developer tools open on it, and an emulation with no
+       * attachment behind it is not something to claim.
+       */
+      if (args.action === "set") {
+        const size = { width: args.width as number, height: args.height as number };
+        const applied = await deps.viewport.set(sessionId, tabId, size);
+        if (!applied.ok) return inputUnavailable(callId, applied.unavailableReason);
+        return { callId, outcome: "ok", result: { ...size, emulated: true } };
+      }
+      const cleared = await deps.viewport.reset(sessionId, tabId);
+      // 012/S2c F4: the clear never went out, so the page is still the size the agent gave it.
+      // Answering `emulated: false` here would be this worker telling the agent something it has
+      // no reason to believe - and the refusal is the attachment's, in the attachment's words.
+      if (!cleared.ok) return inputUnavailable(callId, cleared.unavailableReason);
+      // The page could not be measured - it was never emulated, so there was no attachment to ask
+      // through - and the tab's own content area is then the last fact left about its size. Not the
+      // *window's* bounds (012/S2c F4): those include the browser's own furniture, and an agent
+      // given them would aim every later coordinate at a viewport that is smaller than it was told.
+      const measured = cleared.real ?? (await tabContentSize(tabId));
+      if (measured?.width === undefined || measured.height === undefined) {
+        // The window went between the two reads, which takes the tab with it. A size made up here
+        // would be a fact about nothing, and `stale` is the word for a tab that is not there.
+        return answer(callId, "stale", "tab-gone");
+      }
+      return {
+        callId,
+        outcome: "ok",
+        result: { width: measured.width, height: measured.height, emulated: false },
+      };
+    }
+
     try {
       const { size, priorState } = await resizeWindow(tab.windowId, {
         width: args.width as number,

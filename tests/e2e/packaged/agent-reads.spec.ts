@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
@@ -174,7 +175,82 @@ test.describe("agent reads", () => {
       await client?.close();
     }
   });
+
+  /**
+   * 012/T317 step 6 — the picture an agent asked to be smaller (FR-162, SC-089).
+   *
+   * Nothing is emulated here: this is the ordinary path every screenshot took before 012, with one
+   * argument added, and the claim is that the argument is honoured in the picture's own pixels and
+   * reported back. `frame` is the tab's real content area, which is what makes a `region` on this
+   * path something the agent can compute - and the reason it rides on every answer, not only on the
+   * emulated ones.
+   */
+  test("takes a plain screenshot at half scale and says what it is a picture of", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+
+    const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
+    await ownerPage.goto(`${SITE}/waiting`);
+    await ownerPage.bringToFront();
+    const ownerTabId = await extensionWorker.evaluate(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id === undefined) throw new Error("active-tab-missing");
+      return tab.id;
+    });
+    const panel = await openSidePanel({
+      context: extensionContext,
+      extensionId,
+      fixturePage: ownerPage,
+      tabId: ownerTabId,
+      copy,
+    });
+    await panel.waitForText(ui("agent.appTitle"));
+
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const live = client;
+      await panel.clickIfPresent(ui("agent.retry"));
+      await acceptPairing(panel, { locale });
+
+      const created = await live.callTool("tabs_create", { url: `${SITE}/ordinary` });
+      expect(created.isError, created.text).toBe(false);
+      const tabId = (created.json as { tabId: number }).tabId;
+
+      const whole = await live.callTool("screenshot", { tabId });
+      expect(whole.isError, whole.text).toBe(false);
+      const wholeAnswer = whole.json as { frame: { width: number; height: number }; coverage: string };
+      expect(wholeAnswer.coverage).toBe("viewport");
+      // The real tab, not an emulated frame: no session gave this tab a viewport.
+      expect(wholeAnswer.frame.width).toBeGreaterThan(0);
+
+      const half = await live.callTool("screenshot", { tabId, scale: 0.5 });
+      expect(half.isError, half.text).toBe(false);
+      expect(half.json).toMatchObject({ scale: 0.5, coverage: "viewport", frame: wholeAnswer.frame });
+
+      const full = pngSize(whole.images[0]?.data ?? "");
+      const smaller = pngSize(half.images[0]?.data ?? "");
+      expect(smaller).toEqual({
+        width: Math.max(Math.round(full.width * 0.5), 1),
+        height: Math.max(Math.round(full.height * 0.5), 1),
+      });
+
+      await live.callTool("tabs_close", { tabId });
+    } finally {
+      await client?.close();
+    }
+  });
 });
+
+/** The image's own pixels, from the PNG header: IHDR carries width and height at bytes 16 to 23. */
+function pngSize(base64: string): { width: number; height: number } {
+  const header = Buffer.from(base64.slice(0, 44), "base64");
+  expect(header.length, "a PNG header is 24 bytes").toBeGreaterThanOrEqual(24);
+  return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
+}
 
 /** A file the repository certainly has, as a `file://` url - one of FR-039's restricted kinds. */
 function fileUrlOfProvenance(): string {

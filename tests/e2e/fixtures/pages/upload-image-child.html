@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Upload-image child</title>
+<style>
+  /* 013/T340 — the same drop zone, one document down (FR-171).
+
+     No margin anywhere and a zone at a fixed offset, so a point the agent names in the *parent's*
+     viewport translates into this document by subtracting the frame's position and nothing else:
+     that translation is what the one-level descent does, and this is where it is proven. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font: 14px/1.4 system-ui, sans-serif; }
+  #zone {
+    position: absolute;
+    left: 20px;
+    top: 20px;
+    width: 200px;
+    height: 120px;
+    box-sizing: border-box;
+    border: 2px dashed #888;
+    background: #eef;
+  }
+  #report { position: absolute; left: 20px; top: 150px; margin: 0; font: 12px/1.4 "Courier New", monospace; }
+</style>
+</head>
+<body>
+<section id="zone" aria-label="Child drop zone">Drop a picture here too</section>
+<p id="report">none</p>
+<script>
+  (function () {
+    var zone = document.getElementById("zone");
+    var report = document.getElementById("report");
+    var seen = [];
+    var file = "";
+
+    function describe(dropped) {
+      return dropped.name + ":" + dropped.size + ":" + dropped.type;
+    }
+
+    // Reported to the parent as well as written here: the gate reads the parent's document, and a
+    // child that only wrote into itself would leave the descent provable only by asking this frame
+    // directly - which is the thing under test.
+    function say() {
+      var text = seen.join(",") + (file ? "|" + file : "");
+      report.textContent = text;
+      if (window.parent !== window) window.parent.postMessage({ hallpass: "upload-image-child", report: text }, "*");
+    }
+
+    ["dragenter", "dragover", "drop"].forEach(function (type) {
+      zone.addEventListener(type, function (event) {
+        event.preventDefault();
+        seen.push(type);
+        var dropped = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files[0] : undefined;
+        if (type === "drop" && dropped) file = describe(dropped);
+        say();
+      });
+    });
+
+    window.addEventListener("message", function (event) {
+      if (!event.data || event.data.hallpass !== "upload-image-reset") return;
+      seen = [];
+      file = "";
+      report.textContent = "none";
+    });
+  })();
+</script>
+</body>
+</html>

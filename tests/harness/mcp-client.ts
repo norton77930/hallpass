@@ -2,6 +2,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 
 /**
  * Drives the MCP server exactly as Claude Code does: spawn `dist/mcp-server.js`, speak JSON-RPC
@@ -41,6 +42,18 @@ export type ToolCallOptions = {
    * wait being reported has to ask for it exactly as a real client does.
    */
   onProgress?: (progress: { progress: number; total?: number; message?: string }) => void;
+  /**
+   * How long this client waits for the call's answer, in milliseconds (011/T297).
+   *
+   * The SDK's own default is 60 s (`DEFAULT_REQUEST_TIMEOUT_MSEC`), and that default is exactly
+   * what R-161 set out to distinguish from Claude Code's bound, which is hours. A journey about a
+   * question a person is given two minutes to answer has to say so, or the harness - not the
+   * product - is what ends the call. Absent, the SDK's default stands, so every existing journey
+   * keeps the client behaviour it was written against.
+   */
+  timeoutMs?: number;
+  /** The SDK's `resetTimeoutOnProgress`: a progress notice restarts the bound above. */
+  resetTimeoutOnProgress?: boolean;
 };
 
 export type McpHarnessClient = {
@@ -88,19 +101,30 @@ export async function startMcpClient(options: StartMcpClientOptions = {}): Promi
 
   return {
     async callTool(name, args = {}, options = {}) {
-      const result = (await client.callTool(
-        { name, arguments: args },
-        undefined,
-        options.onProgress
-          ? {
+      /**
+       * Assembled rather than written inline so that a call which asks for nothing still hands the
+       * SDK `undefined` - the shape every journey written before 011 was proven against.
+       */
+      const requestOptions: RequestOptions = {
+        ...(options.onProgress === undefined
+          ? {}
+          : {
               onprogress: (progress) =>
                 options.onProgress?.({
                   progress: progress.progress,
                   ...(progress.total === undefined ? {} : { total: progress.total }),
                   ...(typeof progress.message === "string" ? { message: progress.message } : {}),
                 }),
-            }
-          : undefined,
+            }),
+        ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+        ...(options.resetTimeoutOnProgress === undefined
+          ? {}
+          : { resetTimeoutOnProgress: options.resetTimeoutOnProgress }),
+      };
+      const result = (await client.callTool(
+        { name, arguments: args },
+        undefined,
+        Object.keys(requestOptions).length === 0 ? undefined : requestOptions,
       )) as {
         isError?: boolean;
         content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;

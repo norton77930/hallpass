@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
+import { ASK_TIMEOUT_MS } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 
 /**
@@ -181,6 +182,9 @@ describe("T018 agent runtime wiring", () => {
       agentId: "agent-1",
       sessionId: "session-h1",
       accepted: true,
+      // 013/R-184: the runtime puts this browser's run id on the answer, out of
+      // `chrome.storage.session`. Opaque by design, so the test reads that it is there and no more.
+      browserRunId: expect.any(String),
     });
 
     await runtime.tabs.adopt("session-h1", 7);
@@ -353,6 +357,100 @@ describe("T018 agent runtime wiring", () => {
    * `stop {callId}` means "I have given up on this call". Cancelling every pending prompt on it
    * would take down a question belonging to a different call that is still perfectly alive.
    */
+  /**
+   * 011/T293, T294 — the two things a question raised into a closed panel sets off.
+   *
+   * The badge is the browser's half and the tick is the agent's: Chrome will not let the worker
+   * open the panel (R-160), so the person is told once by the icon in front of them and once by the
+   * agent they are talking to. Both hang off the same fact - a question is up and no panel is
+   * connected - which is why they are wired in one place and checked here together.
+   */
+  it("marks the icon and says it is still waiting while nobody can see the question", async () => {
+    vi.useFakeTimers();
+    try {
+      const port = fakePort();
+      const marks: boolean[] = [];
+      const runtime = composeAgentRuntime({ connectNative: () => port, setAttention: (on) => marks.push(on) });
+      let connected = false;
+      const presenceListeners: Array<(value: boolean) => void> = [];
+      runtime.bindPanelPresence({
+        isConnected: () => connected,
+        onPresenceChange: (listener) => presenceListeners.push(listener),
+      });
+      runtime.start();
+      // On wake, before anything is waiting: a badge left by the worker Chrome evicted is cleared.
+      expect(marks).toEqual([false]);
+
+      port.emit(RELAY_STARTED);
+      port.emit(HELLO);
+      port.emit(PAIR_REQUEST);
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      expect(marks, "the pairing card raised into a panel nobody has open").toEqual([false, true]);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(port.sent).toContainEqual({
+        type: "prompt-waiting",
+        sessionId: "session-h1",
+        kind: "pairing",
+        panelConnected: false,
+        waitedMs: 5_000,
+        boundMs: 120_000,
+      });
+
+      // The person clicks the icon: the panel connects, and the card is now in front of them.
+      connected = true;
+      for (const listener of presenceListeners) listener(true);
+      expect(marks).toEqual([false, true, false]);
+
+      await runtime.pairing.decide("agent-1", true);
+      await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ type: "pair-result", accepted: true }));
+      const heard = port.sent.length;
+      await vi.advanceTimersByTimeAsync(15_000);
+      // The card is answered: nothing is waiting, so nothing says it is.
+      expect(port.sent).toHaveLength(heard);
+      expect(marks).toEqual([false, true, false]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * 011 review — what a runtime with no panel port bound assumes about the panel.
+   *
+   * `agent-entry.ts` binds the real presence before `start()`, so this is a fact about compositions
+   * that say nothing about panels: a suite that composes the runtime to test something else. They
+   * mean the bounds they were written under, so the assumption is "somebody is looking" - the same
+   * one `prompts.ts` and `pairing-controller.ts` make when they are handed no presence at all.
+   */
+  it("raises a question on the open-panel bound until a panel presence is bound", async () => {
+    vi.useFakeTimers();
+    try {
+      const port = fakePort();
+      const runtime = composeAgentRuntime({ connectNative: () => port });
+      runtime.start();
+      port.emit(HELLO);
+      port.emit(PAIR_REQUEST);
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      await runtime.pairing.decide("agent-1", true);
+
+      const asked = runtime.prompts.ask({
+        callId: "call-a",
+        sessionId: "session-h1",
+        site: "https://agent.test",
+        tool: "click",
+        argsSummary: "click a page element",
+      });
+      await vi.waitFor(() => expect(runtime.prompts.current()).toBeDefined());
+
+      await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
+
+      // The pre-011 bound, and no instruction to open a panel nobody said was closed.
+      await expect(asked).resolves.toEqual({ decision: "timed-out" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels only the prompt belonging to the call a stop names (B5)", async () => {
     const port = fakePort();
     const runtime = composeAgentRuntime({ connectNative: () => port });

@@ -13,7 +13,7 @@ import { bundleHost, PACKAGE_NAME, repoRoot } from "../../scripts/package.js";
 
 /**
  * 009/T239 — the product is Hallpass everywhere a user, an agent, the browser or the operating
- * system can see a name (FR-124, R-145), and version 0.3.0 once (FR-136).
+ * system can see a name (FR-124, R-145), and version 0.5.0 once (FR-136).
  *
  * Source-level names are read from the modules that define them; the shipped shape is read from
  * the bundled host (built here into a temp dir, as the QA-package test does) and from
@@ -52,9 +52,9 @@ describe("T239 the product's identity is Hallpass", () => {
     expect(zhMessages["extActionTitle.agent"]).toContain("Hallpass");
   });
 
-  it("advertises the MCP server as hallpass at version 0.3.0, the same version the extension carries", () => {
+  it("advertises the MCP server as hallpass at version 0.5.0, the same version the extension carries", () => {
     expect(SERVER_NAME).toBe("hallpass");
-    expect(SERVER_VERSION).toBe("0.3.0");
+    expect(SERVER_VERSION).toBe("0.5.0");
     expect(AGENT_EXTENSION_VERSION).toBe(SERVER_VERSION);
   });
 

@@ -12,8 +12,10 @@
 
     1. both installs succeed (exit 0);
     2. the new host manifest and launcher (new name, new directory) point at the *new* package's
-       native-host.js, and both registry roots name the new manifest;
-    3. the earlier version's registry keys are gone after the new install, while its directory -
+       native-host.js, and all four registry roots (Chrome, Chromium, Edge, Brave — 010) name the
+       new manifest;
+    3. the earlier version's registry keys are gone from all four roots after the new install
+       (the proof seeds them under Edge and Brave, which 0.2.0 never wrote), while its directory -
        including the config.json the tester filled in - is untouched (the README tells them to
        re-enter upload roots and delete the old directory themselves);
     4. the new package's uninstall removes only the new registration.
@@ -45,14 +47,19 @@ $legacyDirName = ("poc", "agent", "host") -join "-"
 if (-not $OldZip) { $OldZip = Join-Path $repoRoot "release\$legacyPackage-0.2.0.zip" }
 if (-not $NewZip) { $NewZip = Join-Path $repoRoot "release\hallpass-0.3.0.zip" }
 
-$newKeys = @(
-  "HKCU\Software\Google\Chrome\NativeMessagingHosts\com.hallpass.host",
-  "HKCU\Software\Chromium\NativeMessagingHosts\com.hallpass.host"
+# The four per-user roots the 0.3.x installer writes (010/R-154). The 0.2.0 installer only wrote
+# the first two, so the proof seeds the earlier version's registration under the other two by hand
+# before the upgrade (010/R-158) to show FR-142 on every root.
+$roots = @(
+  "HKCU\Software\Google\Chrome\NativeMessagingHosts",
+  "HKCU\Software\Chromium\NativeMessagingHosts",
+  "HKCU\Software\Microsoft\Edge\NativeMessagingHosts",
+  "HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts"
 )
-$legacyKeys = @(
-  "HKCU\Software\Google\Chrome\NativeMessagingHosts\$legacyHost",
-  "HKCU\Software\Chromium\NativeMessagingHosts\$legacyHost"
-)
+$newKeys = @($roots | ForEach-Object { "$_\com.hallpass.host" })
+$legacyKeys = @($roots | ForEach-Object { "$_\$legacyHost" })
+$legacyKeysWrittenByOldInstaller = @($legacyKeys[0], $legacyKeys[1])
+$legacyKeysSeededByProof = @($legacyKeys[2], $legacyKeys[3])
 $registryKeys = $newKeys + $legacyKeys
 # A tester who has filled in an upload root; the second install must leave it alone.
 $sentinelConfig = '{ "uploadRoots": ["D:\\upgrade-proof-sentinel"] }'
@@ -76,14 +83,21 @@ function Get-RegisteredManifest([string]$key) {
 }
 
 function Restore-Registry($snapshot) {
-  foreach ($key in $registryKeys) {
-    $value = $snapshot[$key]
-    if ($null -eq $value) {
-      & reg.exe delete $key /f 2>$null | Out-Null
-    } else {
-      & reg.exe add $key /ve /t REG_SZ /d $value /f 2>$null | Out-Null
+  # Same PowerShell 5.1 rule as Get-RegisteredManifest: a native stderr line under "Stop" is a
+  # terminating error, and `reg delete` of a key that is already gone writes one — which is the
+  # ordinary case for the roots the run added and the uninstall already removed (010/T275).
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    foreach ($key in $registryKeys) {
+      $value = $snapshot[$key]
+      if ($null -eq $value) {
+        if ($null -ne (Get-RegisteredManifest $key)) { & reg.exe delete $key /f 2>&1 | Out-Null }
+      } else {
+        & reg.exe add $key /ve /t REG_SZ /d $value /f 2>&1 | Out-Null
+      }
     }
-  }
+  } finally { $ErrorActionPreference = $previous }
 }
 
 # install.ps1 and uninstall.ps1 end with `exit`, which would take this session with them: each runs
@@ -147,8 +161,14 @@ try {
   Assert-That (Test-Path -LiteralPath $legacyConfigPath) "old install wrote no config.json"
   $oldLauncher = (Get-Content -LiteralPath $legacyLauncherPath -Raw)
   Assert-That ($oldLauncher -like "*$oldDir*") "old launcher does not point into $oldDir"
-  foreach ($key in $legacyKeys) {
+  foreach ($key in $legacyKeysWrittenByOldInstaller) {
     Assert-That ((Get-RegisteredManifest $key) -eq $legacyManifestPath) "$key does not name $legacyManifestPath after the old install"
+  }
+  # The 0.2.0 installer never wrote the Edge and Brave roots; seed its registration there so the
+  # upgrade has something to remove under all four (010/R-158).
+  foreach ($key in $legacyKeysSeededByProof) {
+    & reg.exe add $key /ve /t REG_SZ /d $legacyManifestPath /f 2>$null | Out-Null
+    Assert-That ((Get-RegisteredManifest $key) -eq $legacyManifestPath) "could not seed $key for the proof"
   }
 
   # The tester fills in an upload root between the two installs.
@@ -205,6 +225,6 @@ try {
 }
 
 Write-Host ""
-Write-Host "[T259] host upgrade 0.2.0 -> 0.3.0: relay -> $installedRelay, earlier directory untouched: $configPreserved, earlier registration removed, registry restored: $registryRestored"
+Write-Host "[T259/T275] host upgrade 0.2.0 -> 0.3.x: relay -> $installedRelay, earlier directory untouched: $configPreserved, earlier registration removed under $($roots.Count) roots, $($newKeys.Count) roots registered and unregistered, registry restored: $registryRestored"
 if (-not $registryRestored) { exit 1 }
 exit 0

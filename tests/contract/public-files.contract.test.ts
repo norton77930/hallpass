@@ -150,6 +150,17 @@ describe("T257 the README reads in the order FR-132 fixes", () => {
     expect(firstScreen).toMatch(/!\[[^\]]*]\(docs\/media\/demo\.gif\)/);
   });
 
+  // 010/FR-144: the platform note names the four registered browsers, says which one the
+  // acceptance suite runs on, marks the other two as not live-verified, and links the issue.
+  it("says which browsers are registered and which are verified", () => {
+    const firstScreen = readme.slice(0, readme.indexOf("\n## "));
+    for (const browser of ["Google Chrome", "Chromium", "Microsoft Edge", "Brave"]) {
+      expect(firstScreen, `the platform note names ${browser}`).toContain(browser);
+    }
+    expect(firstScreen).toContain("not live-verified");
+    expect(firstScreen).toMatch(/\[issue #2]\(\.\.\/\.\.\/issues\/2\)/);
+  });
+
   it("carries the named sections in that relative order", () => {
     const positions = README_SECTIONS.map((section) => {
       const at = headings.indexOf(section);
@@ -159,14 +170,14 @@ describe("T257 the README reads in the order FR-132 fixes", () => {
     expect(positions, `headings found: ${headings.join(" / ")}`).toEqual([...positions].sort((a, b) => a - b));
   });
 
-  it("names every tool the host offers, all 31 of them", () => {
+  it("names every tool the host offers, all 33 of them", () => {
     const offered = new Set<string>([
       ...AGENT_TOOL_DESCRIPTORS.map((descriptor) => descriptor.name),
       ...IMPLEMENTED_AGENT_TOOL_NAMES,
       // Listing tabs is answered by the host itself (`mcp-server.ts`), not by a contract descriptor.
       "tabs_context",
     ]);
-    expect(offered.size).toBe(31);
+    expect(offered.size).toBe(33);
     for (const name of offered) {
       expect(readme, `the README's tool table does not name \`${name}\``).toContain(`\`${name}\``);
     }

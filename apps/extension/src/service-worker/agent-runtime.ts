@@ -11,6 +11,7 @@ import {
   type AgentToolName,
   type SiteMode,
 } from "@hallpass/contracts";
+import { setAttention } from "../chrome-adapters/action-badge.js";
 import { downloadFile, watchDownloadChanged, watchDownloadCreated } from "../chrome-adapters/downloads.js";
 import { createOffscreenAdapter } from "../chrome-adapters/offscreen.js";
 import { getTabSnapshot, queryTabSnapshots } from "../chrome-adapters/tabs.js";
@@ -32,6 +33,7 @@ import {
   writePairingState,
   type PairingController,
   type PairingState,
+  type PairingWaitingTick,
 } from "./pairing-controller.js";
 import { createSiteModeStore, siteOfUrl, type SiteModeStore } from "./site-mode-store.js";
 import { createAgentBatch } from "./agent-tools/batch.js";
@@ -52,7 +54,12 @@ import {
 import { createAgentEffects } from "./agent-tools/effects.js";
 import { createAgentPageBindings } from "./agent-tools/page-binding.js";
 import { createStatedPlans } from "./agent-tools/plans.js";
-import { createAgentPromptController, type AgentPromptController, type PromptEnding } from "./agent-tools/prompts.js";
+import {
+  createAgentPromptController,
+  type AgentPromptController,
+  type PromptEnding,
+  type PromptWaitingTick,
+} from "./agent-tools/prompts.js";
 import { createAgentReads } from "./agent-tools/reads.js";
 import { createAgentRecordingTools } from "./agent-tools/recording.js";
 import { createActionContext } from "./recording/action-context.js";
@@ -60,7 +67,9 @@ import { describeAction } from "./recording/action-label.js";
 import { captureFrame } from "./recording/frame-capture.js";
 import { createRecorder, sessionRecordingStore, type AgentRecorder } from "./recording/recorder.js";
 import { createWindowRestorer, sessionWindowRestoreStore } from "./window-restore.js";
-import { createAgentStopSignals } from "./agent-tools/stop.js";
+import { createViewportEmulation, sessionViewportStore } from "./viewport-emulation.js";
+import { sessionBrowserRun } from "./browser-run.js";
+import { createAgentStopSignals, type AgentToolRequest } from "./agent-tools/stop.js";
 import { createAgentTabTools } from "./agent-tools/tabs.js";
 import { createAgentUpload } from "./agent-tools/upload.js";
 import { createAgentWait } from "./agent-tools/wait.js";
@@ -277,6 +286,34 @@ export type AgentRuntimeOptions = {
   disconnectReason?: () => string | undefined;
   onStatusChange?: (status: AgentBridgeStatus) => void;
   onPairingChange?: (state: PairingState) => void;
+  /**
+   * Injected by tests; the real one marks the toolbar icon (011 FR-152). Only the derivation below
+   * decides when it is called, and it is called only when the answer changes.
+   */
+  setAttention?: (on: boolean) => void;
+};
+
+/**
+ * Whether the toolbar icon should be marked (011 data-model "Attention state", FR-152).
+ *
+ * Derived, never stored: the badge is a picture of two facts the worker already holds, and a
+ * remembered badge is how a worker that was evicted mid-question comes back with a mark on an icon
+ * nothing is waiting behind. Both kinds of question count - a pairing card and a consent card are
+ * the same situation to the person - and a panel that is open needs no badge, because the card is
+ * already in front of them.
+ */
+export function deriveAttention(input: {
+  pairingPending: boolean;
+  promptPending: boolean;
+  panelConnected: boolean;
+}): boolean {
+  return (input.pairingPending || input.promptPending) && !input.panelConnected;
+}
+
+/** What the runtime needs of the panel port: is anybody looking, and tell me when that changes. */
+export type AgentPanelPresence = {
+  isConnected: () => boolean;
+  onPresenceChange: (listener: (connected: boolean) => void) => void;
 };
 
 export type AgentRuntime = {
@@ -320,6 +357,14 @@ export type AgentRuntime = {
   setDiagnostics: (site: string, granted: boolean) => Promise<void>;
   /** Fires whenever anything in `projection()` may have changed, so the panel can re-read it. */
   subscribe: (listener: () => void) => void;
+  /**
+   * Hands the runtime the panel port's presence (011 R-163).
+   *
+   * It arrives afterwards rather than as an option because the panel port is built *from* the
+   * runtime: the composition root makes both and introduces them. Until it is called the worker
+   * assumes no panel, which is the truth for a worker Chrome has just woken.
+   */
+  bindPanelPresence: (presence: AgentPanelPresence) => void;
 };
 
 function scheduleRetryAlarm(): void {
@@ -368,16 +413,67 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * state because it is a fact about the projection, not about the owner's durable decision.
    */
   const pairingRequestedAt = new Map<string, string>();
+
+  /**
+   * The three inputs of the attention derivation (011 data-model), each read where it is known.
+   *
+   * `panelPresence` is undefined until the composition root introduces the panel port, which in
+   * production is before `start()` (`agent-entry.ts`) - so the default governs test compositions
+   * alone, and there it says "somebody is looking": a suite that says nothing about panels means
+   * the bounds it was written under, which are the open-panel ones (011 review). It is the same
+   * assumption `prompts.ts` and `pairing-controller.ts` make when they are handed no presence at
+   * all. The pairing half is mirrored here rather than awaited from `pairing.state()` because the
+   * derivation runs inside a panel connect and a prompt raise, where an await would leave the badge
+   * trailing the thing it describes.
+   */
+  let panelPresence: AgentPanelPresence | undefined;
+  let pairingPending = false;
+  /** What the icon was last told. `undefined` until the first derivation, which always speaks. */
+  let attention: boolean | undefined;
+  const markAttention = options.setAttention ?? setAttention;
+  const panelConnected = (): boolean => panelPresence?.isConnected() ?? true;
+
+  function refreshAttention(): void {
+    const next = deriveAttention({
+      pairingPending,
+      promptPending: prompts.currentSession() !== undefined,
+      panelConnected: panelConnected(),
+    });
+    // Only on a change: the derivation runs on every prompt, every pairing event and every panel
+    // connect, and four `chrome.action` calls for a picture that did not move are noise in the
+    // browser the owner is working in.
+    if (attention === next) return;
+    attention = next;
+    markAttention(next);
+  }
+
+  /** One "still waiting", addressed and put on the wire (011 FR-148). */
+  function sendWaiting(tick: PromptWaitingTick | PairingWaitingTick): void {
+    bridge.sendWaiting({
+      type: "prompt-waiting",
+      sessionId: tick.sessionId,
+      ...("callId" in tick ? { callId: tick.callId } : {}),
+      kind: tick.kind,
+      panelConnected: tick.panelConnected,
+      waitedMs: tick.waitedMs,
+      boundMs: tick.boundMs,
+    });
+  }
+
   const pairing = createPairingController({
     read: readPairingState,
     write: writePairingState,
     watch: watchPairingState,
     now: () => new Date().toISOString(),
+    panelPresence: panelConnected,
+    onWaiting: sendWaiting,
     onChange(state) {
       // Whatever is not the prompt on screen is over: answered, ignored, abandoned or unpaired.
       for (const agentId of [...pairingRequestedAt.keys()]) {
         if (agentId !== state.pending?.agentId) pairingRequestedAt.delete(agentId);
       }
+      pairingPending = state.pending !== undefined;
+      refreshAttention();
       options.onPairingChange?.(state);
       notify();
     },
@@ -425,8 +521,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   });
   const siteModes = createSiteModeStore();
   const prompts = createAgentPromptController({
-    onChange: notify,
+    onChange() {
+      // A question raised or ended is half of what the icon shows (011 FR-152); the other half is
+      // whether anybody has a panel open to see it.
+      refreshAttention();
+      notify();
+    },
     reportDiagnostic: reportTestDiagnostic,
+    panelPresence: panelConnected,
+    onWaiting: sendWaiting,
   });
   const bindings = createAgentPageBindings();
   /**
@@ -480,6 +583,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     bindings,
     // What `resize_window` had to un-maximise, so the release can give it back (008/FR-118).
     windowRestores,
+    /**
+     * The emulated viewport `viewport` puts on a tab (012/US1, FR-156).
+     *
+     * Delegated rather than passed, as the dialogs are below: the module needs the attachment,
+     * which is made further down this same function, and a tool call cannot happen before both
+     * exist. Nothing else on the release paths changes - the module's own `onBeforeRelease` hook
+     * is what clears the emulation, wherever the release came from.
+     */
+    viewport: {
+      set: (sessionId, tabId, size) => viewportEmulation.set(sessionId, tabId, size),
+      reset: (sessionId, tabId) => viewportEmulation.reset(sessionId, tabId),
+    },
     onTabsChanged: notify,
     // A tab that moved may be on a site the diagnostics grant does not cover, and a tab that is
     // gone cannot be debugged at all. Both are announced here rather than discovered at the next
@@ -489,7 +604,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // The lease is over, so every holder is: the diagnostics buffers go with their grant, and the
       // attachment an effect made for this tab goes with the tab (004/T121, R-113).
       void diagnostics.release(tabId).catch(() => undefined);
-      void attachments.release(tabId).catch(() => undefined);
+      void attachments
+        .release(tabId)
+        // And the size this session laid the page out at (012/S2c F5) - *after* the release, never
+        // beside it: the release hook reads that very record to know what to clear, so a record
+        // forgotten first would leave the page emulated on a tab the owner has back. What this
+        // catches is the tab that was closed rather than handed back, where there is nothing to
+        // clear and the record would otherwise outlive the tab id Chrome will hand out again.
+        .then(() => viewportEmulation.forget(tabId))
+        .catch(() => undefined);
       // And what a read said about that tab's refs (008/T221): a handle means nothing without the
       // document that minted it, and this worker has no business remembering either.
       actions.forget(tabId);
@@ -516,6 +639,19 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // What a read said about each ref, kept for the label a later recorded action carries (FR-106):
     // the page decides what is redacted, and this is the only moment the worker is told.
     onNodesRead: (tabId, nodes) => actions.noteNodes(tabId, nodes),
+    /**
+     * What a screenshot is a picture of, when a session emulated the tab (012/T311, FR-158).
+     *
+     * Reading the record is all this is: no attachment is made for it, because a read attaches no
+     * debugger - and on a tab that *is* emulated the attachment the emulation holds is already
+     * there, which is what `sendOverAttachment` photographs through (R-166: `captureVisibleTab`
+     * would hand back a picture of the window instead of the viewport that was asked about).
+     */
+    currentViewport: (tabId) => viewportEmulation.current(tabId),
+    sendOverAttachment: (tabId, method, params) => attachments.send(tabId, method, params),
+    // And the attachment itself when an eviction took this worker's record of it (012/S2c F2): the
+    // holder claimed is the emulation's own, which is the one that is already owed to this tab.
+    ensureAttached: (tabId) => attachments.acquire(tabId, "viewport"),
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -562,6 +698,36 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       noteActivity(sessionId, { at: Date.now(), kind: "restore", outcome: "restored", message: state }),
     reportDiagnostic: reportTestDiagnostic,
   });
+
+  /**
+   * The size a session laid a page out at, and giving it back (012/US1, FR-156, FR-159, R-166).
+   *
+   * Composed beside the window restorer because it is the same kind of debt - something this
+   * worker did to the owner's browser for the agent's convenience, owed back the moment the
+   * session lets the tab go - and because the card's line about it is this file's `noteActivity`.
+   * The difference is where the giving back happens: a window is restored by the runtime at each
+   * release site, while an emulation has to be cleared *over the attachment* before it is detached
+   * (R-166 measured that a detach leaves the page emulated), so the two hooks below are registered
+   * once here and the five release paths stay exactly as they were.
+   */
+  const viewportEmulation = createViewportEmulation({
+    store: sessionViewportStore(),
+    attachments,
+    // The worker sends the pieces - an outcome and a size - and the panel writes the sentence.
+    onActivity: (sessionId, outcome, size) =>
+      noteActivity(sessionId, {
+        at: Date.now(),
+        kind: "viewport",
+        outcome,
+        ...(size === undefined ? {} : { message: `${size.width}x${size.height}` }),
+      }),
+    reportDiagnostic: reportTestDiagnostic,
+  });
+  // R-167: Chrome keeps both the emulation and the attachment across an MV3 eviction, and what the
+  // worker loses is its own map. The next acquire re-applies what the record says; the release
+  // clears it while there is still an attachment to send the clear over.
+  attachments.onAttached((tabId) => viewportEmulation.onAttached(tabId));
+  attachments.onBeforeRelease((tabId) => viewportEmulation.onBeforeRelease(tabId));
 
   /**
    * The dialogs the page opens (008/US3, R-138..R-140).
@@ -660,6 +826,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     onApproved: (tabId, tool) => dialogs.noteApprovedEffect(tabId, tool),
     currentDialog: (tabId) => dialogs.current(tabId),
     attachments,
+    // The same record the `screenshot` tool reads (012/T311): `computer`'s own picture and the crop
+    // the owner is shown are of the emulated viewport when there is one, not of the window.
+    currentViewport: (tabId) => viewportEmulation.current(tabId),
     // Where the gesture actually landed, for the ring a recorded frame draws (008/R-136). The
     // coordinate is the runner's own measurement of the target's box; the decorator that builds the
     // label has no way to compute it and must not guess one.
@@ -754,7 +923,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     };
   }
 
-  async function dispatchTool(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function dispatchTool(request: AgentToolRequest): Promise<AgentNativeResponse> {
     // Before routing, deliberately: a runner reached at all is a runner that has already begun
     // asking the page something, and this is the one state in which nothing on that tab can answer.
     const blocked = blockedByDialog(request);
@@ -774,6 +943,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     "navigate",
     "screenshot",
     "file_upload",
+    "upload_image",
     "resize_window",
     "dialog",
   ] satisfies AgentToolName[]);
@@ -784,6 +954,38 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     if (typeof named === "number") return named;
     if (request.tabId !== undefined) return request.tabId;
     return tabs.mainTabId(request.sessionId);
+  }
+
+  /**
+   * One line on the card for a picture the session put into one of the owner's pages (013/FR-174).
+   *
+   * Here rather than inside the upload runner for the same reason the restore's line is here: the
+   * activity list is this file's, and a runner that wrote to it would need the map passed in. Only
+   * an `ok` answer earns a line - a refused or stale call changed nothing on the page, and a card
+   * entry for it would be a fact about nothing - and only `upload_image`: whether `file_upload`
+   * gets one too is the owner's parity decision to make, not a side effect of this slice.
+   *
+   * The pieces, never a sentence: the site the tab is on and the delivery the *page* reported. A
+   * tab whose site cannot be named still gets the line, with the site left out, because what
+   * happened to the page happened either way.
+   */
+  async function noteUploadedImage(
+    request: AgentToolRequest,
+    response: AgentNativeResponse,
+  ): Promise<void> {
+    if (request.tool !== "upload_image" || response.outcome !== "ok") return;
+    const delivery = (response.result as { delivery?: unknown } | undefined)?.delivery;
+    if (delivery !== "input" && delivery !== "drop") return;
+    const tabId = await recordedTabOf(request);
+    const tab = tabId === undefined ? undefined : await getTabSnapshot(tabId);
+    const site = tab === undefined ? undefined : siteOfUrl(tab.url);
+    noteActivity(request.sessionId, {
+      at: Date.now(),
+      kind: "upload",
+      outcome: "delivered",
+      ...(site === undefined ? {} : { site }),
+      message: delivery,
+    });
   }
 
   /** The ref a call names, whichever of the two spellings it uses. */
@@ -837,7 +1039,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     return { ...response, result: { ...(response.result as Record<string, unknown>), recording: state } };
   }
 
-  async function runTool(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function runTool(request: AgentToolRequest): Promise<AgentNativeResponse> {
     if (tabTools.handles(request.tool)) {
       return tabTools.run(request);
     }
@@ -860,7 +1062,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       return diagnostics.run(request);
     }
     if (upload.handles(request.tool)) {
-      return upload.run(request);
+      const answered = await upload.run(request);
+      await noteUploadedImage(request, answered);
+      return answered;
     }
     if (downloadTools.handles(request.tool)) {
       return downloadTools.run(request);
@@ -947,6 +1151,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // prompt that is perfectly alive (004/T103a). Settled first, so a call parked on a question
     // is answered in the word the ending deserves before the session it belongs to is gone.
     prompts.cancelSession(ending, questions);
+    // And its half of a pairing card, if it was waiting on one (011 review M2): the card stays up
+    // for the sessions that are still there, and this one stops being told about it.
+    pairing.sessionEnded(ending);
     /**
      * The recording goes to disk *before* the tabs do (FR-108, R-137).
      *
@@ -1033,6 +1240,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     await indicator.answerAnnouncement(from);
   }
 
+  /** This worker's view of which browser run it belongs to (013/R-184); read once, on first ask. */
+  const browserRun = sessionBrowserRun();
+
   const bridge = createAgentBridge({
     connectNative: options.connectNative ?? connectAgentNativeHost,
     ...(options.disconnectReason === undefined ? {} : { disconnectReason: options.disconnectReason }),
@@ -1081,8 +1291,20 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         agentId: request.agentId,
         displayName: request.displayName,
         origin: request.origin,
+        // Who is waiting, for the ticks alone (011): the card is about an agent, but the frame the
+        // relay routes is addressed to a session, and this is the session that raised the card.
+        sessionId: request.sessionId,
       });
     },
+    /**
+     * Which run of the browser is answering (013/R-184, FR-168).
+     *
+     * One instance for this worker, so the id is read or minted once and the same one travels on
+     * every pairing answer; it lives in `chrome.storage.session`, which is what makes it survive a
+     * recycling of this worker and end when the browser does. The host compares it to decide
+     * whether the screenshots it is holding for this session are still this browser's.
+     */
+    browserRunId: () => browserRun.id(),
     callTool: handleToolCall,
     onStop(frame) {
       if (frame.callId !== undefined) {
@@ -1286,7 +1508,17 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         diagnostics: await readBridgeDiagnostics(),
       };
     },
+    bindPanelPresence(presence: AgentPanelPresence): void {
+      panelPresence = presence;
+      // A panel opening is an answer arriving at a question the person could not see, and a panel
+      // closing can leave one standing that nobody can. Both change what the icon should say.
+      presence.onPresenceChange(() => refreshAttention());
+    },
     start(): void {
+      // 011 FR-152: once, on wake, before anything else can raise a question. A worker Chrome
+      // evicted mid-question comes back with the browser still showing its badge, and nothing else
+      // in the life of this worker would ever clear it - the question it was about is gone.
+      refreshAttention();
       // Before anything connects: a debugger this extension left attached across a worker eviction
       // is let go of, and every later navigation - including the ones no tool of ours started -
       // becomes something the grant can be re-checked against (C1).

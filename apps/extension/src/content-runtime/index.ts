@@ -1,6 +1,6 @@
 import { contentRuntimeMessageSchema, DEFAULT_BOUNDS } from "@hallpass/contracts";
 import { classifyDocumentSupport, collectPage, snapshotTarget } from "./collector.js";
-import { setFilesOnTarget } from "./files.js";
+import { deliverImage, setFilesOnTarget } from "./files.js";
 import { executeAction, pageSinkFromGlobal, type PageSink } from "./actions.js";
 import {
   evaluateCondition,
@@ -366,6 +366,15 @@ export function handleContentMessage(
       documentEpoch: context.documentEpoch,
       targetHandle: message.payload.targetHandle,
       files: message.payload.files,
+    });
+  }
+  if (message.type === "content.deliver-image") {
+    // 013/FR-170: a picture this session took, put where the agent asked - on a file input, or
+    // dropped at a point. Nothing here knows which picture it was: the id stayed with the host.
+    return deliverImage(context.registry, {
+      documentEpoch: context.documentEpoch,
+      target: message.payload.target,
+      file: message.payload.file,
     });
   }
   if (message.type === "content.resolve-active-element") {

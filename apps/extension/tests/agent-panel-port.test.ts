@@ -190,7 +190,9 @@ describe("T019 agent panel port", () => {
     // The relay's `relay-started` was acknowledged first (004/T169); the decision follows it.
     await vi.waitFor(() => expect(nativePort.sent).toEqual([
         { type: "relay-ack", relayPid: 4242 },
-        { type: "pair-result", agentId: "agent-1", sessionId: "session-h1", accepted: true },
+        // 013/R-184: every pairing answer names this browser's run, minted into
+        // `chrome.storage.session` on first use. The value is opaque, so only its presence is read.
+        { type: "pair-result", agentId: "agent-1", sessionId: "session-h1", accepted: true, browserRunId: expect.any(String) },
       ]));
     await vi.waitFor(() =>
       expect(port.sent.at(-1)).toMatchObject({
@@ -409,6 +411,79 @@ describe("T019 agent panel port", () => {
       const connect = vi.spyOn(runtime, "connect");
       first.emit({ type: "ui.agent.connect", payload: {} });
       expect(connect).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * 011/T291 — who, if anybody, can see a card.
+     *
+     * It is the one fact the prompt controllers cannot work out for themselves, and everything in
+     * this feature hangs off it: the bound a question is given, the sentence the person is told,
+     * and whether the toolbar badge is on. The set was already here; this only says it out loud,
+     * and says so on every connect and every disconnect rather than on the transitions through
+     * zero - a listener that wants the transition can compare, and one that wants every event
+     * cannot recover what it was never told.
+     */
+    it("says whether any panel is connected, and says so on every connect and disconnect", async () => {
+      const { panel } = setup();
+      const seen: boolean[] = [];
+      panel.onPresenceChange((connected) => seen.push(connected));
+      expect(panel.isConnected()).toBe(false);
+
+      const first = fakePanelPort();
+      const second = fakePanelPort();
+      panel.accept(first);
+      expect(panel.isConnected()).toBe(true);
+      panel.accept(second);
+
+      second.drop();
+      expect(panel.isConnected(), "one panel is still open").toBe(true);
+      first.drop();
+
+      expect(panel.isConnected()).toBe(false);
+      expect(seen).toEqual([true, true, true, false]);
+    });
+
+    it("says nothing about a connection it refused", async () => {
+      const { panel } = setup();
+      const seen: boolean[] = [];
+      panel.onPresenceChange((connected) => seen.push(connected));
+
+      panel.accept(fakePanelPort({ sender: { id: EXTENSION_ID, url: "https://evil.test/", tab: { id: 3 } } }));
+
+      expect(seen).toEqual([]);
+      expect(panel.isConnected()).toBe(false);
+    });
+
+    /**
+     * 011 FR-149 — a panel opened after the question was raised still shows it.
+     *
+     * This is what makes the closed-panel bound worth having: the person reads the agent's
+     * sentence, clicks the toolbar icon, and the card they are told about is the first thing the
+     * panel they just opened is given. Nothing new does this - the first projection has always been
+     * the whole picture - so the case is here to keep it that way.
+     */
+    it("gives a panel that connects mid-question the question in its first projection", async () => {
+      const { panel, runtime, nativePort } = setup();
+      nativePort.emit({ type: "hello", sessionId: "session-h1", agentId: "agent-1", displayName: "Claude Code" });
+      nativePort.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      await runtime.pairing.decide("agent-1", true);
+      void runtime.prompts.ask({
+        callId: "c-1",
+        sessionId: "session-h1",
+        site: "https://a.test",
+        tool: "click",
+        argsSummary: "click a page element",
+      });
+      await vi.waitFor(() => expect(runtime.prompts.current()).toBeDefined());
+
+      const port = fakePanelPort();
+      panel.accept(port);
+
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      expect((port.sent[0] as { payload: { prompt?: { site: string } } }).payload.prompt).toMatchObject({
+        site: "https://a.test",
+      });
     });
 
     it("stops sending to a panel whose document went away, and keeps the rest", async () => {

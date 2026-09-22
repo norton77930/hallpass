@@ -63,6 +63,26 @@ export async function getTabSnapshot(tabId: number): Promise<AgentTabSnapshot | 
   }
 }
 
+/**
+ * The tab's own content area, in CSS pixels (012/T311, FR-163).
+ *
+ * It is not on `AgentTabSnapshot` because it is not what a snapshot is for: every other field there
+ * says what a tab *is*, and this says how big the picture of it will be. One caller asks - the
+ * screenshot, which has to know the frame its region was measured in before it crops anything - and
+ * `undefined` is a perfectly ordinary answer for a tab Chrome will not size (a detached devtools
+ * window, a tab that has just gone), which the caller reads as "no frame", never as zero.
+ */
+export async function tabContentSize(tabId: number): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const tab = (await chrome.tabs.get(tabId)) as chrome.tabs.Tab & { width?: number; height?: number };
+    return typeof tab.width === "number" && typeof tab.height === "number" && tab.width > 0 && tab.height > 0
+      ? { width: tab.width, height: tab.height }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Every tab in the current profile, as snapshots; the caller filters by group. */
 export async function queryTabSnapshots(): Promise<AgentTabSnapshot[]> {
   const tabs = await chrome.tabs.query({});

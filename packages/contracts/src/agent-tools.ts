@@ -59,6 +59,8 @@ export const AGENT_TOOL_NAMES = [
   "tabs_release",
   "navigate",
   "resize_window",
+  // The emulated viewport (012 US1)
+  "viewport",
   // Reads (US2)
   "get_page_text",
   "read_page",
@@ -85,6 +87,8 @@ export const AGENT_TOOL_NAMES = [
   "evaluate",
   // Upload (US7)
   "file_upload",
+  // 013 US1: the same delivery, for a picture this session took rather than a file on disk.
+  "upload_image",
   // Downloads (005 US2)
   "downloads_context",
   // Recording (008 US1)
@@ -557,6 +561,62 @@ const agentResizeWindowShape = {
 const agentResizeWindowArgsSchema = z.strictObject(agentResizeWindowShape);
 
 /**
+ * The smallest and largest emulated viewport (012 FR-156, R-169).
+ *
+ * The floor is a phone standing up; below it no site's own layout is being tested any more, it is
+ * the browser's minimum being tested. The ceiling is a wide desktop with room to spare: a picture
+ * of one already runs into the frame's own byte bound (R-171), so a larger number would buy the
+ * agent nothing but a refusal.
+ */
+export const AGENT_VIEWPORT_MIN_PX = 320;
+
+export const AGENT_VIEWPORT_MAX_PX = 4096;
+
+const agentViewportSizeSchema = z.number().int().min(AGENT_VIEWPORT_MIN_PX).max(AGENT_VIEWPORT_MAX_PX);
+
+/**
+ * Giving a tab a viewport of its own (012 US1, FR-156, FR-157, R-169).
+ *
+ * The flat field map is what MCP is shown - `inputShape` takes an unrefined shape - and the union
+ * below is the authority the worker parses against, which is the same division `navigate`'s
+ * "a url or a direction, never both" is enforced by: `width` and `height` are a pair `set` must
+ * have and `reset` must not carry, because a reset that accepted a size would read as "put it back
+ * to *this*", which is not what it does.
+ */
+const agentViewportShape = {
+  tabId: agentTabIdSchema,
+  action: z.enum(["set", "reset"]),
+  /** Both, or neither: CSS pixels, and only with `set`. */
+  width: agentViewportSizeSchema.optional(),
+  height: agentViewportSizeSchema.optional(),
+};
+
+const agentViewportArgsSchema = z.discriminatedUnion("action", [
+  z.strictObject({
+    tabId: agentTabIdSchema,
+    action: z.literal("set"),
+    width: agentViewportSizeSchema,
+    height: agentViewportSizeSchema,
+  }),
+  z.strictObject({ tabId: agentTabIdSchema, action: z.literal("reset") }),
+]);
+
+/**
+ * What the tool answers with: the size the page is now laid out at, and whose size it is.
+ *
+ * `emulated` is required rather than implied by the action, because the two answers an agent must
+ * tell apart look identical without it - 375×812 asked for and honoured, and 375×812 that is simply
+ * what the owner's window happens to be after a reset.
+ */
+export const agentViewportResultSchema = z.strictObject({
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  emulated: z.boolean(),
+});
+
+export type AgentViewportResult = z.infer<typeof agentViewportResultSchema>;
+
+/**
  * One tab of a session, as both the agent and the panel are shown it (FR-044).
  *
  * `active` is required rather than optional because it is the fact that decides what a screenshot
@@ -939,6 +999,9 @@ export type AgentReadPageResult = z.infer<typeof agentReadPageResultSchema>;
 /** The largest viewport crop worth naming; beyond it a "region" is the whole screenshot. */
 const AGENT_REGION_MAX_PX = 10_000;
 
+/** A tenth: below it the picture is no longer a picture of anything the agent could read. */
+const AGENT_SCREENSHOT_MIN_SCALE = 0.1;
+
 const agentScreenshotShape = {
   tabId: agentTabIdSchema,
   /**
@@ -953,6 +1016,15 @@ const agentScreenshotShape = {
       height: z.number().int().positive().max(AGENT_REGION_MAX_PX),
     })
     .optional(),
+  /**
+   * How much of the picture's own pixels to keep (012 FR-162, R-171).
+   *
+   * A picture is taken at the display's density and an emulated viewport can be 2 560 wide, so the
+   * honest picture is routinely larger than the native-messaging frame will carry. `scale` is the
+   * one dial that makes it fit, and it only ever shrinks: above 1 it would hand back pixels the
+   * capture never took.
+   */
+  scale: z.number().min(AGENT_SCREENSHOT_MIN_SCALE).max(1).default(1),
 };
 
 const agentScreenshotArgsSchema = z.strictObject(agentScreenshotShape);
@@ -970,6 +1042,34 @@ export const agentScreenshotResultSchema = z.strictObject({
   /** Base64, without a data-url prefix: the host puts it straight into the image block. */
   data: z.string().min(1),
   cropped: z.boolean(),
+  /**
+   * What the picture is of, in the agent's own terms (012 FR-158, FR-162, data-model CaptureAnswer).
+   *
+   * Every field is optional and every one of them is new, because this answer crosses a link whose
+   * two ends are installed separately: a worker from before this feature answers the three fields
+   * above and nothing else, and a host from before it drops what it does not know. That is also why
+   * `AGENT_LINK_PROTOCOL` does not move for this - neither end has to agree on anything new.
+   *
+   * `width`/`height` are the image's own pixels, `frame` is the CSS size of the viewport the
+   * picture shows (emulated or real), and `coverage` says which of the two the picture covers. The
+   * pair is what makes the density readable at all: `width / frame.width` is the device pixel
+   * ratio the capture happened at, and without it an agent measuring a 1 484-pixel picture of an
+   * 1 187-pixel page has no way to know which number its coordinates are in.
+   */
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  scale: z.number().min(AGENT_SCREENSHOT_MIN_SCALE).max(1).optional(),
+  frame: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+  coverage: z.enum(["viewport", "region"]).optional(),
+  /** Echoed when one was asked for, in the CSS pixels of `frame` it was asked in. */
+  region: z
+    .strictObject({
+      x: z.number().int().nonnegative(),
+      y: z.number().int().nonnegative(),
+      width: z.number().int().positive(),
+      height: z.number().int().positive(),
+    })
+    .optional(),
   ...agentAnswerContextShape,
 });
 
@@ -1005,6 +1105,8 @@ export const AGENT_BATCH_STEP_TOOL_NAMES = [
   "tabs_context",
   "navigate",
   "resize_window",
+  /** 012: a viewport is about one tab, so "set a phone width, read, reset" is one round trip. */
+  "viewport",
   "get_page_text",
   "read_page",
   "find",
@@ -1026,6 +1128,9 @@ export const AGENT_BATCH_STEP_TOOL_NAMES = [
   "read_network",
   "evaluate",
   "file_upload",
+  /** 013/R-181: putting a picture into a page is one step like `file_upload`'s, and only differs in
+   * where the bytes came from - so it is a step exactly as long as `file_upload` is. */
+  "upload_image",
   "downloads_context",
 ] as const satisfies readonly AgentToolName[];
 
@@ -1078,6 +1183,15 @@ export const agentBatchStepResultSchema = z.strictObject({
   outcome: agentToolOutcomeSchema,
   result: z.unknown().optional(),
   reason: z.string().max(200).optional(),
+  /**
+   * Where the person has to click, when this step is the one that timed out (011 FR-146).
+   *
+   * The same optional field a whole call's answer carries, for the same reason and with the same
+   * bound: a step that raised a consent card into a panel nobody had open is the commonest way an
+   * agent meets this situation, and dropping the sentence here would leave the one answer that
+   * could unstick it inside the batch.
+   */
+  hint: z.string().max(400).optional(),
 });
 
 export type AgentBatchStepResult = z.infer<typeof agentBatchStepResultSchema>;
@@ -1457,6 +1571,87 @@ export const agentUploadResultSchema = z.strictObject({
 export type AgentUploadResult = z.infer<typeof agentUploadResultSchema>;
 
 /**
+ * `upload_image` (013 US1): the picture *this session already took*, put into a page.
+ *
+ * Two shapes again, for `file_upload`'s reason and one more. The agent names an `imageId` it was
+ * handed with a screenshot; the worker is handed bytes. Between them is the host, which is the only
+ * end that ever held the picture - so the id is not a field the worker-facing schema is merely
+ * uninterested in, it is one it cannot express, and a worker that never stores a picture cannot be
+ * asked to hand one to the wrong session.
+ *
+ * `AGENT_LINK_PROTOCOL` does not move for any of this: an older worker is simply never sent the
+ * tool (the host offers what it can honour), and an older host never mints an id, so neither end
+ * has to agree on anything it does not already know.
+ */
+
+/**
+ * The picture's handle, opaque here exactly as a ref is.
+ *
+ * The host mints it and the host resolves it; a value this contract could interpret would be a
+ * second place the format is written down, and the two would drift.
+ */
+const agentImageIdSchema = z.string().min(1).max(64);
+
+/** What the *agent* sends: a picture it was given, and one place to put it. */
+const agentUploadImageShape = {
+  tabId: agentTabIdSchema,
+  imageId: agentImageIdSchema,
+  /** A `<input type="file">` or any other element, named the way every other target is (R-106). */
+  ref: agentRefSchema.optional(),
+  /** A drop point in the top-level viewport's CSS pixels, for a page that takes dragged files. */
+  coordinate: agentPointSchema.optional(),
+  filename: agentFileNameSchema.default("screenshot.png"),
+};
+
+/**
+ * The same fields with the rule the MCP input schema cannot carry: exactly one target.
+ *
+ * `inputShape` is the unrefined map because that is what an MCP `inputSchema` takes, so this is
+ * where "both or neither" becomes a refusal - checked by the host, which is where the call is
+ * turned into bytes and is therefore the last place the id still exists.
+ */
+export const agentUploadImageRequestSchema = z
+  .strictObject(agentUploadImageShape)
+  .superRefine((value, ctx) => {
+    if ((value.ref === undefined) === (value.coordinate === undefined)) {
+      // Both is asking the host to pick, which is a choice that belongs to neither of them; neither
+      // names no target at all. One refusal for one mistake: `invalid-arguments`.
+      ctx.addIssue({ code: "custom", message: "exactly one of ref / coordinate", path: ["ref"] });
+    }
+  });
+
+export type AgentUploadImageRequest = z.infer<typeof agentUploadImageRequestSchema>;
+
+/**
+ * What reaches the *worker*: a target and the bytes, and nothing about which picture they were.
+ *
+ * `target` is its own union rather than two optional fields for `agentTargetSchema`'s reason - a
+ * request carrying both would be asking the worker to choose - and it is spelled `coordinate`
+ * rather than a bare `{x, y}` because a drop point is named in the arguments the agent wrote.
+ */
+export const agentUploadImageArgsSchema = z.strictObject({
+  tabId: agentTabIdSchema,
+  target: z.union([z.strictObject({ ref: agentRefSchema }), z.strictObject({ coordinate: agentPointSchema })]),
+  file: agentUploadFileSchema,
+});
+
+/**
+ * What the page reports back: how the picture was delivered, and the file the page now holds.
+ *
+ * `name`/`size` are read from the `<input>` on the input path, which is the evidence FR-040's rule
+ * asks for; a drop has nothing to read back, so they are echoed from the delivered `File` and the
+ * point the events landed at rides with them.
+ */
+export const agentUploadImageResultSchema = z.strictObject({
+  delivery: z.enum(["input", "drop"]),
+  file: z.strictObject({ name: agentFileNameSchema, size: z.number().int().nonnegative() }),
+  point: agentPointSchema.optional(),
+  ...agentAnswerContextShape,
+});
+
+export type AgentUploadImageResult = z.infer<typeof agentUploadImageResultSchema>;
+
+/**
  * What post-effect verification concluded, in the attention causes' own words (003/B2).
  *
  * A subset of `ATTENTION_REQUIRED_CAUSES` plus `verified`, and not the whole set: `execute-uncertain`
@@ -1644,8 +1839,23 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Resize the window holding a tab",
     description:
       "Resizes the browser window that contains one of this session's tabs, and returns the size it ended up with. " +
-      "The browser may clamp what you ask for to what fits on the screen.",
+      "The browser may clamp what you ask for to what fits on the screen. " +
+      "For viewing a page at a size, use `viewport` instead - it does not disturb the owner's window. " +
+      "Use this only when the real window must change (another program will look at it, or the site measures " +
+      "the window). It does not change an emulated viewport.",
     inputShape: agentResizeWindowShape,
+  },
+  {
+    name: "viewport",
+    title: "Give a tab an emulated viewport",
+    description:
+      "Gives one of your tabs an emulated viewport of `width`x`height` CSS pixels for viewing a page at a size - " +
+      "phone, tablet, wide desktop - without changing the browser window. Screenshots, reads and clicks then use " +
+      "that size. Prefer this over `resize_window` for any layout or breakpoint check. `reset` puts the page back " +
+      "to the window's real size; the emulation is also cleared when you release the tab, so reset before " +
+      "finishing unless the owner asked to keep it. The two tools are independent: resizing the window does not " +
+      "change an emulated viewport.",
+    inputShape: agentViewportShape,
   },
   {
     name: "downloads_context",
@@ -1692,7 +1902,13 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Returns a PNG of one of this session's tabs as an image. The browser can only photograph the tab that is " +
       "active in its window, so if yours is not, it is brought to the front for the capture and the previously " +
-      "active tab is put back afterwards. `region` crops the result to a rectangle of the viewport.",
+      "active tab is put back afterwards. `region` crops the result to a rectangle of the viewport, and is " +
+      "refused when it is not wholly inside it. `scale` (0.1 to 1) shrinks the returned image, which is how a " +
+      "picture too large for one answer is made to fit; it changes the image only - a region, and every " +
+      "coordinate you act on, stay in the unscaled viewport the answer's `frame` names. " +
+      // 013 FR-176: the id is on the answer whether or not the agent was looking for it, so the
+      // sentence that makes it usable belongs where the agent reads before it calls.
+      "The answer carries an `imageId` that `upload_image` accepts for 5 minutes.",
     inputShape: agentScreenshotShape,
   },
   {
@@ -1791,7 +2007,10 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "from the top-left of the top-level viewport, the same ones a screenshot shows you; a point outside it " +
       "is refused with the viewport's size. Use it for what the page's structure does not describe - a " +
       "canvas, a drawn menu - and prefer the ref-based tools everywhere else, because they say what they " +
-      "acted on. Acting at a point changes the page, so the site's mode applies as it does to a click.",
+      "acted on. Acting at a point changes the page, so the site's mode applies as it does to a click. " +
+      // 013 FR-176: the screenshot action answers the same shape the `screenshot` tool does, so it
+      // carries the same id - and an agent that only ever aims by point must be told so here.
+      "A `screenshot` answer carries an `imageId` that `upload_image` accepts for 5 minutes.",
     inputShape: agentComputerShape,
   },
   {
@@ -1866,8 +2085,24 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "the names and sizes the input is holding afterwards. The paths are read by the local host, not by the " +
       "browser, and only inside the directories the owner listed as upload roots - anything outside them, or " +
       "past the size bound, is refused before it is read. Setting files changes the page, so the site's mode " +
-      "applies exactly as it does to a click.",
+      "applies exactly as it does to a click. " +
+      // 013 FR-176: the one thing an agent cannot discover by trying is that a picture it already
+      // has needs no path at all - it would otherwise write the screenshot to disk to upload it.
+      "For a screenshot this session took, use `upload_image` with its `imageId` instead: there is no path.",
     inputShape: agentFileUploadShape,
+  },
+  {
+    name: "upload_image",
+    title: "Put a screenshot this session took into a page",
+    description:
+      "Puts a screenshot *this session took* into a page, quoting the `imageId` from the screenshot's answer - " +
+      "no path, no file on disk. Name a `<input type=\"file\">` by `ref` (a hidden one works too) or a drop " +
+      "`coordinate` for a page that takes dragged files; exactly one of the two. The picture is kept 5 minutes " +
+      "after the screenshot, so take one and upload it in the same stretch of work; after that, take a new " +
+      "screenshot and quote the new id. `filename` is what the page will show, `screenshot.png` by default. " +
+      "For a file of the owner's own, on their disk, use `file_upload`. Putting a file into a page changes it, " +
+      "so the site's mode applies exactly as it does to a click.",
+    inputShape: agentUploadImageShape,
   },
   {
     name: "gif_recorder",
@@ -1971,6 +2206,7 @@ export const agentToolArgSchemas: Record<AgentToolName, z.ZodType> = {
   tabs_release: agentTabsReleaseArgsSchema,
   navigate: agentNavigateArgsSchema,
   resize_window: agentResizeWindowArgsSchema,
+  viewport: agentViewportArgsSchema,
   get_page_text: agentGetPageTextArgsSchema,
   read_page: agentReadPageArgsSchema,
   find: agentFindArgsSchema,
@@ -1992,6 +2228,7 @@ export const agentToolArgSchemas: Record<AgentToolName, z.ZodType> = {
   read_network: agentReadNetworkArgsSchema,
   evaluate: agentEvaluateArgsSchema,
   file_upload: agentFileUploadArgsSchema,
+  upload_image: agentUploadImageArgsSchema,
   downloads_context: agentDownloadsContextArgsSchema,
   gif_recorder: agentGifRecorderArgsSchema,
   dialog: agentDialogArgsSchema,
@@ -2100,6 +2337,17 @@ export const agentNativeResponseSchema = z.strictObject({
    * where the agent needs more than the code - which session holds the tab, how big the viewport is.
    */
   refusal: agentRefusalSchema.optional(),
+  /**
+   * Where the person has to click, when that is why this answer is a `timed-out` (011 FR-146).
+   *
+   * It is beside `reason` for the reason `refusal` is: `reason` stays the short stable code the
+   * agent branches on, and this is the sentence it relays to the person at the terminal. Present
+   * only when the question was raised with no side panel connected - a prompt nobody could see is a
+   * different fact from a prompt somebody ignored, and only the first one has an instruction that
+   * would have helped. The text is never page-derived: it is one of `ATTENTION_SENTENCES`, and the
+   * bound is the length of the longer of them with room to spare.
+   */
+  hint: z.string().max(400).optional(),
 });
 
 export type AgentNativeResponse = z.infer<typeof agentNativeResponseSchema>;
@@ -2147,6 +2395,21 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
      */
     sessionId: z.string().min(1).max(128),
     accepted: z.boolean(),
+    /**
+     * Which run of the browser is answering (013/R-184, FR-168).
+     *
+     * An opaque id the worker mints once per browser start and keeps in `chrome.storage.session`,
+     * so it survives the worker being recycled and dies when the browser exits - the two halves of
+     * FR-168's retention promise, as one fact. It rides *this* frame because a pairing answer is
+     * what the worker sends on every (re)established link, and because the host awaits it before
+     * any call reads its screenshot cache: a run that changed means the browser restarted and the
+     * cache goes, while a run that did not means only the port went away and the pictures stay.
+     *
+     * Optional in the shape, and additive: a worker from before this field says nothing about its
+     * run and the host falls back to clearing on the link, which is what it did in S1. The link
+     * protocol floor does not move - this is the worker's answer, not the greeting the relay checks.
+     */
+    browserRunId: z.string().min(1).max(64).optional(),
   }),
   z.strictObject({
     type: z.literal("unpair"),
@@ -2213,7 +2476,84 @@ export type AgentControlFrame = z.infer<typeof agentControlFrameSchema>;
  * It is a floor, not a counter. 004 raises it once for every change it makes to these two shapes,
  * and the next bump belongs to the next release that changes them.
  */
+/**
+ * It stays at 2 for the `prompt-waiting` frame of 011, deliberately (plan.md "Constraints").
+ *
+ * The stamp is a floor for shapes both sides must agree on. This one they need not: a tick is a
+ * keep-alive, every end of it is already handled, and both ends drop a type they do not know - the
+ * relay logs it as unaddressed, the host as a rejected frame. So an old relay in front of a new
+ * host loses the ticks and the call falls back to the bound it had before, while a bump would have
+ * refused that pair outright and broken a browser the owner had not restarted yet.
+ */
+/**
+ * It stays at 2 for 012 as well (012/T304, contracts/viewport-and-capture.md).
+ *
+ * Everything this feature adds is additive in the one direction that matters: every new field on
+ * the screenshot answer is optional, so a worker that predates them answers what it always did and
+ * a host that predates them drops what it does not know; and `viewport` is simply absent from an
+ * older offering, which is the ordinary "tool not offered" an agent already handles. A bump would
+ * refuse the pair outright and break a browser the owner had not restarted yet, for a change
+ * neither end has to agree on.
+ */
 export const AGENT_LINK_PROTOCOL = 2;
+
+/**
+ * The questions the side panel can be holding (011 data-model "Pending question").
+ *
+ * Pairing is one of them here even though it lives in a different controller: from the person's
+ * side it is the same situation - something is waiting in a panel they cannot see - and the kind is
+ * what picks which of the two sentences they are told.
+ */
+export const AGENT_PROMPT_KINDS = ["pairing", "ask", "plan", "dialog", "diagnostics"] as const;
+
+export type AgentPromptKind = (typeof AGENT_PROMPT_KINDS)[number];
+
+/**
+ * What the agent says to the person when the panel that holds their question is closed (011 R-164).
+ *
+ * Two fixed strings, English line then zh-TW line, and no third party in the sentence: no page
+ * text, no tool arguments, no session id (FR-151), so there is nothing to template and no `{` in
+ * them. They live in the contracts package because three parties have to say the same words - the
+ * worker that raises the question, the host that relays it as progress and as a `timed-out` hint,
+ * and the tests that assert what the person was told.
+ *
+ * `consent` covers ask, plan, dialog and diagnostics: the person is being asked to answer a card,
+ * and which card it is is on the card, not in a sentence read from a terminal.
+ */
+export const ATTENTION_SENTENCES = {
+  pairing:
+    "Hallpass is waiting for you to accept the pairing in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.\n" +
+    "Hallpass 正在等你在 Chrome 側欄接受配對,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。",
+  consent:
+    "Hallpass is waiting for your answer to a consent card in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.\n" +
+    "Hallpass 正在等你回答側欄裡的同意卡,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。",
+} as const;
+
+/**
+ * "This question is still waiting", sent every five seconds while one is (011 R-162, FR-148).
+ *
+ * It exists because three bounds are in play and only the worker knows the one that matters. The
+ * worker fixes the question's bound when it raises it - 120 s when no panel is connected, the
+ * ordinary 25 s / 45 s when one is - and the host's own per-call backstop is 30 s, so without this
+ * the transport would give up on a call while the person was still walking to their browser. The
+ * tick carries the arithmetic rather than a command: `waitedMs` and `boundMs` let the router
+ * re-arm its backstop statelessly, and `panelConnected` is what picks between the neutral progress
+ * text and one of `ATTENTION_SENTENCES`.
+ *
+ * `callId` is absent for pairing alone: the pairing exchange belongs to the server, not to any one
+ * call, and a tick that named a call would tie it to whichever call happened to arrive first.
+ */
+export const promptWaitingFrameSchema = z.strictObject({
+  type: z.literal("prompt-waiting"),
+  sessionId: z.string().min(1).max(128),
+  callId: z.string().min(1).max(64).optional(),
+  kind: z.enum(AGENT_PROMPT_KINDS),
+  panelConnected: z.boolean(),
+  waitedMs: z.number().int().nonnegative(),
+  boundMs: z.number().int().positive(),
+});
+
+export type PromptWaitingFrame = z.infer<typeof promptWaitingFrameSchema>;
 
 export const agentLinkFrameSchema = z.discriminatedUnion("type", [
   /**
@@ -2290,6 +2630,8 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
     type: z.literal("relay-ack"),
     relayPid: z.number().int().positive(),
   }),
+  /** The worker's "still waiting" tick (011); see `promptWaitingFrameSchema` for why it is here. */
+  promptWaitingFrameSchema,
 ]);
 
 export type AgentLinkFrame = z.infer<typeof agentLinkFrameSchema>;
@@ -2416,9 +2758,13 @@ export const AGENT_ACTIVITY_KEPT = 20;
  * in the owner's own language, as every other string there is. `message` is page-authored text and
  * is the same bounded field `CurrentDialog` carries it in - shown, never interpreted.
  */
-const agentActivityItemSchema = z.strictObject({
+export const agentActivityItemSchema = z.strictObject({
   at: z.number().int().nonnegative(),
-  kind: z.enum(["dialog", "export", "restore"]),
+  /**
+   * 012: `viewport` is the emulated size a session gave a tab, and gave back (FR-159).
+   * 013: `upload` is a picture the session put into the owner's page (FR-174).
+   */
+  kind: z.enum(["dialog", "export", "restore", "viewport", "upload"]),
   outcome: z.enum([
     "accepted",
     "accepted-chained",
@@ -2429,9 +2775,17 @@ const agentActivityItemSchema = z.strictObject({
     "left",
     "exported",
     "restored",
+    "set",
+    "cleared",
+    "delivered",
   ]),
   /** The host the dialog belonged to; absent when the item is not about a page. */
   site: z.string().max(256).optional(),
+  /**
+   * 012: `"WxH"` for a viewport that was set, and absent for one that was cleared.
+   * 013: `"input"` or `"drop"` for an upload - how the page received the picture, which is the one
+   * thing that makes the owner's line a different sentence rather than a different word.
+   */
   message: z.string().max(4000).optional(),
 });
 

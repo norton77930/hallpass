@@ -15,9 +15,23 @@ import {
   registryDeleteArguments,
   registryListArguments,
 } from "../src/install/windows.js";
+import {
+  registerAll,
+  removeLegacyRegistrations,
+  unregisterAll,
+  type RegRunner,
+} from "../src/install/registration.js";
 import { agentIdFilePath, bridgeFilePath, hostDataDirectory, hostManifestPath, launcherPath } from "../src/host-paths.js";
 
 const env = { LOCALAPPDATA: "C:\\Users\\owner\\AppData\\Local" };
+
+/** The four keys the installer must write, in table order - spelled out rather than re-derived. */
+const EXPECTED_REGISTRY_KEYS = [
+  "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.hallpass.host",
+  "HKCU\\Software\\Chromium\\NativeMessagingHosts\\com.hallpass.host",
+  "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com.hallpass.host",
+  "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\com.hallpass.host",
+] as const;
 
 describe("native host manifest", () => {
   it("names the host, points Chrome at the launcher, and allows only the extension origin", () => {
@@ -60,15 +74,22 @@ describe("relay entry resolution", () => {
 });
 
 describe("windows registration", () => {
-  it("registers under both the Chrome and the Chromium native-messaging roots", () => {
-    expect(NATIVE_MESSAGING_REGISTRY_KEYS).toEqual([
-      "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.hallpass.host",
-      "HKCU\\Software\\Chromium\\NativeMessagingHosts\\com.hallpass.host",
+  it("registers under the four native-messaging roots in table order", () => {
+    expect(NATIVE_MESSAGING_ROOTS).toEqual([
+      { browser: "Google Chrome", root: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts" },
+      { browser: "Chromium", root: "HKCU\\Software\\Chromium\\NativeMessagingHosts" },
+      { browser: "Microsoft Edge", root: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts" },
+      { browser: "Brave", root: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts" },
     ]);
+    // The keys are derived from the table, not written out by index, so adding a browser is one row.
+    expect(NATIVE_MESSAGING_REGISTRY_KEYS).toEqual(
+      NATIVE_MESSAGING_ROOTS.map((row) => `${row.root}\\${AGENT_HOST_NAME}`),
+    );
+    expect(NATIVE_MESSAGING_REGISTRY_KEYS).toEqual([...EXPECTED_REGISTRY_KEYS]);
   });
 
   it("writes the manifest path as the key's default value, overwriting an existing registration", () => {
-    expect(registryAddArguments(NATIVE_MESSAGING_REGISTRY_KEYS[0], "C:\\d\\com.hallpass.host.json")).toEqual([
+    expect(registryAddArguments(EXPECTED_REGISTRY_KEYS[0], "C:\\d\\com.hallpass.host.json")).toEqual([
       "add",
       "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.hallpass.host",
       "/ve",
@@ -81,7 +102,7 @@ describe("windows registration", () => {
   });
 
   it("removes the whole key on uninstall", () => {
-    expect(registryDeleteArguments(NATIVE_MESSAGING_REGISTRY_KEYS[1])).toEqual([
+    expect(registryDeleteArguments(EXPECTED_REGISTRY_KEYS[1])).toEqual([
       "delete",
       "HKCU\\Software\\Chromium\\NativeMessagingHosts\\com.hallpass.host",
       "/f",
@@ -89,11 +110,90 @@ describe("windows registration", () => {
   });
 });
 
+describe("registration outcomes (010/FR-139, FR-140)", () => {
+  const manifestPath = "C:\\d\\com.hallpass.host.json";
+  const denied = "ERROR: Access is denied.";
+
+  /** A registry runner that never touches the machine: it records its calls and fails on demand. */
+  function fakeReg(fails: (args: string[]) => boolean) {
+    const calls: string[][] = [];
+    return {
+      calls,
+      reg: async (args: string[]) => {
+        calls.push(args);
+        return fails(args) ? { ok: false, output: denied } : { ok: true, output: "" };
+      },
+    };
+  }
+
+  it("registerAll writes every root, keeps going after a failure, and returns one outcome per root", async () => {
+    const edgeKey = EXPECTED_REGISTRY_KEYS[2];
+    const { calls, reg } = fakeReg((args) => args[0] === "add" && args[1] === edgeKey);
+
+    const outcomes = await registerAll(reg, manifestPath);
+
+    expect(calls).toEqual(NATIVE_MESSAGING_REGISTRY_KEYS.map((key) => registryAddArguments(key, manifestPath)));
+    expect(outcomes).toEqual([
+      { browser: "Google Chrome", key: EXPECTED_REGISTRY_KEYS[0], outcome: "written" },
+      { browser: "Chromium", key: EXPECTED_REGISTRY_KEYS[1], outcome: "written" },
+      { browser: "Microsoft Edge", key: edgeKey, outcome: "failed", reason: denied },
+      { browser: "Brave", key: EXPECTED_REGISTRY_KEYS[3], outcome: "written" },
+    ]);
+  });
+
+  it("unregisterAll reports removed or absent per root and never fails", async () => {
+    // Chrome and Edge hold the entry; Chromium and Brave never had one, which is not a failure.
+    const present: string[] = [EXPECTED_REGISTRY_KEYS[0], EXPECTED_REGISTRY_KEYS[2]];
+    const { calls, reg } = fakeReg((args) => !present.includes(args[1] ?? ""));
+
+    const outcomes = await unregisterAll(reg);
+
+    expect(calls).toEqual(NATIVE_MESSAGING_REGISTRY_KEYS.map((key) => registryDeleteArguments(key)));
+    expect(outcomes).toEqual([
+      { browser: "Google Chrome", key: EXPECTED_REGISTRY_KEYS[0], outcome: "removed" },
+      { browser: "Chromium", key: EXPECTED_REGISTRY_KEYS[1], outcome: "absent" },
+      { browser: "Microsoft Edge", key: EXPECTED_REGISTRY_KEYS[2], outcome: "removed" },
+      { browser: "Brave", key: EXPECTED_REGISTRY_KEYS[3], outcome: "absent" },
+    ]);
+  });
+
+  it("removeLegacyRegistrations visits every root in the table and removes only an earlier version's entry", async () => {
+    const legacyManifestPath = "C:\\old\\com.previous.host.json";
+    const listed: string[] = [];
+    const deleted: string[] = [];
+    const reg: RegRunner = async (args) => {
+      const [verb, target = ""] = args;
+      if (verb === "query" && args.length === 2) {
+        listed.push(target);
+        // Only the Brave root holds anything: an earlier version's key beside another vendor's host.
+        if (target !== NATIVE_MESSAGING_ROOTS[3].root) return { ok: true, output: "" };
+        return { ok: true, output: [`${target}\\com.previous.host`, `${target}\\com.other.vendor`].join("\r\n") };
+      }
+      if (verb === "query") {
+        const path = target.endsWith("com.previous.host") ? legacyManifestPath : "C:\\other\\vendor.json";
+        return { ok: true, output: `    (Default)    REG_SZ    ${path}\r\n` };
+      }
+      deleted.push(target);
+      return { ok: true, output: "" };
+    };
+    const readManifest = async (path: string) =>
+      path === legacyManifestPath
+        ? JSON.stringify({ name: "com.previous.host", allowed_origins: [...AGENT_HOST_ALLOWED_ORIGINS] })
+        : JSON.stringify({ name: "com.other.vendor", allowed_origins: ["chrome-extension://aaaa/"] });
+
+    const result = await removeLegacyRegistrations(reg, readManifest);
+
+    expect(listed).toEqual(NATIVE_MESSAGING_ROOTS.map(({ root }) => root));
+    expect(deleted).toEqual([`${NATIVE_MESSAGING_ROOTS[3].root}\\com.previous.host`]);
+    expect(result).toEqual({ removedKeys: deleted, directories: ["C:\\old"] });
+  });
+});
+
 describe("earlier version's registration (009/FR-126)", () => {
   const ours = ["chrome-extension://adgpccmmbgnchnphfaoabfflfcepbopd/"];
 
   it("lists a root's subkeys from reg query output and ignores everything else", () => {
-    const root = NATIVE_MESSAGING_ROOTS[0];
+    const root = NATIVE_MESSAGING_ROOTS[0].root;
     expect(registryListArguments(root)).toEqual(["query", root]);
     // reg.exe spells the hive out even when asked with the HKCU alias (seen on the 0.2.0 -> 0.3.0
     // upgrade proof, 2026-09-19); both spellings must be read.

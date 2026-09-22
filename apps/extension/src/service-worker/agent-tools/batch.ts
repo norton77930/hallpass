@@ -9,8 +9,8 @@ import {
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { StatedPlanStep } from "./gate.js";
 import type { StatedPlanStore } from "./plans.js";
-import type { AgentPromptController } from "./prompts.js";
-import { batchStepCallId, type AgentStopSignals } from "./stop.js";
+import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import { batchStepCallId, type AgentStopSignals, type AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 
@@ -52,7 +52,7 @@ export type AgentBatchDeps = {
    */
   siteOfTab: (sessionId: string, tabId: number, callId: string) => Promise<string | undefined>;
   /** One step, answered exactly as it would have been if the agent had sent it by itself. */
-  dispatch: (request: AgentNativeRequest) => Promise<AgentNativeResponse>;
+  dispatch: (request: AgentToolRequest) => Promise<AgentNativeResponse>;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -115,7 +115,7 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
       });
       if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
       // FR-043's rule for a question nobody answered, applied to the whole batch: nothing ran.
-      if (asked.decision === "timed-out") return answer(callId, "timed-out", "no-answer");
+      if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
       // 006 FR-087: the owner's Stop, in the word every stopped call gets; nothing ran here either.
       if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
       if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
@@ -157,6 +157,10 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
         }
         const response = await deps.dispatch({
           callId: batchStepCallId(callId, index),
+          // The call the host is holding and the relay can route (011 review H1). A question this
+          // step raises says it is still waiting under this id, because the step's own is a name
+          // only this worker knows - a tick carrying it is dropped on the way back.
+          hostCallId: callId,
           // 004 S1: a step belongs to the session the batch belongs to - one call frame, one
           // session. Nothing reads it yet; S1 is the slice that routes on it.
           sessionId: request.sessionId,
@@ -169,6 +173,9 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
           outcome: response.outcome,
           ...(response.result === undefined ? {} : { result: response.result }),
           ...(response.reason === undefined ? {} : { reason: response.reason }),
+          // 011 FR-146: the step's own answer may carry the person's instruction, and a batch is
+          // where a consent card most often meets a closed panel. Passed on, never composed here.
+          ...(response.hint === undefined ? {} : { hint: response.hint }),
         });
         /**
          * A step that raised a dialog stops the batch too (008/FR-111, US3 edge case).
