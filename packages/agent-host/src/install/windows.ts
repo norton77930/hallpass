@@ -5,25 +5,36 @@ import { AGENT_HOST_NAME } from "./manifest.js";
 const execFileAsync = promisify(execFile);
 
 /**
- * Where Chrome looks for a native-messaging host manifest on Windows.
+ * Where a Chromium-family browser looks for a native-messaging host manifest on Windows.
  *
- * Two keys, not one: branded Chrome reads the `Google\Chrome` root and Chromium builds - including
- * the bundled Chromium every packaged test runs against - read the `Chromium` root. Registering
- * only the first makes the host work for the owner and silently not exist for the test gates, which
- * is the worst of the two failures because it looks like a bridge bug rather than a missing
- * registration.
+ * Four roots, not one: native messaging is a Chromium-family mechanism and every browser reads its
+ * *own* root. Branded Chrome reads the `Google\Chrome` root, Chromium builds - including the bundled
+ * Chromium every packaged test runs against - read the `Chromium` root, and Microsoft Edge and Brave
+ * read theirs (010/R-154). Registering only the first two makes the host work for the owner and
+ * silently not exist elsewhere, which is the worst kind of failure because it looks like a bridge bug
+ * rather than a missing registration. Writing a root whose browser is not installed is harmless: the
+ * key is created under an absent parent and found if that browser arrives later.
+ *
+ * The browser name travels with the root so the installer's output can say which browser each line
+ * is about, and the key list below is *derived* from the table, so adding a browser is one row.
  *
  * `HKCU`, never `HKLM`: a per-user registration needs no elevation (R-101).
  */
 export const NATIVE_MESSAGING_ROOTS = [
-  "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts",
-  "HKCU\\Software\\Chromium\\NativeMessagingHosts",
-] as const;
+  { browser: "Google Chrome", root: "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts" },
+  { browser: "Chromium", root: "HKCU\\Software\\Chromium\\NativeMessagingHosts" },
+  { browser: "Microsoft Edge", root: "HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts" },
+  { browser: "Brave", root: "HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts" },
+] as const satisfies readonly { browser: string; root: string }[];
 
-export const NATIVE_MESSAGING_REGISTRY_KEYS = [
-  `${NATIVE_MESSAGING_ROOTS[0]}\\${AGENT_HOST_NAME}`,
-  `${NATIVE_MESSAGING_ROOTS[1]}\\${AGENT_HOST_NAME}`,
-] as const;
+/** The host's key under one root; the list below is this applied to the whole table, in its order. */
+export function nativeMessagingKey(root: string): string {
+  return `${root}\\${AGENT_HOST_NAME}`;
+}
+
+export const NATIVE_MESSAGING_REGISTRY_KEYS: readonly string[] = NATIVE_MESSAGING_ROOTS.map(({ root }) =>
+  nativeMessagingKey(root),
+);
 
 /** `reg query` of a root alone lists its subkeys, one per line, as full key paths. */
 export function registryListArguments(root: string): string[] {

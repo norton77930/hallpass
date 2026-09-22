@@ -3,13 +3,15 @@
 **Let coding agents drive your own Chrome, one permission at a time.**
 
 Hallpass is a Chrome extension plus a local MCP server. Claude Code, Codex CLI, Cursor, Claude
-Desktop or any stdio MCP client gets 31 browser tools that work in the Chrome you already use, with
+Desktop or any stdio MCP client gets 33 browser tools that work in the Chrome you already use, with
 your logins. Every site the agent touches, and every action that changes a page, is gated by a
 decision you make in the side panel: allow once, allow this site from now on, or refuse. You can
 stop the agent at any moment and take your tabs back.
 
-> **Platform**: Windows 11 and Google Chrome. Chromium-family browsers are registered for but
-> unverified. macOS and Linux are not supported yet — see [issue #1](../../issues/1).
+> **Platform**: Windows 11. The installer registers the host for Google Chrome, Chromium,
+> Microsoft Edge and Brave. Google Chrome is the browser the acceptance suite runs on; Edge and
+> Brave are registered but not live-verified — see [issue #2](../../issues/2). macOS and Linux are
+> not supported yet — see [issue #1](../../issues/1).
 > **Licence**: Apache-2.0.
 
 ![A coding agent searches Wikipedia in the user's Chrome; every frame carries the action label, the step counter and the Hallpass watermark](docs/media/demo.gif)
@@ -79,6 +81,8 @@ the host needs no reinstall.
    the page title."*
 2. The first tool call shows a **pairing card** in the side panel (click the toolbar icon or press
    Alt+A): "Claude Code wants to connect to this browser". Allow it. You pair once; Chrome remembers.
+   If the panel is closed, the agent tells you so and the toolbar icon shows a red **!**; the card
+   waits up to two minutes for you to open the panel.
 3. The first action that **changes a page** (a click, typing, navigation) shows a **consent card**:
    "Claude Code wants to click on wikipedia.org". Choose *only this time*, *always on this site*, or
    *refuse*.
@@ -121,8 +125,9 @@ The agent sees these as `mcp__hallpass__<name>` in Claude Code.
 | `tabs_claim` / `tabs_release` | Take one of your tabs into the session; give it back |
 | `navigate` | Go to a URL or back/forward; stays on the page if it asks to (`force` to leave) |
 | `resize_window` | Resize the window holding a tab; restored when the session lets go |
+| `viewport` | Give a tab an emulated viewport for a layout check; cleared when the session lets go |
 | `read_page` / `get_page_text` / `find` | Structure with refs and field values; visible text; elements by description |
-| `screenshot` | PNG of a tab, optionally cropped |
+| `screenshot` | PNG of a tab, optionally cropped to a region and taken at a smaller `scale`; the answer carries an `imageId` for `upload_image` |
 | `click` / `right_click` / `double_click` / `triple_click` / `hover` / `drag` | Pointer actions delivered as real input |
 | `type` / `key` / `scroll` / `form_input` | Keyboard, scrolling and form controls |
 | `computer` | Act at a viewport point when the page's structure does not describe the target |
@@ -131,6 +136,7 @@ The agent sees these as `mcp__hallpass__<name>` in Claude Code.
 | `downloads_context` | The downloads this session caused, with paths and states |
 | `read_console` / `read_network` / `evaluate` | Diagnostics, behind the per-site grant |
 | `file_upload` | Put your files (from allowed roots) into a file input |
+| `upload_image` | Put a screenshot the session took into a file input or onto a drop target |
 | `gif_recorder` | Start, stop, export or clear a recording of the session |
 | `dialog` | Accept or dismiss an alert, confirm or prompt |
 
@@ -146,6 +152,27 @@ These three run in CI on Windows. Two more suites need a real Chrome and run loc
 release: the packaged gate (`tests/e2e/packaged/agent-*.spec.ts`, attaching to a Chrome started
 with `--remote-debugging-port=9222`) and the acceptance probes, which drive the bridge with a real
 coding-agent session. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run both.
+
+## What 0.5.0 adds
+
+`upload_image` puts a screenshot the session just took into the page it is working on — no file on
+your disk, and no writing one. Every screenshot answer now carries an `imageId`, and the agent
+quotes it: to a file input by `ref` (a hidden one behind the page's own button works too), or to a
+drop `coordinate` for a page that takes dragged files, one level into a same-origin frame. The
+picture is held for five minutes, in the local MCP server's own memory and nowhere else, and the
+upload is a page change like any other — the site's mode decides, the card says what is about to
+happen, and the panel keeps one line about it afterwards. Files of your own still go through
+`file_upload` and its allowed roots.
+
+## What 0.4.0 adds
+
+`viewport` gives one tab an emulated size — a phone, a tablet, a wide desktop — so the agent can
+check a layout without touching your window; your window stays exactly where you left it, and the
+two tools are independent of each other. A screenshot of an emulated tab is a picture of that
+viewport, and `screenshot` takes a `scale` (0.1 to 1) for a smaller picture and crops a `region` at
+the picture's own density, so the rectangle you ask for in CSS pixels is the rectangle you get. The
+emulation is cleared whenever the session lets the tab go — reset, release, your take-back from the
+panel, or the session ending — so no agent can leave your tab at a phone width.
 
 ## Upgrading from 0.2.0
 

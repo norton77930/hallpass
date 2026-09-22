@@ -61,7 +61,7 @@ function fakeDeps(options: {
     },
     photograph: async () =>
       options.photograph === "ok"
-        ? { ok: true, image: { data: "png-bytes", cropped: false } }
+        ? { ok: true, image: { data: "png-bytes", cropped: false, scale: 1 } }
         : { ok: false, reason: "capture-refused" as const },
     ...(options.lastViewport === undefined ? {} : { lastViewport: options.lastViewport }),
   };

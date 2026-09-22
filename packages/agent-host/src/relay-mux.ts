@@ -208,7 +208,17 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
       const callId = frameField(frame, "callId");
       if (callId !== undefined) {
         const sessionId = calls.get(callId);
-        calls.delete(callId);
+        /**
+         * A frame that names a call is usually its answer, and an answered call is over. The one
+         * exception is 011's `prompt-waiting`: it names the call it is about precisely because it
+         * is *not* the answer - the owner is still being asked - so forgetting the call here would
+         * leave their eventual Allow with nowhere to go, dropped as unaddressed while the agent was
+         * answered by a backstop. The keep-alive is named rather than inferred, so a frame type
+         * nobody declared still spends the entry instead of pinning it open.
+         */
+        if (frameField(frame, "type") !== "prompt-waiting") {
+          calls.delete(callId);
+        }
         deliver(frame, sessionId, "call");
         return;
       }

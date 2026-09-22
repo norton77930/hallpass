@@ -4,7 +4,6 @@ import {
   AGENT_DIAGNOSTICS_MAX_LIMIT,
   AGENT_EVALUATE_MAX_CHARS,
   type AgentConsoleResult,
-  type AgentNativeRequest,
   type AgentNativeResponse,
   type AgentNetworkResult,
   type AgentToolName,
@@ -17,7 +16,8 @@ import { siteOfUrl, type SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts } from "./context.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
-import type { AgentPromptController } from "./prompts.js";
+import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 
 /**
@@ -70,7 +70,7 @@ export type AgentDiagnosticsDeps = {
 
 export type AgentDiagnosticsRunner = {
   handles(tool: AgentToolName): boolean;
-  run(request: AgentNativeRequest): Promise<AgentNativeResponse>;
+  run(request: AgentToolRequest): Promise<AgentNativeResponse>;
   /**
    * Begins watching the browser, and squares this worker's belief with it (C1).
    *
@@ -395,7 +395,7 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
     };
   }
 
-  async function run(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function run(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId } = request;
     const tool = request.tool as DiagnosticsToolName;
     const parsed = agentToolArgSchemas[tool].safeParse(request.args);
@@ -437,13 +437,17 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       if (decision.decision === "prompt") {
         const asked = await deps.prompts.ask({
           callId,
+          // Which call the host knows it as, when this read is a batch step (011 review H1).
+          hostCallId: request.hostCallId,
           sessionId: request.sessionId,
           site,
           tool,
+          // 011: the grant has a card of its own, so its ticks say so (contracts AgentPromptKind).
+          promptKind: "diagnostics",
           argsSummary: summariseToolCall(tool, args),
         });
         if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
-        if (asked.decision === "timed-out") return answer(callId, "timed-out", "no-answer");
+        if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
         if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
         if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
         // 006 FR-087: the tab may have been handed back while the question stood (see effects.ts).

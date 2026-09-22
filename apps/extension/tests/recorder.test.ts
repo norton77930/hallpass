@@ -126,7 +126,7 @@ function harness(options: { store?: RecordingStore & { raw: Record<string, unkno
           slept.push(ms);
         },
       },
-      watermark: () => "Hallpass 0.3.0",
+      watermark: () => "Hallpass 0.5.0",
     },
   };
   return state;

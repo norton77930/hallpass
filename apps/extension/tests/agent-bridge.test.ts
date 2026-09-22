@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { agentControlFrameSchema, agentLinkFrameSchema } from "@hallpass/contracts";
 import {
   AGENT_RECONNECT_BASE_MS,
   AGENT_RECONNECT_MAX_MS,
@@ -94,6 +95,54 @@ describe("T013 agent bridge", () => {
       type: "pair-result",
       agentId: "agent-1",
       sessionId: "session-h1",
+      accepted: true,
+    });
+  });
+
+  /**
+   * 013/S4 (R-184, FR-168) — the pairing answer is also where the worker names its browser run.
+   *
+   * It rides this frame because this is the one the worker sends on every (re)established link, and
+   * because the host awaits it before releasing a call: the run is known by the time anything reads
+   * the screenshot cache. The bridge still decides nothing about it - it asks the runtime for the
+   * id, exactly as it asks for the pairing decision.
+   */
+  it("names its browser run on the pairing answer (R-184)", async () => {
+    const { bridge, port } = bridgeWith({ browserRunId: async () => "run-1234" });
+    bridge.connect();
+
+    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h7" });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+
+    expect(port.sent[0]).toEqual({
+      type: "pair-result",
+      agentId: "agent-1",
+      sessionId: "session-h7",
+      accepted: true,
+      browserRunId: "run-1234",
+    });
+    // On contract, so an older relay forwards it and the host parses it rather than rejecting the
+    // frame - which would lose the pairing answer entirely.
+    expect(agentControlFrameSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("still answers the pairing when its browser run cannot be read", async () => {
+    const { bridge, port } = bridgeWith({
+      browserRunId: async () => {
+        throw new Error("storage-gone");
+      },
+    });
+    bridge.connect();
+
+    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h8" });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+
+    // The field is left off rather than guessed: the host reads its absence as "cannot tell" and
+    // keeps its own fall-back. A pairing answer withheld over it would strand the agent's call.
+    expect(port.sent[0]).toEqual({
+      type: "pair-result",
+      agentId: "agent-1",
+      sessionId: "session-h8",
       accepted: true,
     });
   });
@@ -236,6 +285,51 @@ describe("T013 agent bridge", () => {
     expect(port.sent).toEqual([
       { type: "pair-result", agentId: "agent-1", sessionId: "session-h1", accepted: false },
     ]);
+  });
+
+  /**
+   * 011/T294 — the "still waiting" tick on the wire.
+   *
+   * It is a link frame, not a control frame: the relay routes it by `sessionId` like every other
+   * one and the bridge adds nothing to it. The whole of the claim is that what the runtime composed
+   * is what the host reads - the router's arithmetic is done on these numbers, so a bridge that
+   * rewrote any of them would re-arm a backstop against a bound nobody chose.
+   */
+  it("sends a prompt-waiting tick through the port exactly as it was given", () => {
+    const { bridge, port } = bridgeWith();
+    bridge.connect();
+    const frame = {
+      type: "prompt-waiting" as const,
+      sessionId: "session-h1",
+      callId: "call-1",
+      kind: "ask" as const,
+      panelConnected: false,
+      waitedMs: 5_000,
+      boundMs: 120_000,
+    };
+
+    bridge.sendWaiting(frame);
+
+    expect(port.sent).toEqual([frame]);
+    expect(agentLinkFrameSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("drops a tick raised while no host is there, without throwing at the caller", () => {
+    const { bridge } = bridgeWith({ connectNative: () => undefined });
+    bridge.connect();
+
+    // A question can outlive the link that raised it (the runtime cancels it a moment later); the
+    // tick that lands in that gap is lost, which is the truth, and is not an error for the timer.
+    expect(() =>
+      bridge.sendWaiting({
+        type: "prompt-waiting",
+        sessionId: "session-h1",
+        kind: "pairing",
+        panelConnected: false,
+        waitedMs: 5_000,
+        boundMs: 120_000,
+      }),
+    ).not.toThrow();
   });
 });
 

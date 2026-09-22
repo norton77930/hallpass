@@ -1,0 +1,69 @@
+{
+  "id": "s13-upload-image",
+  "slice": "S13",
+  "evidence": "T346 (013/US4, SC-098)",
+  "page": "https://127.0.0.1:19443/upload-image",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call. Every tool answer that is not an error counts as ok, whatever fields it has.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://127.0.0.1:19443/upload-image and remember the tabId.\nStep 2. Attach a picture of this page to the form on it, then tell me what the page shows next to the attachment field. Pick whichever of the browser's tools you judge right; do not write any file to disk.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, outcome = ok or the error text.\n- In imageTool: the exact name of the tool whose answer gave you the picture, or \"(none)\" if you never took one.\n- In observed: write \"uploaded-by-id\" if you called mcp__hallpass__upload_image quoting an imageId that a screenshot answer gave you, and never called mcp__hallpass__file_upload at any point; write \"file_upload\" if you called mcp__hallpass__file_upload at any point; write \"no-upload\" if nothing was put into the page; otherwise write \"other\".\n- In report: the text the page shows next to the attachment field, verbatim.\n- In notes: the imageId you quoted, the answer of the upload call verbatim, and the sentence the screenshot answer carried about that id, if any.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "imageTool",
+      "observed",
+      "report"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "imageTool": {
+        "type": "string"
+      },
+      "observed": {
+        "type": "string"
+      },
+      "report": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "uploaded-by-id"
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "maxTurns": 14,
+  "maxBudgetUsd": 0.4,
+  "timeoutMs": 240000,
+  "expectedAfterFix": "SC-098: asked in plain words to attach a picture of the page to the form on it, a real coding-agent caller takes a screenshot and then calls `upload_image` quoting that answer's `imageId` - it does not reach for `file_upload` and it does not try to write the picture to disk first; the page's own report next to the attachment field then names the file, its size and `image/png`.",
+  "note": "T346 (013/S3). The prompt names neither upload tool on purpose: what is measured is the choice the descriptions steer (FR-176) - `screenshot`'s and `computer`'s answers say an `imageId` can be quoted, `upload_image` says it takes one and `file_upload` points at it for a picture with no path. The page is the gate's own fixture (`npm run dev:test-pages` must be running, and the harness TLS leaf trusted), because the claim needs a form whose file input reports what it is holding: `#report-visible` shows `<name>:<size>:image/png changed` after a delivery, so the second half of the request is answerable from the page rather than from the tool's own echo. Site mode skip-checks only so the upload never waits on a card nobody is there to answer; the consent path itself is gate evidence (SC-096)."
+}

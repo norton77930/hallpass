@@ -25,6 +25,9 @@ type FakeTab = {
   active: boolean;
   history: string[];
   historyIndex: number;
+  /** The tab's content area, as Chrome reports it (012/S2c F4): smaller than the window it is in. */
+  width: number;
+  height: number;
 };
 
 type FakeChrome = {
@@ -73,6 +76,8 @@ function installChrome(): FakeChrome {
         active: true,
         history: ["https://owner.test/"],
         historyIndex: 0,
+        width: 1180,
+        height: 700,
       },
       // A page no session may hold, so a claim has something to refuse for a reason that is about
       // the page rather than about another session (004/T104).
@@ -85,6 +90,8 @@ function installChrome(): FakeChrome {
         active: false,
         history: ["chrome://settings/"],
         historyIndex: 0,
+        width: 1180,
+        height: 700,
       },
     ],
     removed: [],
@@ -147,6 +154,8 @@ function installChrome(): FakeChrome {
           active: false,
           history: [url ?? "about:blank"],
           historyIndex: 0,
+          width: 1180,
+          height: 700,
         };
         state.tabs.push(tab);
         if (state.commitsLate) {
@@ -272,6 +281,16 @@ describe("T041 agent tab tools", () => {
   let changes: number;
   /** The same store the tools run against, so a test can put a tab in another session's hands. */
   let manager: ReturnType<typeof createAgentTabManager>;
+  let viewportCalls: Array<{
+    verb: "set" | "reset";
+    sessionId: string;
+    tabId: number;
+    size?: { width: number; height: number };
+  }>;
+  /** Set by the test that wants Chrome to refuse the attachment the emulation needs. */
+  let viewportRefusal: "devtools-open" | "restricted-page" | undefined;
+  /** What a `reset` could measure of the real page; `undefined` when it could not read it. */
+  let viewportReal: { width: number; height: number } | undefined;
 
   function build(
     navigationTimeoutMs = 60,
@@ -279,6 +298,7 @@ describe("T041 agent tab tools", () => {
   ): ReturnType<typeof createAgentTabTools> {
     invalidated = [];
     changes = 0;
+    viewportCalls = [];
     manager = createAgentTabManager();
     return createAgentTabTools({
       context: testSessionContexts(),
@@ -293,8 +313,27 @@ describe("T041 agent tab tools", () => {
         changes += 1;
       },
       downloads: { list: async (sessionId) => (sessionId === SESSION ? fake.downloads : []) },
+      viewport: viewportModule(),
       ...extra,
     });
+  }
+
+  /**
+   * The viewport module as this tool uses it (012/T307): two calls, and the honest answers the
+   * real one gives - an attachment Chrome refused, and a `reset` that could not measure the page.
+   */
+  function viewportModule(): Parameters<typeof createAgentTabTools>[0]["viewport"] {
+    return {
+      async set(sessionId, tabId, size) {
+        viewportCalls.push({ verb: "set", sessionId, tabId, size });
+        return viewportRefusal === undefined ? { ok: true } : { ok: false, unavailableReason: viewportRefusal };
+      },
+      async reset(sessionId, tabId) {
+        viewportCalls.push({ verb: "reset", sessionId, tabId });
+        if (viewportRefusal !== undefined) return { ok: false, unavailableReason: viewportRefusal };
+        return { ok: true, ...(viewportReal === undefined ? {} : { real: viewportReal }) };
+      },
+    };
   }
 
   /** A download record as the observer writes one at `onCreated`: no name yet, size unknown. */
@@ -314,6 +353,8 @@ describe("T041 agent tab tools", () => {
 
   beforeEach(() => {
     fake = installChrome();
+    viewportRefusal = undefined;
+    viewportReal = { width: 1187, height: 707 };
   });
 
   afterEach(() => {
@@ -633,6 +674,93 @@ describe("T041 agent tab tools", () => {
     expect(closed).toEqual({ callId: "call-1", outcome: "stale", reason: "tab-gone" });
     // And the session lets it go: a tab nobody has is not held against the next call.
     expect(invalidated).toContain(tabId);
+  });
+
+  /**
+   * 012/T307 — `viewport` answers about the page, never about the window (FR-156, FR-157).
+   *
+   * The three answers are the whole tool: the size that was asked for and honoured, the page's real
+   * size after it is given back, and the refusal for a tab Chrome will not let this session debug.
+   * The window is not touched on any of them - that is `resize_window`, and the two are independent
+   * (FR-165).
+   */
+  it("gives a tab the size it asked for, and says the size is emulated", async () => {
+    const tools = build();
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+
+    const set = await tools.run(call("viewport", { tabId, action: "set", width: 375, height: 812 }));
+
+    expect(set).toEqual({ callId: "call-1", outcome: "ok", result: { width: 375, height: 812, emulated: true } });
+    expect(viewportCalls).toEqual([{ verb: "set", sessionId: SESSION, tabId, size: { width: 375, height: 812 } }]);
+    // The owner's window is where they left it: this tool changes what the page believes, nothing else.
+    expect(fake.windows[0]).toEqual({ id: 900, width: 1200, height: 900 });
+  });
+
+  it("answers a reset with the page's real size, and falls back to the window when it cannot read one", async () => {
+    const tools = build();
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+
+    const reset = await tools.run(call("viewport", { tabId, action: "reset" }));
+
+    expect(reset).toEqual({ callId: "call-1", outcome: "ok", result: { width: 1187, height: 707, emulated: false } });
+    expect(viewportCalls).toEqual([{ verb: "reset", sessionId: SESSION, tabId }]);
+
+    // A page that cannot be measured - no attachment, a tab that never had a viewport - still gets
+    // an answer, and it is the tab's own content area (012/S2c F4). The window's outer bounds are
+    // a fact about furniture: they include the browser's own chrome, and an agent told 1 200x900
+    // for a 1 180x700 page would aim every later coordinate at the wrong place.
+    viewportReal = undefined;
+    const unmeasured = await tools.run(call("viewport", { tabId, action: "reset" }));
+    expect(unmeasured).toEqual({
+      callId: "call-1",
+      outcome: "ok",
+      result: { width: 1180, height: 700, emulated: false },
+    });
+  });
+
+  /**
+   * 012/S2c F4 - a reset the attachment refused is not a reset.
+   *
+   * Chrome will not let an extension debug a tab with developer tools open on it, so the clear
+   * never went out and the page is still the size the agent gave it. `emulated: false` there would
+   * be this worker telling the agent something it has no reason to believe.
+   */
+  it("says input is unavailable when the reset could not be delivered", async () => {
+    const tools = build();
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+    viewportRefusal = "devtools-open";
+
+    const refused = await tools.run(call("viewport", { tabId, action: "reset" }));
+
+    expect(refused).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "input-unavailable",
+      refusal: { reason: "input-unavailable", unavailableReason: "devtools-open" },
+    });
+  });
+
+  it("says input is unavailable when Chrome will not let the session debug the tab, and stale when it is gone", async () => {
+    const tools = build();
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+    viewportRefusal = "devtools-open";
+
+    const refused = await tools.run(call("viewport", { tabId, action: "set", width: 375, height: 812 }));
+
+    expect(refused).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "input-unavailable",
+      refusal: { reason: "input-unavailable", unavailableReason: "devtools-open" },
+    });
+
+    fake.tabs = fake.tabs.filter((candidate) => candidate.id !== tabId);
+    const gone = await tools.run(call("viewport", { tabId, action: "reset" }));
+    expect(gone).toEqual({ callId: "call-1", outcome: "stale", reason: "tab-gone" });
   });
 
   it("refuses every tab tool on a tab this session does not hold (SC-024)", async () => {

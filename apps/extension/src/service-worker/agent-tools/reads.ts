@@ -8,7 +8,13 @@ import {
   type AgentReadPageResult,
   type AgentToolName,
 } from "@hallpass/contracts";
-import { captureTab, type CaptureDeps, type CaptureRegion } from "../../chrome-adapters/capture.js";
+import {
+  captureTab,
+  type CaptureDeps,
+  type CaptureFrame,
+  type CaptureRegion,
+  type CaptureSend,
+} from "../../chrome-adapters/capture.js";
 import { queryTabSnapshots } from "../../chrome-adapters/tabs.js";
 import { enumerateTabFrames } from "../../chrome-adapters/scripting.js";
 import { collectFromActiveTab } from "../content-broker.js";
@@ -22,8 +28,9 @@ import {
 } from "./frames.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
 import type { AgentPageBinding, AgentPageBindings } from "./page-binding.js";
+import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
-import { photographTab } from "./photograph.js";
+import { captureFrameFacts, photographTab, type PhotographDeps } from "./photograph.js";
 
 /**
  * The read tools (003/T034, T036, US2, FR-036..FR-039).
@@ -50,6 +57,25 @@ export type AgentReadDeps = {
   capture?: typeof captureTab;
   captureDeps?: CaptureDeps;
   listTabs?: typeof queryTabSnapshots;
+  /**
+   * The emulated size a session gave a tab, when it gave it one (012/FR-158).
+   *
+   * The record, read from storage - a read never attaches a debugger, and asking the page its size
+   * over an attachment this module does not hold would be exactly that.
+   */
+  currentViewport?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /** One protocol command over the attachment an emulated tab already has (012, R-171). */
+  sendOverAttachment?: CaptureSend;
+  /** The tab's own content area in CSS pixels: the frame when nothing emulates the tab. */
+  tabSize?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /**
+   * Claims the emulation's own attachment before an emulated tab is photographed (012/S2c F2).
+   *
+   * This is the one place a read leads to an attachment, and it is not a read attaching a debugger
+   * to a page: the tab is already being debugged by this session's emulation, and after an MV3
+   * eviction the only thing missing is this worker's record of it.
+   */
+  ensureAttached?: PhotographDeps["ensureAttached"];
   /** Which documents a tab is made of (004/US4): the scripting API's all-frames execution. */
   enumerateFrames?: typeof enumerateTabFrames;
   /**
@@ -119,6 +145,23 @@ const INTERACTIVE_ROLES = new Set([
 export const SCREENSHOT_MAX_BASE64_CHARS = 700_000;
 
 /**
+ * The scale that would have fitted, for the refusal to name (012/FR-162, R-171).
+ *
+ * A picture shrinks with the *area*, so the linear scale that fits is the square root of the ratio
+ * the payload is over by; rounded **down** to a tenth, because a hint that lands a hair over the
+ * ceiling is a second refusal. It is the whole reason the refusal is worth reading: an agent told
+ * "too large" learns nothing, and an agent told "retry with scale 0.5" has its next call written.
+ */
+function fittingScale(length: number): number {
+  return Math.max(Math.floor(Math.sqrt(SCREENSHOT_MAX_BASE64_CHARS / length) * 10) / 10, 0.1);
+}
+
+/** Whether the rectangle is one the viewport actually contains (012/FR-164). */
+function insideFrame(region: CaptureRegion, frame: CaptureFrame): boolean {
+  return region.x + region.width <= frame.width && region.y + region.height <= frame.height;
+}
+
+/**
  * What one document of an agent read may bring back (004/FR-064, R-116).
  *
  * The remote path's 200 nodes are what a person can be shown on a review card; an agent working a
@@ -140,6 +183,16 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
   const capture = deps.capture ?? captureTab;
   const listTabs = deps.listTabs ?? queryTabSnapshots;
   const enumerateFrames = deps.enumerateFrames ?? enumerateTabFrames;
+  /** One set of deps for both halves of a screenshot: the frame it is judged in, and the picture. */
+  const photographDeps: PhotographDeps = {
+    capture,
+    listTabs,
+    captureDeps: deps.captureDeps ?? {},
+    ...(deps.currentViewport ? { currentViewport: deps.currentViewport } : {}),
+    ...(deps.sendOverAttachment ? { send: deps.sendOverAttachment } : {}),
+    ...(deps.tabSize ? { tabSize: deps.tabSize } : {}),
+    ...(deps.ensureAttached ? { ensureAttached: deps.ensureAttached } : {}),
+  };
 
   /** One document's own readable text; the same collection a 003 text read made, by frame. */
   async function collectText(
@@ -423,12 +476,29 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     callId: string,
     tabId: number,
     region: CaptureRegion | undefined,
+    scale: number,
   ): Promise<AgentNativeResponse> {
+    // Before anything is photographed, because the frame is what a region is judged against and a
+    // refused region must not have cost the owner a tab flicker (012/FR-164).
+    const facts = await captureFrameFacts(tabId, photographDeps);
+    if (facts.frame === undefined) {
+      deps.reportDiagnostic?.("agent.screenshot.frame-unknown");
+    } else if (region && !insideFrame(region, facts.frame)) {
+      // Named, not clamped: a clamp answers `ok` with a picture of a rectangle the agent did not
+      // ask for, and the agent has no way of telling that from the one it meant.
+      return answer(callId, "failed", `region-outside-viewport (frame ${facts.frame.width}x${facts.frame.height})`);
+    }
     const photograph = await photographTab(
-      { tabId, ...(region === undefined ? {} : { region }) },
-      { capture, listTabs, captureDeps: deps.captureDeps ?? {} },
+      { tabId, scale, facts, ...(region === undefined ? {} : { region }) },
+      photographDeps,
     );
     if (!photograph.ok) {
+      // The attachment's own refusal keeps the attachment's words (012/S2c F2): `not-readable`
+      // would say the page cannot be photographed, when what happened is that Chrome will not let
+      // this session debug the tab the emulation lives on.
+      if (photograph.reason === "input-unavailable") {
+        return inputUnavailable(callId, photograph.unavailableReason);
+      }
       // A tab Chrome no longer has is stale; the restricted pages `captureVisibleTab` refuses are
       // the same ones FR-039 calls not readable, so that is that answer rather than a failure.
       return photograph.reason === "tab-gone"
@@ -438,7 +508,7 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     const image = photograph.image;
     if (image.data.length > SCREENSHOT_MAX_BASE64_CHARS) {
       deps.reportDiagnostic?.("agent.screenshot.too-large");
-      return answer(callId, "failed", "screenshot-too-large");
+      return answer(callId, "failed", `screenshot-too-large; retry with scale ≤ ${fittingScale(image.data.length)}`);
     }
     if (region && !image.cropped) {
       deps.reportDiagnostic?.("agent.screenshot.not-cropped");
@@ -446,7 +516,20 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     return {
       callId,
       outcome: "ok",
-      result: { mimeType: "image/png", data: image.data, cropped: image.cropped },
+      result: {
+        mimeType: "image/png",
+        data: image.data,
+        cropped: image.cropped,
+        ...(image.width === undefined || image.height === undefined
+          ? {}
+          : { width: image.width, height: image.height }),
+        scale: image.scale,
+        ...(photograph.frame === undefined ? {} : { frame: photograph.frame }),
+        // What the picture covers, rather than what was asked for: a region the worker could not
+        // crop came back as the whole viewport, and this is the field that says so in one word.
+        coverage: image.cropped ? "region" : "viewport",
+        ...(region === undefined ? {} : { region }),
+      },
     };
   }
 
@@ -470,7 +553,14 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     if (tool === "screenshot") {
       // Deliberately before any binding: a screenshot is a picture of a window, and a page the
       // content runtime cannot be injected into is still a page the browser can photograph.
-      return screenshot(callId, tabId, args.region as CaptureRegion | undefined);
+      return screenshot(
+        callId,
+        tabId,
+        args.region as CaptureRegion | undefined,
+        // The schema defaults it to 1; the check is for the callers inside this worker that hand
+        // the tool raw args rather than parsed ones.
+        typeof args.scale === "number" ? args.scale : 1,
+      );
     }
 
     const context = deps.context.forCall(request.sessionId, callId);

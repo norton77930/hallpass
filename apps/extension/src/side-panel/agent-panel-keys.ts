@@ -52,6 +52,12 @@ export const ACTIVITY_OUTCOME_KEYS: Record<AgentActivityItem["outcome"], string>
   left: "agent.activity.left",
   exported: "agent.activity.exported",
   restored: "agent.activity.restored",
+  // 012: the two outcomes a viewport item can carry (FR-159).
+  set: "agent.activity.set",
+  cleared: "agent.activity.cleared",
+  // 013: what became of a picture the session put into a page (FR-174). Delivery, never
+  // acceptance: what the page then does with the file is the page's own business.
+  delivered: "agent.activity.delivered",
 };
 
 /**
@@ -116,6 +122,14 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.activity.dialog",
   // The window a session gave back (008 FR-119).
   "agent.activity.restore",
+  // The emulated viewport a session gave a tab, and gave back (012 FR-159).
+  "agent.activity.viewportSet",
+  "agent.activity.viewportCleared",
+  // The picture a session put into one of the owner's pages (013 FR-174), and the panel's own word
+  // for a page whose site the worker did not resolve.
+  "agent.activity.uploadInput",
+  "agent.activity.uploadDrop",
+  "agent.activity.unknownSite",
   // The dialog questions and the non-blocking notice (008 FR-114, FR-115).
   "agent.prompt.dialogAccept",
   "agent.prompt.dialogQuote",

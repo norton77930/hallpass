@@ -73,6 +73,9 @@ export function requiresGate(tool: AgentToolName): boolean {
     isAgentEffectTool(tool) ||
     tool === "evaluate" ||
     tool === "file_upload" ||
+    // 013/FR-174: a picture this session took, put into a form or dropped on the page, is the same
+    // kind of change a file from disk is - the next click may send it somewhere.
+    tool === "upload_image" ||
     // 008/US3, D-008-4: pressing OK on a page's dialog agrees to whatever it proposed - deleting
     // the three orders - so it is the owner's to consent to exactly as the click that raised it
     // was. The caller asks only for the cases that need asking: an alert, a dismiss and a chained

@@ -42,6 +42,15 @@ export function summariseToolCall(tool: AgentToolName, args: Record<string, unkn
     const count = Array.isArray(args.files) ? args.files.length : 1;
     return count === 1 ? "put one of your files into a form on the page" : `put ${count} of your files into a form on the page`;
   }
+  // 013: the picture is one the agent took of a page this session, never the owner's own file, and
+  // the sentence says which of the two places it is going - a form, or a point the page was asked
+  // to take a dropped file at. No id: the worker never sees one, and it would tell the owner nothing.
+  if (tool === "upload_image") {
+    const target = args.target as { coordinate?: unknown } | undefined;
+    return target?.coordinate !== undefined
+      ? "drop a screenshot the agent took onto a point on the page"
+      : "put a screenshot the agent took into a form on the page";
+  }
   /**
    * The tools that never raise an `ask` prompt of their own, but do appear inside a batch the owner
    * is asked about as a whole. Each is one plain sentence about what the step does, for the same

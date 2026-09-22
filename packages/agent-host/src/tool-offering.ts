@@ -16,7 +16,7 @@ export const SERVER_NAME = "hallpass";
  * (`AGENT_EXTENSION_VERSION`). A contract test pins the two together - an extension and the host it
  * talks to are one release, and a client asking who it is talking to must not be told otherwise.
  */
-export const SERVER_VERSION = "0.3.0";
+export const SERVER_VERSION = "0.5.0";
 
 /**
  * The tools this host will actually carry to a worker, as opposed to the tools the contract
@@ -35,6 +35,8 @@ export const IMPLEMENTED_AGENT_TOOL_NAMES: ReadonlySet<AgentToolName> = new Set<
   "tabs_release",
   "navigate",
   "resize_window",
+  // 012/S1: the worker gives a tab an emulated viewport; the runner is `agent-tools/tabs.ts`.
+  "viewport",
   "get_page_text",
   "read_page",
   "screenshot",
@@ -56,6 +58,13 @@ export const IMPLEMENTED_AGENT_TOOL_NAMES: ReadonlySet<AgentToolName> = new Set<
   "read_network",
   "evaluate",
   "file_upload",
+  /**
+   * 013/S1: this is the one tool the *host* answers rather than the worker. Every refusal it can
+   * receive - an id nobody issued, a picture whose window has passed, a target named twice - is
+   * decided in `mcp-server.ts` before anything crosses the link, which is why it is offered from
+   * the slice that adds the interception rather than from the slice that adds the delivery.
+   */
+  "upload_image",
   "downloads_context",
   // 008/S3: the worker records and exports it; the runner is `agent-tools/recording.ts`.
   "gif_recorder",

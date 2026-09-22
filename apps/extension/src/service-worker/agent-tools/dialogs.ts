@@ -11,7 +11,7 @@ import {
 import type { TabOwnership } from "../agent-tab-manager.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { ownershipRefusal } from "./ownership.js";
-import type { AgentPromptController } from "./prompts.js";
+import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 
 /**
  * The dialogs a page opens, and the one decision answering them can cost (008/T225, US3,
@@ -372,6 +372,9 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
           sessionId: request.sessionId,
           site,
           tool: DIALOG_TOOL,
+          // 011: which sentence the person is told while this card waits; the panel's own wording
+          // comes from `kind` below, which is a different question about a different reader.
+          promptKind: "dialog",
           // The panel writes the sentence from `kind`; this stays the worker's own record of what
           // was asked, as it is for every other prompt.
           argsSummary: `dialog accept on ${site}`,
@@ -380,7 +383,7 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
           dialogText: dialog.message,
         });
         if (asked.decision === "busy") return { callId, outcome: "busy", reason: "prompt-pending" };
-        if (asked.decision === "timed-out") return { callId, outcome: "timed-out", reason: "no-answer" };
+        if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
         if (asked.decision === "stopped") return { callId, outcome: "stopped", reason: "owner-stopped" };
         if (asked.decision === "deny") {
           // FR-114: refusing is not leaving the page stuck. The dialog is dismissed - which is the

@@ -5,14 +5,19 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   agentControlFrameSchema,
   agentNativeResponseSchema,
+  agentUploadImageRequestSchema,
+  promptWaitingFrameSchema,
   AGENT_TOOL_DESCRIPTORS,
+  ATTENTION_SENTENCES,
   type AgentNativeResponse,
   type AgentToolName,
+  type PromptWaitingFrame,
 } from "@hallpass/contracts";
 import { dialRelay, DIAL_RETRY_MS, readBridgeRecord, type RelayDial } from "./bridge-link.js";
 import { IMPLEMENTED_AGENT_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "./tool-offering.js";
 import { agentIdFilePath, hostDataDirectory } from "./host-paths.js";
-import { CallRouter } from "./router.js";
+import { CallRouter, KEEP_ALIVE_CAP_MS } from "./router.js";
+import { createScreenshotCache, SCREENSHOT_UPLOAD_SENTENCES } from "./screenshot-cache.js";
 import { readUploadConfig, resolveUploadFiles } from "./upload-policy.js";
 
 /**
@@ -40,8 +45,16 @@ import { readUploadConfig, resolveUploadFiles } from "./upload-policy.js";
 /**
  * How long a tool call waits for the owner to answer a first-time pairing prompt.
  *
- * Under the MCP client's own 60 s request bound, so the agent is told `denied`/`timed-out` in the
- * contract's own words rather than losing the request to a transport timeout it cannot interpret.
+ * Well inside the client's own bounds, so the agent is told `denied`/`timed-out` in the contract's
+ * own words rather than losing the request to a transport timeout it cannot interpret. This file
+ * used to say the client's bound was 60 s; that is the MCP SDK's default, not Claude Code's.
+ * Measured 2026-09-21 (011 research.md R-161): Claude Code's `MCP_TOOL_TIMEOUT` defaults to about
+ * 28 hours of wall clock and its stdio idle bound is 30 minutes, so the two-minute closed-panel
+ * wait of FR-148 is held on the call rather than answered early. The progress notifications below
+ * are kept for a different reason than they were introduced for: they are the carrier of the
+ * message that tells the person where to click (FR-146), and they keep the idle bound alive as a
+ * side effect. Other clients are not documented here; the assumption that they tolerate two
+ * minutes is recorded in the spec and checked by first use, not by us.
  */
 export const PAIRING_TIMEOUT_MS = 45_000;
 
@@ -59,12 +72,24 @@ export const PAIRING_TIMEOUT_FLOOR_MS = 30_000;
 /**
  * How often a call waiting on the owner's answer tells its client it is still waiting (R-112).
  *
- * MCP's progress notification is the standard way for a server to say "still working", and a
- * client that honours it restarts its own request bound on each one. Without them the owner's
- * reading time is spent inside a call that says nothing, which is how a 60 s client bound expires
- * over a prompt the owner is halfway through reading (the owner's E2).
+ * MCP's progress notification is the standard way for a server to say "still working", and since
+ * 011 it is also the only channel that reaches the person at the terminal while a card waits in a
+ * side panel they have not opened. Without them the owner's reading time is spent inside a call
+ * that says nothing at all (the owner's E2).
  */
 export const PAIRING_PROGRESS_MS = 5_000;
+
+/**
+ * What a waiting call says when the owner can see the question (011 FR-151).
+ *
+ * Two fixed sentences, because a notification must carry nothing page-derived and nothing about
+ * what the agent asked for: the card itself says which site and which action, and it is in front
+ * of the owner. When it is *not* in front of them - no side panel is connected - the message is one
+ * of the contract's `ATTENTION_SENTENCES` instead, which is the sentence that says where to click.
+ */
+export const PAIRING_PROGRESS_MESSAGE = "waiting for the owner to answer the pairing prompt";
+
+export const PROMPT_PROGRESS_MESSAGE = "waiting for the owner to answer a question in the side panel";
 
 /** How the progress cadence is shortened for a test, for the reason the bounds below are. */
 export const PAIRING_PROGRESS_ENV = "HALLPASS_AGENT_PAIRING_PROGRESS_MS";
@@ -86,6 +111,18 @@ export const PAIRING_TIMEOUT_ENV = "HALLPASS_AGENT_PAIRING_TIMEOUT_MS";
 function pairingTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env[PAIRING_TIMEOUT_ENV]);
   return Number.isFinite(raw) && raw > 0 ? raw : PAIRING_TIMEOUT_MS;
+}
+
+/**
+ * The furthest a worker's tick may push the end of a pairing exchange (011 review L4).
+ *
+ * The router caps what a tick may add to a call for the reason this caps what it may add to an
+ * exchange: every wait has to end, whatever the far side keeps saying. It is the router's own
+ * number because it is the same promise about the same ticks - two minutes of closed-panel wait
+ * plus a round trip - and a call parked on this exchange is held by that cap anyway.
+ */
+export function cappedPairingBoundMs(requestedMs: number): number {
+  return Math.min(requestedMs, KEEP_ALIVE_CAP_MS);
 }
 
 /**
@@ -123,6 +160,31 @@ export const ATTACH_TIMEOUT_ENV = "HALLPASS_AGENT_ATTACH_TIMEOUT_MS";
 function attachTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env[ATTACH_TIMEOUT_ENV]);
   return Number.isFinite(raw) && raw > 0 ? raw : ATTACH_TIMEOUT_MS;
+}
+
+/**
+ * How the screenshot cache's two bounds are shortened for a test or a gate run (013/T341).
+ *
+ * The module's own constants are the product's - five minutes and eight mebibytes - and they stand
+ * whenever these are unset. They are read here, at the one place that builds the cache, rather than
+ * inside it: the cache is a pure module with an injected clock, and a module that read the
+ * environment would be a second source of truth about the same two numbers.
+ */
+export const SCREENSHOT_RETENTION_ENV = "HALLPASS_SCREENSHOT_RETENTION_MS";
+export const SCREENSHOT_BUDGET_ENV = "HALLPASS_SCREENSHOT_BUDGET_CHARS";
+
+/**
+ * The override, or nothing at all. Exported so the fall-back is a tested rule (S2c review F3).
+ *
+ * Anything that is not a positive finite number - a word, a zero, a negative, an empty variable -
+ * is `undefined` rather than itself, because each of those would otherwise reach the cache as a
+ * bound: `Number("abc")` is `NaN`, and a retention of `NaN` expires every picture on the next
+ * sweep while a retention of `0` keeps none at all. A shortened bound is a test's lever, and a
+ * mistyped one has to leave the product's own promise standing.
+ */
+export function positiveEnv(name: string, env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = Number(env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : undefined;
 }
 
 /** What the owner is told the connection came through; the panel shows it beside the agent's name. */
@@ -200,6 +262,35 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    */
   const sessionId = randomBytes(16).toString("hex");
 
+  /**
+   * The screenshots this session may still put into a page (013 US3, R-177).
+   *
+   * One cache per session object, which here means one per process - and that is the whole of
+   * FR-175's isolation: another agent's pictures are in another process's memory, and the panel has
+   * no way to ask this one for anything. It survives a worker recycling for the same reason, and
+   * dies with the session without anybody having to remember to end it.
+   */
+  const retentionOverrideMs = positiveEnv(SCREENSHOT_RETENTION_ENV);
+  const budgetOverrideChars = positiveEnv(SCREENSHOT_BUDGET_ENV);
+  const screenshots = createScreenshotCache({
+    ...(retentionOverrideMs === undefined ? {} : { retentionMs: retentionOverrideMs }),
+    ...(budgetOverrideChars === undefined ? {} : { budgetChars: budgetOverrideChars }),
+  });
+
+  /**
+   * The browser run the cache was filled under, and whether the link has dropped since it was last
+   * confirmed (013/R-184, FR-168).
+   *
+   * The worker mints one id per browser start and keeps it in `chrome.storage.session`, so it
+   * survives a worker recycling and dies with the browser; it arrives on every pairing answer.
+   * These two variables are what turn that id into the retention rule: a run that came back the
+   * same means only the port went away and the pictures stay, a run that changed means the browser
+   * restarted and they go, and a worker that names no run at all leaves S1's answer standing - the
+   * pictures go with the link - because nothing else can tell those two apart.
+   */
+  let browserRun: string | undefined;
+  let linkDroppedSincePairing = false;
+
   /** The dial loop towards the relay, started once the MCP client has said who it is. */
   let link: RelayDial | undefined;
   /** Whether a relay has acknowledged the greeting on the current link. */
@@ -220,6 +311,24 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * was given to a link that no longer exists.
    */
   let pairingPending = false;
+  /**
+   * The bound the open pairing exchange is running on, and how to lengthen it (011 FR-148).
+   *
+   * The worker is the only party that knows whether a side panel is open, so it is the only one
+   * that can say the owner needs two minutes rather than forty-five seconds. It says so in its
+   * `prompt-waiting` ticks and this adopts the larger of the two - never the smaller, because a
+   * bound the owner is already inside must not shrink under them (spec edge case).
+   */
+  let pairingBoundNowMs = pairingBoundMs;
+  let extendPairingBound: ((boundMs: number) => void) | undefined;
+  /**
+   * Whether the last tick for this session's pairing said no panel was connected (011 FR-146).
+   *
+   * It is what turns the eventual `timed-out` into an answer the agent can act on: "nobody
+   * answered" plus the sentence that says the card was in a panel nobody had opened. Cleared with
+   * every fresh exchange, so a later request that the owner *could* see is not hinted at.
+   */
+  let pairingPanelClosed = false;
 
   const router = new CallRouter({
     send: (frame) => {
@@ -255,6 +364,46 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
   }
 
   /**
+   * What the worker's pairing answer says about the retention (013/R-184, FR-168, gate finding F4).
+   *
+   * FR-168 asks for two things at once: the retention survives a worker recycling, and it ends when
+   * the browser exits. S1 read both off the link dropping, which cannot be right - a recycled
+   * service worker takes the native host down with it, so the two events look identical from here.
+   * The browser run is the fact that separates them, and it arrives on the one frame the worker
+   * sends on every (re)established link, before any call is released to read the cache.
+   *
+   * The rule, in the order the branches read: a worker that names no run leaves S1's answer
+   * standing (a drop clears), because a mixed install must not silently start keeping pictures
+   * across a browser restart; a first run recorded while the link has dropped is a run this process
+   * cannot vouch for, so it clears once and records it; a run that came back unchanged keeps
+   * everything, which is the recycling case; a run that changed clears, which is the browser having
+   * exited. Nothing here clears merely because the port went away.
+   */
+  function noteBrowserRun(reported: string | undefined): void {
+    const dropped = linkDroppedSincePairing;
+    linkDroppedSincePairing = false;
+    if (reported === undefined) {
+      if (!dropped) return;
+      screenshots.clear();
+      log("agent.screenshots.cleared", "link-dropped-no-run");
+      return;
+    }
+    if (browserRun === undefined) {
+      browserRun = reported;
+      // The session's *first* answer arrives before any picture could have been taken - a
+      // screenshot needs a paired session - so there is nothing to clear unless a drop came first.
+      if (!dropped) return;
+      screenshots.clear();
+      log("agent.screenshots.cleared", "browser-run-unknown");
+      return;
+    }
+    if (browserRun === reported) return;
+    browserRun = reported;
+    screenshots.clear();
+    log("agent.screenshots.cleared", "browser-run-changed");
+  }
+
+  /**
    * The worker forgot this session (006 FR-087): the owner pressed Stop on its card. This process
    * is still paired and still on the link, so the way on is a new session under the same id - the
    * relay keys one socket to one id - which the worker takes on a fresh greeting. The pairing
@@ -268,6 +417,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     pairingPending = false;
     pairing = undefined;
     settlePairing = undefined;
+    /**
+     * 013/R-180, site 1 of 2 as R-184 left them - the session itself ended: the worker forgot it
+     * and the way on is a new one (this is not a port that dropped). A
+     * picture the *previous* session took is not this one's to upload, and `unknown-image-id` is
+     * the honest answer for it.
+     */
+    screenshots.clear();
     log("agent.session.reopening", sessionId);
     if (!link?.greet()) {
       return false;
@@ -296,16 +452,22 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     // that call awaiting something nothing will ever resolve.
     if (!pairingPending) {
       pairingPending = true;
+      // A new exchange starts on the product's own bound and with no knowledge of the panel; the
+      // worker's ticks are what change either.
+      pairingBoundNowMs = pairingBoundMs;
+      pairingPanelClosed = false;
       pairing = new Promise<PairingOutcome>((resolve) => {
         let done = false;
+        const requestedAt = Date.now();
         const finish = (outcome: PairingOutcome): void => {
           if (done) return;
           done = true;
           pairingPending = false;
+          extendPairingBound = undefined;
           clearTimeout(timer);
           resolve(outcome);
         };
-        const timer = setTimeout(() => {
+        const expire = (): void => {
           finish("timed-out");
           /**
            * FR-059: the request is withdrawn when the bound passes with no answer.
@@ -321,8 +483,29 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           pairRequested = false;
           settlePairing = undefined;
           log("agent.pair.withdrawn");
-        }, pairingBoundMs);
+        };
+        let timer = setTimeout(expire, pairingBoundNowMs);
         (timer as { unref?: () => void }).unref?.();
+        /**
+         * 011 FR-148: the owner needs longer when the card is in a panel they have not opened.
+         *
+         * The exchange keeps its own start, so a tick arriving twenty seconds in lengthens the
+         * wait to the worker's bound *from the moment the card was raised* rather than from now -
+         * otherwise every tick would push the ending further away and the exchange would never end.
+         */
+        extendPairingBound = (requestedMs: number): void => {
+          // Never past the ceiling (review L4): a worker with a stuck card, or a frame from
+          // anywhere else, must not be able to park every call on this exchange indefinitely.
+          const boundMs = cappedPairingBoundMs(requestedMs);
+          if (done || boundMs <= pairingBoundNowMs) {
+            return;
+          }
+          pairingBoundNowMs = boundMs;
+          clearTimeout(timer);
+          timer = setTimeout(expire, Math.max(0, requestedAt + boundMs - Date.now()));
+          (timer as { unref?: () => void }).unref?.();
+          log("agent.pair.bound-extended", String(boundMs));
+        };
         settlePairing = finish;
       });
     }
@@ -336,7 +519,82 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     });
   }
 
+  /**
+   * Who a progress notification can be sent to, for the two things a call can be waiting on.
+   *
+   * A notification needs the client's own token, and MCP forbids reporting progress without one -
+   * so a client that asked for no progress is simply absent from both of these. The call map is
+   * keyed by `callId` because a tick names the call it is about; the pairing set is a set because
+   * several calls can be parked on one pairing exchange and each is entitled to hear about it.
+   */
+  const callProgress = new Map<string, ProgressTarget>();
+  const pairingProgress = new Set<ProgressTarget>();
+
+  function reportProgress(target: ProgressTarget, update: { progress: number; total: number; message: string }): void {
+    void target.extra
+      .sendNotification({ method: "notifications/progress", params: { progressToken: target.token, ...update } })
+      // A client that closed its side mid-wait is not this call's failure to report.
+      .catch(() => log("agent.progress.failed"));
+  }
+
+  /**
+   * One question is still waiting, and the person may not be able to see it (011 R-162).
+   *
+   * Two things happen with one frame, because they are two halves of the same promise. The router
+   * is told so its backstop steps out of the owner's way, and the client is told so the person at
+   * the terminal learns - in the agent's own reply - that something is waiting and, when no panel
+   * is connected, where to click. Pairing is the case with no call of its own: the tick lengthens
+   * the exchange's bound instead, and every call parked on that exchange hears about it.
+   */
+  function onPromptWaiting(frame: PromptWaitingFrame): void {
+    if (frame.sessionId !== sessionId) {
+      // The relay addresses a worker frame by its session and never broadcasts, so this is a frame
+      // that should not have arrived. Acting on it would let one session hold another's call open.
+      log("agent.waiting.other-session");
+      return;
+    }
+    router.noteWaiting(frame);
+    // The worker sends ticks only while no panel is connected (011 review M1), so the open-panel
+    // branch below is for a frame this server did not expect - an older worker, or a panel that
+    // opened between the raise and the tick. Its neutral text says the wait and nothing about
+    // clicking anything, and the server's own pairing ticker stays the progress source in that case.
+    const message = frame.panelConnected
+      ? frame.kind === "pairing"
+        ? PAIRING_PROGRESS_MESSAGE
+        : PROMPT_PROGRESS_MESSAGE
+      : ATTENTION_SENTENCES[frame.kind === "pairing" ? "pairing" : "consent"];
+    const update = { progress: frame.waitedMs, total: frame.boundMs, message };
+    if (frame.callId !== undefined) {
+      const target = callProgress.get(frame.callId);
+      if (!target) {
+        // The call was answered, or the backstop ended it, between the worker's tick and this.
+        log("agent.waiting.unmatched");
+        return;
+      }
+      reportProgress(target, update);
+      return;
+    }
+    if (frame.kind !== "pairing") {
+      // Only pairing has no call of its own. A consent tick that named none could not be attributed
+      // to a caller at all, and guessing would report one call's wait on another's token.
+      log("agent.waiting.no-call", frame.kind);
+      return;
+    }
+    if (!frame.panelConnected) {
+      pairingPanelClosed = true;
+      extendPairingBound?.(frame.boundMs);
+    }
+    for (const target of pairingProgress) {
+      reportProgress(target, update);
+    }
+  }
+
   function onRelayFrame(value: unknown): void {
+    const waiting = promptWaitingFrameSchema.safeParse(value);
+    if (waiting.success) {
+      onPromptWaiting(waiting.data);
+      return;
+    }
     const response = agentNativeResponseSchema.safeParse(value);
     if (response.success) {
       if (!router.settle(response.data)) {
@@ -359,6 +617,10 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           return;
         }
         log("agent.pair.answered", control.data.accepted ? "accepted" : "declined");
+        // Before the answer itself: the frame is also this worker's statement about which run of
+        // the browser is on the other end of the link (R-184), and whether the pictures this
+        // session is holding are still that browser's is a question about the run, not the answer.
+        noteBrowserRun(control.data.browserRunId);
         // An `unpair` while a session is open arrives as a decline, which is what makes unpairing
         // effective immediately (FR-032): every later call reads this same settled answer.
         //
@@ -372,6 +634,12 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         } else {
           pairing = Promise.resolve<PairingOutcome>("denied");
           settlePairing?.("denied");
+          /**
+           * 013/R-180, site 2 of 2 - an unpair arrives as a decline naming this agent, and takes
+           * effect immediately (FR-032). The owner withdrawing the pairing withdraws what this
+           * session is holding of their screen with it, so a later re-pair starts with nothing.
+           */
+          screenshots.clear();
         }
         settlePairing = undefined;
         pairingPending = false;
@@ -433,6 +701,16 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          */
         router.failAll("failed", "call-unconfirmed");
         resetPairing();
+        /**
+         * 013/R-184 - the port going away is *not* the end of the retention (gate finding F4).
+         *
+         * R-180 cleared here, reading a dropped link as the browser having exited. A recycled
+         * service worker kills the native host too, so that read forgot a picture FR-168 promises
+         * to keep across exactly that recycling. What is recorded instead is that the link dropped:
+         * the worker's next pairing answer names its browser run, and `noteBrowserRun` decides
+         * there whether this is the same browser coming back or a new one.
+         */
+        linkDroppedSincePairing = true;
         log("agent.relay.detached");
       },
       retryMs: dialRetryMs(),
@@ -501,10 +779,26 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         // (2026-09-19) found an agent could not see `recording` on a screenshot's answer because only
         // the image was sent; the bytes themselves stay out of the text.
         const { data: _data, mimeType: _mimeType, ...rest } = outcome.result as Record<string, unknown>;
+        /**
+         * 013 FR-167: the picture is retained here, where it is recognised, and the id rides back
+         * with it.
+         *
+         * At the same one place for the same reason the image block is built at one place: the
+         * `computer` tool's screenshot action answers the same shape, so an id minted per tool name
+         * would be an id the position-aiming agent never gets. The sentence is on the answer whether
+         * or not the agent was looking for it - a retained picture says how to use it, and one too
+         * large to keep says so on the spot rather than on the next call.
+         */
+        const issued = screenshots.issue(image.data, image.mimeType);
+        const carried = {
+          ...rest,
+          imageId: issued.imageId,
+          upload: issued.retained ? SCREENSHOT_UPLOAD_SENTENCES.retained : SCREENSHOT_UPLOAD_SENTENCES.oversize,
+        };
         return {
           content: [
             { type: "image" as const, data: image.data, mimeType: image.mimeType },
-            ...(Object.keys(rest).length === 0 ? [] : [{ type: "text" as const, text: JSON.stringify(rest) }]),
+            { type: "text" as const, text: JSON.stringify(carried) },
           ],
         };
       }
@@ -520,10 +814,14 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           // `held-by-session` without the session it names is a refusal an agent can only repeat -
           // it is what tells "wait for that agent" from "claim it". Carried whole, never
           // reformatted: it is the contract's own shape and every field in it is a bounded code.
+          // 011: `hint` rides here for the same reason, and is the one field of the three written
+          // for a person rather than for the agent - it is the sentence the agent relays when a
+          // question timed out in a side panel nobody had opened.
           text: JSON.stringify({
             outcome: outcome.outcome,
             reason: outcome.reason ?? "",
             ...(outcome.refusal === undefined ? {} : { refusal: outcome.refusal }),
+            ...(outcome.hint === undefined ? {} : { hint: outcome.hint }),
           }),
         },
       ],
@@ -581,14 +879,19 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     }) => Promise<void>;
   };
 
+  /** One client that asked to be told about progress, and the token it asked to be told on. */
+  type ProgressTarget = { extra: ToolCallExtra; token: string | number };
+
   /**
    * Waits for the owner's pairing answer, saying every five seconds that the wait is still on
    * (R-112, FR-059).
    *
-   * The notifications are the difference between a call the client gives up on and a call it holds:
-   * a client that honours progress restarts its own request bound on each one, so the owner's
-   * reading time stops counting against the caller. Where the client does not honour them the
-   * 45 s bound still leaves the owner room under a 60 s client bound, and nothing here changes.
+   * The notifications are what the owner's reading time is spent *saying* rather than in silence.
+   * R-161 measured what they are not: Claude Code's per-call bound is hours, not the 60 s this file
+   * used to assume, so they are not what keeps the call alive - they are the carrier of the message
+   * (011 FR-146), and since 011 that message is the sentence telling the person where to click when
+   * the card is in a side panel nobody has opened. A client that ignores progress loses only the
+   * message; the `timed-out` answer repeats it as a `hint`.
    */
   async function awaitPairing(extra: ToolCallExtra | undefined): Promise<PairingOutcome> {
     /**
@@ -603,26 +906,26 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return exchange;
     }
     const started = Date.now();
+    const target: ProgressTarget = { extra, token: progressToken };
+    // 011: the worker's pairing ticks are reported on this call's token too, for as long as it is
+    // the one waiting on the exchange.
+    pairingProgress.add(target);
     const ticker = setInterval(() => {
-      void extra
-        .sendNotification({
-          method: "notifications/progress",
-          params: {
-            progressToken,
-            progress: Date.now() - started,
-            total: pairingBoundMs,
-            // No page-derived text ever reaches a notification; this is the host's own sentence.
-            message: "waiting for the owner to answer the pairing prompt",
-          },
-        })
-        // A client that closed its side mid-wait is not this call's failure to report.
-        .catch(() => log("agent.pair.progress-failed"));
+      reportProgress(target, {
+        progress: Date.now() - started,
+        // Both follow what the worker's ticks said about the panel: the bound it chose, and - while
+        // nobody can see the card - the sentence that says how to open it. No page-derived text
+        // ever reaches a notification.
+        total: pairingBoundNowMs,
+        message: pairingPanelClosed ? ATTENTION_SENTENCES.pairing : PAIRING_PROGRESS_MESSAGE,
+      });
     }, pairingProgressEveryMs);
     (ticker as { unref?: () => void }).unref?.();
     try {
       return await exchange;
     } finally {
       clearInterval(ticker);
+      pairingProgress.delete(target);
     }
   }
 
@@ -686,6 +989,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         outcome: pairingOutcome === "timed-out" ? "timed-out" : "denied",
         // FR-059's own words for the two facts: nobody answered, or the owner said no.
         reason: pairingOutcome === "timed-out" ? "not-paired: no answer" : "not-paired",
+        // 011 FR-146: nobody answered *because the card was in a panel nobody had opened*, which
+        // is the one case where there is something the person can do about it.
+        ...(pairingOutcome === "timed-out" && pairingPanelClosed ? { hint: ATTENTION_SENTENCES.pairing } : {}),
       };
     }
     /**
@@ -708,20 +1014,79 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       const { paths: _dropped, ...rest } = args;
       args = { ...rest, files: resolved.files };
     }
+    /**
+     * The other tool whose arguments change on this side of the link (013 US1, FR-169, FR-172).
+     *
+     * `file_upload`'s shape exactly, with the disk swapped for this session's own memory: the agent
+     * names a picture it was handed, the browser is handed bytes, and the id does not exist on the
+     * far side. Both of FR-172's refusals are decided here, before the call crosses - so a picture
+     * the host cannot resolve never raises a consent card and never touches a page.
+     */
+    if (tool === "upload_image") {
+      const request = agentUploadImageRequestSchema.safeParse(args);
+      if (!request.success) {
+        // The MCP input schema cannot carry "exactly one of ref / coordinate", nor the file-name
+        // rule, so this is where both become a refusal - and the kind, never the arguments, is what
+        // the log gets.
+        log("agent.upload-image.refused", "invalid-arguments");
+        return { callId, outcome: "failed", reason: "invalid-arguments" };
+      }
+      const { imageId, ref, coordinate, filename, tabId: target } = request.data;
+      const held = screenshots.take(imageId);
+      if (held.kind === "unknown") {
+        log("agent.upload-image.refused", "unknown-image-id");
+        return {
+          callId,
+          outcome: "denied",
+          // Two different facts for two different next moves: this session never gave out that id,
+          // so quoting it again - or waiting - will not help.
+          reason: "unknown-image-id; take a new screenshot and quote its imageId",
+        };
+      }
+      if (held.kind === "gone") {
+        log("agent.upload-image.refused", held.why);
+        return {
+          callId,
+          outcome: "denied",
+          reason: `image-no-longer-available (${held.why}); take a new screenshot`,
+        };
+      }
+      args = {
+        tabId: target,
+        target: ref === undefined ? { coordinate } : { ref },
+        file: { name: filename, type: held.file.type, bytesBase64: held.file.bytesBase64 },
+      };
+    }
     // The tab travels as a field of the frame as well as inside the arguments, because it is what
     // the router's one-call-per-tab rule is keyed by (FR-043). A tool that names no tab concerns no
     // page and does not contend with anything.
     const tabId = typeof args.tabId === "number" ? args.tabId : undefined;
-    const response = await router.call({
-      callId,
-      // 004 S1: every call frame names its session now, so the relay can route several servers'
-      // calls through one worker. The session id is the one the server already minted at
-      // `initialize`; S1 is the slice that makes the relay and the worker act on it.
-      sessionId,
-      tool,
-      ...(tabId === undefined ? {} : { tabId }),
-      args,
-    });
+    /**
+     * 011: this call is reachable by a progress notification for as long as it is outstanding.
+     *
+     * Registered for every call, not only the ones that end up waiting on the owner, because which
+     * ones those are is decided in the worker - a click on an `ask` site raises a card, the same
+     * click on a `skip-checks` site does not - and the frame that says so names the call by id.
+     */
+    const progressToken = extra?._meta?.progressToken;
+    if (extra && progressToken !== undefined) {
+      callProgress.set(callId, { extra, token: progressToken });
+    }
+    let response: AgentNativeResponse;
+    try {
+      response = await router.call({
+        callId,
+        // 004 S1: every call frame names its session now, so the relay can route several servers'
+        // calls through one worker. The session id is the one the server already minted at
+        // `initialize`; S1 is the slice that makes the relay and the worker act on it.
+        sessionId,
+        tool,
+        ...(tabId === undefined ? {} : { tabId }),
+        args,
+      });
+    } finally {
+      callProgress.delete(callId);
+    }
     log("agent.call.completed", response.outcome);
     return response;
   }

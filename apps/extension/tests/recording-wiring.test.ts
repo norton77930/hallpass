@@ -65,7 +65,12 @@ function installChrome(): void {
     runtime: { id: "extension-1", onMessage: { addListener() {} } },
     scripting: { async executeScript() {} },
     tabs: {
-      async sendMessage() {
+      async sendMessage(_tabId: number, message: unknown) {
+        // 013: the page's own answer to a delivered picture, so a recorded `upload_image` reaches
+        // the `ok` the recorder's rule is about. Everything else here is a probe.
+        if ((message as { type?: string }).type === "content.deliver-image") {
+          return { ok: true, delivery: "drop", file: { name: "screenshot.png", size: 8 }, point: { x: 40, y: 50 } };
+        }
         return { documentEpoch: "doc-1", canonicalOrigin: "https://agent.test" };
       },
       async get(tabId: number) {
@@ -189,6 +194,87 @@ describe("008 recording wiring", () => {
       result: { recording?: unknown };
     };
     expect(answered.result.recording).toEqual({ state: "recording", frames: 4, skipped: 0, full: false });
+  });
+
+  it("adds a frame for a picture put into the page (013/T334)", async () => {
+    const { port, runtime, recorder } = await pairedRuntime();
+    await runtime.siteModes.set("https://agent.test", { mode: "skip-checks" });
+
+    port.emit({
+      callId: "call-u1",
+      sessionId: "session-r1",
+      tool: "upload_image",
+      tabId: 7,
+      args: {
+        tabId: 7,
+        target: { coordinate: { x: 40, y: 50 } },
+        file: { name: "screenshot.png", type: "image/png", bytesBase64: "iVBORw0KGgo=" },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(port.sent.some((sent) => (sent as { callId?: string }).callId === "call-u1")).toBe(true),
+    );
+
+    // FR-101 parity with `file_upload`: a recording of the session should show the picture arriving
+    // on the page, because that is something the session *did* to it.
+    expect(recorder.notes).toEqual([
+      { sessionId: "session-r1", tabId: 7, tool: "upload_image", label: "upload_image" },
+    ]);
+  });
+
+  /**
+   * 013/T337 — and one line on the session's card for it (FR-174).
+   *
+   * Asserted through this file's harness because a delivered picture needs the whole path - a
+   * paired session, a held tab, a site mode that admits the call and a page that answers - and
+   * that is exactly what `pairedRuntime` above builds. The claim itself is the runtime's, not the
+   * recorder's: an admitted `upload_image` that the page received leaves something the owner can
+   * read afterwards, which is the only trace a `skip-checks` upload leaves at all.
+   */
+  it("notes a delivered picture on the session's card (013/T337, FR-174)", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await runtime.siteModes.set("https://agent.test", { mode: "skip-checks" });
+
+    port.emit({
+      callId: "call-u2",
+      sessionId: "session-r1",
+      tool: "upload_image",
+      tabId: 7,
+      args: {
+        tabId: 7,
+        target: { coordinate: { x: 40, y: 50 } },
+        file: { name: "screenshot.png", type: "image/png", bytesBase64: "iVBORw0KGgo=" },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(port.sent.some((sent) => (sent as { callId?: string }).callId === "call-u2")).toBe(true),
+    );
+
+    const session = (await runtime.projection()).sessions.find((view) => view.sessionId === "session-r1");
+    // The pieces, never a sentence: the site the tab is on and the delivery the *page* reported.
+    expect(session?.activity).toMatchObject([
+      { kind: "upload", outcome: "delivered", site: "https://agent.test", message: "drop" },
+    ]);
+  });
+
+  it("notes nothing for an upload the page refused", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await runtime.siteModes.set("https://agent.test", { mode: "skip-checks" });
+
+    port.emit({
+      callId: "call-u3",
+      sessionId: "session-r1",
+      tool: "upload_image",
+      // No file: refused by the argument schema before anything reaches the page, so there is
+      // nothing that happened to the owner's page to tell them about.
+      args: { tabId: 7, target: { coordinate: { x: 40, y: 50 } } },
+    });
+    await vi.waitFor(() =>
+      expect(port.sent.some((sent) => (sent as { callId?: string }).callId === "call-u3")).toBe(true),
+    );
+
+    const session = (await runtime.projection()).sessions.find((view) => view.sessionId === "session-r1");
+    expect(session?.activity ?? []).toEqual([]);
   });
 
   it("adds no frame for a read", async () => {

@@ -1,0 +1,70 @@
+{
+  "id": "s12-viewport",
+  "slice": "S12",
+  "evidence": "T322 (012/US3, SC-090)",
+  "page": "https://example.com/",
+  "baselineSource": "browser-tree",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call. Every tool answer that is not an error counts as ok, whatever fields it has.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://example.com/ and remember the tabId.\nStep 2. Show me how this page looks at a phone width of 390 pixels: pick whichever of the browser's tools you judge right for viewing a page at a size, apply it, then call mcp__hallpass__screenshot on the tab. Note the `frame` field the screenshot answer carries, if any.\nStep 3. Put the page back the way it was before you finish.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, outcome = ok or the error text.\n- In sizeTool: the exact name of the tool you used in step 2 to obtain the phone width.\n- In observed: write \"viewport\" if sizeTool was mcp__hallpass__viewport and you never called mcp__hallpass__resize_window at any point; write \"resize_window\" if you called mcp__hallpass__resize_window at any point; otherwise write \"other\".\n- In frame: the screenshot answer's frame as WIDTHxHEIGHT (for example 390x844), or \"(absent)\" if the answer carried no frame.\n- In notes: the answer of the size tool verbatim, and the answer of the call that put the page back.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "sizeTool",
+      "observed",
+      "frame"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "sizeTool": {
+        "type": "string"
+      },
+      "observed": {
+        "type": "string"
+      },
+      "frame": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "viewport"
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "maxTurns": 14,
+  "maxBudgetUsd": 0.4,
+  "timeoutMs": 240000,
+  "expectedAfterFix": "SC-090: asked in plain words for a page at a phone width, a real coding-agent caller reaches for the `viewport` tool (whose description says it is for viewing a page at a size without changing the window) and not for `resize_window`; the screenshot's frame is the emulated 390-wide viewport; the agent resets before finishing, as the description asks.",
+  "note": "T322 (012/S3). The prompt does not name either size tool: the point of the scenario is the choice the descriptions steer (FR-165). Site mode skip-checks only so the screenshot and reset never wait on a card; neither `viewport` nor `screenshot` is an effect."
+}

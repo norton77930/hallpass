@@ -1,3 +1,5 @@
+import type { AgentNativeRequest } from "@hallpass/contracts";
+
 /**
  * The owner's Stop, as the calls that are watching it can read it (003/T048, FR-046, FR-048).
  *
@@ -14,12 +16,24 @@
  */
 
 /** Separates a batch's call id from the step's position. Never appears in a host-minted call id. */
-const STEP_SEPARATOR = "#";
+export const STEP_SEPARATOR = "#";
 
 /** The call id one step of a batch runs under, derived so an answer can be traced to its step. */
 export function batchStepCallId(callId: string, index: number): string {
   return `${callId}${STEP_SEPARATOR}${index}`;
 }
+
+/**
+ * One tool call as the worker's own dispatch passes it around (011 review H1).
+ *
+ * The derived step id above is a worker-internal name: the relay routes a worker frame by the call
+ * id it handed out and the host's router is holding the batch, so nothing outside this worker can
+ * address `<batch>#<i>`. A step therefore carries the batch's own id beside its step id, and the
+ * one thing that travels back to the host under an id of its own - the "still waiting" tick - uses
+ * that. It is not on the wire frame (`agentNativeRequestSchema`): the host never sends it, and a
+ * field a host *could* send would be a way to name a call it is not holding.
+ */
+export type AgentToolRequest = AgentNativeRequest & { hostCallId?: string };
 
 export type AgentStopHandle = {
   /** Whether Stop has reached this call. Read between steps and between polls, never once. */

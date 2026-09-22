@@ -249,6 +249,9 @@ describe("T095 several agent sessions in one worker", () => {
       agentId: "agent-1",
       sessionId: "session-b",
       accepted: true,
+      // 013/R-184: the browser run rides every pairing answer, and it is one browser, so both
+      // sessions name the same opaque id. Its value is nothing a test may assert.
+      browserRunId: expect.any(String),
     });
     expect((await runtime.pairing.state()).pending).toBeUndefined();
 
@@ -656,7 +659,15 @@ describe("T189 owner controls from the panel and the projection they read", () =
     port.emit(announce("session-a"));
     port.emit(pairRequest("session-a"));
     await vi.waitFor(() => expect(port.sent).toHaveLength(4));
-    expect(port.sent[3]).toEqual({ type: "pair-result", agentId: "agent-1", sessionId: "session-a", accepted: true });
+    expect(port.sent[3]).toEqual({
+      type: "pair-result",
+      agentId: "agent-1",
+      sessionId: "session-a",
+      accepted: true,
+      // The same browser run as before the session was stopped (013/R-184): stopping a session is
+      // not the browser going away, and the id lives in storage the worker did not lose.
+      browserRunId: expect.any(String),
+    });
     port.emit({ callId: "again-a", sessionId: "session-a", tool: "tabs_context", args: {} });
     await vi.waitFor(() => expect(port.sent).toHaveLength(5));
     expect(port.sent[4]).toMatchObject({ callId: "again-a", outcome: "ok" });

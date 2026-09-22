@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AGENT_TOOL_DESCRIPTORS } from "@hallpass/contracts";
+import { positiveEnv, SCREENSHOT_BUDGET_ENV, SCREENSHOT_RETENTION_ENV } from "../src/mcp-server.js";
 import { PENDING_AGENT_TOOL_NAMES } from "../src/tool-offering.js";
 import { startFakeAgentWorker, type FakeAgentWorker } from "../../../tests/harness/fake-agent-worker.js";
 import { startMcpClient, type McpHarnessClient } from "../../../tests/harness/mcp-client.js";
@@ -50,6 +51,8 @@ describe("T012 agent MCP server", () => {
       "tabs_release",
       "navigate",
       "resize_window",
+      // 012/S1: the worker gives a tab an emulated viewport and clears it again, so it is offered.
+      "viewport",
       // 005/T183: the worker answers the session's download ring, so the host may offer it.
       "downloads_context",
       "get_page_text",
@@ -74,6 +77,9 @@ describe("T012 agent MCP server", () => {
       "read_network",
       "evaluate",
       "file_upload",
+      // 013/S1: the *host* answers this one - every refusal it can take is decided before the call
+      // crosses the link - so it is offered from the slice that adds the interception.
+      "upload_image",
       // 008/S3: the worker records a session and writes the GIF, so the tool is offered.
       "gif_recorder",
       // 008/S4: the worker hears the page's dialogs and answers them, so it is offered too - and
@@ -606,6 +612,362 @@ describe("T012 agent MCP server", () => {
       expect(request.displayName).toHaveLength(128);
       expect(request.agentId).toHaveLength(128);
     });
+  });
+
+  /**
+   * 013/T329 (US1, US3) — the id on a picture, and `upload_image` answered by the host alone.
+   *
+   * Every assertion here is made from outside the process, because the claim is about what the
+   * *agent* is handed and what crosses the link: the picture's id travels on the screenshot's text
+   * block, and a refusal for an id the host cannot resolve is decided before anything reaches the
+   * browser. That is the same shape `file_upload` has - the host is the end that holds the bytes -
+   * and it is why an id never appears in a frame at all.
+   */
+  describe("the screenshot's id and the upload_image interception (013)", () => {
+    const PICTURE = "iVBORw0KGgoAAAANSUhEUg==";
+    const UPLOAD_SENTENCE = "Quote imageId to upload_image to put this picture into a page (kept 5 minutes).";
+    const TOO_LARGE_SENTENCE =
+      "Too large to retain for upload_image; a smaller screenshot (scale or region) can be.";
+
+    const SHOT = {
+      screenshot: { callId: "", outcome: "ok" as const, result: { mimeType: "image/png", data: PICTURE, cropped: false } },
+      computer: { callId: "", outcome: "ok" as const, result: { mimeType: "image/png", data: PICTURE, cropped: false } },
+      upload_image: {
+        callId: "",
+        outcome: "ok" as const,
+        result: { delivery: "input" as const, file: { name: "screenshot.png", size: 17 } },
+      },
+    };
+
+    /** The screenshot's own id, read the way an agent reads it: off the answer's text block. */
+    async function takePicture(tool: "screenshot" | "computer"): Promise<{ imageId: string; upload: string }> {
+      const args = tool === "screenshot" ? { tabId: 3 } : { tabId: 3, action: "screenshot" };
+      const shot = await client!.callTool(tool, args);
+      expect(shot.isError, shot.text).toBe(false);
+      expect(shot.images).toEqual([{ data: PICTURE, mimeType: "image/png" }]);
+      return shot.json as { imageId: string; upload: string };
+    }
+
+    it("puts an id and the upload sentence on both kinds of screenshot answer (FR-167)", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+
+      // `toolReply` recognises a picture by its shape, not by the tool's name, so the action that
+      // an agent aiming by coordinate uses has to come out with the same id as the tool does.
+      const plain = await takePicture("screenshot");
+      const computed = await takePicture("computer");
+
+      for (const answer of [plain, computed]) {
+        expect(answer.imageId).toMatch(/^img_[a-z0-9]{10}$/u);
+        expect(answer.upload).toBe(UPLOAD_SENTENCE);
+      }
+      // Two pictures, two ids: an id names one answer, never "the last screenshot".
+      expect(plain.imageId).not.toBe(computed.imageId);
+      // The bytes stay out of the text block, as they have since the S9 probe.
+      expect(JSON.stringify(plain)).not.toContain(PICTURE);
+    });
+
+    it("still gives an id to a picture it could not keep, and says why (FR-172)", async () => {
+      client = await startMcpClient({
+        // A budget no real picture would breach, so the oversize answer can be read in a unit test;
+        // the constant stands when the variable is unset (S3/T341 uses the same two overrides).
+        env: { LOCALAPPDATA: dataDir, HALLPASS_SCREENSHOT_BUDGET_CHARS: "8" },
+      });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+
+      const answer = await takePicture("screenshot");
+
+      // The id is issued either way: an agent told on the spot why this one cannot be uploaded
+      // learns the rule without spending a call to find out.
+      expect(answer.imageId).toMatch(/^img_[a-z0-9]{10}$/u);
+      expect(answer.upload).toBe(TOO_LARGE_SENTENCE);
+
+      const refused = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+      expect(refused.isError).toBe(true);
+      expect(refused.json).toEqual({
+        outcome: "denied",
+        reason: "image-no-longer-available (oversize); take a new screenshot",
+      });
+      expect(worker.requests.map((request) => request.tool)).toEqual(["screenshot"]);
+    });
+
+    it("refuses an id it never issued before anything reaches the browser", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: "img_a1b2c3d4e5", ref: "tgt-1" });
+
+      expect(result.isError).toBe(true);
+      expect((result.json as { reason: string }).reason).toMatch(/^unknown-image-id/u);
+      // The whole point of deciding it here: the page is never touched, and the consent card the
+      // worker would raise for an upload is never raised for a call that cannot happen.
+      expect(worker.requests).toEqual([]);
+      expect(client.stderr()).toContain("agent.upload-image.refused unknown-image-id");
+    });
+
+    it("refuses a picture whose five minutes have passed", async () => {
+      client = await startMcpClient({
+        env: { LOCALAPPDATA: dataDir, HALLPASS_SCREENSHOT_RETENTION_MS: "1" },
+      });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+
+      const answer = await takePicture("screenshot");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(result.isError).toBe(true);
+      expect(result.json).toEqual({
+        outcome: "denied",
+        // Not `unknown-image-id`: the host did issue this id, and "take a new screenshot" is a
+        // different next move from "you are quoting an id from somewhere else".
+        reason: "image-no-longer-available (expired); take a new screenshot",
+      });
+      expect(worker.requests.map((request) => request.tool)).toEqual(["screenshot"]);
+      expect(client.stderr()).toContain("agent.upload-image.refused expired");
+    });
+
+    it("turns a live id into bytes and a target, and carries no id across the link", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+      const answer = await takePicture("screenshot");
+
+      const byRef = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(byRef.isError, byRef.text).toBe(false);
+      expect(worker.requests[1]).toEqual({
+        callId: expect.stringMatching(/^[0-9a-f]{16}$/),
+        sessionId: expect.stringMatching(/^[0-9a-f]{32}$/),
+        tool: "upload_image",
+        tabId: 3,
+        args: {
+          tabId: 3,
+          target: { ref: "tgt-1" },
+          // Byte-identical to the picture the agent was handed, under the default name.
+          file: { name: "screenshot.png", type: "image/png", bytesBase64: PICTURE },
+        },
+      });
+      // Not merely absent from the arguments: the id is nowhere in the frame, because the worker has
+      // no id to resolve and must not be able to name one.
+      expect(JSON.stringify(worker.requests[1])).not.toContain(answer.imageId);
+
+      // The same picture again, at a point and under the agent's own name - taking does not spend it.
+      const byPoint = await client.callTool("upload_image", {
+        tabId: 3,
+        imageId: answer.imageId,
+        coordinate: { x: 120, y: 340 },
+        filename: "evidence.png",
+      });
+
+      expect(byPoint.isError, byPoint.text).toBe(false);
+      expect(worker.requests[2]?.args).toEqual({
+        tabId: 3,
+        target: { coordinate: { x: 120, y: 340 } },
+        file: { name: "evidence.png", type: "image/png", bytesBase64: PICTURE },
+      });
+    });
+
+    it("refuses a call that names both a ref and a coordinate, or neither", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+      const answer = await takePicture("screenshot");
+
+      const both = await client.callTool("upload_image", {
+        tabId: 3,
+        imageId: answer.imageId,
+        ref: "tgt-1",
+        coordinate: { x: 1, y: 2 },
+      });
+      const neither = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId });
+
+      // The MCP input schema cannot carry "exactly one of", so the host is where it becomes a
+      // refusal - and it is the last place the id still exists, so it is the right place.
+      for (const result of [both, neither]) {
+        expect(result.isError).toBe(true);
+        expect(result.json).toEqual({ outcome: "failed", reason: "invalid-arguments" });
+      }
+      expect(worker.requests.map((request) => request.tool)).toEqual(["screenshot"]);
+    });
+
+    /**
+     * R-180, as R-184 amended it — the ways a session loses its pictures, each observed through the
+     * agent's own answer. In every one of them the honest word is `unknown-image-id`: the issued set
+     * goes with the bytes, so the host is not claiming to have forgotten a picture it now knows
+     * nothing about.
+     *
+     * What R-184 changed is the *link* case. A dropped socket is no longer one of them on its own:
+     * a recycled service worker takes the relay down with it, and FR-168 promises the retention
+     * survives that. The browser run the worker names on its pairing answer is what separates the
+     * recycling from a browser that exited, and a worker that names none is answered as before.
+     */
+    const RUN_A = "run-aaaaaaaa";
+    const RUN_B = "run-bbbbbbbb";
+
+    it("keeps its pictures when the same browser run re-links after a drop (F4, FR-168)", async () => {
+      client = await startMcpClient({
+        env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_DIAL_RETRY_MS: "300" },
+      });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: SHOT,
+        browserRunId: RUN_A,
+      });
+      await worker.waitForControlFrame("pair-request");
+      const answer = await takePicture("screenshot");
+
+      // Chrome recycled the service worker, which killed the native host and this link with it; the
+      // browser is the same one, so the next worker greets under the same run.
+      await worker.close();
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: SHOT,
+        browserRunId: RUN_A,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(result.isError, result.text).toBe(false);
+      // The picture crossed the *new* link: the retention outlived the port, which is what SC-097's
+      // worker-restart half asks for.
+      expect(worker.requests.map((request) => request.tool)).toEqual(["upload_image"]);
+    });
+
+    it("forgets its pictures when a different browser run takes the link over", async () => {
+      client = await startMcpClient({
+        env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_DIAL_RETRY_MS: "300" },
+      });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: SHOT,
+        browserRunId: RUN_A,
+      });
+      await worker.waitForControlFrame("pair-request");
+      const answer = await takePicture("screenshot");
+
+      await worker.close();
+      // The browser exited and was started again: `chrome.storage.session` went with it, so the
+      // worker mints a new run - which is the fact this process reads "the browser exited" off.
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: SHOT,
+        browserRunId: RUN_B,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(result.isError).toBe(true);
+      expect((result.json as { reason: string }).reason).toMatch(/^unknown-image-id/u);
+      expect(worker.requests).toEqual([]);
+    });
+
+    it("forgets its pictures when a worker that names no browser run re-links", async () => {
+      client = await startMcpClient({
+        env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_DIAL_RETRY_MS: "300" },
+      });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+      const answer = await takePicture("screenshot");
+
+      await worker.close();
+      // An extension from before R-184 says nothing about its run, so this process cannot tell a
+      // recycling from a restart and keeps 013's original answer: the pictures go with the link.
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(result.isError).toBe(true);
+      expect((result.json as { reason: string }).reason).toMatch(/^unknown-image-id/u);
+      expect(worker.requests).toEqual([]);
+    });
+
+    it("forgets its pictures when the worker says the session ended", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: {
+          ...SHOT,
+          // The owner pressed Stop on the card: the worker forgot the session, so the host greets
+          // again as a new one (006 FR-087) and retries the call once. The retried call belongs to
+          // a session that never took this picture.
+          upload_image: ({ callId }) => ({ callId, outcome: "denied", reason: "session-ended" }),
+        },
+      });
+      await worker.waitForControlFrame("pair-request");
+      const answer = await takePicture("screenshot");
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(result.isError).toBe(true);
+      expect((result.json as { reason: string }).reason).toMatch(/^unknown-image-id/u);
+      // The first attempt crossed the link, the retry never did: the cache was cleared between them.
+      expect(worker.requests.map((request) => request.tool)).toEqual(["screenshot", "upload_image"]);
+    });
+
+    it("forgets its pictures when the owner unpairs the agent", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });
+      const request = (await worker.waitForControlFrame("pair-request")) as {
+        agentId: string;
+        sessionId: string;
+      };
+      const answer = await takePicture("screenshot");
+
+      // An unpair arrives as a decline naming this agent (FR-032); pairing again afterwards is the
+      // owner's own doing, and is what makes the picture's absence observable rather than hidden
+      // behind `not-paired`.
+      worker.send({ type: "pair-result", agentId: request.agentId, sessionId: request.sessionId, accepted: false });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const unpaired = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+      expect(unpaired.json).toEqual({ outcome: "denied", reason: "not-paired" });
+
+      worker.send({ type: "pair-result", agentId: request.agentId, sessionId: request.sessionId, accepted: true });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+
+      const result = await client.callTool("upload_image", { tabId: 3, imageId: answer.imageId, ref: "tgt-1" });
+
+      expect(result.isError).toBe(true);
+      expect((result.json as { reason: string }).reason).toMatch(/^unknown-image-id/u);
+      expect(worker.requests.map((request) => request.tool)).toEqual(["screenshot"]);
+    });
+  });
+});
+
+/**
+ * 013/T337 (S2c review F3) — the two bounds a test may shorten, and what a mistyped one does.
+ *
+ * The overrides exist so a gate run need not wait five minutes for a picture to expire (T341). The
+ * rule worth pinning is the fall-back: anything that is not a positive finite number leaves the
+ * product's own bound standing, because each of the alternatives would reach the cache as a bound
+ * of its own - `NaN` expires every picture on the next sweep, `0` keeps none at all, and a negative
+ * retention is a window that closed before the picture arrived. A pure function, so it is asserted
+ * directly rather than through a spawned process whose behaviour would be five minutes wide.
+ */
+describe("T337 the screenshot cache's environment overrides", () => {
+  it("takes a positive number and falls back to the default for anything else", () => {
+    expect(positiveEnv(SCREENSHOT_RETENTION_ENV, { [SCREENSHOT_RETENTION_ENV]: "1500" })).toBe(1_500);
+    expect(positiveEnv(SCREENSHOT_BUDGET_ENV, { [SCREENSHOT_BUDGET_ENV]: "4096" })).toBe(4_096);
+
+    for (const raw of ["abc", "0", "-5", ""]) {
+      expect(positiveEnv(SCREENSHOT_RETENTION_ENV, { [SCREENSHOT_RETENTION_ENV]: raw }), raw).toBeUndefined();
+      expect(positiveEnv(SCREENSHOT_BUDGET_ENV, { [SCREENSHOT_BUDGET_ENV]: raw }), raw).toBeUndefined();
+    }
+    // Unset is the shipping case: the module's own five minutes and eight mebibytes stand.
+    expect(positiveEnv(SCREENSHOT_RETENTION_ENV, {})).toBeUndefined();
+    expect(positiveEnv(SCREENSHOT_BUDGET_ENV, {})).toBeUndefined();
   });
 });
 

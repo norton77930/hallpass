@@ -175,6 +175,84 @@ describe("relay multiplexer", () => {
     ]);
   });
 
+  /**
+   * 011/T289 — a "still waiting" tick is about a call without being its answer.
+   *
+   * The mux routes a worker frame by the `callId` it names and forgets the call once it has, which
+   * is right for an answer and wrong for a tick: the tick names the call it concerns, the answer is
+   * still to come, and forgetting the call here would leave the owner's eventual Allow with nowhere
+   * to go - dropped as unaddressed, the agent answered by a backstop instead. So the entry survives
+   * a tick and is spent by the answer, and the frame itself is forwarded unchanged like every other.
+   */
+  it("forwards a prompt-waiting tick without spending the call it names", () => {
+    const { mux, logs } = createHarness();
+    const connection = fakeConnection();
+    const other = fakeConnection();
+    mux.fromServer(connection, hello("s-1"));
+    mux.fromServer(other, hello("s-2"));
+    mux.fromServer(connection, { callId: "c-1", sessionId: "s-1", tool: "click", args: {} });
+
+    const tick = {
+      type: "prompt-waiting",
+      sessionId: "s-1",
+      callId: "c-1",
+      kind: "ask",
+      panelConnected: false,
+      waitedMs: 5_000,
+      boundMs: 120_000,
+    };
+    mux.fromWorker(tick);
+    // Two minutes later the owner opened the panel and pressed Allow.
+    mux.fromWorker({ callId: "c-1", outcome: "ok", result: { verdict: "acted" } });
+
+    expect(connection.sent).toEqual([
+      { type: "hello-ack", relayPid: RELAY_PID },
+      tick,
+      { callId: "c-1", outcome: "ok", result: { verdict: "acted" } },
+    ]);
+    // Never to the other session, and nothing was dropped on the way.
+    expect(other.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }]);
+    expect(logs.filter((line) => line.startsWith("relay.mux.dropped"))).toEqual([]);
+    // And the call is finished once its answer has gone: the drain has nothing left to wait for.
+    expect(mux.pendingCallCount()).toBe(0);
+  });
+
+  /**
+   * 011 review H1 — a question raised inside a batch has to name the batch to be routed at all.
+   *
+   * The relay knows the call ids it handed out and nothing else. A batch step runs under an id the
+   * worker derives (`<batch>#<i>`) and never sends here, so a tick carrying that id is addressed to
+   * nobody: it is dropped, the server never hears it, and the batch is given up on by the backstop
+   * while the owner is still looking at the card. The worker says the batch's own id instead.
+   */
+  it("routes a batch step's tick by the batch call the server made", () => {
+    const { mux, logs } = createHarness();
+    const connection = fakeConnection();
+    mux.fromServer(connection, hello("s-1"));
+    mux.fromServer(connection, { callId: "c-1", sessionId: "s-1", tool: "browser_batch", args: {} });
+
+    const step = {
+      type: "prompt-waiting",
+      sessionId: "s-1",
+      callId: "c-1#0",
+      kind: "ask",
+      panelConnected: false,
+      waitedMs: 5_000,
+      boundMs: 120_000,
+    };
+    mux.fromWorker(step);
+    // The id the worker's dispatch invented reaches nobody, which is why it must not be sent.
+    expect(connection.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }]);
+    expect(logs.filter((line) => line.startsWith("relay.mux.dropped"))).toEqual(["relay.mux.dropped call"]);
+
+    const batch = { ...step, callId: "c-1" };
+    mux.fromWorker(batch);
+
+    expect(connection.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }, batch]);
+    // And the batch is still in flight: its answer has not been sent yet.
+    expect(mux.pendingCallCount()).toBe(1);
+  });
+
   it("drops a frame for an unknown callId or sessionId instead of broadcasting it", () => {
     const { mux, logs } = createHarness();
     const first = fakeConnection();

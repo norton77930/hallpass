@@ -1,6 +1,6 @@
 # Hallpass(瀏覽器代理橋接)— 操作手冊(維護者版)
 
-2026-09-19 · 適用於 009 完成後的 **Hallpass 0.3.0**(31 個 MCP 工具、side panel 三態、錄製 GIF 與對話框)。
+2026-09-22 · 適用於 013 完成後的 **Hallpass 0.5.0**(33 個 MCP 工具、side panel 三態、錄製 GIF 與對話框)。
 
 > 這份是中文的維護者手冊。英文的 README 是公開入口;開發從 <https://github.com/norton77930/hallpass> 繼續。
 這份文件寫給**要開始用 AI(Claude Code)操作自己瀏覽器的人**;開發與測試的細節在
@@ -28,8 +28,9 @@ Claude Code ──stdio──▶ mcp-server.js ──loopback──▶ relay(nat
 
 ### 1.1 前置
 - Windows 11、**Node 24**(`node -v`)、npm。
-- **Chrome**——你平常用的那個就可以(正式版 Chrome 152 驗收過;Chromium 系也行,安裝程式會在
-  `Google\Chrome` 與 `Chromium` 兩個登錄位置都註冊 native host)。
+- **Chrome**——你平常用的那個就可以(正式版 Chrome 152 驗收過)。安裝程式會在四個登錄位置註冊 native host:
+  `Google\Chrome`、`Chromium`、`Microsoft\Edge`、`BraveSoftware\Brave-Browser`;其中只有 Chrome 跑過驗收,
+  Edge 與 Brave 只註冊、未實機驗證(公開 repo issue #2)。
   想把 agent 的登入狀態和日常瀏覽分開,才用專用 profile:`chrome.exe --user-data-dir=D:\chrome-agent-profile`。
   `--remote-debugging-port=9222` 只有跑自動測試才需要,日常使用**不要**加。
 - **Claude Code** 已安裝且可登入(`claude --version`)。
@@ -209,6 +210,39 @@ agent 回報 `not-yours` / `held-by-session` 表示那個分頁不是它的(你�
   文件閒置就關。下載失敗(`download-failed`)時**畫面原封不動留著**,agent 可以再匯出一次;
   回報的檔名是**瀏覽器實際存下來的那個**(同名會變 `TC-1234 (1).gif`)。
 - `narrow` build 的 manifest 完全沒動;兩份 manifest 都有 contract test 釘住。
+
+## 9.1 012 新增的兩件事(0.4.0,工具數 31 → 32)
+
+**`viewport {tabId, action, width?, height?}`**:給某一個分頁一個**模擬的視窗大小**(320–4096 px),
+頁面就照那個寬高重新排版——手機寬、平板寬、寬螢幕都可以,**你自己的瀏覽器視窗完全不動**。它用的是
+Chrome DevTools 協定的畫面模擬,不是把視窗拉大拉小,因為視窗是你的;`resize_window` 留給「真的必須
+改視窗」的少數情況,兩個工具互不影響。**截圖**跟著改:分頁被模擬時拍的就是那個模擬視窗的整張畫面,
+`region` 以 CSS 像素裁切但**按畫面自己的密度**取像(在 DPR 1.25 或 2 的螢幕上不會再少裁 25 %),
+另外新增 `scale`(0.1–1)可以要一張比較小的圖;圖太大時會直接回「請用 scale ≤ 多少重試」。
+
+**放開分頁時一定會清掉**:模擬在 Chrome 裡**不會因為 debugger 斷線就消失**(2026-09-21 實測),
+所以擴充功能在每一條「放開」路徑上都會先主動清除——`reset`、`tabs_release`、你在側欄按「還我分頁」、
+解除配對、撤銷授權、session 結束都算。也就是說,**agent 不可能把你的分頁留在手機寬**;側欄的活動
+紀錄會寫「視窗模擬為 375x812」與清除的那一行。
+
+## 9.2 013 新增:把 agent 剛拍的截圖放進頁面(0.5.0,工具數 32 → 33)
+
+**`upload_image {tabId, imageId, ref | coordinate, filename?}`**:把**這個 session 自己拍的截圖**
+放進它正在操作的頁面——不需要先存成檔案,也不會存成檔案。每一張截圖的回覆(`screenshot` 與
+`computer` 的 screenshot 動作)現在都會帶一個 `imageId`,agent 直接引用它:給 `ref` 就放進
+`<input type="file">`(頁面自己用按鈕藏起來的那種也放得進去),給 `coordinate` 就在那個點上做一次
+拖放(dragenter → dragover → drop),同源子框架往下**一層**也找得到;檔名預設 `screenshot.png`。
+
+- **留什麼**:只有那張截圖的位元組、它的型別與拍攝時間,**只在本機 MCP server(host)的程序記憶體裡**,
+  不寫磁碟、不進瀏覽器儲存、側欄也讀不到;另一個 agent 的 session 是另一個程序,拿不到你這個的 id。
+- **留多久**:**5 分鐘**,而且一個 session 總共最多留 **8 MiB**;超過就先丟最舊的,單張太大的直接不留
+  並在回覆裡說「不能之後上傳」。過期或被丟掉的 id 會被明確拒絕(`expired` / `evicted`),agent 應該
+  重新拍一張——這些拒絕發生在 host 端,**頁面完全不會被碰到**。
+- **經過站點同意**:放檔案進頁面就是改頁面,所以跟點擊一樣受站點模式管——`ask` 會出同意卡(卡上寫
+  「把代理拍的截圖放進頁面」,不會出現 id 或檔名)、`skip-checks` 直接做、撤銷授權就拒絕;錄製中也會
+  拍一張。做成之後側欄的活動紀錄會寫「截圖已放進 {站點} 的表單」或「截圖已拖放到 {站點}」。
+- **兩種投遞**:檔案輸入框(頁面的 `input`/`change` 會跑,回覆帶頁面自己讀回來的檔名與大小)與
+  拖放(回覆帶投遞的座標)。你自己磁碟上的檔案仍然走 `file_upload` 與它的 upload roots。
 
 ## 10. 跑驗收(工程)
 

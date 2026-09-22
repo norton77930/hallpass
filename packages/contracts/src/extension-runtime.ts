@@ -239,6 +239,30 @@ function createExtensionRuntimeSchemas(bounds: ProtocolBounds = DEFAULT_BOUNDS) 
     }),
     z.strictObject({
       ...contentBase,
+      type: z.literal("content.deliver-image"),
+      /**
+       * 013/FR-170, FR-171: a picture *this session took*, for one place on the page.
+       *
+       * The same rule `content.set-files` is built around, with the disk swapped for the host's own
+       * memory: the bytes arrive already read, nothing here names a file on the machine, and the
+       * one thing that could have identified the picture - the id the agent quoted - does not exist
+       * on this side of the link. Two targets rather than one, because a page that takes a dragged
+       * file has no input to name: a handle this document minted, or a point in its viewport.
+       */
+      payload: z.strictObject({
+        target: z.union([
+          z.strictObject({ handle: z.string().min(1).max(256) }),
+          z.strictObject({ point: z.strictObject({ x: z.number().finite(), y: z.number().finite() }) }),
+        ]),
+        file: z.strictObject({
+          name: z.string().min(1).max(255),
+          type: z.string().min(1).max(128),
+          bytesBase64: z.string().min(1).max(AGENT_UPLOAD_MAX_BASE64_CHARS),
+        }),
+      }),
+    }),
+    z.strictObject({
+      ...contentBase,
       type: z.literal("content.cancel"),
       payload: z.strictObject({}),
     }),

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Upload-image fixture</title>
+<style>
+  /* 013/T340 — a page whose *reports* are the evidence.
+
+     Everything a delivery can land on is here at a coordinate this page decides, because half of
+     what the gate asserts is a point: a drop zone that moved with the font or the window would make
+     "the file arrived where it was aimed" untestable. So every element is absolutely positioned,
+     the html and body margins are zero, and the child frame has no border and no padding - the
+     numbers in the gate spec are these numbers.
+
+     The three things the page says about a delivery, and says itself rather than being asked:
+     what a file input is holding after a `change` (name, size and type, plus the word `changed` so
+     an empty input cannot be mistaken for a silent one), which drag events a zone heard and in what
+     order, and the same for a zone inside a same-origin child document, relayed to the parent. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font: 14px/1.4 system-ui, sans-serif; }
+
+  #visible { position: absolute; left: 20px; top: 20px; }
+  #pick { position: absolute; left: 20px; top: 56px; }
+  /* Not rendered at all, which is the case FR-170 is about: a page that hides its real control
+     behind a button of its own. An agent still gets a ref for it (the read marks it hidden), and a
+     picture put into it is what the page's own handler reports. */
+  #hidden { display: none; }
+
+  /* 200x120 at (20, 92): centre (120, 152). A page that takes a dragged file and says so. */
+  #zone {
+    position: absolute;
+    left: 20px;
+    top: 92px;
+    width: 200px;
+    height: 120px;
+    box-sizing: border-box;
+    border: 2px dashed #888;
+    background: #f4f4f4;
+  }
+
+  /* 320x180 at (20, 232), no border and no padding: the child's own (0, 0) is the parent's
+     (20, 232), so a point inside the child zone is that offset plus the child's own coordinates. */
+  #child {
+    position: absolute;
+    left: 20px;
+    top: 232px;
+    width: 320px;
+    height: 180px;
+    border: 0;
+    padding: 0;
+    display: block;
+  }
+
+  #reports { position: absolute; left: 20px; top: 424px; margin: 0; }
+  #reports p { margin: 0 0 2px; font: 12px/1.4 "Courier New", monospace; }
+</style>
+</head>
+<body>
+<input type="file" id="visible" name="visible" aria-label="Visible attachment">
+<button type="button" id="pick" aria-label="Choose a hidden attachment">Choose a hidden attachment</button>
+<input type="file" id="hidden" name="hidden" aria-label="Hidden attachment">
+<section id="zone" aria-label="Drop zone">Drop a picture here</section>
+<iframe id="child" title="child" src="/upload-image-child"></iframe>
+<div id="reports">
+  <p id="report-visible" data-events="">none</p>
+  <p id="report-hidden" data-events="">none</p>
+  <p id="report-zone">none</p>
+  <p id="report-child">none</p>
+  <p id="picker">no picker</p>
+</div>
+<script>
+  (function () {
+    function describe(file) {
+      return file.name + ":" + file.size + ":" + file.type;
+    }
+
+    /**
+     * One file input, reporting what it holds and that its own `change` ran.
+     *
+     * Both events are recorded, in order, in `data-events`: FR-173 asks for `input` then `change`,
+     * and a page that heard only one of them is a different fact from a page that heard both.
+     */
+    function watchInput(input, report) {
+      function note(name) {
+        report.dataset.events = report.dataset.events ? report.dataset.events + "," + name : name;
+      }
+      input.addEventListener("input", function () {
+        note("input");
+      });
+      input.addEventListener("change", function () {
+        note("change");
+        var files = Array.prototype.slice.call(input.files || []);
+        report.textContent = files.length === 0 ? "empty changed" : files.map(describe).join(",") + " changed";
+      });
+    }
+
+    watchInput(document.getElementById("visible"), document.getElementById("report-visible"));
+    watchInput(document.getElementById("hidden"), document.getElementById("report-hidden"));
+
+    // The button a person would press. It opens no chooser: a native file dialog left open wedges
+    // the browser for every journey after it, and what the gate needs from this control is only
+    // that the hidden input has a reason to exist and a name a read can find.
+    document.getElementById("pick").addEventListener("click", function () {
+      document.getElementById("picker").textContent = "picker requested";
+    });
+
+    /**
+     * A drop zone that writes down the sequence, then the file (FR-173).
+     *
+     * `dragenter` and `dragover` are cancelled because that is what a page that means to accept a
+     * file does, and the gate has one case that proves a delivery does not depend on it. The report
+     * is written on every event, so a zone that heard two of the three says so instead of saying
+     * nothing.
+     */
+    function watchZone(zone, write) {
+      var seen = [];
+      var file = "";
+      function report() {
+        write(seen.join(",") + (file ? "|" + file : ""));
+      }
+      ["dragenter", "dragover", "drop"].forEach(function (type) {
+        zone.addEventListener(type, function (event) {
+          event.preventDefault();
+          seen.push(type);
+          var dropped = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files[0] : undefined;
+          if (type === "drop" && dropped) file = describe(dropped);
+          report();
+        });
+      });
+      // A `dragleave` after the drop would mean the sequence was not the one a browser sends, so it
+      // is recorded too - and never expected.
+      zone.addEventListener("dragleave", function () {
+        seen.push("dragleave");
+        report();
+      });
+      return function reset() {
+        seen = [];
+        file = "";
+        write("none");
+      };
+    }
+
+    var zoneReport = document.getElementById("report-zone");
+    var resetZone = watchZone(document.getElementById("zone"), function (text) {
+      zoneReport.textContent = text;
+    });
+
+    // The child document is same-origin, so it could be read from here - it reports through
+    // `postMessage` instead, because that is the one channel a page has when the frame is not
+    // readable, and using it keeps the fixture honest about where the delivery happened.
+    window.addEventListener("message", function (event) {
+      var data = event.data;
+      if (!data || data.hallpass !== "upload-image-child") return;
+      document.getElementById("report-child").textContent = String(data.report);
+    });
+
+    /** Everything back to `none`, for a journey that delivers more than once. */
+    window.__hallpassReset = function () {
+      resetZone();
+      ["report-visible", "report-hidden"].forEach(function (id) {
+        var node = document.getElementById(id);
+        node.textContent = "none";
+        node.dataset.events = "";
+      });
+      document.getElementById("report-child").textContent = "none";
+      var frame = document.getElementById("child");
+      if (frame.contentWindow) frame.contentWindow.postMessage({ hallpass: "upload-image-reset" }, "*");
+      return true;
+    };
+  })();
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentNativeRequest } from "@hallpass/contracts";
+import { ATTENTION_SENTENCES, type AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import {
   createAgentEffects,
@@ -697,6 +697,30 @@ describe("T028 agent effect tools", () => {
       callId: "call-1",
       outcome: "timed-out",
       reason: "no-answer",
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 011/T293 — the one answer the agent can act on when nobody answered.
+   *
+   * `reason` does not move: an agent that has never heard of this feature reads `no-answer` and
+   * branches exactly as it did. Beside it is the sentence to relay to the person at the terminal,
+   * and it is there only because this question was raised into a side panel nobody had open - the
+   * one situation in which telling them where to click is the thing that unsticks the call.
+   */
+  it("says where to click when the question nobody answered was raised into a closed panel", async () => {
+    const prompts = createAgentPromptController({
+      closedPanelTimeoutMs: 60,
+      panelPresence: () => false,
+    });
+    const { runner, execute } = harness({ prompts });
+
+    await expect(runner.run(clickRequest())).resolves.toEqual({
+      callId: "call-1",
+      outcome: "timed-out",
+      reason: "no-answer",
+      hint: ATTENTION_SENTENCES.consent,
     });
     expect(execute).not.toHaveBeenCalled();
   });

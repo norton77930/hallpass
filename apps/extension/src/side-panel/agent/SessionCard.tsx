@@ -28,6 +28,23 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
     const state = item.message === "fullscreen" ? WINDOW_STATE_KEYS.fullscreen : WINDOW_STATE_KEYS.maximized;
     return t("agent.activity.restore").replace("{state}", () => t(state));
   }
+  if (item.kind === "viewport") {
+    // 012 FR-159: a third sentence, because this is a third kind of thing. The size is the
+    // worker's own `"WxH"` - two numbers it chose, never a word from the page - and a cleared
+    // viewport carries none, so the two outcomes are two templates rather than one with a hole.
+    return item.outcome === "set"
+      ? t("agent.activity.viewportSet").replace("{size}", () => item.message ?? "")
+      : t("agent.activity.viewportCleared");
+  }
+  if (item.kind === "upload") {
+    // 013 FR-174: a fourth sentence - a picture the session took, now in the owner's page. The
+    // worker sends the delivery the *page* reported, `input` or `drop`, and the two read as two
+    // different things: a file handed to a form, and a file dropped on the page. A site the worker
+    // could not name leaves no hole in either, the way a restore's missing state does not.
+    const sentence =
+      item.message === "input" ? t("agent.activity.uploadInput") : t("agent.activity.uploadDrop");
+    return sentence.replace("{site}", () => item.site ?? t("agent.activity.unknownSite"));
+  }
   return t("agent.activity.dialog")
     .replace("{site}", () => item.site ?? "")
     .replace("{message}", () => item.message ?? "");

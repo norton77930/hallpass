@@ -14,7 +14,7 @@ MCP client ──stdio──▶ host\mcp-server.js ──loopback──▶ relay
 
 - Windows 11。
 - **Node.js 24 以上**(`node -v` 要看到 `v24.x`;https://nodejs.org/)。`install.ps1` 會檢查,太舊會停下來。
-- **Chrome**(正式版 152 驗收過;Chromium 系也可以)。想把 agent 的登入狀態和日常瀏覽分開,才用專用
+- **Chrome**(正式版 152 驗收過;Chromium、Edge、Brave 有註冊但未實機驗證)。想把 agent 的登入狀態和日常瀏覽分開,才用專用
   profile:`chrome.exe --user-data-dir=D:\chrome-agent-profile`。
 - 一個支援 stdio MCP 的 client(第 4 節有五種常見的:CodeBuddy、Claude Code、Claude Desktop、Codex CLI、Cursor)。
 
@@ -108,7 +108,7 @@ Chrome 頂端出現「Hallpass 已開始對此瀏覽器進行偵錯」橫幅是�
 | `com.hallpass.host.json`、`native-host.cmd` | host manifest 與啟動器,`install.ps1` 寫、`uninstall.ps1` 刪 |
 | `agent-id` | 這台機器的 agent 身分,配對只問一次靠它 |
 
-登錄:`HKCU\Software\Google\Chrome\NativeMessagingHosts\com.hallpass.host` 與 `...\Chromium\...`(只在目前使用者)。
+登錄:`HKCU\Software\<瀏覽器>\NativeMessagingHosts\com.hallpass.host`,四個瀏覽器根都寫:`Google\Chrome`、`Chromium`、`Microsoft\Edge`、`BraveSoftware\Brave-Browser`(只在目前使用者;Chrome 驗收過,Edge、Brave 只註冊、未實機驗證,見公開 repo issue #2)。
 
 ## 7. 移除
 

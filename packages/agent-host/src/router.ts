@@ -4,6 +4,7 @@ import {
   type AgentNativeRequest,
   type AgentNativeResponse,
   type AgentToolOutcome,
+  type PromptWaitingFrame,
 } from "@hallpass/contracts";
 
 /**
@@ -38,6 +39,27 @@ import {
  */
 export const CALL_TIMEOUT_MS = AGENT_CALL_TIMEOUT_MS;
 
+/**
+ * The round trip the backstop leaves after the prompt's own bound (011 R-162).
+ *
+ * A `prompt-waiting` tick says how much of the question's bound is left; the backstop is re-armed
+ * to that plus this. The slack is what makes the *worker's* `timed-out` the answer the agent gets:
+ * the worker ends the question at its own bound and sends a real outcome, and this backstop only
+ * fires if that answer never arrives at all, which is the transport failure it exists for.
+ */
+export const KEEP_ALIVE_SLACK_MS = 10_000;
+
+/**
+ * The longest a call may be held by ticks, from the moment it was admitted (011 R-162).
+ *
+ * The two-minute closed-panel bound plus the slack, and not a millisecond more. Without a cap the
+ * ticks would be a way for the far side to hold a call open indefinitely - a worker with a stuck
+ * prompt, or a frame from anywhere else - and the one promise this router makes is that every call
+ * ends. A call whose own arguments asked for longer (`wait`, `browser_batch`) keeps what it asked
+ * for: the cap bounds what a tick may *add*, never what the agent already stated.
+ */
+export const KEEP_ALIVE_CAP_MS = 130_000;
+
 export type CallRouterOptions = {
   /** Writes one frame towards the worker. Throwing here fails the call rather than the router. */
   send: (frame: AgentNativeRequest) => void;
@@ -58,6 +80,12 @@ type PendingCall = {
   tabKey: number | undefined;
   settle: (response: AgentNativeResponse) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** When the call was admitted, so a tick's cap is measured from one fixed point (011). */
+  admittedAt: number;
+  /** When the backstop is armed to fire, so a tick can only ever move it later. */
+  deadline: number;
+  /** Fires the backstop; held so a tick can re-arm the same ending rather than describe it twice. */
+  expire: () => void;
 };
 
 export class CallRouter {
@@ -96,19 +124,29 @@ export class CallRouter {
       return Promise.resolve({ callId, outcome: "busy", reason: "tab-in-flight" });
     }
     return new Promise<AgentNativeResponse>((resolve) => {
-      // The bound comes from the call's own validated arguments, so a wait or a batch is given the
-      // time it stated and every other call keeps the flat backstop.
-      const timer = setTimeout(() => {
+      const expire = (): void => {
         const pending = this.#take(callId);
         if (!pending) return;
         pending.settle({ callId, outcome: "timed-out", reason: "no-answer" });
         // Only after the answer: the agent is never left waiting on the worker acknowledging this.
         this.#onTimeout?.(callId);
-      }, this.#timeoutMs ?? agentCallBoundMs(request.tool, request.args));
+      };
+      // The bound comes from the call's own validated arguments, so a wait or a batch is given the
+      // time it stated and every other call keeps the flat backstop.
+      const boundMs = this.#timeoutMs ?? agentCallBoundMs(request.tool, request.args);
+      const admittedAt = Date.now();
+      const timer = setTimeout(expire, boundMs);
       // `unref` where the runtime has it: a pending call must not be the reason the process refuses
       // to exit after its streams have closed.
       (timer as { unref?: () => void }).unref?.();
-      this.#pending.set(callId, { tabKey: tabId, settle: resolve, timer });
+      this.#pending.set(callId, {
+        tabKey: tabId,
+        settle: resolve,
+        timer,
+        admittedAt,
+        deadline: admittedAt + boundMs,
+        expire,
+      });
       if (tabId !== undefined) {
         this.#busyTabs.add(tabId);
       }
@@ -133,6 +171,43 @@ export class CallRouter {
     }
     pending.settle(response);
     return true;
+  }
+
+  /**
+   * The worker says one of its questions is still waiting, so the backstop steps back (011 FR-150).
+   *
+   * The only reason a call is held longer than the flat backstop is that a person is being asked
+   * something they cannot yet see - a pairing or consent card in a side panel Chrome will not let
+   * the worker open (R-160). The worker fixed that question's bound when it raised it and repeats
+   * the arithmetic in every tick, so nothing is remembered here between ticks: the new ending is
+   * "the rest of the bound, plus a round trip", and the worker's own `timed-out` is expected to
+   * arrive inside that slack.
+   *
+   * Three things it deliberately does not do. It never extends a call this router is not holding -
+   * a tick naming another session's call, or the pairing tick that names no call at all, is not
+   * this router's business. It never moves an ending *earlier*, so a `browser_batch` that asked for
+   * five minutes and raised a prompt on the way does not end at two. And it never postpones past
+   * `KEEP_ALIVE_CAP_MS` from the moment the call was admitted, so a stuck prompt cannot hold a call
+   * open for as long as it likes.
+   */
+  noteWaiting(frame: PromptWaitingFrame): void {
+    if (frame.callId === undefined) {
+      return;
+    }
+    const pending = this.#pending.get(frame.callId);
+    if (!pending) {
+      return;
+    }
+    const now = Date.now();
+    const asked = now + Math.max(0, frame.boundMs - frame.waitedMs) + KEEP_ALIVE_SLACK_MS;
+    const deadline = Math.max(pending.deadline, Math.min(asked, pending.admittedAt + KEEP_ALIVE_CAP_MS));
+    if (deadline <= pending.deadline) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    pending.deadline = deadline;
+    pending.timer = setTimeout(pending.expire, deadline - now);
+    (pending.timer as { unref?: () => void }).unref?.();
   }
 
   /** Ends every call in flight with one outcome; used when the link closes. */

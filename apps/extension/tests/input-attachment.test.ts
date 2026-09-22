@@ -360,6 +360,107 @@ describe("T118 the input attachment", () => {
     expect(attachments.attached()).toEqual([]);
   });
 
+  /**
+   * 012/T306 — the fourth holder, and the two moments the emulated viewport needs (FR-159, R-167).
+   *
+   * The holder is `"viewport"` and it enables nothing, exactly as `"recording"` does: what it buys
+   * is a lifetime, not a capability - the attachment lasts as long as the emulation, so that there
+   * is something to send the clear over. The two hooks are here rather than in the runtime because
+   * `acquire` is the only place a debugger is attached at all and `release` / `releaseAll` are the
+   * only places one is detached; anything that has to happen either side of those cannot be
+   * remembered by five call sites.
+   */
+  it("enables no domain for the viewport holder, and tells its listener after the attachment's own setup", async () => {
+    const { attachments } = harness();
+    const attachedSeen: Array<{ tabId: number; after: string[] }> = [];
+    attachments.onAttached((tabId) => {
+      attachedSeen.push({ tabId, after: methodsOn(fake.fakeDebugger, tabId) });
+    });
+
+    expect(await attachments.acquire(AGENT_TAB, "viewport")).toEqual({ ok: true });
+
+    expect(methodsOn(fake.fakeDebugger, AGENT_TAB)).toEqual(["Target.setAutoAttach", "Page.enable"]);
+    expect(attachments.state(AGENT_TAB)?.diagnosticsEnabled).toBe(false);
+    // Told after the per-attachment setup, because what the listener does is send a command of its
+    // own: a re-applied viewport override before `Page.enable` would race the attachment's own.
+    expect(attachedSeen).toEqual([{ tabId: AGENT_TAB, after: ["Target.setAutoAttach", "Page.enable"] }]);
+
+    // Once per attachment, not once per holder: a second acquire joins the attachment that exists.
+    await attachments.acquire(AGENT_TAB, "input");
+    expect(attachedSeen).toHaveLength(1);
+  });
+
+  it("runs the before-release listener before the detach, on both release paths", async () => {
+    const { attachments } = harness();
+    const order: string[] = [];
+    attachments.onBeforeRelease(async (tabId) => {
+      // What the viewport module does here: one command over the attachment that is about to go.
+      await attachments.send(tabId, "Emulation.clearDeviceMetricsOverride");
+      order.push(`before-release:${tabId}`);
+    });
+    await attachments.acquire(AGENT_TAB, "viewport");
+    await attachments.acquire(OTHER_TAB, "viewport");
+
+    await attachments.release(AGENT_TAB);
+    await attachments.releaseAll();
+
+    expect(order).toEqual([`before-release:${AGENT_TAB}`, `before-release:${OTHER_TAB}`]);
+    // R-166: a detach does not clear an emulation, so the clear has to be the last thing sent -
+    // and it is sent while the tab is still attached, which is the only time `send` will carry it.
+    expect(methodsOn(fake.fakeDebugger, AGENT_TAB).at(-1)).toBe("Emulation.clearDeviceMetricsOverride");
+    expect(methodsOn(fake.fakeDebugger, OTHER_TAB).at(-1)).toBe("Emulation.clearDeviceMetricsOverride");
+    expect(fake.fakeDebugger.detached).toEqual([AGENT_TAB, OTHER_TAB]);
+  });
+
+  /**
+   * 012/S2c F1 - the eviction hole the review found.
+   *
+   * MV3 evicts the worker while Chrome keeps both the emulation and the debugger. The map this
+   * module is built on is exactly what the eviction takes away, so a release on a tab it no longer
+   * lists used to return before the hook ran - and the owner got their tab back still laid out for
+   * the agent. The hook is about the *tab*, not about this worker's bookkeeping.
+   */
+  it("runs the before-release listener for a tab this worker no longer lists, and clears it", async () => {
+    const { attachments } = harness();
+    const seen: number[] = [];
+    attachments.onBeforeRelease(async (tabId) => {
+      seen.push(tabId);
+      // What the viewport module does on this path (`decideClear` -> attach-clear-detach): the
+      // attachment is made for the clear and given straight back.
+      const acquired = await attachments.acquire(tabId, "viewport");
+      if (!acquired.ok) return;
+      await attachments.send(tabId, "Emulation.clearDeviceMetricsOverride");
+      await attachments.drop(tabId, "viewport");
+    });
+
+    // Never acquired in this worker's lifetime: the map is empty, as it is after an eviction.
+    await attachments.release(AGENT_TAB);
+
+    expect(seen).toEqual([AGENT_TAB]);
+    expect(methodsOn(fake.fakeDebugger, AGENT_TAB)).toContain("Emulation.clearDeviceMetricsOverride");
+    // The clear's own attachment is the only one there was, and it was given back by the hook.
+    expect(fake.fakeDebugger.detached).toEqual([AGENT_TAB]);
+  });
+
+  it("detaches anyway when a hook fails, and never throws its failure at the caller", async () => {
+    const reported: string[] = [];
+    const attachments = createInputAttachments({ reportDiagnostic: (code) => reported.push(code) });
+    attachments.onAttached(() => {
+      throw new Error("the record could not be read");
+    });
+    attachments.onBeforeRelease(() => {
+      throw new Error("the clear went nowhere");
+    });
+
+    expect(await attachments.acquire(AGENT_TAB, "viewport")).toEqual({ ok: true });
+    await attachments.release(AGENT_TAB);
+
+    // The tab is going back to the owner either way: a hook that threw must not keep a debugger
+    // attached to it, and the failure is a diagnostic rather than an answer the agent reads.
+    expect(fake.fakeDebugger.detached).toEqual([AGENT_TAB]);
+    expect(reported).toContain("agent.attachment.hook-failed");
+  });
+
   it("sends its protocol commands over the shared attachment, and only while it holds one", async () => {
     const { attachments } = harness();
     await attachments.acquire(AGENT_TAB, "input");

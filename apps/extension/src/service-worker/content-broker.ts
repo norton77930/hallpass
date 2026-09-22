@@ -936,6 +936,97 @@ export async function setFilesOnTab(input: {
 }
 
 /**
+ * 013/FR-170: hands one place on the page a picture this session took.
+ *
+ * `setFilesOnTab`'s port with one more target. The binding checks are the same and for the same
+ * reason - the picture is meant for one document, and a tab that has moved on is a different page
+ * that would receive it - and the reply is bounded here as well as in the page, because what comes
+ * back from a delivery is still page-derived.
+ *
+ * A point goes to the top frame, which does its own one-level descent into a frame it can read
+ * (`deliverImage`); a handle goes to the frame that minted it, which the caller has already found.
+ */
+export async function deliverImageOnTab(input: {
+  taskId: string;
+  operationId: string;
+  runtimeEpochId: string;
+  nonce: string;
+  expectedTabId: number;
+  canonicalOrigin: string;
+  documentEpoch: string;
+  target: { handle: string } | { point: { x: number; y: number } };
+  file: { name: string; type: string; bytesBase64: string };
+  tab?: number;
+  /** Which document of the tab the delivery is for; absent is the top frame, as everywhere else. */
+  frameId?: number;
+  /** The origin required of *this frame's* answer, mirroring `setFilesOnTab`'s `frameOrigin`. */
+  frameOrigin?: string;
+}): Promise<
+  | {
+      ok: true;
+      delivery: "input" | "drop";
+      file: { name: string; size: number };
+      point?: { x: number; y: number };
+    }
+  | { ok: false; reason: string }
+> {
+  const page = await resolveBoundPage(input.tab);
+  if (page.tabId !== input.expectedTabId || page.canonicalOrigin !== input.canonicalOrigin) {
+    return { ok: false, reason: "stale-context" };
+  }
+  const expectedOrigin = input.frameOrigin ?? input.canonicalOrigin;
+  const binding = await ensureContentRuntime(page, input);
+  if (binding.documentEpoch !== input.documentEpoch || binding.canonicalOrigin !== expectedOrigin) {
+    return { ok: false, reason: "stale-context" };
+  }
+  const raw = (await withDeadline(
+    chrome.tabs.sendMessage(
+      page.tabId,
+      contentFrame({
+        type: "content.deliver-image",
+        taskId: input.taskId,
+        operationId: input.operationId,
+        runtimeEpochId: input.runtimeEpochId,
+        nonce: input.nonce,
+        tabId: page.tabId,
+        documentEpoch: binding.documentEpoch,
+        payload: { target: input.target, file: input.file },
+      }),
+      { frameId: input.frameId ?? 0 },
+    ),
+    "content.execution",
+  )) as Record<string, unknown> | undefined;
+  if (raw?.ok !== true) {
+    const reason = typeof raw?.reason === "string" ? raw.reason : "invalid-result";
+    // The one refusal that carries a fact with it: how big the page's own viewport is, so the agent
+    // can name a point that is on it. Said in the reason rather than beside it, because that is what
+    // the tool answers with.
+    const frame = raw?.frame as { width?: unknown; height?: unknown } | undefined;
+    if (reason === "point-outside-viewport" && typeof frame?.width === "number" && typeof frame.height === "number") {
+      return {
+        ok: false,
+        reason: `point-outside-viewport (frame ${Math.max(0, Math.floor(frame.width))}x${Math.max(0, Math.floor(frame.height))})`,
+      };
+    }
+    return { ok: false, reason };
+  }
+  const delivery = raw.delivery === "input" || raw.delivery === "drop" ? raw.delivery : undefined;
+  const file = raw.file as { name?: unknown; size?: unknown } | undefined;
+  if (delivery === undefined || typeof file?.name !== "string" || typeof file.size !== "number") {
+    return { ok: false, reason: "invalid-result" };
+  }
+  const point = raw.point as { x?: unknown; y?: unknown } | undefined;
+  return {
+    ok: true,
+    delivery,
+    file: { name: boundedString(file.name, 255) ?? "", size: Math.max(0, Math.floor(file.size)) },
+    ...(typeof point?.x === "number" && Number.isFinite(point.x) && typeof point.y === "number" && Number.isFinite(point.y)
+      ? { point: { x: point.x, y: point.y } }
+      : {}),
+  };
+}
+
+/**
  * 002/FR-027: asks the leased tab's bound document whether one wait condition holds. One round trip
  * per poll, with the same binding checks a resolution makes before it speaks to the page at all.
  * The reply is admitted by the contract that declares it, so an answer carrying anything besides the

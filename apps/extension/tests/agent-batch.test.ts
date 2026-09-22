@@ -3,7 +3,7 @@ import type { AgentNativeRequest, AgentNativeResponse } from "@hallpass/contract
 import { createAgentBatch } from "../src/service-worker/agent-tools/batch.js";
 import { createStatedPlans } from "../src/service-worker/agent-tools/plans.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
-import { createAgentStopSignals } from "../src/service-worker/agent-tools/stop.js";
+import { createAgentStopSignals, type AgentToolRequest } from "../src/service-worker/agent-tools/stop.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 
 /**
@@ -347,6 +347,26 @@ describe("T047 browser_batch", () => {
     expect(response.outcome).toBe("ok");
     expect(seen.map((step) => step.tool)).toEqual(["click", "navigate", "click"]);
     expect(asked).toBe(1);
+  });
+
+  /**
+   * 011 review H1 — a step says which call the host is actually holding.
+   *
+   * The step's own id is minted here and known nowhere else, so a step that raises a consent card
+   * would say it was still waiting under an id the relay cannot route and the router is not
+   * holding: the tick is dropped and the batch is given up on with the card on screen. The batch is
+   * the only place that knows both ids, so it is the place that says so.
+   */
+  it("hands each step the batch's own call id beside the step's", async () => {
+    const { runner, dispatch } = harness();
+
+    await runner.run(batchRequest([CLICK, TYPE]));
+
+    for (const [index, call] of dispatch.mock.calls.entries()) {
+      const step = call[0] as AgentToolRequest;
+      expect(step.callId, `step ${index} runs under its own id`).toBe(`call-1#${index}`);
+      expect(step.hostCallId, `step ${index} names the call the host holds`).toBe("call-1");
+    }
   });
 
   it("refuses to run a batch inside a batch even if one reaches it", async () => {

@@ -1,4 +1,11 @@
-import type { AgentEffectPrompt, AgentPlanPrompt, SiteMode } from "@hallpass/contracts";
+import {
+  ATTENTION_SENTENCES,
+  type AgentEffectPrompt,
+  type AgentNativeResponse,
+  type AgentPlanPrompt,
+  type SiteMode,
+} from "@hallpass/contracts";
+import { STEP_SEPARATOR } from "./stop.js";
 
 /**
  * The questions the owner is asked about something that has not happened yet (FR-042, FR-043,
@@ -27,6 +34,44 @@ import type { AgentEffectPrompt, AgentPlanPrompt, SiteMode } from "@hallpass/con
 export const ASK_TIMEOUT_MS = 25_000;
 
 /**
+ * How long a question waits when no side panel is connected to see it (011 FR-147, R-163).
+ *
+ * The 25 s above is how long a *visible* card may stand unanswered: the person is looking at their
+ * browser and not answering, which is close enough to a decision. A card raised into a panel nobody
+ * has opened is a different situation - Chrome will not let the worker open one (R-160), so the
+ * only route left is the agent's own reply telling the person to click the toolbar icon, and two
+ * minutes is how long that takes to read, reach for the mouse and answer.
+ *
+ * It is chosen once, when the question is raised, and never revised: a panel that opens mid-wait
+ * shows the card (the projection does that already) and must not shorten a bound the person is
+ * already inside - re-arming on presence would expire the question exactly as somebody walked up.
+ */
+export const CLOSED_PANEL_TIMEOUT_MS = 120_000;
+
+/**
+ * How often a pending question says it is still pending (011 R-162, contracts/prompt-waiting.md).
+ *
+ * Five seconds because the tick is two things at once: the keep-alive the host's per-call backstop
+ * reads, and the carrier of the sentence the person is told - and the first of them has to arrive
+ * inside SC-078's five seconds to be the first thing the person sees.
+ */
+export const PROMPT_WAITING_TICK_MS = 5_000;
+
+/**
+ * One "still waiting", as the worker knows it. The runtime turns it into the link frame; nothing
+ * here knows there is a host at the other end.
+ */
+export type PromptWaitingTick = {
+  /** Which question is waiting; `pairing` belongs to the pairing controller, not to this one. */
+  kind: "ask" | "plan" | "dialog" | "diagnostics";
+  callId: string;
+  sessionId: string;
+  waitedMs: number;
+  boundMs: number;
+  panelConnected: boolean;
+};
+
+/**
  * The two ways the owner can end a question from the session card without answering it (006
  * FR-087). Neither is "nobody answered": Stop ends the session and the parked call with it, and
  * Release takes back the tab the question was about, so the call is refused as any unheld tab is.
@@ -37,7 +82,12 @@ export type PromptEnding = "timed-out" | "stopped" | "released";
 export type PromptDecision =
   | { decision: "allow"; rememberMode?: SiteMode }
   | { decision: "deny" }
-  | { decision: "timed-out" }
+  /**
+   * `hint` is where the person has to click, present only when this question expired with no panel
+   * connected to show it (011 FR-146). The caller puts it on the `timed-out` answer beside the
+   * stable `reason`; an agent that cannot read it still branches on the reason exactly as before.
+   */
+  | { decision: "timed-out"; hint?: string }
   | { decision: "stopped" }
   | { decision: "released" };
 
@@ -45,7 +95,8 @@ export type PlanDecision =
   /** The owner's yes, minus any steps they struck out (US5, the batch approval). */
   | { decision: "approve"; planId: string; excluded: readonly number[] }
   | { decision: "deny" }
-  | { decision: "timed-out" }
+  /** The same hint a single question's expiry carries (011 FR-146). */
+  | { decision: "timed-out"; hint?: string }
   | { decision: "stopped" }
   | { decision: "released" };
 
@@ -59,10 +110,28 @@ export type PlanDecision =
 export type PromptOwner = {
   callId: string;
   /**
+   * The same call as the host and the relay know it, when the two differ (011 review H1).
+   *
+   * They differ for one thing: a batch step runs under `<batch>#<i>`, an id minted in this worker
+   * and known nowhere else. The question is still *about* the step - that is the id a `stop` for
+   * the step names and the id the answer is traced to - but the tick that says it is still waiting
+   * has to travel, so it names this one. Absent means the two are the same, which is every call
+   * that is not a batch step.
+   */
+  hostCallId?: string | undefined;
+  /**
    * The session that raised it (004/T103a). A question outlives the call frame that asked it, so
    * when a session ends this is the only thing that tells its own questions from another agent's.
    */
   sessionId: string;
+  /**
+   * Which of the person's questions this is, for the "still waiting" ticks alone (011 R-162).
+   *
+   * It is not `AgentEffectPrompt["kind"]`, which is the panel's wording for two page-raised cards:
+   * this one is the contract's `AgentPromptKind` minus `pairing`, and the tools that have a word of
+   * their own - the dialog gate, the diagnostics grant - pass it. Everything else is an `ask`.
+   */
+  promptKind?: PromptWaitingTick["kind"];
 };
 
 export type AgentPromptController = {
@@ -115,8 +184,65 @@ export type AgentPromptDeps = {
   onChange?: () => void;
   reportDiagnostic?: (code: string) => void;
   timeoutMs?: number;
+  /**
+   * The closed-panel bound, overridden the way `timeoutMs` overrides the open-panel one.
+   *
+   * Two levers rather than one because the two bounds are the thing under test: a suite that wants
+   * a question to expire in milliseconds still has to be able to say *which* bound it expired on.
+   */
+  closedPanelTimeoutMs?: number;
   now?: () => number;
+  /**
+   * Whether any side panel document is connected, asked once per question (011 R-163).
+   *
+   * Absent means "assume somebody is looking": the controllers composed by a test that says nothing
+   * about panels keep the 25 s they have always had, and only the runtime - which knows about the
+   * panel port - hands in the real answer.
+   */
+  panelPresence?: () => boolean;
+  /**
+   * Called every `PROMPT_WAITING_TICK_MS` while a question stands that nobody could see when it was
+   * raised, for as long as it stands (011 FR-148, review M1).
+   *
+   * The controller does not know what becomes of it. The runtime turns it into the link frame the
+   * host reads as a keep-alive and the server reads as the person's progress message - both of
+   * which are about the closed-panel case alone: a card in front of the person waits the ordinary
+   * bound, which the host already allows for.
+   */
+  onWaiting?: (tick: PromptWaitingTick) => void;
 };
+
+/**
+ * The answer to a call whose question nobody answered in time (FR-043), with the person's
+ * instruction attached when there is one (011 FR-146).
+ *
+ * One helper for all six tools that can raise a question, because the shape is the claim: the
+ * agent branches on `reason`, which does not move, and `hint` is beside it only when the question
+ * was raised into a panel nobody had open - a card that was never seen is a different fact from a
+ * card that was ignored, and only the first has an instruction that would have helped.
+ */
+export function noAnswerResponse(callId: string, decision: { hint?: string }): AgentNativeResponse {
+  return {
+    callId,
+    outcome: "timed-out",
+    reason: "no-answer",
+    ...(decision.hint === undefined ? {} : { hint: decision.hint }),
+  };
+}
+
+/**
+ * Whether a pending question belongs to the call the host has given up on (011 review H1).
+ *
+ * The same rule `stop.ts` applies to the calls it is watching, for the same reason: a batch step's
+ * question was raised under `<batch>#<i>`, and the host only ever names the batch. Without this the
+ * card would stand after its call was abandoned, and the owner's Allow would run an effect for a
+ * call nobody is waiting on. The separator is what makes it a step - a call id that merely begins
+ * with another's is a different call (B5).
+ */
+function isCall(pendingCallId: string | undefined, callId: string): boolean {
+  if (pendingCallId === undefined) return false;
+  return pendingCallId === callId || pendingCallId.startsWith(`${callId}${STEP_SEPARATOR}`);
+}
 
 function newId(prefix: string): string {
   const bytes = new Uint8Array(8);
@@ -140,13 +266,21 @@ type PendingPrompt = {
   effect?: AgentEffectPrompt;
   plan?: AgentPlanPrompt;
   timer: ReturnType<typeof setTimeout>;
-  end: (ending: PromptEnding) => void;
+  /** The five-second "still waiting", running for exactly as long as this question does (011). */
+  ticker?: ReturnType<typeof setInterval>;
+  /**
+   * Where the person has to click, if this question was raised into a panel nobody had open. It is
+   * fixed at raise like the bound is, and it travels only with the question's *own* expiry.
+   */
+  hint?: string;
+  end: (ending: PromptEnding, hint?: string) => void;
   settleEffect?: (decision: PromptDecision) => void;
   settlePlan?: (decision: PlanDecision) => void;
 };
 
 export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPromptController {
   const timeoutMs = deps.timeoutMs ?? ASK_TIMEOUT_MS;
+  const closedPanelTimeoutMs = deps.closedPanelTimeoutMs ?? CLOSED_PANEL_TIMEOUT_MS;
   /** When a question was raised (006 FR-085): the panel orders the questions it holds by this. */
   const raisedAt = (): string => new Date(deps.now?.() ?? Date.now()).toISOString();
   let pending: PendingPrompt | undefined;
@@ -162,21 +296,62 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     if (!active) return undefined;
     pending = undefined;
     clearTimeout(active.timer);
+    // Whatever ended the question ends the ticks with it: a tick for a question that is over would
+    // re-arm the host's backstop on a call that has already been answered (011 R-162).
+    if (active.ticker !== undefined) clearInterval(active.ticker);
     settled.add(active.id);
     return active;
   }
 
-  function end(ending: PromptEnding): void {
+  /**
+   * Ends the pending question. `expired` separates the question's own deadline from every other
+   * route out - a stop, a link that went away, the owner's Stop - because only the first of them is
+   * "nobody answered in time", which is the only ending the person's instruction belongs on (011).
+   */
+  function end(ending: PromptEnding, expired = false): void {
     const active = close();
     if (!active) return;
-    active.end(ending);
+    active.end(ending, expired ? active.hint : undefined);
     deps.onChange?.();
   }
 
-  function arm(build: (timer: ReturnType<typeof setTimeout>) => PendingPrompt): void {
-    const timer = setTimeout(() => end("timed-out"), timeoutMs);
+  function arm(
+    raise: { kind: PromptWaitingTick["kind"]; callId: string; sessionId: string },
+    build: (timer: ReturnType<typeof setTimeout>) => PendingPrompt,
+  ): void {
+    // Read once, here (R-163): the bound and the hint are facts about the moment the question was
+    // raised, and a panel that opens while it stands changes neither.
+    const panelConnected = deps.panelPresence?.() ?? true;
+    const boundMs = panelConnected ? timeoutMs : closedPanelTimeoutMs;
+    const timer = setTimeout(() => end("timed-out", true), boundMs);
     (timer as { unref?: () => void }).unref?.();
-    pending = build(timer);
+    const active = build(timer);
+    if (!panelConnected) active.hint = ATTENTION_SENTENCES.consent;
+    /**
+     * Only while nobody can see the card (011 FR-148, review M1).
+     *
+     * The tick is the notice for a person who has not opened the panel their question is in, and
+     * the keep-alive for the longer bound that situation buys. With a panel open neither applies:
+     * the card is in front of them, the bound is the ordinary one the host already allows for, and
+     * a tick would be one more frame on the link saying what the card on screen says.
+     */
+    if (deps.onWaiting && !panelConnected) {
+      let waitedMs = 0;
+      const ticker = setInterval(() => {
+        waitedMs += PROMPT_WAITING_TICK_MS;
+        deps.onWaiting?.({
+          kind: raise.kind,
+          callId: raise.callId,
+          sessionId: raise.sessionId,
+          waitedMs,
+          boundMs,
+          panelConnected,
+        });
+      }, PROMPT_WAITING_TICK_MS);
+      (ticker as { unref?: () => void }).unref?.();
+      active.ticker = ticker;
+    }
+    pending = active;
     deps.onChange?.();
   }
 
@@ -190,7 +365,7 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     currentSession() {
       return pending?.sessionId;
     },
-    ask({ callId, sessionId, ...prompt }) {
+    ask({ callId, hostCallId, sessionId, promptKind, ...prompt }) {
       if (pending) {
         // Not queued: a queued prompt would be shown to the owner about a call that may already
         // have timed out at the host, and the agent would have no way to tell.
@@ -198,30 +373,34 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
       }
       const full: AgentEffectPrompt = { promptId: newId("prompt"), ...prompt, raisedAt: raisedAt() };
       return new Promise<PromptDecision>((resolve) => {
-        arm((timer) => ({
+        arm({ kind: promptKind ?? "ask", callId: hostCallId ?? callId, sessionId }, (timer) => ({
           id: full.promptId,
           callId,
           sessionId,
           effect: full,
           timer,
-          end: (ending) => resolve({ decision: ending }),
+          end: (ending, hint) =>
+            resolve(ending === "timed-out" && hint !== undefined ? { decision: ending, hint } : { decision: ending }),
           settleEffect: resolve,
         }));
       });
     },
-    askPlan({ callId, sessionId, ...plan }) {
+    askPlan({ callId, hostCallId, sessionId, promptKind: _promptKind, ...plan }) {
       if (pending) {
         return Promise.resolve({ decision: "busy" as const });
       }
       const full: AgentPlanPrompt = { planId: newId("plan"), ...plan, raisedAt: raisedAt() };
       return new Promise<PlanDecision>((resolve) => {
-        arm((timer) => ({
+        // A whole batch is its own kind, whatever the caller said: the person is answering one
+        // question about a sequence, and the sentence they are told is the consent one either way.
+        arm({ kind: "plan", callId: hostCallId ?? callId, sessionId }, (timer) => ({
           id: full.planId,
           callId,
           sessionId,
           plan: full,
           timer,
-          end: (ending) => resolve({ decision: ending }),
+          end: (ending, hint) =>
+            resolve(ending === "timed-out" && hint !== undefined ? { decision: ending, hint } : { decision: ending }),
           settlePlan: resolve,
         }));
       });
@@ -253,7 +432,7 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
       return true;
     },
     cancel(callId) {
-      if (callId !== undefined && pending?.callId !== callId) return;
+      if (callId !== undefined && !isCall(pending?.callId, callId)) return;
       end("timed-out");
     },
     cancelSession(sessionId, ending = "timed-out") {
