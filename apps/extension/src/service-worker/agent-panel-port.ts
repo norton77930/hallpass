@@ -176,6 +176,12 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
               command.payload.promptId,
               command.payload.allow,
               command.payload.rememberMode,
+              // 014 FR-188: the transition card's "always", which remembers one ordered pair of
+              // origins rather than a mode for one site. The controller hands it to whoever asked.
+              command.payload.rememberTransition,
+              // 014 FR-193: the directory card's "from now on", which the *host* writes - the one
+              // route by which its list of upload directories ever grows.
+              command.payload.rememberDirectory,
             );
             return;
           case "ui.agent.plan-decide":
@@ -208,6 +214,39 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
           case "ui.agent.session-release":
             void input.runtime.releaseSessionTabs(command.payload.sessionId);
             return;
+          /**
+           * 014 FR-178: end the calls, keep the session.
+           *
+           * Nothing is awaited and nothing is answered back to the panel: there is nothing to wait
+           * for - no lease, no attachment, no recording is touched - and the panel re-reads the
+           * picture as it does after every other command. A press that found nothing running is
+           * not an error the worker reports; the card says so in the moment.
+           */
+          /**
+           * 014 FR-192: forget one remembered move; the next such move asks again.
+           *
+           * The row goes as soon as the store says so, because the store is the whole of it - no
+           * host, no file, nothing that can be out of reach (which is what makes this different
+           * from the upload directories the same list will show).
+           */
+          case "ui.agent.transition-clear":
+            void input.runtime.clearTransition(command.payload.from, command.payload.to);
+            return;
+          case "ui.agent.upload-root-clear":
+            // The press goes to the host; the row goes when the host answers (014 FR-192). Nothing
+            // is awaited here - the panel is told by the next projection, as it is for everything.
+            void input.runtime.clearUploadRoot(command.payload.root);
+            return;
+          case "ui.agent.session-interrupt": {
+            const ended = input.runtime.interruptSession(command.payload.sessionId);
+            // What the press found, where a gate and a puzzled owner's log can read it: "nothing
+            // was running" is a fact about the moment, not a failure, and the two cases read
+            // differently when a session is misbehaving.
+            input.reportDiagnostic?.(
+              ended.interrupted === 0 ? "agent.interrupt.nothing-in-flight" : "agent.interrupt.ended",
+            );
+            return;
+          }
           default:
             input.reportDiagnostic?.("agent.panel.command-rejected");
         }

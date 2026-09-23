@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,7 +61,9 @@ test.describe("agent file upload", () => {
     const configPath = join(dataDir, "config.json");
     const savedConfig = existsSync(configPath) ? await readFile(configPath, "utf8") : undefined;
     const allowedRoot = await mkdtemp(join(tmpdir(), "hallpass-upload-root-"));
-    const privateDir = await mkdtemp(join(tmpdir(), "hallpass-upload-private-"));
+    // Resolved, because 014's card shows the owner the path `realpath` answers, and Windows hands
+    // out a temp directory under the short 8.3 spelling of the profile.
+    const privateDir = await realpath(await mkdtemp(join(tmpdir(), "hallpass-upload-private-")));
     const allowedFile = join(allowedRoot, "receipt.txt");
     const privateFile = join(privateDir, "diary.txt");
     await writeFile(allowedFile, "agent-upload-fixture", "utf8");
@@ -123,19 +125,37 @@ test.describe("agent file upload", () => {
       // The page itself says so, through its own `change` handler: the answer above is evidence
       // rather than an echo of the request.
       await expect(form.locator("#uploaded")).toHaveText("receipt.txt:20");
+      /**
+       * 014/T385 — and the owner has a trace of it afterwards (FR-196).
+       *
+       * On a `skip-checks` site nothing was asked, so this line on the session's card is the only
+       * thing that says one of their files went into a page. 013 wrote it for `upload_image`
+       * alone; the parity is decided here.
+       */
+      await panel.waitForText(ui("agent.activity.uploadInput").replace("{site}", SITE), 15_000);
 
-      // ================= a file outside every root =================
-      const refused = await live.callTool("file_upload", {
+      /**
+       * ============ a file outside every root ============
+       *
+       * 014 FR-193: no longer the end of the call. The host holds it and asks the owner, and the
+       * refusal is theirs - which is what this half now pins, because the claim it was written for
+       * is unchanged: nothing is read, and nothing crosses the link, until somebody says so. The
+       * whole of the question (once / from now on / the list itself) is `agent-upload-directory`.
+       */
+      const asked = live.callTool("file_upload", {
         tabId,
         ref: input?.ref,
         paths: [privateFile],
       });
+      await panel.waitForText(privateFile);
+      await panel.clickButton(ui("agent.uploadDecline"));
+      const refused = await asked;
 
       expect(refused.isError).toBe(true);
-      expect(refused.json).toMatchObject({ outcome: "denied", reason: "upload-not-allowed" });
+      expect(refused.json).toMatchObject({ outcome: "denied", reason: "upload-declined" });
       // The host refused it before opening anything, and said which rule did - a code, never the
       // path, because a log that named the owner's files would be the disclosure this rule prevents.
-      expect(live.stderr()).toContain("agent.upload.refused outside-roots");
+      expect(live.stderr()).toContain("agent.upload.refused declined");
       expect(live.stderr()).not.toContain("diary");
       // And the page still holds only the file that was allowed.
       await expect(form.locator("#uploaded")).toHaveText("receipt.txt:20");

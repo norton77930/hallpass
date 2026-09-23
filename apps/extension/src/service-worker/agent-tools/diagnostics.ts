@@ -439,6 +439,8 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
           callId,
           // Which call the host knows it as, when this read is a batch step (011 review H1).
           hostCallId: request.hostCallId,
+          // And whether the owner ended the call while the runner was still getting here (FR-179).
+          stopped: request.stopped,
           sessionId: request.sessionId,
           site,
           tool,
@@ -449,6 +451,8 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
         if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
         if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
         if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
+        // 014 FR-179: the step ended, the session did not.
+        if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
         if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
         // 006 FR-087: the tab may have been handed back while the question stood (see effects.ts).
         const held = await deps.tabOwnership(request.sessionId, tabId);

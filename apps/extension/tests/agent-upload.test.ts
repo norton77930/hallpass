@@ -122,6 +122,19 @@ describe("T062 agent file upload", () => {
     expect(setFiles).not.toHaveBeenCalled();
   });
 
+  /** 014/T356 (FR-179): interrupted is the stopped outcome with its own word, never a decline. */
+  it("answers owner-interrupted when the owner interrupts the session while its prompt stands", async () => {
+    const { runner, setFiles, prompts, siteModes } = harness();
+
+    const pending = runner.run(request());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.cancelSession("session-h1", "interrupted");
+
+    await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "stopped", reason: "owner-interrupted" });
+    expect(setFiles).not.toHaveBeenCalled();
+    await expect(siteModes.list()).resolves.toEqual([]);
+  });
+
   it("addresses frame 0 with the binding's own identity on a page with no other frames (004/T160 regression)", async () => {
     const { runner, setFiles, siteModes } = harness();
     await siteModes.set(SITE, { mode: "skip-checks" });
@@ -290,6 +303,30 @@ describe("T334 agent upload_image", () => {
 
     expect(response).toEqual({ callId: "call-2", outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } });
     expect(deliverImage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * 014/T385 — and the card is told which of the two deliveries it is about (FR-196).
+   *
+   * The panel cannot work it out for itself: the projection carries the tool and a summary written
+   * in English by this worker, and the sentence the owner reads is looked up from a key. So the
+   * fact the owner needs - a file field, or a point on the page - has to travel as a fact. It is
+   * read off the arguments rather than off an answer, because the question comes first.
+   */
+  it("tells the card how the picture would be delivered (014/T385, FR-196)", async () => {
+    for (const [target, delivery] of [
+      [{ ref: "t_zone" }, "input"],
+      [{ coordinate: { x: 40, y: 50 } }, "drop"],
+    ] as const) {
+      const { runner, prompts } = imageHarness();
+
+      const pending = runner.run(imageRequest(target));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ tool: "upload_image", delivery });
+
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await pending;
+    }
   });
 
   it("asks the owner first on an `ask` site with a summary that names the target, and delivers nothing if they refuse", async () => {

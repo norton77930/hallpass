@@ -309,6 +309,42 @@ describe("T138 acting by position", () => {
     expect(approvals).toEqual([{ tabId: AGENT_TAB, tool: "computer" }]);
   });
 
+  /**
+   * 014/T369 review F5 — every action that reaches the page marks its delivery (FR-181).
+   *
+   * The interrupt's two sentences are chosen by this marker alone: "nothing was delivered" or "it
+   * may have taken effect and was not verified". `computer` wrote none, so an interrupt landing
+   * after a click had gone out at a coordinate told the agent nothing had happened. The same two
+   * actions that record no approval record no delivery either, and for the same reason: one
+   * photographs the tab and the other sleeps.
+   */
+  it("marks a delivery for every action that reaches the page, and for neither that does not", async () => {
+    const delivered: string[] = [];
+    const { runner, siteModes } = harness({ onDelivered: (callId: string) => delivered.push(callId) });
+    await allowed(siteModes);
+
+    expect((await runner.run(request({ action: "screenshot" }))).outcome).toBe("ok");
+    expect((await runner.run(request({ action: "wait", ms: 1 }))).outcome).toBe("ok");
+    expect(delivered, "an action that touches nothing said it had delivered something").toEqual([]);
+
+    for (const args of [
+      { action: "left_click", x: 400, y: 300 },
+      { action: "right_click", x: 400, y: 300 },
+      { action: "double_click", x: 400, y: 300 },
+      { action: "triple_click", x: 400, y: 300 },
+      { action: "scroll", x: 400, y: 300, amount: 3 },
+      { action: "type", text: "hello" },
+      { action: "key", key: "Enter" },
+    ]) {
+      delivered.length = 0;
+
+      const response = await runner.run(request(args));
+
+      expect(response.outcome, String(args.action)).toBe("ok");
+      expect(delivered, String(args.action)).toEqual(["call-computer"]);
+    }
+  });
+
   it("waits the length the call stated, and 003's bound is the ceiling", async () => {
     const slept: number[] = [];
     const { runner, siteModes } = harness({ sleep: async (ms: number) => void slept.push(ms) });

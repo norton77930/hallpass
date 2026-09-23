@@ -45,6 +45,9 @@ function harness(overrides: Partial<AgentDialogsDeps> & { mode?: SiteMode } = {}
     prompts: {
       async ask(prompt) {
         asked.push(prompt as unknown as Record<string, unknown>);
+        // The real controller's own first rule (014 FR-179): a question raised for a call the
+        // owner has already ended is answered `interrupted`, and no card goes up.
+        if ((prompt as { stopped?: () => boolean }).stopped?.()) return { decision: "interrupted" } as never;
         return decision as never;
       },
     },
@@ -369,6 +372,32 @@ describe("T225 dialogs", () => {
       args: { tabId: 99, action: "accept" },
     } as AgentNativeRequest);
     expect(response).toMatchObject({ outcome: "denied", reason: "not-yours" });
+  });
+
+  /**
+   * 014/T369 follow-up — the dialog card was the one ask site that did not read the handle.
+   *
+   * Every other question a runner raises is refused at the raise when the owner has already ended
+   * the call (FR-179). This one was not, so an interrupt landing between the dispatch point and
+   * this ask left a card standing whose Allow would press OK on a page for a call the agent had
+   * been told was over - and pressing OK on a confirm is the least undoable thing this extension
+   * does. The step's own id travels too, so the "still waiting" tick names a call the host holds.
+   */
+  it("answers interrupted, and presses nothing, when the owner ended the call before the question", async () => {
+    const h = harness();
+    h.dialogs.onDebuggerEvent(AGENT_TAB, "Page.javascriptDialogOpening", opening({}));
+
+    const response = await h.dialogs.run({
+      ...dialogCall({ action: "accept" }),
+      hostCallId: "call-host",
+      stopped: () => true,
+    });
+
+    expect(response).toMatchObject({ outcome: "stopped", reason: "owner-interrupted" });
+    expect(h.asked[0]).toMatchObject({ hostCallId: "call-host" });
+    expect(handled(h.sent), "the page was answered for a call that was already over").toBeUndefined();
+    // The dialog is left exactly as it is: the session and the page are untouched by an interrupt.
+    expect(h.dialogs.current(AGENT_TAB)).toBeDefined();
   });
 
   it("carries the agent's answer in the prompt the owner is shown, and remembers a mode from it", async () => {

@@ -209,6 +209,9 @@ export const messages = {
   "agent.session.waiting": "Waiting for you",
   "agent.session.stop": "Stop",
   "agent.session.release": "Give my tabs back",
+  // 014 FR-178: the second control, and the line for a press that found nothing running.
+  "agent.session.interrupt": "Interrupt",
+  "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",
   // 008 FR-109: the one line a card says about a recording - while it runs, when it is full, and
   // after the file is written.
   "agent.session.recording": "Recording · {frames} frames",
@@ -220,9 +223,12 @@ export const messages = {
   "agent.activity.restore": "Window put back to {state}",
   "agent.activity.viewportSet": "Viewport set to {size}",
   "agent.activity.viewportCleared": "Viewport cleared",
-  "agent.activity.uploadInput": "Screenshot put into a form on {site}",
+  // 014 FR-196: `file_upload` earns this line too, and what it puts into the form is one of the
+  // owner's own files - so the sentence says "file" rather than claiming every upload is a picture.
+  "agent.activity.uploadInput": "File put into a form on {site}",
   "agent.activity.uploadDrop": "Screenshot dropped on {site}",
   "agent.activity.unknownSite": "the page",
+  "agent.activity.interrupt": "You interrupted a step",
   "agent.activity.windowMaximized": "maximized",
   "agent.activity.windowFullscreen": "full screen",
   "agent.activity.accepted": "OK pressed",
@@ -237,6 +243,7 @@ export const messages = {
   "agent.activity.set": "Set",
   "agent.activity.cleared": "Cleared",
   "agent.activity.delivered": "Delivered",
+  "agent.activity.interrupted": "Interrupted by you",
   // 008 FR-114, FR-115: the two questions a dialog raises, in the words of what is decided.
   "agent.prompt.dialogAccept": "{agent} wants to press OK on the page's dialog",
   "agent.prompt.dialogQuote": "“{text}”",
@@ -251,6 +258,38 @@ export const messages = {
   "agent.allowOnce": "Allow once",
   "agent.allowAlways": "Always allow on this site",
   "agent.refuse": "Refuse",
+  // 014 FR-187, FR-188: the move, and the three answers to it. Both origins in the question,
+  // because where the tab *was* is half of what the owner is deciding about.
+  "agent.prompt.transition": "This session's tab moved from {from} to {to}. May it keep working there?",
+  "agent.transitionContinue": "Continue this session",
+  "agent.transitionAlways": "Always allow this move",
+  "agent.transitionDecline": "Decline",
+  // 014 FR-191: the moves the owner has allowed for good, listed beside the sites.
+  "agent.transitionsTitle": "Remembered decisions",
+  "agent.transitionRow": "{from} → {to}",
+  "agent.transitionLastUsed": "Last used {at}",
+  "agent.transitionNeverUsed": "Not used since it was allowed",
+  "agent.transitionRevoke": "Forget {from} → {to}",
+  // 014 FR-193: the directory question. The paths themselves are the card's body and are shown as
+  // they are; this is the sentence around them, and the three answers to it.
+  "agent.prompt.uploadDirectory":
+    "{agent} wants to upload files from outside the directories you allowed. They are on your computer:",
+  // S3 review F7: what 以後都可以 would remember, under the path it belongs to.
+  "agent.uploadFileDirectory": "in {directory}",
+  "agent.uploadOnce": "These files this time",
+  "agent.uploadAlways": "These directories from now on",
+  "agent.uploadDecline": "Refuse",
+  // 014 FR-191, FR-192: the directories the host may read uploads from, listed beside the sites.
+  "agent.uploadRootsTitle": "Allowed upload directories",
+  "agent.uploadRootsPath": "Kept by the local host in {path}",
+  "agent.uploadRootsMalformed": "The host could not read that file as a list, so no directory is allowed.",
+  // S3 review F4: and what it did with the file it could not read, which is the owner's own document.
+  "agent.uploadRootsPreserved":
+    "The host could not read that file as a list, so it kept the old one as {name} and started a new one.",
+  // S3 review F2: a "from now on" the host could not write down. The agent is told in its own word.
+  "agent.uploadRootNotRecorded": "The host could not record {root}, so it is not allowed yet.",
+  "agent.uploadRootRevoke": "Forget {root}",
+  "agent.uploadRootPending": "Waiting for the local host…",
   "extName.agent": "Hallpass",
   "extActionTitle.agent": "Open Hallpass",
   "extCommandDescription.agent": "Open the Hallpass side panel",
@@ -284,6 +323,9 @@ export const messages = {
   "agent.summary.evaluate": "Run a script on the page",
   "agent.summary.file_upload": "Put one of your files into a form on the page",
   "agent.summary.upload_image": "Put a screenshot the agent took into the page",
+  // 014 FR-196: which of the two things that tool does is being asked about, when the question says.
+  "agent.summary.upload_image.input": "Put a screenshot the agent took into a file field on the page",
+  "agent.summary.upload_image.drop": "Drop a screenshot the agent took onto a place on the page",
   "agent.summary.downloads_context": "List the files it downloaded",
   "agent.summary.gif_recorder": "Record this session as a GIF",
   "agent.summary.dialog": "Answer a dialog the page opened",

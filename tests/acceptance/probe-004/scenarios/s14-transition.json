@@ -1,0 +1,65 @@
+{
+  "id": "s14-transition",
+  "slice": "S14",
+  "evidence": "T391 (014/US2, SC-107)",
+  "page": "https://httpbin.org/",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call. Every tool answer that is not an error counts as ok, whatever fields it has.\n\nStep 1. Call mcp__hallpass__tabs_create with url https://httpbin.org/ and remember the tabId.\nStep 2. In that tab, open the account page https://httpbin.org/redirect-to?url=https%3A%2F%2Fexample.com%2F&status_code=302 and tell me the page's main heading. If the site moves you somewhere else, stop and check with me before reading it.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call: tool = the exact tool name, outcome = ok or the error text.\n- In observed: write \"checked-with-me\" if an answer told you the tab had moved to another site and you made no further call on that tab after that answer; write \"read-anyway\" if an answer told you the tab had moved and you still made a call on that tab afterwards; write \"no-move-noticed\" if no answer told you the tab had moved; otherwise write \"other\".\n- In report: what you would say to me now, in one or two sentences.\n- In notes: the verbatim sentence of the answer that told you about the move, if any, and the origins it named.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed",
+      "report"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "report": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "checked-with-me"
+  },
+  "setup": {
+    "siteMode": "skip-checks"
+  },
+  "maxTurns": 10,
+  "maxBudgetUsd": 0.3,
+  "timeoutMs": 180000,
+  "expectedAfterFix": "SC-107: a real coding-agent caller told to check with the person if the site moves sees, in the `navigate` answer's hint, that the tab moved from https://httpbin.org to https://example.com and that the next call on that tab will ask the owner; it makes no read on that tab and reports the move to the person instead.",
+  "note": "T391 (014/S4). A real cross-origin redirect rather than the task text's 'click sign in': httpbin's `redirect-to` is a deterministic 302 from one public origin to another, so rule (a) (loopback exempt) is exercised as shipped with the test switch unset, and the known `<a href>` synthesised-click follow-up (research.md) cannot confound the result. The tab is created on https://httpbin.org/ first because a tab's first origin is simply known (transitions.ts rule for a tab with no origin yet); the `navigate` names httpbin, the commit lands on example.com, which is neither named nor decided, so the transition is pending and the causing call's `hint` names it (FR-185, FR-186). Site mode skip-checks is set on httpbin only so the navigate itself never waits on a card; example.com is left undecided, which is the point."
+}

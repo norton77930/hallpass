@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -28,7 +28,9 @@ let root: string;
 let outside: string;
 
 beforeEach(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), "hallpass-upload-"));
+  // Resolved: an `outside-roots` refusal now names the files it is about, as `realpath` answers
+  // them, and Windows hands out a temp directory under the short 8.3 spelling of the profile.
+  dataDir = await realpath(await mkdtemp(join(tmpdir(), "hallpass-upload-")));
   root = join(dataDir, "allowed");
   outside = join(dataDir, "private");
   await mkdir(root, { recursive: true });
@@ -47,7 +49,13 @@ describe("T062 upload policy", () => {
     expect(config.uploadRoots).toEqual([]);
 
     const refused = await resolveUploadFiles([join(root, "receipt.txt")], config);
-    expect(refused).toEqual({ ok: false, reason: "upload-not-allowed", code: "outside-roots" });
+    expect(refused).toEqual({
+      ok: false,
+      reason: "upload-not-allowed",
+      code: "outside-roots",
+      // 014/T372: which files, so the owner can be asked about them (FR-193).
+      outside: [{ path: join(root, "receipt.txt"), directory: root }],
+    });
   });
 
   it("writes a config the owner can read and edit, with an empty list and a note", async () => {
@@ -68,14 +76,25 @@ describe("T062 upload policy", () => {
     });
 
     const refused = await resolveUploadFiles([join(outside, "diary.txt")], config);
-    expect(refused).toEqual({ ok: false, reason: "upload-not-allowed", code: "outside-roots" });
+    expect(refused).toEqual({
+      ok: false,
+      reason: "upload-not-allowed",
+      code: "outside-roots",
+      outside: [{ path: join(outside, "diary.txt"), directory: outside }],
+    });
   });
 
   it("refuses a path that walks out of a root, and a symlink that points out of one", async () => {
     const config = { uploadRoots: [root] };
 
     const walked = await resolveUploadFiles([join(root, "..", "private", "diary.txt")], config);
-    expect(walked).toEqual({ ok: false, reason: "upload-not-allowed", code: "outside-roots" });
+    expect(walked).toEqual({
+      ok: false,
+      reason: "upload-not-allowed",
+      code: "outside-roots",
+      // The path as it resolves, which is the one the owner would be shown and the host would read.
+      outside: [{ path: join(outside, "diary.txt"), directory: outside }],
+    });
 
     let linked = true;
     try {
@@ -91,6 +110,7 @@ describe("T062 upload policy", () => {
         ok: false,
         reason: "upload-not-allowed",
         code: "outside-roots",
+        outside: [{ path: join(outside, "diary.txt"), directory: outside }],
       });
     }
   });
@@ -161,6 +181,7 @@ describe("T062 upload policy", () => {
       ok: false,
       reason: "upload-not-allowed",
       code: "outside-roots",
+      outside: [{ path: join(sibling, "sneaky.txt"), directory: sibling }],
     });
 
     const shouted = await resolveUploadFiles([join(root, "receipt.txt")], {
@@ -182,6 +203,85 @@ describe("T062 upload policy", () => {
       ok: false,
       reason: "upload-not-allowed",
       code: "not-a-file",
+    });
+  });
+
+  /**
+   * 014/T372 — the refusal the owner can be asked about (FR-193).
+   *
+   * `outside-roots` is the one code that is not final: it is the question "may this come from
+   * here?", and the only party that can answer it is the owner. So it is surfaced to the caller
+   * with the files it is about - resolved, with the directory the host would add - and every other
+   * code stays exactly the flat refusal it was, because none of them has an answer.
+   */
+  it("names the files that are outside every root, with the directories a yes would add", async () => {
+    const second = join(dataDir, "elsewhere");
+    await mkdir(second, { recursive: true });
+    await writeFile(join(second, "photo.png"), "x");
+
+    const refused = await resolveUploadFiles(
+      [join(outside, "diary.txt"), join(second, "photo.png")],
+      { uploadRoots: [root] },
+    );
+
+    expect(refused).toEqual({
+      ok: false,
+      reason: "upload-not-allowed",
+      code: "outside-roots",
+      // Both of them, in the order they were named: one card, two paths (SC-105).
+      outside: [
+        { path: join(outside, "diary.txt"), directory: outside },
+        { path: join(second, "photo.png"), directory: second },
+      ],
+    });
+  });
+
+  it("admits exactly the files named for this one call, and nothing else beside them", async () => {
+    const config = { uploadRoots: [root] };
+    const named = join(outside, "diary.txt");
+    await writeFile(join(outside, "secret.txt"), "also not for the agent");
+
+    const allowed = await resolveUploadFiles([named], config, { allowFiles: [named] });
+    expect(allowed).toEqual({
+      ok: true,
+      files: [
+        {
+          name: "diary.txt",
+          type: "text/plain",
+          bytesBase64: Buffer.from("not for the agent").toString("base64"),
+        },
+      ],
+    });
+
+    // Its neighbour in the same directory is not admitted by the same answer: "once" is about the
+    // files the owner read on the card, not about where they happened to live.
+    const neighbour = await resolveUploadFiles([join(outside, "secret.txt")], config, {
+      allowFiles: [named],
+    });
+    expect(neighbour).toEqual({
+      ok: false,
+      reason: "upload-not-allowed",
+      code: "outside-roots",
+      outside: [{ path: join(outside, "secret.txt"), directory: outside }],
+    });
+  });
+
+  it("compares the allowed files by real path, and still applies every other rule to them", async () => {
+    const config = { uploadRoots: [] as string[] };
+    const named = join(outside, "diary.txt");
+
+    // The same file, spelled as a walk: one file, and the walk is what the agent may well send.
+    const walked = join(outside, "..", "private", "diary.txt");
+    expect((await resolveUploadFiles([walked], config, { allowFiles: [named] })).ok).toBe(true);
+
+    // Allowed by the owner is not allowed past the size bound: their answer was about where the
+    // file is, and the bound is about what the frame can carry.
+    const big = join(outside, "big.bin");
+    await writeFile(big, Buffer.alloc(600_000));
+    expect(await resolveUploadFiles([big], config, { allowFiles: [big] })).toEqual({
+      ok: false,
+      reason: "upload-not-allowed",
+      code: "too-large",
     });
   });
 });

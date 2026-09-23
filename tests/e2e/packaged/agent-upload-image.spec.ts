@@ -340,12 +340,16 @@ test.describe("agent upload image", () => {
        * reviewed tables, so no English written for an agent reaches a card), which is why the
        * delivery-specific wording `summariseToolCall` produces is pinned in the unit test instead.
        * No id, no file name, nothing of the page's own words either way.
+       *
+       * 014/T385: the sentence is now the one for *this* delivery (FR-196). The card is told which
+       * of the two acts it is about - a file field here, a point on the page for a drop - because
+       * they are not the same decision, and the panel still picks reviewed copy from a key.
        */
       expect(await panel.panelText()).toContain(
         ui("agent.consentBody")
           .replace("{agent}", "Claude Code")
           .replace("{site}", SITE)
-          .replace("{action}", ui("agent.summary.upload_image")),
+          .replace("{action}", ui("agent.summary.upload_image.input")),
       );
       await panel.clickButton(ui("agent.refuse"));
       const refused = await refusedCall;

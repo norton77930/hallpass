@@ -44,10 +44,10 @@ export async function probeMcpConfig(repositoryRoot: string): Promise<string> {
 /**
  * The owner's slice order from plan.md; `--all` means exactly this list, in this order.
  * S7 and S8 are feature 005's two scenarios (form values, downloads), run through this same harness;
- * S9 (recording) and S10 (dialogs) are feature 008's (T237). S12 (viewport) is feature 012's; S13 (upload_image) is feature 013's (T346)
+ * S9 (recording) and S10 (dialogs) are feature 008's (T237). S12 (viewport) is feature 012's; S13 (upload_image) is feature 013's (T346); S14 (site transition) is feature 014's (T391)
  * (T322); 011 had no probe scenario of its own, so there is no S11.
  */
-export const PROBE_SLICES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S12", "S13"] as const;
+export const PROBE_SLICES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S12", "S13", "S14"] as const;
 
 export type ProbeSlice = (typeof PROBE_SLICES)[number];
 
@@ -56,11 +56,11 @@ export type ParsedArgs =
   | { ok: false; message: string };
 
 const USAGE = [
-  "usage: npm run probe:004 -- --slice <S0..S10, S12, S13>",
+  "usage: npm run probe:004 -- --slice <S0..S10, S12..S14>",
   "       npm run probe:004 -- --all",
   "",
-  "  --slice <S0..S10, S12, S13>  run one slice's acceptance scenarios",
-  "  --all             run every slice, in the order S0..S10, S12, S13",
+  "  --slice <S0..S10, S12..S14>  run one slice's acceptance scenarios",
+  "  --all             run every slice, in the order S0..S10, S12..S14",
   "",
   "  --slice and --all are mutually exclusive; exactly one is required.",
 ].join("\n");
@@ -92,7 +92,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     if (argument === "--slice") {
       const value = argv[index + 1];
       if (value === undefined || value.startsWith("--")) {
-        return { ok: false, message: `probe-004: --slice needs a value (S0..S10, S12, S13).\n\n${USAGE}` };
+        return { ok: false, message: `probe-004: --slice needs a value (S0..S10, S12..S14).\n\n${USAGE}` };
       }
       slice = value;
       index += 1;

@@ -10,6 +10,7 @@ import {
 import { bridgeFilePath, hostDataDirectory } from "./host-paths.js";
 import { createRelayMux, type RelayMux } from "./relay-mux.js";
 import { encodeFrame, FrameDecoder } from "./native-frame.js";
+import { createUploadConfigStore } from "./upload-config-store.js";
 
 /**
  * The native-messaging relay Chrome spawns (R-102, 004/R-111).
@@ -262,9 +263,18 @@ async function main(): Promise<void> {
   const token = randomBytes(32).toString("hex");
   /** Set once the record names another relay: from then on this process's socket closes say nothing. */
   let superseded = false;
+  /**
+   * The owner's upload directories, as this process may read and write them (014 FR-194).
+   *
+   * The relay is the one process that both speaks to the worker and can touch the file, which is
+   * why the panel's list and its revoke are answered here and nowhere else. It never *adds*: the
+   * list grows only where a file is already in hand, in the server's consent flow (FR-195).
+   */
+  const uploadRoots = createUploadConfigStore();
   const mux = createRelayMux({
     token,
     relayPid: process.pid,
+    uploadRoots,
     toWorker(frame) {
       // Whole values, forwarded unchanged: the relay re-encodes but never rewrites, so a field it
       // has never heard of still reaches the worker that understands it.

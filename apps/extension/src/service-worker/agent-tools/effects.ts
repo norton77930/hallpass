@@ -1513,6 +1513,15 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       clickedRef = target.ref;
       clickedFrame = target.rect.frame;
       sessionId = clickedFrame?.sessionId;
+      /**
+       * The marker, before the first thing this call puts into the page (014 FR-181).
+       *
+       * The pointer family writes it with the point it measured, for the ring a recorded frame
+       * draws; here there is no point worth drawing - the click is how a caret is placed, not the
+       * action the owner asked for - so the record carries nothing and says only what it is for:
+       * from this line on, an interrupt cannot honestly say the page was given nothing.
+       */
+      deps.onDelivered?.(callId, {});
       await pointer.click(binding.tabId, centreOf(target.rect), {
         button: "left",
         clickCount: 1,
@@ -1554,6 +1563,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
           context,
         );
       }
+      // The keys themselves, with or without a target above (014 FR-181).
+      deps.onDelivered?.(callId, {});
       await keyboard.type(binding.tabId, text, {
         replace: args.mode !== "insert",
         ...(sessionId === undefined ? {} : { sessionId }),
@@ -1576,6 +1587,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
 
     const key = String(args.key ?? "");
+    deps.onDelivered?.(callId, {});
     await keyboard.press(binding.tabId, key, {
       ...(Array.isArray(args.modifiers) ? { modifiers: args.modifiers as string[] } : {}),
       repeat: Number(args.repeat ?? 1),
@@ -1728,6 +1740,16 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       };
     }
 
+    /**
+     * The marker, before the first thing this action puts into the page (014 FR-181, review F5).
+     *
+     * Every action still here reaches the page - the two that do not were answered above - so this
+     * is the line after which an interrupt cannot honestly say the page was given nothing. It
+     * carries no point: the ring a recorded frame draws belongs to the gesture families that
+     * measured a target's box, and `computer` was aimed by the agent rather than measured here.
+     */
+    deps.onDelivered?.(callId, {});
+
     const effect = await deliverPosition({
       tabId: binding.tabId,
       action,
@@ -1829,6 +1851,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         callId,
         // And which call the host knows it as, when this effect is a batch step (011 review H1).
         hostCallId: request.hostCallId,
+        // And whether the owner ended the call while the runner was still getting here (FR-179).
+        stopped: request.stopped,
         sessionId: request.sessionId,
         site: binding.site,
         tool,
@@ -1846,6 +1870,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       }
       // 006 FR-087: the owner's Stop reaches a parked call in the same word an in-flight wait gets.
       if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
+      // 014 FR-179: the owner ended this step and kept the session; not a decline, and not a stop.
+      if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
       if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
       /**
        * The lease, read again now that the owner has answered (006 FR-087, S1 review).
@@ -1885,6 +1911,17 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     const planned = await planEffect(tool, args, context, binding);
     if (!planned.ok) return answer(callId, planned.outcome, planned.reason);
+
+    /**
+     * The marker, before the page is asked to do it (014 FR-181, T369 review F5).
+     *
+     * `scroll` and `form_input` are the two effects that still run inside the page rather than
+     * through the debugger, and they were the two that wrote nothing here - so an interrupt that
+     * landed after one had gone out answered "nothing was delivered" about a page that had already
+     * been told to scroll or to take a value. Nothing is drawn for them (no point was measured);
+     * the record says only what it is for.
+     */
+    deps.onDelivered?.(callId, {});
 
     let last: Extract<PageExecutionOutcome, { ok: true }> | undefined;
     for (let attempt = 0; attempt < planned.plan.repeat; attempt += 1) {

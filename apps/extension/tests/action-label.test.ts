@@ -143,6 +143,24 @@ describe("describeAction", () => {
     });
   });
 
+  /**
+   * 014/T385 — the size a page was laid out at, on the frame that shows it (FR-196).
+   *
+   * A recording that jumps from a desktop layout to a phone one with nothing said about it is a
+   * film of a page that changed for no reason; the size is the whole action, and a `reset` has no
+   * size to name at all - what it did was give the page back its own.
+   */
+  it("names the size an emulated viewport was set to, and says cleared for a reset", () => {
+    expect(describeAction({ tool: "viewport", args: { tabId: 1, action: "set", width: 375, height: 812 } })).toEqual({
+      tool: "viewport",
+      label: "viewport 375x812",
+    });
+    expect(describeAction({ tool: "viewport", args: { tabId: 1, action: "reset" } })).toEqual({
+      tool: "viewport",
+      label: "viewport cleared",
+    });
+  });
+
   it("cuts a long label at forty characters with an ellipsis", () => {
     const action = describeAction({
       tool: "click",

@@ -1,5 +1,5 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { extname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { AGENT_UPLOAD_MAX_BASE64_CHARS, AGENT_UPLOAD_MAX_FILES } from "@hallpass/contracts";
 import { hostDataDirectory, type HostEnvironment } from "./host-paths.js";
 
@@ -44,9 +44,33 @@ export type UploadRefusalCode =
   | "too-large"
   | "not-a-file";
 
+/** One file the owner may be asked about, with the directory a "from now on" would add (014). */
+export type UploadCandidate = { path: string; directory: string };
+
 export type UploadResolution =
   | { ok: true; files: UploadFile[] }
-  | { ok: false; reason: "upload-not-allowed"; code: UploadRefusalCode };
+  /**
+   * The one refusal that has an answer (014 FR-193).
+   *
+   * Every other code is final - a file that is too large is too large, and nobody's yes changes
+   * that - so `outside-roots` is the only one that carries anything: the files it is about, as
+   * `realpath` resolved them, each beside the directory the owner's "from now on" would add. The
+   * caller shows those paths to the owner and to nobody else; they are still never logged, never
+   * put into a frame bound for a page, and never in an answer the agent reads.
+   */
+  | { ok: false; reason: "upload-not-allowed"; code: "outside-roots"; outside: UploadCandidate[] }
+  | { ok: false; reason: "upload-not-allowed"; code: Exclude<UploadRefusalCode, "outside-roots"> };
+
+/**
+ * What one call may do beyond the owner's standing list (014 FR-194).
+ *
+ * `allowFiles` is the owner's "these files, this once": exactly the paths they read on the card,
+ * compared as real paths, admitted for this resolution and for nothing else. It widens no list and
+ * outlives no call - the next `file_upload` from the same directory asks again - and it suspends
+ * only the roots rule. The size and count bounds still apply to a file the owner allowed, because
+ * those are facts about what a frame can carry rather than about where a file may come from.
+ */
+export type UploadAllowance = { allowFiles?: readonly string[] };
 
 export function uploadConfigPath(env: HostEnvironment = process.env): string {
   return join(hostDataDirectory(env), "config.json");
@@ -125,6 +149,7 @@ function fileNameOf(path: string): string {
 export async function resolveUploadFiles(
   paths: readonly string[],
   config: UploadConfig,
+  allowance: UploadAllowance = {},
 ): Promise<UploadResolution> {
   if (paths.length === 0 || paths.length > AGENT_UPLOAD_MAX_FILES) {
     return { ok: false, reason: "upload-not-allowed", code: "too-many-files" };
@@ -139,7 +164,25 @@ export async function resolveUploadFiles(
     }
   }
 
+  /** The owner's one-call yes, resolved the way a root is, so the comparison is path to path. */
+  const allowFiles: string[] = [];
+  for (const named of allowance.allowFiles ?? []) {
+    try {
+      allowFiles.push(await realpath(resolve(named)));
+    } catch {
+      // A file that has gone since the card was answered is simply not admitted by that answer.
+    }
+  }
+
   const allowed: Array<{ path: string; size: number }> = [];
+  /**
+   * The files outside every root, collected rather than returned at the first one (014 FR-193).
+   *
+   * The owner is asked one question about the call, not one per file, so the resolution has to know
+   * all of them. Collecting costs nothing the old early return protected: a path in here has been
+   * resolved and not opened, which is exactly where the roots rule stops.
+   */
+  const outside: UploadCandidate[] = [];
   let total = 0;
   for (const candidate of paths) {
     let real: string;
@@ -150,9 +193,6 @@ export async function resolveUploadFiles(
     } catch {
       return { ok: false, reason: "upload-not-allowed", code: "not-a-file" };
     }
-    if (!roots.some((root) => within(root, real))) {
-      return { ok: false, reason: "upload-not-allowed", code: "outside-roots" };
-    }
     const info = await stat(real).catch(() => undefined);
     if (!info?.isFile()) {
       return { ok: false, reason: "upload-not-allowed", code: "not-a-file" };
@@ -161,7 +201,30 @@ export async function resolveUploadFiles(
     if (total > AGENT_UPLOAD_MAX_BASE64_CHARS) {
       return { ok: false, reason: "upload-not-allowed", code: "too-large" };
     }
+    /**
+     * The roots rule, now the *last* of the three and still before anything is opened (014).
+     *
+     * It used to return here, ahead of the two bounds above, and the order mattered to nobody: all
+     * three were the same flat refusal. It matters now, because this one is a question for the
+     * owner - and a question about a file that would be refused for its size anyway is a card that
+     * cannot lead anywhere, answered by adding a directory to their list for a call that then
+     * fails. The bounds above read a size; the reading the roots exist to prevent is below.
+     *
+     * `within` rather than equality for the allowed files, for its one other job: two spellings of
+     * one path are one path on Windows. A file is never a prefix of another path, so it admits
+     * exactly itself.
+     */
+    if (!roots.some((root) => within(root, real)) && !allowFiles.some((file) => within(file, real))) {
+      outside.push({ path: real, directory: dirname(real) });
+      continue;
+    }
     allowed.push({ path: real, size: info.size });
+  }
+
+  if (outside.length > 0) {
+    // After the loop, so the two bounds above still decide first: a call that would be refused
+    // whatever the owner answered is refused without asking them anything at all.
+    return { ok: false, reason: "upload-not-allowed", code: "outside-roots", outside };
   }
 
   // Only now, with every path decided, is anything opened.

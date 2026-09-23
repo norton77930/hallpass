@@ -1,4 +1,4 @@
-import type { ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { ACTIVITY_OUTCOME_KEYS, WINDOW_STATE_KEYS } from "../agent-panel-keys.js";
@@ -24,6 +24,11 @@ type ActivityItem = NonNullable<SessionView["activity"]>[number];
  * worker English ever reaches the card.
  */
 export function activityText(item: ActivityItem, t: (key: string) => string): string {
+  if (item.kind === "interrupt") {
+    // 014 FR-182: one line for the owner's own action, with no site and no message - they ended a
+    // step, and which step it was is not something the card should claim to know afterwards.
+    return t("agent.activity.interrupt");
+  }
   if (item.kind === "restore") {
     const state = item.message === "fullscreen" ? WINDOW_STATE_KEYS.fullscreen : WINDOW_STATE_KEYS.maximized;
     return t("agent.activity.restore").replace("{state}", () => t(state));
@@ -76,16 +81,34 @@ export function recordingLine(
     : t("agent.session.recordingExported").replace("{filename}", recording.lastExport);
 }
 
+/** How long the "nothing was running" line stays up (FR-178): long enough to read, then gone. */
+export const NOTHING_TO_INTERRUPT_MS = 4_000;
+
 export function SessionCard(props: {
   session: SessionView;
   agentName: string;
   locale: string;
   onStop: () => void;
   onRelease: () => void;
+  onInterrupt: () => void;
 }): ReactElement {
   const t = (key: string): string => lookup(key, props.locale);
   const { session } = props;
   const state = session.state ?? "working";
+  /**
+   * Whether there is anything to interrupt (014 FR-178), as the worker counted it.
+   *
+   * A projection from before this slice carries no count, which reads as nothing running - the
+   * honest fallback: a control that claimed to be actionable on a picture that never said so
+   * would be a promise made by the panel rather than by the session.
+   */
+  const inFlight = session.inFlight ?? 0;
+  const [saidNothing, setSaidNothing] = useState(false);
+  useEffect(() => {
+    if (!saidNothing) return undefined;
+    const timer = setTimeout(() => setSaidNothing(false), NOTHING_TO_INTERRUPT_MS);
+    return () => clearTimeout(timer);
+  }, [saidNothing]);
   const sites = session.sites ?? [];
   // Newest first, as the worker keeps it; the panel never re-orders what it is told (FR-113).
   const activity = session.activity ?? [];
@@ -137,9 +160,42 @@ export function SessionCard(props: {
           ))}
         </ul>
       )}
+      {/*
+        014 FR-178: what the owner is told when they interrupt a session that was not doing
+        anything. A line rather than a card, announced rather than focused: nothing was decided and
+        nothing is being asked, so it must not take the place their next action is heading for.
+      */}
+      {saidNothing ? (
+        <p className="agent-session-nothing" role="status">
+          {t("agent.session.nothingToInterrupt")}
+        </p>
+      ) : null}
       <div className="agent-session-actions">
         <button type="button" className="agent-danger" onClick={props.onStop}>
           {t("agent.session.stop")}
+        </button>
+        {/*
+          014 FR-178: 中斷 beside 停止, and deliberately not `disabled` when there is nothing to
+          interrupt. The count it reads is a picture that can be a moment old - the call it named
+          may have answered while the owner was reaching for the mouse - and a control that simply
+          did nothing in that moment would look broken. So it is marked unavailable for assistive
+          technology and for the eye, and pressing it anyway says what happened instead (US1
+          scenario 5). With a call in flight it is the plain control it looks like.
+        */}
+        <button
+          type="button"
+          className="agent-interrupt"
+          aria-disabled={inFlight === 0}
+          onClick={() => {
+            if (inFlight === 0) {
+              setSaidNothing(true);
+              return;
+            }
+            setSaidNothing(false);
+            props.onInterrupt();
+          }}
+        >
+          {t("agent.session.interrupt")}
         </button>
         <button type="button" onClick={props.onRelease}>
           {t("agent.session.release")}

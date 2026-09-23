@@ -76,6 +76,21 @@ export type AgentTabToolDeps = {
   /** Told when a tab this session had is gone, whoever closed it. */
   onTabReleased?: (tabId: number) => void;
   /**
+   * Where this call is about to send the tab (014 rule (e), FR-185).
+   *
+   * Registered *before* the move and released when the call answers, because the arrival is heard
+   * on `tabs.onUpdated` - a signal that says where a tab is, never who sent it there. Without the
+   * expectation every navigation the agent made itself would look exactly like a redirect nobody
+   * asked for, and the agent would be held behind a card for going where it said it was going.
+   *
+   * It is the *requested* origin and nothing more: a redirect onward from there is not what this
+   * call asked for, and it is a move the owner is still owed (US2 scenario 1).
+   */
+  transitions?: {
+    expectNavigate(sessionId: string, tabId: number, url: string): Promise<void>;
+    endNavigate(sessionId: string, tabId: number): Promise<void>;
+  };
+  /**
    * The worker's record of the session's downloads (005/US2). A url the browser downloads rather
    * than renders never commits, so its navigation would run to the bound; the record that appears
    * for it is what ends the navigation instead, with the download in the answer.
@@ -317,6 +332,8 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       callId,
       // Which call the host knows it as, when this navigation is a batch step (011 review H1).
       hostCallId: request.hostCallId,
+      // And whether the owner ended the call while the runner was still getting here (FR-179).
+      stopped: request.stopped,
       sessionId: request.sessionId,
       site,
       tool,
@@ -328,6 +345,8 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
     if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
     if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
+    // 014 FR-179: the step ended, the session did not.
+    if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
     if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
     const held = await deps.tabs.ownership(request.sessionId, tabId);
     if (held.state !== "this") return ownershipRefusal(callId, held);
@@ -617,8 +636,33 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     }
   }
 
-  /** 003's navigation, with 008's one addition: a page that asked to stay is not left (FR-115). */
+  /**
+   * 003's navigation, with 008's one addition (a page that asked to stay is not left, FR-115) and
+   * 014's: the origin this call asked for is on the record while it moves (rule (e), FR-185).
+   *
+   * Around the whole call rather than around the move alone, and released in a `finally`: the
+   * arrival is heard asynchronously, and an expectation dropped the instant `navigateTab` resolved
+   * would be gone before the commit it was registered for was reported. A history move registers
+   * nothing - it names no origin, so there is nothing to expect and the destination is whatever
+   * the tab was on before, which the session already knows.
+   */
   async function navigateTabTool(
+    request: AgentNativeRequest,
+    tabId: number,
+    args: Record<string, unknown>,
+    watch: { settled: Promise<BeforeunloadOutcome> } | undefined,
+  ): Promise<AgentNativeResponse> {
+    const asked = typeof args.url === "string" ? args.url : undefined;
+    if (asked === undefined) return navigateTabNow(request, tabId, args, watch);
+    await deps.transitions?.expectNavigate(request.sessionId, tabId, asked);
+    try {
+      return await navigateTabNow(request, tabId, args, watch);
+    } finally {
+      await deps.transitions?.endNavigate(request.sessionId, tabId);
+    }
+  }
+
+  async function navigateTabNow(
     request: AgentNativeRequest,
     tabId: number,
     args: Record<string, unknown>,

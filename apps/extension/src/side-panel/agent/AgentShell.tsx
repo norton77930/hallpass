@@ -243,9 +243,18 @@ export function AgentShell(props: { locale: string }): ReactElement {
               onRelease={() => {
                 send({ type: "ui.agent.session-release", payload: { sessionId: session.sessionId } });
               }}
+              onInterrupt={() => {
+                send({ type: "ui.agent.session-interrupt", payload: { sessionId: session.sessionId } });
+              }}
             />
           ))}
-          <SiteList sites={state.sites} locale={props.locale} send={send} />
+          <SiteList
+            sites={state.sites}
+            transitions={state.transitions}
+            uploadRoots={state.uploadRoots}
+            locale={props.locale}
+            send={send}
+          />
         </>
       )}
     </div>

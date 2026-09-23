@@ -1198,6 +1198,27 @@ export type AgentBatchStepResult = z.infer<typeof agentBatchStepResultSchema>;
 
 export const agentBatchResultSchema = z.strictObject({
   results: z.array(agentBatchStepResultSchema).max(AGENT_BATCH_MAX_STEPS),
+  /**
+   * How far a batch got when the owner interrupted it (014 FR-180).
+   *
+   * Three fields rather than a new result shape, and all three optional, because an ordinary batch
+   * still answers exactly what it always did. The per-step list alone cannot say this: a step that
+   * never started and a step that failed both read as `not-run` in it, and "how far did it get" is
+   * the agent's next question. The indexes are the positions the steps were sent in, the same ones
+   * `results[].index` uses.
+   */
+  completed: z.array(z.number().int().nonnegative().max(AGENT_BATCH_MAX_STEPS)).max(AGENT_BATCH_MAX_STEPS).optional(),
+  interruptedAt: z.number().int().nonnegative().max(AGENT_BATCH_MAX_STEPS).optional(),
+  /**
+   * Where a batch stopped because the *browser* moved, not because the owner did (014 FR-187).
+   *
+   * Its own field rather than `interruptedAt` reused, because the two say different things to the
+   * agent: an interrupt is the owner ending a step, and this is a step that never started because
+   * the tab it was about is on a site nobody has decided about yet. The step at this index carries
+   * `stopped / site-transition`; the agent's next single call on that tab is what raises the card.
+   */
+  stoppedAt: z.number().int().nonnegative().max(AGENT_BATCH_MAX_STEPS).optional(),
+  notRun: z.array(z.number().int().nonnegative().max(AGENT_BATCH_MAX_STEPS)).max(AGENT_BATCH_MAX_STEPS).optional(),
 });
 
 export type AgentBatchResult = z.infer<typeof agentBatchResultSchema>;
@@ -1781,6 +1802,19 @@ export type AgentToolDescriptor = {
 const POINTER_NOTE =
   "The target is a ref from `find`, or a viewport point {x, y} which the page resolves to an element.";
 
+/**
+ * What an agent has to know before it moves a tab (014 FR-186, contracts/transitions.md).
+ *
+ * On the two tools that most often take a tab somewhere nobody has decided about - a `navigate`
+ * the agent chose and a `click` the page answered with a redirect - because this is the one
+ * product behaviour an agent cannot discover from a refusal after the fact: a
+ * `denied / site-transition-declined` with no warning reads as a bug in the agent's own plan
+ * rather than as a person saying no.
+ */
+const TRANSITION_NOTE =
+  "If the tab lands on a site the owner has not decided about, the answer says so and the next call " +
+  "on that tab asks the owner (continue / always / decline).";
+
 export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
   {
     name: "tabs_create",
@@ -1831,7 +1865,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "browser downloads rather than renders answers ok with `download` (its id, path, url and state) the moment " +
       "the download begins; wait for `download-complete` to learn how it ends. A page with unsaved work can " +
       "ask to stay: without `force` the tab does not leave and the call answers `blocked-by-beforeunload`; " +
-      "`force: true` leaves anyway and is an effect the site's mode governs.",
+      "`force: true` leaves anyway and is an effect the site's mode governs. " +
+      TRANSITION_NOTE,
     inputShape: agentNavigateShape,
   },
   {
@@ -1925,7 +1960,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
   {
     name: "click",
     title: "Click",
-    description: `Activates one element. ${POINTER_NOTE}`,
+    description: `Activates one element. ${POINTER_NOTE} ${TRANSITION_NOTE}`,
     inputShape: pointerToolShape,
   },
   {
@@ -2083,9 +2118,17 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Sets one or more of the owner's own files on a `<input type=\"file\">` named by `ref`, and answers with " +
       "the names and sizes the input is holding afterwards. The paths are read by the local host, not by the " +
-      "browser, and only inside the directories the owner listed as upload roots - anything outside them, or " +
-      "past the size bound, is refused before it is read. Setting files changes the page, so the site's mode " +
-      "applies exactly as it does to a click. " +
+      "browser, and only inside the directories the owner listed as upload roots - anything past the size " +
+      "bound is refused before it is read. " +
+      // 014 FR-197: outside those directories is no longer the end of the call, and the two
+      // refusals that remain mean two different things - an extension that predates the question,
+      // and a host that does. An agent told only "not allowed" reports a broken tool for what is,
+      // either way, an owner with something to install.
+      "A file outside the directories the owner allowed makes the owner's panel ask (this file once / its " +
+      "directory from now on / decline). `upload-outside-allowed-directories` means the owner's extension " +
+      "predates that question; `upload-not-allowed` for such a file means the owner's host does " +
+      "(reinstall it). " +
+      "Setting files changes the page, so the site's mode applies exactly as it does to a click. " +
       // 013 FR-176: the one thing an agent cannot discover by trying is that a picture it already
       // has needs no path at all - it would otherwise write the screenshot to disk to upload it.
       "For a screenshot this session took, use `upload_image` with its `imageId` instead: there is no path.",
@@ -2321,6 +2364,141 @@ export const agentRefusalSchema = z.discriminatedUnion("reason", [
 export type AgentRefusal = z.infer<typeof agentRefusalSchema>;
 
 /**
+ * The two words the owner's own controls end a call with (014 data-model "Stop flag").
+ *
+ * Closed, and pinned here rather than written as a literal in each runner, because a runner asks
+ * the stop handle what ended it and answers that word verbatim (FR-180): a synonym invented in one
+ * of the seven runners would reach an agent as a reason nothing documents. Stop is the session
+ * ending; interrupt is this one step ending and nothing else.
+ */
+export const AGENT_STOP_REASONS = ["owner-stopped", "owner-interrupted"] as const;
+
+export type AgentStopReason = (typeof AGENT_STOP_REASONS)[number];
+
+/**
+ * The reasons that name a decision of the owner's - made, declined, not yet made, or interrupted
+ * (014 data-model "Reasons").
+ *
+ * They are a list rather than six literals because three processes say them: the worker composes
+ * the interrupt and the transition answers, the host composes the upload ones, and the panel and
+ * the gates assert both. `reason` is the short stable code an agent branches on, so the one thing
+ * that must not happen is two spellings of the same fact.
+ */
+export const AGENT_CONSENT_REASONS = [
+  /** The owner ended this step and kept everything else (FR-180); also one of `AGENT_STOP_REASONS`. */
+  "owner-interrupted",
+  /** The owner said no to a move from one origin to another (FR-188). */
+  "site-transition-declined",
+  /** A batch stopped before a step whose tab has a move nobody has decided about yet (FR-190). */
+  "site-transition",
+  /** The owner said no to reading a file from outside the directories they listed (FR-193). */
+  "upload-declined",
+  /** Nobody answered that question inside its bound (FR-193). */
+  "upload-not-answered",
+  /**
+   * There was no way to ask: the file is outside every listed directory and this link cannot raise
+   * the card (an extension that predates the feature). It replaces the opaque `upload-not-allowed`
+   * for that one code alone - the size, count and not-a-file refusals keep the word they had.
+   */
+  "upload-outside-allowed-directories",
+  /**
+   * The owner said "from now on" and the host could not write it down (014 FR-194, S3 review F2).
+   *
+   * Separate from the refusal above, because the two ask for opposite things. That one means this
+   * browser cannot raise the question at all - reinstall the extension. This one means the question
+   * was asked and answered *yes*: the list is exactly as it was, nothing was uploaded, and what the
+   * owner can do about it is on their own disk. The `hint` beside it carries the store's own
+   * refusal, which is the only place the reason for it exists.
+   */
+  "upload-directory-not-recorded",
+] as const;
+
+export type AgentConsentReason = (typeof AGENT_CONSENT_REASONS)[number];
+
+/**
+ * What an interrupted call is told, in the only two ways this product can say it honestly
+ * (FR-180, FR-181, Constitution XI).
+ *
+ * Here beside `ATTENTION_SENTENCES` and for the same reason: the worker composes the sentence, the
+ * agent reads it and the gate asserts it, and a third copy is how the one that matters - *it may
+ * have taken effect and was not verified* - quietly becomes *nothing happened*. Which of the two
+ * is sent is a fact, not a guess: the operation marker for the call is written before an effect's
+ * input is dispatched, so its presence at the moment of the interrupt says whether the page was
+ * given anything.
+ *
+ * Neither sentence has a hole to fill: no session id, no tool name, no page text (FR-151).
+ */
+export const INTERRUPT_HINTS = {
+  nothingDelivered:
+    "The owner interrupted this step. Nothing refused it; the session and its tabs are still held. " +
+    "Re-run it if still needed.",
+  mayHaveTakenEffect:
+    "The owner interrupted this step after its input was delivered; it may have taken effect and was " +
+    "not verified. Read the page before re-running it.",
+} as const;
+
+/**
+ * What an upload says about a directory it would not remember (014 FR-194, S3 review F7).
+ *
+ * Here for the reason `INTERRUPT_HINTS` is here: the host composes it, the agent reads it and the
+ * gate asserts it. One sentence, no holes - it names a rule, not a path of the owner's.
+ */
+export const UPLOAD_HINTS = {
+  rootNotRemembered:
+    "Drive and share roots are not remembered: those files were uploaded this once and no directory " +
+    "was added. Move them into a folder if the owner should be able to allow it for good.",
+} as const;
+
+/**
+ * Whether a directory is a whole drive or a whole share (014 FR-194, S3 review F7).
+ *
+ * The card's "from now on" adds the file's own parent, and for a file sitting at `D:\` or at
+ * `\\server\share` that parent is everything on the drive or the share: one press and every file on
+ * it is uploadable, unasked, for as long as the row stands. The host refuses to write such a root
+ * and the worker has to know the same rule - it must not then report the answer as one the host
+ * failed to record - so the rule lives here, where both of them read it from one place.
+ *
+ * Spelt as shapes rather than with `node:path`, because the worker has no `node:path`: a drive
+ * letter with only separators after it, a UNC `\\server\share` with nothing below it, and the
+ * POSIX root, which this product does not ship on but which the path schema accepts.
+ */
+export function isRootDirectory(path: string): boolean {
+  return /^[A-Za-z]:[\\/]*$/u.test(path) || /^\\\\[^\\/]+[\\/][^\\/]+[\\/]*$/u.test(path) || /^\/+$/u.test(path);
+}
+
+/**
+ * What the call the tab moved during tells the agent (014 FR-186, contracts/transitions.md).
+ *
+ * A sentence with two holes rather than a constant, because the two origins *are* the notice: an
+ * agent told only that "the tab moved" would have to spend a call finding out where to, which is a
+ * call this feature would then hold behind a card.
+ *
+ * It rides in `hint` - the response frame is a strict object and a new key makes the whole frame
+ * fail to parse on an older host (R-187 §6) - and it is composed here so that the worker that
+ * writes it and the gate that reads it cannot drift into two sentences.
+ */
+export function transitionNoticeText(from: string, to: string): string {
+  return `The tab moved from ${from} to ${to}; the next call on this tab will ask the owner.`;
+}
+
+/**
+ * A path on the owner's own machine, as the two processes that pass one around may state it.
+ *
+ * Absolute only, and checked at the shape rather than where it is used: a relative path is a path
+ * whose meaning depends on which process resolves it, and the host, the relay and the browser have
+ * three different working directories. Windows drive-rooted, UNC and POSIX forms are all accepted -
+ * the product is Windows-only today, and the check is about rootedness rather than about a
+ * platform.
+ */
+export const absolutePathSchema = z
+  .string()
+  .min(2)
+  .max(4096)
+  .refine((value) => /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\") || value.startsWith("/"), {
+    message: "expected an absolute path",
+  });
+
+/**
  * The one answer to one call. `reason` is a short stable code, never page text: the host logs
  * outcomes, and an unbounded reason is how page-derived content reaches a log (FR-035).
  */
@@ -2410,6 +2588,20 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
      * protocol floor does not move - this is the worker's answer, not the greeting the relay checks.
      */
     browserRunId: z.string().min(1).max(64).optional(),
+    /**
+     * What this worker can be asked to do, beyond answering calls (014/R-187 §1).
+     *
+     * `upload-consent` is the only member today: it says the worker can raise the directory card,
+     * so the host may hold a `file_upload` open and ask instead of refusing it. The host must know
+     * before it asks, because a request a worker does not recognise is dropped as an unknown frame
+     * type and the call would then hang until its own bound - an old worker answered nothing and a
+     * new one answers "no such frame" the same way.
+     *
+     * Added exactly as `browserRunId` above was (013/R-184): optional, on the frame the worker
+     * sends on every established link, so a host that predates the field parses the answer and a
+     * worker that predates it simply advertises nothing. The link protocol floor does not move.
+     */
+    features: z.array(z.string().min(1).max(64)).max(16).optional(),
   }),
   z.strictObject({
     type: z.literal("unpair"),
@@ -2445,6 +2637,53 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
    */
   z.strictObject({
     type: z.literal("bridge-unavailable"),
+  }),
+  /**
+   * The host asking the owner about a file outside the directories they listed (014/R-187 §1).
+   *
+   * It goes the direction nothing else on this link goes - host to worker, *during* a call the
+   * host is holding - because the paths are the host's to see and nobody else's: the worker never
+   * reads a file and the page is never told a file name. The card the worker raises from this
+   * shows the owner their own paths in full, and the answer comes back on the frame below.
+   *
+   * `directory` is the file's own parent as the host resolved it, carried beside the path because
+   * it is what the owner's "from now on" would add - the card must not make the panel derive a
+   * directory from a path with string arithmetic the host has already done properly.
+   */
+  z.strictObject({
+    type: z.literal("upload-consent-request"),
+    sessionId: z.string().min(1).max(128),
+    callId: z.string().min(1).max(64),
+    files: z
+      .array(z.strictObject({ path: absolutePathSchema, directory: absolutePathSchema }))
+      .min(1)
+      .max(AGENT_UPLOAD_MAX_FILES),
+  }),
+  /**
+   * The owner's answer, once per request (014/R-187 §1).
+   *
+   * Six words rather than a boolean and a flag, because six different things happened: these
+   * files this once, these directories from now on, no, nobody answered, the owner interrupted the
+   * step the question belonged to (R-185 §3), and - since S3 review F3 - the owner was already
+   * being asked something else, so this card was never raised. The host maps each to what the call
+   * answers, and `busy` is the one that must not be dressed up as any of the others: an agent told
+   * `owner-interrupted` about a card nobody ever saw learns the owner did something they did not.
+   */
+  z.strictObject({
+    type: z.literal("upload-consent-result"),
+    callId: z.string().min(1).max(64),
+    decision: z.enum(["once", "always", "deny", "timed-out", "interrupted", "busy"]),
+    /**
+     * Where the person has to click, when this question expired with nobody able to see it
+     * (011 FR-146, S3 review F1).
+     *
+     * The worker is the only end that knows: it chose the bound from whether a panel was connected
+     * when the card was raised, and it is the side that owns the sentence. Without it the host's
+     * `upload-not-answered` would be the one unanswered question in the product that does not tell
+     * the person how to answer it. Optional on a frame type this feature introduced, so no older
+     * side can meet it; the text is one of `ATTENTION_SENTENCES` and never page-derived.
+     */
+    hint: z.string().max(400).optional(),
   }),
 ]);
 
@@ -2495,6 +2734,21 @@ export type AgentControlFrame = z.infer<typeof agentControlFrameSchema>;
  * refuse the pair outright and break a browser the owner had not restarted yet, for a change
  * neither end has to agree on.
  */
+/**
+ * It stays at 2 for 014, and the measurement says why (T349, R-187 §6).
+ *
+ * Every frame schema on this link is `z.strictObject`, so an addition can take exactly two forms
+ * and this feature uses both: a **new frame type**, which an old side logs as unexpected and drops
+ * (`upload-consent-request`, `upload-consent-result`, `upload-roots-list`, `upload-roots-remove`,
+ * `upload-roots`), and an **optional field on a frame the other end is the one that predates**
+ * (`pair-result.features`, added exactly as 013 added `browserRunId`). Neither end has to agree on
+ * anything new: a host without the feature never asks, a worker without it never advertises, and
+ * an old relay simply drops a list request. The transition notice is not a field at all - it rides
+ * in the existing `hint`, because a new key would make the whole answer fail to parse.
+ *
+ * A bump would refuse every pair outright until the owner restarted a browser they have no reason
+ * to restart, for a change nothing has to negotiate.
+ */
 export const AGENT_LINK_PROTOCOL = 2;
 
 /**
@@ -2504,7 +2758,22 @@ export const AGENT_LINK_PROTOCOL = 2;
  * side it is the same situation - something is waiting in a panel they cannot see - and the kind is
  * what picks which of the two sentences they are told.
  */
-export const AGENT_PROMPT_KINDS = ["pairing", "ask", "plan", "dialog", "diagnostics"] as const;
+/**
+ * 014: two more, and both are questions about something that has *already* happened rather than
+ * about a call's arguments - a tab that moved to an origin the session has not been on (FR-186),
+ * and a file the host is holding from a directory the owner has not listed (FR-192). They are
+ * kinds rather than two more `ask` prompts because the card is a different sentence with different
+ * buttons, and because the tick that says a question is still waiting names its kind.
+ */
+export const AGENT_PROMPT_KINDS = [
+  "pairing",
+  "ask",
+  "plan",
+  "dialog",
+  "diagnostics",
+  "transition",
+  "upload-directory",
+] as const;
 
 export type AgentPromptKind = (typeof AGENT_PROMPT_KINDS)[number];
 
@@ -2632,6 +2901,56 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
   }),
   /** The worker's "still waiting" tick (011); see `promptWaitingFrameSchema` for why it is here. */
   promptWaitingFrameSchema,
+  /**
+   * The worker asking what the owner's upload directories are (014/R-187 §4).
+   *
+   * It carries nothing: there is one list per machine, the relay is the one process that both
+   * talks to this worker and can read the file, and a request that named a session would imply a
+   * list per agent - which is the opposite of what this list is. Sent on `relay-ack` and after
+   * every answer, so the panel's rows are a picture of the file rather than of what the panel last
+   * did to it.
+   */
+  z.strictObject({
+    type: z.literal("upload-roots-list"),
+  }),
+  /**
+   * The owner revoking one directory from the panel (014 FR-194).
+   *
+   * Remove only. There is deliberately no `add` on this link: the list grows by exactly one route,
+   * the owner answering "from now on" on a card the *host* raised about a file it already has in
+   * hand (FR-195). A browser-side add would be a way for anything that reached this port to widen
+   * what the host may read.
+   */
+  z.strictObject({
+    type: z.literal("upload-roots-remove"),
+    root: absolutePathSchema,
+  }),
+  /**
+   * The relay's answer to either of the two above: the list as the file now reads.
+   *
+   * `path` is where the file lives, for the panel's own row - the owner may want to open it, and
+   * it is a fact about *their* machine shown to *them*. It never travels the other way: no tool
+   * argument, answer or description names it (T381).
+   *
+   * `malformed` is the one thing the list cannot say by being empty: a config file that could not
+   * be read as a list is treated as `[]`, exactly as the host has always treated it, and the panel
+   * says so rather than showing "no directories" about a file that may hold ten.
+   */
+  z.strictObject({
+    type: z.literal("upload-roots"),
+    roots: z.array(absolutePathSchema).max(256),
+    path: absolutePathSchema,
+    malformed: z.boolean().optional(),
+    /**
+     * The name of the copy the host kept of a document it could not read (S3 review F4).
+     *
+     * A file that will not parse is read as no directories at all, and the first write after that
+     * used to go straight over it. It is moved aside instead, and this says where to - a file name
+     * beside the `path` already on the frame, never a second path. Optional on a frame type this
+     * feature introduced, so there is no older side that could meet it.
+     */
+    preserved: z.string().min(1).max(64).optional(),
+  }),
 ]);
 
 export type AgentLinkFrame = z.infer<typeof agentLinkFrameSchema>;
@@ -2764,7 +3083,7 @@ export const agentActivityItemSchema = z.strictObject({
    * 012: `viewport` is the emulated size a session gave a tab, and gave back (FR-159).
    * 013: `upload` is a picture the session put into the owner's page (FR-174).
    */
-  kind: z.enum(["dialog", "export", "restore", "viewport", "upload"]),
+  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt"]),
   outcome: z.enum([
     "accepted",
     "accepted-chained",
@@ -2778,6 +3097,8 @@ export const agentActivityItemSchema = z.strictObject({
     "set",
     "cleared",
     "delivered",
+    /** 014 FR-182: the owner ended a step; one line per press, whatever it was in flight. */
+    "interrupted",
   ]),
   /** The host the dialog belonged to; absent when the item is not about a page. */
   site: z.string().max(256).optional(),
@@ -2829,6 +3150,15 @@ const agentSessionViewSchema = z.strictObject({
   state: z.enum(AGENT_SESSION_STATES).optional(),
   /** Its last greeting or effect, for ordering the cards newest first. */
   lastActivityAt: z.string().min(1).max(64).optional(),
+  /**
+   * How many of this session's calls the stop registry is holding right now (014 FR-178).
+   *
+   * The card's 中斷 control is enabled by this and by nothing else: "is there anything to
+   * interrupt" is a fact the worker already has, and a button enabled on a guess would let the
+   * owner press it into an empty session and be told nothing happened. Optional because a
+   * projection from before this slice carried no count, which the panel reads as zero.
+   */
+  inFlight: z.number().int().nonnegative().optional(),
   /**
    * How the session's recording stands, for the card's own line (008 FR-109, data-model "Panel
    * messages").
@@ -2885,7 +3215,7 @@ export type AgentBridgeDiagnostics = z.infer<typeof agentBridgeDiagnosticsSchema
  * handle it was never meant to hold. The label and role are the ones the worker already minted for
  * that target, the same values a 001/002 review card is built from.
  */
-const agentEffectPromptSchema = z.strictObject({
+export const agentEffectPromptSchema = z.strictObject({
   promptId: z.string().min(1).max(128),
   raisedAt: questionArrivalSchema,
   site: siteOriginSchema,
@@ -2899,7 +3229,39 @@ const agentEffectPromptSchema = z.strictObject({
    * deciding, so the panel picks its wording from this. Absent for every other prompt, which is
    * every prompt a 004 worker raises.
    */
-  kind: z.enum(["dialog-accept", "beforeunload-force"]).optional(),
+  /**
+   * 014: two more kinds, and the same rule - the tool name would hide what is being decided. A
+   * `transition` card is about a tab that has moved, raised by whatever call names that tab next
+   * (FR-187); an `upload-directory` card is about the owner's own files, raised by a `file_upload`
+   * the host is holding (FR-192).
+   */
+  kind: z.enum(["dialog-accept", "beforeunload-force", "transition", "upload-directory"]).optional(),
+  /**
+   * The move the owner is being asked about (014 FR-187): where the tab was, and where it is.
+   *
+   * Both origins, because both of them are the question - "it was on your bank and is now on
+   * somewhere else" is a different decision from "it is on somewhere else". Origins as `siteOfUrl`
+   * mints them, never urls: a path is a page's own word, and the decision is about the site.
+   */
+  transition: z.strictObject({ from: siteOriginSchema, to: siteOriginSchema }).optional(),
+  /**
+   * The files the host is holding and the directories they are in (014 FR-192).
+   *
+   * Shown to the owner in full and to nobody else: these are their own file names, they never
+   * reach a page, and they are the only thing that makes the decision meaningful - a card saying
+   * "a file outside your directories" is a card about nothing in particular. Absolute, because the
+   * host resolved them (`absolutePathSchema`).
+   */
+  files: z
+    .array(z.strictObject({ path: absolutePathSchema, directory: absolutePathSchema }))
+    .min(1)
+    .max(AGENT_UPLOAD_MAX_FILES)
+    .optional(),
+  /**
+   * How a picture would be put into the page (013 tail, FR-196): handed to an input, or dropped at
+   * a point. The panel picks one of two sentences from it; absent leaves the generic one.
+   */
+  delivery: z.enum(["input", "drop"]).optional(),
   /**
    * The dialog's own words, quoted to the owner beneath the question (D-008-5, FR-114).
    *
@@ -3014,6 +3376,51 @@ export const agentPanelStateSchema = z.strictObject({
   agentName: z.string().min(1).max(128).optional(),
   /** The bridge's technical facts (006 FR-082). Absent from a 004 projection; never required. */
   diagnostics: agentBridgeDiagnosticsSchema.optional(),
+  /**
+   * The pairs of origins the owner said "always" to (014 FR-191), for the panel's rows.
+   *
+   * Ordered pairs: `B→A` is a different record from `A→B`, because "I expect my bank to hand me to
+   * this payment site" is not "I expect this payment site to hand me to my bank". `lastUsedAt` is
+   * what makes a row reviewable a month later - a pair nothing has used is one the owner can
+   * revoke without wondering what it was for.
+   */
+  transitions: z
+    .array(
+      z.strictObject({
+        from: siteOriginSchema,
+        to: siteOriginSchema,
+        allowedAt: z.string().min(1).max(64),
+        lastUsedAt: z.string().min(1).max(64).optional(),
+      }),
+    )
+    .max(256)
+    .optional(),
+  /**
+   * The directories the host may read uploads from, as the relay last reported them (014 FR-194).
+   *
+   * Absent rather than empty when the relay is old or has not answered yet: "no directories" and
+   * "nobody has told me" are different things to show the owner, and only the first of them means
+   * every upload will be asked about.
+   */
+  uploadRoots: z
+    .strictObject({
+      roots: z.array(absolutePathSchema).max(256),
+      path: absolutePathSchema,
+      malformed: z.boolean().optional(),
+      /** Where a document the host could not read was kept, for the panel to say (S3 review F4). */
+      preserved: z.string().min(1).max(64).optional(),
+      /**
+       * Directories the owner answered "from now on" about that are not on the list (S3 review F2).
+       *
+       * The agent is told in a word of its own when a write fails; the owner used to be told
+       * nothing at all, and the next upload from the same directory would simply ask again with no
+       * hint that their answer had gone nowhere. The worker derives it from the list the host sends
+       * back after an answer - the one place both facts meet - and it clears itself the moment a
+       * listing does carry the directory.
+       */
+      notRecorded: z.array(absolutePathSchema).max(16).optional(),
+    })
+    .optional(),
 });
 
 export type AgentPanelState = z.infer<typeof agentPanelStateSchema>;
@@ -3072,6 +3479,15 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
       promptId: z.string().min(1).max(128),
       allow: z.boolean(),
       rememberMode: siteModeSchema.optional(),
+      /**
+       * 014 FR-191: the transition card's "always allow this pair". Its own flag rather than a
+       * shared `remember`, because the three cards remember three different things - a site's
+       * mode, a pair of origins, a directory on the owner's disk - and one flag would let a yes
+       * meant for one of them be read as another. `allow: false` is the decline for all three.
+       */
+      rememberTransition: z.boolean().optional(),
+      /** 014 FR-193: the directory card's "these directories from now on". */
+      rememberDirectory: z.boolean().optional(),
     }),
   }),
   /**
@@ -3143,6 +3559,32 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("ui.agent.session-release"),
     payload: z.strictObject({ sessionId: z.string().min(1).max(128) }),
+  }),
+  /**
+   * End the calls one session has in flight, and nothing else (014 FR-178, FR-179).
+   *
+   * A session and never a call, exactly as Stop names a session: the card shows an agent's work,
+   * not a list of calls, and a control that named one call would be the owner picking among things
+   * they were never shown. What separates it from Stop is what it leaves standing - the tabs, the
+   * group marking, the leases, the attachment, the emulated viewport, the recording and the site
+   * decisions all remain, and the agent may simply call again.
+   */
+  z.strictObject({
+    type: z.literal("ui.agent.session-interrupt"),
+    payload: z.strictObject({ sessionId: z.string().min(1).max(128) }),
+  }),
+  /** Forget one remembered pair of origins (014 FR-191); the next such move asks again. */
+  z.strictObject({
+    type: z.literal("ui.agent.transition-clear"),
+    payload: z.strictObject({ from: siteOriginSchema, to: siteOriginSchema }),
+  }),
+  /**
+   * Forget one upload directory (014 FR-194). Remove only, on this command as on the link frame it
+   * becomes: the list grows by the owner's answer on a card and by nothing else.
+   */
+  z.strictObject({
+    type: z.literal("ui.agent.upload-root-clear"),
+    payload: z.strictObject({ root: absolutePathSchema }),
   }),
 ]);
 

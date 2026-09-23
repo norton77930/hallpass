@@ -1,9 +1,15 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AGENT_TOOL_DESCRIPTORS } from "@hallpass/contracts";
-import { positiveEnv, SCREENSHOT_BUDGET_ENV, SCREENSHOT_RETENTION_ENV } from "../src/mcp-server.js";
+import { AGENT_TOOL_DESCRIPTORS, ATTENTION_SENTENCES, INTERRUPT_HINTS } from "@hallpass/contracts";
+import {
+  positiveEnv,
+  splitRememberableDirectories,
+  SCREENSHOT_BUDGET_ENV,
+  SCREENSHOT_RETENTION_ENV,
+  UPLOAD_CONSENT_BOUND_ENV,
+} from "../src/mcp-server.js";
 import { PENDING_AGENT_TOOL_NAMES } from "../src/tool-offering.js";
 import { startFakeAgentWorker, type FakeAgentWorker } from "../../../tests/harness/fake-agent-worker.js";
 import { startMcpClient, type McpHarnessClient } from "../../../tests/harness/mcp-client.js";
@@ -589,7 +595,9 @@ describe("T012 agent MCP server", () => {
       });
 
       expect(result.isError).toBe(true);
-      expect(result.json).toEqual({ outcome: "denied", reason: "upload-not-allowed" });
+      // 014 FR-195: this worker advertised nothing, so there is nobody to ask and the refusal is
+      // 0.5.0's - said in the word that tells the agent which side of the link predates the question.
+      expect(result.json).toEqual({ outcome: "denied", reason: "upload-outside-allowed-directories" });
       // Nothing crossed the link, and the host said which rule refused it - a code, not the path.
       expect(worker.requests).toEqual([]);
       expect(client.stderr()).toContain("agent.upload.refused outside-roots");
@@ -944,6 +952,369 @@ describe("T012 agent MCP server", () => {
       expect(worker.requests.map((request) => request.tool)).toEqual(["screenshot"]);
     });
   });
+
+  /**
+   * 014/T374 (US4, FR-193..195) — the question the host asks about the owner's own disk.
+   *
+   * Until now a path outside the configured roots was the end of the call. It is now a question,
+   * and the question travels the one direction nothing else on this link travels: host to worker,
+   * during a call the host is holding, because the paths are the host's to see and the panel is
+   * the only place the owner can answer. Every assertion here is from outside the process - what
+   * crossed the link, what the agent was told, and what is on disk afterwards - because that is
+   * the whole claim: the list grows only by an answer, and only ever here.
+   */
+  describe("the upload directory question (014)", () => {
+    /** A file nobody has allowed, and the directory an answer would add, as the host resolves them. */
+    async function stageFileOutsideEveryRoot(
+      name = "diary.txt",
+      contents: string | Buffer = "not for the agent",
+    ): Promise<{ directory: string; path: string }> {
+      const directory = join(await realpath(dataDir), "private");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, name), contents);
+      return { directory, path: join(directory, name) };
+    }
+
+    async function configuredRoots(): Promise<unknown> {
+      const raw = await readFile(join(dataDir, "hallpass", "config.json"), "utf8").catch(() => "{}");
+      return (JSON.parse(raw) as { uploadRoots?: unknown }).uploadRoots;
+    }
+
+    const UPLOADED = {
+      file_upload: { callId: "", outcome: "ok" as const, result: { files: [{ name: "diary.txt", size: 17 }] } },
+    };
+
+    it("asks about the files, and on 'once' uploads them without widening the list", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      const second = join(await realpath(dataDir), "pictures");
+      await mkdir(second, { recursive: true });
+      await writeFile(join(second, "photo.png"), "x");
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "once",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", {
+        tabId: 3,
+        ref: "tgt-1",
+        paths: [outside.path, join(second, "photo.png")],
+      });
+
+      expect(result.isError, result.text).toBe(false);
+      // One question about the call, naming every file in it and the directory each sits in.
+      const asked = (await worker.waitForControlFrame("upload-consent-request")) as {
+        sessionId: string;
+        callId: string;
+        files: Array<{ path: string; directory: string }>;
+      };
+      expect(asked.files).toEqual([
+        { path: outside.path, directory: outside.directory },
+        { path: join(second, "photo.png"), directory: second },
+      ]);
+      expect(asked.sessionId).toMatch(/^[0-9a-f]{32}$/u);
+      // The call went, carrying bytes as any allowed upload does - and no path with them.
+      expect(worker.requests.map((request) => request.tool)).toEqual(["file_upload"]);
+      expect(JSON.stringify(worker.requests)).not.toContain("private");
+      // "Once" is about these files and this call: nothing was written down.
+      expect(await configuredRoots()).toBeUndefined();
+    });
+
+    it("writes the directory on 'always', and only then sends the call", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "always",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError, result.text).toBe(false);
+      expect(worker.requests.map((request) => request.tool)).toEqual(["file_upload"]);
+      // The file the *reader* uses, written before the upload proceeded (FR-194).
+      expect(await configuredRoots()).toEqual([outside.directory]);
+    });
+
+    it("refuses in the owner's own words when they decline", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "deny",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError).toBe(true);
+      expect(result.json).toEqual({ outcome: "denied", reason: "upload-declined" });
+      expect(worker.requests).toEqual([]);
+      expect(await configuredRoots()).toBeUndefined();
+    });
+
+    it("distinguishes nobody answering from a decline, on its own bound", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({
+        env: { LOCALAPPDATA: dataDir, [UPLOAD_CONSENT_BOUND_ENV]: "400" },
+      });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "ignore",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError).toBe(true);
+      expect(result.json).toEqual({ outcome: "denied", reason: "upload-not-answered" });
+      expect(worker.requests).toEqual([]);
+    });
+
+    it("answers an interrupt as a stop that refused nothing (FR-179)", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "interrupted",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError).toBe(true);
+      expect(result.json).toEqual({
+        outcome: "stopped",
+        reason: "owner-interrupted",
+        // Nothing was delivered: the call never crossed the link, so there is only one honest hint.
+        hint: INTERRUPT_HINTS.nothingDelivered,
+      });
+      expect(worker.requests).toEqual([]);
+    });
+
+    it("ends the question when the browser goes away while it stands", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      const browser = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "ignore",
+        answers: UPLOADED,
+      });
+      worker = browser;
+      await browser.waitForControlFrame("pair-request");
+
+      const pending = client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+      await browser.waitForControlFrame("upload-consent-request");
+      await browser.close();
+      worker = undefined;
+
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      /**
+       * Not "nobody answered", and not the owner either (S3 review, the minor finding).
+       *
+       * The link dropped: nothing was asked of anybody in the end and nothing crossed, which is
+       * the 004 vocabulary's `bridge-lost` - the same word this file answers a call that never
+       * left the process with. `owner-interrupted` named a person who did nothing at all, and an
+       * agent reading it would stop rather than dial again.
+       */
+      expect(result.json).toEqual({ outcome: "failed", reason: "bridge-lost" });
+    });
+
+    /**
+     * 014/T384 (S3 review F1) — the wait the agent is not told about is a wait nobody can end.
+     *
+     * The directory question happens before the call crosses the link, which is exactly why it was
+     * the one wait with no progress behind it: the token was registered on the way *out*, after the
+     * question had already been answered. 011's promise is the same for this card as for every
+     * other - the person at the terminal is told that their browser is asking, and told where to
+     * click when the card is in a panel nobody opened.
+     */
+    it("reports the owner being asked while the directory question stands (011 FR-146)", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        // Answered by hand below, so the tick lands while the question is genuinely standing.
+        uploadConsent: "ignore",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const seen: Array<{ progress: number; total?: number; message?: string }> = [];
+      const pending = client.callTool(
+        "file_upload",
+        { tabId: 3, ref: "tgt-1", paths: [outside.path] },
+        { onProgress: (update) => seen.push(update) },
+      );
+      const asked = (await worker.waitForControlFrame("upload-consent-request")) as {
+        sessionId: string;
+        callId: string;
+      };
+
+      worker.send({
+        type: "prompt-waiting",
+        sessionId: asked.sessionId,
+        callId: asked.callId,
+        kind: "ask",
+        panelConnected: false,
+        waitedMs: 5_000,
+        boundMs: 120_000,
+      });
+      await waitForCondition(() => seen.length >= 1, "a progress notification for the directory card");
+
+      // The tick's own arithmetic, on this call's token - and the sentence that says where to click.
+      expect(seen[0]).toEqual({ progress: 5_000, total: 120_000, message: ATTENTION_SENTENCES.consent });
+      // Nothing was mis-filed: the tick was matched to the call it named.
+      expect(client.stderr()).not.toContain("agent.waiting.unmatched");
+
+      worker.send({ type: "upload-consent-result", callId: asked.callId, decision: "once" });
+      const result = await pending;
+      expect(result.isError, result.text).toBe(false);
+    });
+
+    it("repeats where to click on the answer, when nobody could see the card (011 FR-146)", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "ignore",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const pending = client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+      const asked = (await worker.waitForControlFrame("upload-consent-request")) as { callId: string };
+
+      // The worker's own bound passed with no panel to show the card in: it says so, and says where
+      // the person has to click - the same sentence every other unanswered question carries.
+      worker.send({
+        type: "upload-consent-result",
+        callId: asked.callId,
+        decision: "timed-out",
+        hint: ATTENTION_SENTENCES.consent,
+      });
+
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(result.json).toEqual({
+        outcome: "denied",
+        reason: "upload-not-answered",
+        hint: ATTENTION_SENTENCES.consent,
+      });
+      expect(worker.requests).toEqual([]);
+    });
+
+    /**
+     * 014/T384 (S3 review F2) — a yes that could not be written down is its own fact.
+     *
+     * It used to be answered `upload-outside-allowed-directories`, which tells an agent that this
+     * browser cannot raise the question - "have the owner reinstall the extension" - about an owner
+     * who answered the question on the card in front of them. The list is exactly as it was, and
+     * why is on their own disk, so the answer says that and carries the store's own refusal.
+     */
+    it("tells the agent the owner's yes could not be recorded (F2)", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      // Nothing can be renamed over a directory: the store's write fails with the file the reader
+      // uses untouched, which is exactly the case this answer is about.
+      await mkdir(join(dataDir, "hallpass", "config.json"), { recursive: true });
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "always",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError).toBe(true);
+      const answer = result.json as { outcome: string; reason: string; hint?: string };
+      expect(answer.outcome).toBe("denied");
+      expect(answer.reason).toBe("upload-directory-not-recorded");
+      // The store's own words, which are the only place the reason for it exists: the directory the
+      // owner answered about, and what went wrong with it.
+      expect(answer.hint).toContain(outside.directory);
+      expect(answer.hint).toContain("write-failed");
+      // Nothing crossed the link, and the list is still the list.
+      expect(worker.requests).toEqual([]);
+    });
+
+    /**
+     * 014/T384 (S3 review F3) — two sessions asking at once is not the owner doing anything.
+     *
+     * The worker holds one question at a time, so a second session's card is refused `busy` before
+     * it is ever raised. Mapped to `interrupted` that reached the agent as `owner-interrupted` - a
+     * sentence about a person who was at that moment answering somebody else's question.
+     */
+    it("answers a worker that is already asking about something else as busy (F3)", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: () => "busy",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError).toBe(true);
+      // The word every other tool of this product answers that situation with: nothing was decided,
+      // nothing was refused, and the call may simply be made again.
+      expect(result.json).toEqual({ outcome: "busy", reason: "prompt-pending" });
+      expect(worker.requests).toEqual([]);
+      expect(await configuredRoots()).toBeUndefined();
+    });
+
+    it("asks nothing about a file it would refuse whatever the answer was", async () => {
+      const big = await stageFileOutsideEveryRoot("big.bin", Buffer.alloc(600_000));
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: "always",
+        answers: UPLOADED,
+      });
+      await worker.waitForControlFrame("pair-request");
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [big.path] });
+
+      expect(result.isError).toBe(true);
+      // The bound is about what a frame can carry, and no permission changes it (0.5.0's word).
+      expect(result.json).toEqual({ outcome: "denied", reason: "upload-not-allowed" });
+      expect(worker.controlFrames.map((frame) => frame.type)).not.toContain("upload-consent-request");
+      expect(await configuredRoots()).toBeUndefined();
+    });
+  });
 });
 
 /**
@@ -956,6 +1327,46 @@ describe("T012 agent MCP server", () => {
  * retention is a window that closed before the picture arrived. A pure function, so it is asserted
  * directly rather than through a spawned process whose behaviour would be five minutes wide.
  */
+/**
+ * 014/T384 (S3 review F7) — what an `always` will and will not write down.
+ *
+ * The card's "these directories from now on" remembers each file's own parent, and for a file
+ * sitting at `D:\` - or on a share root - that parent is everything on the drive or the share: one
+ * press, and every file on it is uploadable without another question for as long as the row stands.
+ * The owner's yes still uploads what they were shown; those files are simply allowed the way "this
+ * once" allows them, and nothing is added.
+ *
+ * Asserted on the split rather than through a spawned server, because the end-to-end version would
+ * have to create a file at a real drive root - which Windows refuses on `C:\` for a process that is
+ * not elevated, and which would make the suite depend on which drives this machine happens to have.
+ * The rule itself is the contract's (`isRootDirectory`, pinned in the 014 contract suite).
+ */
+describe("T384 the directories an 'always' remembers", () => {
+  it("keeps the ordinary parents and refuses the roots", () => {
+    const split = splitRememberableDirectories([
+      { path: "C:\\Users\\owner\\docs\\receipt.txt", directory: "C:\\Users\\owner\\docs" },
+      { path: "D:\\holiday.png", directory: "D:\\" },
+      { path: "\\\\server\\share\\notes.txt", directory: "\\\\server\\share" },
+    ]);
+
+    expect(split.remember.map((file) => file.directory)).toEqual(["C:\\Users\\owner\\docs"]);
+    // The two that are not written down are still uploaded - once, by path, exactly as "this time"
+    // uploads them - so the owner's yes is honoured and the list is not widened to a drive.
+    expect(split.onceOnly.map((file) => file.path)).toEqual([
+      "D:\\holiday.png",
+      "\\\\server\\share\\notes.txt",
+    ]);
+  });
+
+  it("has nothing to say when no root is among them", () => {
+    const split = splitRememberableDirectories([
+      { path: "C:\\Users\\owner\\docs\\receipt.txt", directory: "C:\\Users\\owner\\docs" },
+    ]);
+
+    expect(split.onceOnly).toEqual([]);
+  });
+});
+
 describe("T337 the screenshot cache's environment overrides", () => {
   it("takes a positive number and falls back to the default for anything else", () => {
     expect(positiveEnv(SCREENSHOT_RETENTION_ENV, { [SCREENSHOT_RETENTION_ENV]: "1500" })).toBe(1_500);

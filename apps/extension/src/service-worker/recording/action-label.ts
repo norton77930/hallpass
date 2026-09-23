@@ -123,6 +123,17 @@ function subjectOf(input: DescribeActionInput, redacted: boolean): string | unde
   if (tool === "dialog") {
     return typeof args["action"] === "string" ? (args["action"] as string) : undefined;
   }
+  /**
+   * 014/FR-196: the size, because the size is what happened.
+   *
+   * A `reset` has none to name - what it did was give the page its own back - so it says so in the
+   * one word the panel's activity line already uses for it (`cleared`), rather than echoing the
+   * argument `reset`, which reads as an action that failed.
+   */
+  if (tool === "viewport") {
+    const { width, height } = args as { width?: unknown; height?: unknown };
+    return typeof width === "number" && typeof height === "number" ? `${width}x${height}` : "cleared";
+  }
   if (TEXT_TOOLS.has(tool)) {
     const text = textOf(tool, args);
     if (text === undefined) return input.target?.name === undefined ? undefined : `"${input.target.name}"`;

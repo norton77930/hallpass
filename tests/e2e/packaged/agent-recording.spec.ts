@@ -101,6 +101,49 @@ test.describe("agent recording", () => {
     }
   });
 
+  /**
+   * 014/T385 — the size a session gave a page is on the film too (FR-196).
+   *
+   * 012 added `viewport` and left it out of the recorded list, which shows up as a page that
+   * narrows between two frames with nothing saying why. The frame count is the claim; what the
+   * frame *says* (`viewport 480x640`, `viewport cleared`) is the label's own unit test, because
+   * reading 40 characters of drawn text back out of a GIF proves less than it costs.
+   */
+  test("adds a frame for the viewport a session set and for the one it cleared", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+    const { client, call, panel } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    try {
+      const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
+      await setSiteMode(panel, SITE, "skip-checks");
+
+      const started = (await call("gif_recorder", { action: "start" })) as RecordingAnswer;
+      expect(started).toMatchObject({ state: "recording", frames: 1 });
+
+      const set = (await call("viewport", { tabId, action: "set", width: 480, height: 640 })) as {
+        emulated: boolean;
+        recording?: RecordingAnswer;
+      };
+      expect(set.emulated).toBe(true);
+      expect(set.recording).toMatchObject({ state: "recording", frames: 2, skipped: 0 });
+
+      const cleared = (await call("viewport", { tabId, action: "reset" })) as {
+        emulated: boolean;
+        recording?: RecordingAnswer;
+      };
+      expect(cleared.emulated).toBe(false);
+      expect(cleared.recording).toMatchObject({ state: "recording", frames: 3, skipped: 0 });
+
+      await call("gif_recorder", { action: "clear" });
+      await call("tabs_close", { tabId });
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
   test("records a session, draws what it did, and writes the GIF the agent named", async ({
     extensionContext,
     extensionId,

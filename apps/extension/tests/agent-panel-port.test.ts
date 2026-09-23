@@ -131,7 +131,16 @@ describe("T019 agent panel port", () => {
     expect(port.sent[0]).toEqual({
       type: "worker.agent.state",
       // 006/T189: the relay that greeted this worker rides along, for the not-connected page.
-      payload: { paired: [], sessions: [], tabs: [], sites: [], bridge: "connected", diagnostics: { relayPid: 4242 } },
+      // 014 FR-191: the remembered moves ride along too, empty until the owner allows one.
+      payload: {
+        paired: [],
+        sessions: [],
+        tabs: [],
+        sites: [],
+        bridge: "connected",
+        transitions: [],
+        diagnostics: { relayPid: 4242 },
+      },
     });
   });
 
@@ -190,9 +199,20 @@ describe("T019 agent panel port", () => {
     // The relay's `relay-started` was acknowledged first (004/T169); the decision follows it.
     await vi.waitFor(() => expect(nativePort.sent).toEqual([
         { type: "relay-ack", relayPid: 4242 },
+        // 014 FR-194: and the worker asks that relay what the owner's upload directories are, on
+        // every link, because the panel's rows are a picture of the host's file.
+        { type: "upload-roots-list" },
         // 013/R-184: every pairing answer names this browser's run, minted into
         // `chrome.storage.session` on first use. The value is opaque, so only its presence is read.
-        { type: "pair-result", agentId: "agent-1", sessionId: "session-h1", accepted: true, browserRunId: expect.any(String) },
+        // 014/R-187: and what this worker can be asked, which is what lets the host ask at all.
+        {
+          type: "pair-result",
+          agentId: "agent-1",
+          sessionId: "session-h1",
+          accepted: true,
+          browserRunId: expect.any(String),
+          features: ["upload-consent"],
+        },
       ]));
     await vi.waitFor(() =>
       expect(port.sent.at(-1)).toMatchObject({
@@ -229,7 +249,7 @@ describe("T019 agent panel port", () => {
       expect((port.sent.at(-1) as { payload: { pending?: unknown } }).payload.pending).toBeUndefined(),
     );
     // Nothing went down the link: no answer at all is what leaves the request to expire (FR-084).
-    expect(nativePort.sent).toEqual([{ type: "relay-ack", relayPid: 4242 }]);
+    expect(nativePort.sent).toEqual([{ type: "relay-ack", relayPid: 4242 }, { type: "upload-roots-list" }]);
     runtime.prompts.cancel();
     await asked;
   });
@@ -242,13 +262,13 @@ describe("T019 agent panel port", () => {
     nativePort.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
     await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ payload: { pending: expect.anything() } }));
     port.emit({ type: "ui.agent.pair-decide", payload: { agentId: "agent-1", accepted: true } });
-    // `relay-ack` (004/T169) and then the accept.
-    await vi.waitFor(() => expect(nativePort.sent).toHaveLength(2));
+    // `relay-ack` (004/T169), the list request (014) and then the accept.
+    await vi.waitFor(() => expect(nativePort.sent).toHaveLength(3));
 
     port.emit({ type: "ui.agent.unpair", payload: { agentId: "agent-1" } });
 
     await vi.waitFor(() =>
-      expect(nativePort.sent[2]).toEqual({
+      expect(nativePort.sent[3]).toEqual({
         type: "pair-result",
         agentId: "agent-1",
         sessionId: "session-h1",
@@ -335,6 +355,22 @@ describe("T019 agent panel port", () => {
     port.emit({ type: "ui.agent.session-release", payload: { sessionId: "session-h2" } });
     expect(releaseSessionTabs).toHaveBeenCalledWith("session-h2");
     expect(stopSessionFromOwner).toHaveBeenCalledTimes(1);
+  });
+
+  /** 014/T358 (FR-178): 中斷 is its own runtime operation, and it is not a quiet stop. */
+  it("routes session-interrupt to the interrupt and never to the stop", async () => {
+    const { panel, runtime } = setup();
+    const port = fakePanelPort();
+    panel.accept(port);
+    const interruptSession = vi.spyOn(runtime, "interruptSession").mockReturnValue({ interrupted: 1 });
+    const stopSessionFromOwner = vi.spyOn(runtime, "stopSessionFromOwner").mockResolvedValue();
+    const releaseSessionTabs = vi.spyOn(runtime, "releaseSessionTabs").mockResolvedValue();
+
+    port.emit({ type: "ui.agent.session-interrupt", payload: { sessionId: "session-h1" } });
+
+    expect(interruptSession).toHaveBeenCalledWith("session-h1");
+    expect(stopSessionFromOwner).not.toHaveBeenCalled();
+    expect(releaseSessionTabs).not.toHaveBeenCalled();
   });
 
   it("refuses a stop aimed at one call and a release aimed at one tab", async () => {

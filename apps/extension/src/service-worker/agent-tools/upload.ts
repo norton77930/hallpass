@@ -69,6 +69,21 @@ function answer(callId: string, outcome: AgentNativeResponse["outcome"], reason:
 type Admitted = { ok: true; context: AgentToolContext; binding: AgentPageBinding };
 type NotAdmitted = { ok: false; response: AgentNativeResponse };
 
+/**
+ * How a picture would reach the page, as a fact the card can look a sentence up from (014 FR-196).
+ *
+ * Read off the arguments rather than off an answer, because the question is asked before anything
+ * is delivered: a `ref` names a file field the owner can see, a `coordinate` names a place on the
+ * page - two acts an owner would decide differently, behind one tool name. `file_upload` has only
+ * the first, and its own sentence already says so, so it carries nothing.
+ */
+function deliveryOf(tool: UploadTool, args: Record<string, unknown>): "input" | "drop" | undefined {
+  if (tool !== "upload_image") return undefined;
+  const target = args["target"] as { ref?: unknown; coordinate?: unknown } | undefined;
+  if (target?.ref !== undefined) return "input";
+  return target?.coordinate === undefined ? undefined : "drop";
+}
+
 export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
   const setFiles = deps.setFiles ?? setFilesOnTab;
   const deliverImage = deps.deliverImage ?? deliverImageOnTab;
@@ -114,18 +129,25 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       deps.onAdmitted?.(binding.site, decision.step);
     }
     if (decision.decision === "prompt") {
+      const delivery = deliveryOf(tool, args);
       const asked = await deps.prompts.ask({
         callId,
         // Which call the host knows it as, when this upload is a batch step (011 review H1).
         hostCallId: request.hostCallId,
+        // And whether the owner ended the call while the runner was still getting here (FR-179).
+        stopped: request.stopped,
         sessionId: request.sessionId,
         site: binding.site,
         tool,
         argsSummary: summariseToolCall(tool, args),
+        ...(delivery === undefined ? {} : { delivery }),
       });
       if (asked.decision === "busy") return { ok: false, response: answer(callId, "busy", "prompt-pending") };
       if (asked.decision === "timed-out") return { ok: false, response: noAnswerResponse(callId, asked) };
       if (asked.decision === "stopped") return { ok: false, response: answer(callId, "stopped", "owner-stopped") };
+      // 014 FR-179: the step ended, the session did not, and nothing was decided about the site.
+      if (asked.decision === "interrupted")
+        return { ok: false, response: answer(callId, "stopped", "owner-interrupted") };
       if (asked.decision === "deny") return { ok: false, response: answer(callId, "denied", "owner-denied") };
       // 006 FR-087: the tab may have been handed back while the question stood (see effects.ts).
       const held = await deps.tabOwnership(request.sessionId, tabId);

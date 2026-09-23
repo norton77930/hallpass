@@ -120,6 +120,16 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
     // Registered before the first `await`, so a Stop that arrives in the same turn as the call -
     // the batch case, where the step and the Stop are both already in flight - is not missed.
     const handle = deps.stops.begin(callId, request.sessionId);
+    /**
+     * What ended it, in the registry's own word (014 FR-180).
+     *
+     * The literal used to be written here because there was one way to end a call. There are
+     * two now, and they say opposite things about what is left standing, so the runner reports
+     * the word the control that ended it set rather than one of its own. The fallback is the
+     * word this line always had, for a flag set by something that named no reason.
+     */
+    const endedByOwner = (): AgentNativeResponse =>
+      answer(callId, "stopped", handle.reason() ?? "owner-stopped");
     try {
       const parsed = agentToolArgSchemas.wait.safeParse(request.args);
       if (!parsed.success) {
@@ -155,12 +165,12 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
       if (args.forMs !== undefined) {
         const boundMs = args.forMs;
         while (elapsedMs() < boundMs) {
-          if (handle.stopped()) return answer(callId, "stopped", "owner-stopped");
+          if (handle.stopped()) return endedByOwner();
           const refusal = await released();
           if (refusal) return refusal;
           await sleep(Math.min(pollMs, Math.max(1, boundMs - elapsedMs())));
         }
-        if (handle.stopped()) return answer(callId, "stopped", "owner-stopped");
+        if (handle.stopped()) return endedByOwner();
         // A fixed wait's condition is the time itself, so it ends the one way a wait can end well.
         return { callId, outcome: "ok", result: { outcome: "condition-met", waitedMs: elapsedMs() } };
       }
@@ -171,7 +181,7 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
         // Decided here, against the session's ring, and the page is never asked: the record is the
         // browser's, and a document that navigated or went away changes nothing about it.
         for (;;) {
-          if (handle.stopped()) return answer(callId, "stopped", "owner-stopped");
+          if (handle.stopped()) return endedByOwner();
           const refusal = await released();
           if (refusal) return refusal;
           let download: AgentWaitDownload | undefined;
@@ -181,7 +191,7 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
             deps.reportDiagnostic?.("agent.wait.downloads-failed");
             return answer(callId, "failed", "evaluate-failed");
           }
-          if (handle.stopped()) return answer(callId, "stopped", "owner-stopped");
+          if (handle.stopped()) return endedByOwner();
           if (download) {
             return { callId, outcome: "ok", result: { outcome: "condition-met", waitedMs: elapsedMs(), download } };
           }
@@ -227,7 +237,7 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
       };
 
       for (;;) {
-        if (handle.stopped()) return answer(callId, "stopped", "owner-stopped");
+        if (handle.stopped()) return endedByOwner();
         const refusal = await released();
         if (refusal) return refusal;
         const blocked = interrupted();
@@ -251,7 +261,7 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
           deps.reportDiagnostic?.("agent.wait.evaluate-failed");
           return answer(callId, "failed", "evaluate-failed");
         }
-        if (handle.stopped()) return answer(callId, "stopped", "owner-stopped");
+        if (handle.stopped()) return endedByOwner();
         if (!reply.ok) {
           const stale =
             reply.reason === "stale-context" || reply.reason === "stale-binding" || reply.reason === "stale-target";

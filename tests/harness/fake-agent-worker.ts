@@ -61,6 +61,26 @@ export type FakeAgentWorkerOptions = {
    * relay was respawned - a recycled service worker - and with different ids they are two browsers.
    */
   browserRunId?: string;
+  /**
+   * What this worker says it can be asked to do, on its pairing answer (014/R-187 §1).
+   *
+   * Absent is a worker from before the field, which is what every test that does not name one
+   * exercises - and what the host must still refuse an outside-roots upload against.
+   */
+  features?: string[];
+  /**
+   * How the owner answers an `upload-consent-request` (014/T374).
+   *
+   * `"ignore"` never answers, which is the case the host's own bound has to end; a function is
+   * handed the request so a test can answer one call and not another.
+   */
+  uploadConsent?:
+    | "once"
+    | "always"
+    | "deny"
+    | "interrupted"
+    | "ignore"
+    | ((request: { callId: string; files: Array<{ path: string; directory: string }> }) => string | undefined);
 };
 
 export type FakeAgentWorker = {
@@ -141,6 +161,19 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
           return;
         }
         controlFrames.push(control.data);
+        if (control.data.type === "upload-consent-request") {
+          // The owner's answer, as the worker's panel would send it back (014/R-187 §1). The
+          // request names the call, and so does the answer: that is what the relay routes it by.
+          const scripted = options.uploadConsent;
+          const decision =
+            typeof scripted === "function"
+              ? scripted({ callId: control.data.callId, files: [...control.data.files] })
+              : scripted;
+          if (decision !== undefined && decision !== "ignore") {
+            channel.send({ type: "upload-consent-result", callId: control.data.callId, decision });
+          }
+          return;
+        }
         if (control.data.type === "pair-request" && pairing !== "ignore") {
           channel.send({
             type: "pair-result",
@@ -151,6 +184,8 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
             accepted: pairing === "accept",
             // 013/R-184: the worker's own answer is the frame that says which browser run this is.
             ...(options.browserRunId === undefined ? {} : { browserRunId: options.browserRunId }),
+            // 014/R-187 §1: and what it can be asked, which is how the host knows it may ask at all.
+            ...(options.features === undefined ? {} : { features: options.features }),
           });
         }
       },
