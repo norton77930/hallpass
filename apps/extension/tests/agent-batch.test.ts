@@ -205,6 +205,89 @@ describe("T047 browser_batch", () => {
     expect(seen).toHaveLength(1);
   });
 
+  /**
+   * 014/T357 — the owner interrupted a batch at the step it was on (FR-180).
+   *
+   * A batch is the one answer that has more to say than "stopped". The per-step list cannot say it
+   * on its own: a step that never started and a step that failed both read as `not-run` there, and
+   * "how far did it get" is the agent's next question. So the answer names the three groups - what
+   * ran, where it was interrupted, what never started - and its outcome is the interrupt's, not
+   * the `ok` an ordinary batch answers with.
+   */
+  it("reports what ran, where it was interrupted and what never started", async () => {
+    let reachedThird: (() => void) | undefined;
+    const third = new Promise<void>((resolve) => {
+      reachedThird = resolve;
+    });
+    let stops: ReturnType<typeof harness>["stops"] | undefined;
+    const built = harness({}, async (request) => {
+      const step = Number(request.callId.split("#")[1] ?? -1);
+      if (step < 2) return { callId: request.callId, outcome: "ok", result: { delivered: true } };
+      // The third step is the one in flight when the owner presses 中斷: the dispatch point it
+      // would have gone through answers it, which is what this fake stands in for.
+      reachedThird?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      stops?.interruptSession("session-h1");
+      return {
+        callId: request.callId,
+        outcome: "stopped",
+        reason: "owner-interrupted",
+        hint: "The owner interrupted this step.",
+      };
+    });
+    stops = built.stops;
+
+    const pending = built.runner.run(batchRequest([CLICK, TYPE, CLICK, TYPE, CLICK]));
+    await third;
+    const response = await pending;
+
+    // `ok`, as every partially-run batch answers: the host composes an error reply from the
+    // outcome and the reason alone, so a `stopped` batch would reach the agent with none of the
+    // three lists below. The interruption is said on the step it happened to.
+    expect(response).toMatchObject({ callId: "call-1", outcome: "ok" });
+    const result = response.result as {
+      results: Array<{ index: number; outcome: string; reason?: string; hint?: string }>;
+      completed: number[];
+      interruptedAt: number;
+      notRun: number[];
+    };
+    expect(result.completed).toEqual([0, 1]);
+    expect(result.interruptedAt).toBe(2);
+    expect(result.notRun).toEqual([3, 4]);
+    // The step's own answer is where the reason and the sentence survive the trip to the agent;
+    // only that step knows whether its input had already gone out (FR-181).
+    expect(result.results[2]).toMatchObject({
+      index: 2,
+      outcome: "stopped",
+      reason: "owner-interrupted",
+      hint: "The owner interrupted this step.",
+    });
+    expect(result.results.slice(3)).toEqual([
+      { index: 3, outcome: "stopped", reason: "not-run" },
+      { index: 4, outcome: "stopped", reason: "not-run" },
+    ]);
+    expect(built.seen).toHaveLength(3);
+  });
+
+  /** FR-180: and the plan it stated is gone, so the next single call on that site asks again. */
+  it("clears the plan it stated when the owner interrupts it", async () => {
+    const built = harness({}, async (request) => {
+      const step = Number(request.callId.split("#")[1] ?? -1);
+      if (step === 0) built.stops.interruptSession("session-h1");
+      return { callId: request.callId, outcome: "ok", result: { delivered: true } };
+    });
+    await built.siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const pending = built.runner.run(batchRequest([CLICK, TYPE]));
+    await vi.waitFor(() => expect(built.prompts.currentPlan()).toBeDefined());
+    built.prompts.decidePlan(built.prompts.currentPlan()?.planId ?? "", true);
+    const response = await pending;
+
+    expect(response).toMatchObject({ outcome: "ok" });
+    expect((response.result as { interruptedAt?: number }).interruptedAt).toBe(1);
+    expect(built.plans.get(SITE), "consent for a sequence that is over").toBeUndefined();
+  });
+
   it("asks about the whole batch once under follow-a-plan, and its steps then run unprompted", async () => {
     const { runner, siteModes, prompts, plans, seen } = harness();
     await siteModes.set(SITE, { mode: "follow-a-plan" });
@@ -367,6 +450,31 @@ describe("T047 browser_batch", () => {
       expect(step.callId, `step ${index} runs under its own id`).toBe(`call-1#${index}`);
       expect(step.hostCallId, `step ${index} names the call the host holds`).toBe("call-1");
     }
+  });
+
+  /**
+   * 014/T369 review F7 — the notice rides in a field with a bound, so it is written to fit it.
+   *
+   * `hint` is `z.string().max(400)` and the answer frame is strict: a sentence one character over
+   * does not arrive truncated, it makes the whole frame fail to parse and the agent is told
+   * nothing at all. Two origins long enough to overflow it are unusual and perfectly legal, and
+   * losing the batch's three lists to them would be a far worse answer than losing the notice.
+   */
+  it("keeps the step's notice inside the field's bound, whatever the origins are called", async () => {
+    const label = (letter: string) => `${letter.repeat(60)}.${letter.repeat(60)}.${letter.repeat(60)}`;
+    const from = `https://${label("a")}.test`;
+    const to = `https://${label("b")}.test`;
+    const { runner, dispatch } = harness({ pendingTransition: async () => ({ from, to }) });
+
+    const response = await runner.run(batchRequest([CLICK, TYPE]));
+
+    const results = (response.result as { results: Array<{ outcome: string; reason?: string; hint?: string }> }).results;
+    // The step still says what happened to it, in the words S2 gave it...
+    expect(results[0]).toMatchObject({ outcome: "stopped", reason: "site-transition" });
+    expect(results[1]).toMatchObject({ outcome: "stopped", reason: "not-run" });
+    // ...and the one field with a bound on it stays inside that bound.
+    expect(results[0]?.hint?.length ?? 0).toBeLessThanOrEqual(400);
+    expect(dispatch, "a step ran on a tab that had moved").not.toHaveBeenCalled();
   });
 
   it("refuses to run a batch inside a batch even if one reaches it", async () => {

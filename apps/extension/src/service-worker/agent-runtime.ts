@@ -1,6 +1,8 @@
 import {
   AGENT_ACTIVITY_KEPT,
   AGENT_EFFECT_TOOL_NAMES,
+  INTERRUPT_HINTS,
+  isRootDirectory,
   type AgentActivityItem,
   type AgentBridgeDiagnostics,
   type AgentNotice,
@@ -14,7 +16,7 @@ import {
 import { setAttention } from "../chrome-adapters/action-badge.js";
 import { downloadFile, watchDownloadChanged, watchDownloadCreated } from "../chrome-adapters/downloads.js";
 import { createOffscreenAdapter } from "../chrome-adapters/offscreen.js";
-import { getTabSnapshot, queryTabSnapshots } from "../chrome-adapters/tabs.js";
+import { getTabSnapshot, queryTabSnapshots, watchTabUpdates } from "../chrome-adapters/tabs.js";
 import { getWindowFacts, setWindowState } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
 import {
@@ -36,6 +38,15 @@ import {
   type PairingWaitingTick,
 } from "./pairing-controller.js";
 import { createSiteModeStore, siteOfUrl, type SiteModeStore } from "./site-mode-store.js";
+import { chromeTransitionStore } from "./transition-store.js";
+import {
+  applyTransition,
+  beginTransitionState,
+  clearPending,
+  hintWithTransitionNotice,
+  noteKnownOrigin,
+  type TransitionLookups,
+} from "./agent-tools/transitions.js";
 import { createAgentBatch } from "./agent-tools/batch.js";
 import {
   createAgentSessionContext,
@@ -56,10 +67,12 @@ import { createAgentPageBindings } from "./agent-tools/page-binding.js";
 import { createStatedPlans } from "./agent-tools/plans.js";
 import {
   createAgentPromptController,
+  noAnswerResponse,
   type AgentPromptController,
   type PromptEnding,
   type PromptWaitingTick,
 } from "./agent-tools/prompts.js";
+import { summariseToolCall } from "./agent-tools/summaries.js";
 import { createAgentReads } from "./agent-tools/reads.js";
 import { createAgentRecordingTools } from "./agent-tools/recording.js";
 import { createActionContext } from "./recording/action-context.js";
@@ -69,7 +82,7 @@ import { createRecorder, sessionRecordingStore, type AgentRecorder } from "./rec
 import { createWindowRestorer, sessionWindowRestoreStore } from "./window-restore.js";
 import { createViewportEmulation, sessionViewportStore } from "./viewport-emulation.js";
 import { sessionBrowserRun } from "./browser-run.js";
-import { createAgentStopSignals, type AgentToolRequest } from "./agent-tools/stop.js";
+import { createAgentStopSignals, STEP_SEPARATOR, type AgentToolRequest } from "./agent-tools/stop.js";
 import { createAgentTabTools } from "./agent-tools/tabs.js";
 import { createAgentUpload } from "./agent-tools/upload.js";
 import { createAgentWait } from "./agent-tools/wait.js";
@@ -137,6 +150,17 @@ export const AGENT_RECONCILE_ALARM = "hallpass-reconcile";
 
 /** R-111's bound. Chrome may fire an alarm late, which delays the release and never skips it. */
 export const AGENT_RECONCILE_SECONDS = 15;
+
+/**
+ * How long an `always` waits for the host to place the call it answered (014 FR-194).
+ *
+ * The host writes the directory down after it has the answer and only then places the call, so the
+ * call arriving is the proof the write happened and is when the list is asked for. A host that
+ * could not write never places it; after this bound the list is asked for anyway, read after the
+ * host's attempt, so the panel can say what never reached it (S3 review F2). The write is one
+ * atomic temp-and-rename, milliseconds, so the bound is generous rather than tight.
+ */
+export const UPLOAD_ROOTS_RECORD_WAIT_MS = 3_000;
 
 /**
  * What a *trusted* click on the in-page indicator's control produces (004/T108, FR-062, R-117).
@@ -267,6 +291,22 @@ async function readBridgeDiagnostics(): Promise<AgentBridgeDiagnostics> {
  * or one that is not a web page at all - `chrome://extensions` parses to a hostname, and it is not
  * a site the agent is on.
  */
+/**
+ * Whether an origin names a page on the web (014 FR-185, T369 review F8).
+ *
+ * `chrome://settings` and `chrome-extension://<id>` are origins in the browser's own URL parser,
+ * and they are not sites: nothing the owner sets a mode for, nothing an agent is asked to act on.
+ * The check is on the scheme rather than on a list of hosts, because that is the actual line.
+ */
+function isWebOrigin(origin: string): boolean {
+  try {
+    const { protocol } = new URL(origin);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function hostOfUrl(url: string): string | undefined {
   try {
     const parsed = new URL(url);
@@ -338,10 +378,35 @@ export type AgentRuntime = {
   /** The site list's revoke (006 FR-086): forget the site's record, so the default applies again. */
   clearSiteMode: (site: string) => Promise<void>;
   /**
+   * The remembered-decisions revoke (014 FR-191, FR-192): forget one ordered pair of origins.
+   *
+   * It takes effect at the next transition in any session, and deliberately not sooner: a session
+   * that was told 繼續 keeps that answer until it ends, because the owner answered it about that
+   * session's work and taking it back mid-work would refuse a call they already allowed.
+   */
+  clearTransition: (from: string, to: string) => Promise<void>;
+  /**
+   * The directory row's revoke (014 FR-192): ask the host to forget one upload directory.
+   *
+   * The row does not go here. Only the host can write the list, so the row goes when the host says
+   * it is gone - and while it has not said so the press is remembered and made again on the next
+   * link, which is what FR-192 means by a host that cannot be reached.
+   */
+  clearUploadRoot: (root: string) => Promise<void>;
+  /**
    * The session card's Stop (006 FR-087): the session ends the way a relay-named stop ends it, and
    * its in-flight `wait` or batch answers `owner-stopped` through the stops registry it is watching.
    */
   stopSessionFromOwner: (sessionId: string) => Promise<void>;
+  /**
+   * The session card's 中斷 (014 FR-178, FR-179): end the calls, keep the session.
+   *
+   * Synchronous and total by construction. It flags what is in flight and withdraws the question a
+   * call may be parked on, and there is nothing to await because nothing is released - no lease,
+   * no attachment, no recording, no decision. It answers how many calls it reached, so the panel
+   * can say "nothing was running" without asking a second question.
+   */
+  interruptSession: (sessionId: string) => { interrupted: number };
   /**
    * The session card's Release tabs (006 FR-087): every tab the session holds goes back to the owner
    * the way `tabs_release` hands one back, and the session stays live and paired.
@@ -540,6 +605,101 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   const stops = createAgentStopSignals();
 
   /**
+   * Where each held tab has been, and where it has gone without anybody deciding (014 US2, R-186).
+   *
+   * Every write goes through one queue, and that is load-bearing rather than tidy. The arrival is
+   * heard on `tabs.onUpdated`, which fires while a `navigate` is still running and while a call is
+   * being answered; three of those handlers read the same stored map, change one entry and write
+   * it back. Serialised, "the navigate registered its expectation before the commit was recorded"
+   * and "the commit was recorded before the navigate released it" are facts about the order the
+   * jobs were queued in, which is the order the browser told us about them.
+   */
+  const transitionStore = chromeTransitionStore();
+  let transitionQueue: Promise<unknown> = Promise.resolve();
+  function queueTransition<T>(job: () => Promise<T>): Promise<T> {
+    const next = transitionQueue.then(job, job);
+    // The queue must survive one job's failure: a storage write that threw is not a reason to stop
+    // hearing about every later navigation.
+    transitionQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  function transitionLookups(sessionId: string): TransitionLookups {
+    return {
+      siteMode: async (origin) => (await siteModes.get(origin)).mode,
+      /**
+       * Rule (d), both halves, remembered one first (FR-188, FR-190).
+       *
+       * The persisted record is asked about first because asking *is* the touch: the panel's "last
+       * used" is what makes a row reviewable a month later, and a session that had also been told
+       * 繼續 would otherwise leave the owner's row looking unused while it was being used all day.
+       */
+      allowedPair: async (from, to) =>
+        (await transitionStore.touch(from, to)) || (await transitionStore.allowsForSession(sessionId, from, to)),
+      loopbackExempt: () => transitionStore.loopbackExempt(),
+    };
+  }
+
+  /**
+   * One arrival, from the browser's own signal (FR-185).
+   *
+   * A tab nobody holds is nobody's business: the owner browsing their own tabs raises nothing, and
+   * neither does another extension's. The lease is the authority on "is this a session's tab",
+   * exactly as it is for every other question this worker asks about a tab.
+   */
+  async function noteTabArrival(tabId: number, url: string | undefined): Promise<void> {
+    const to = url === undefined ? undefined : siteOfUrl(url);
+    // Web pages only (T369 review F8). Chrome gives its own pages and this extension's a perfectly
+    // real origin, and neither is a site: not one the owner holds a decision about, not one an
+    // agent can be asked to act on, and a pending question about one would hold the session's next
+    // call behind a card nobody could answer usefully. The same line `hostOfUrl` draws.
+    if (to === undefined || !isWebOrigin(to)) return;
+    const holder = (await tabs.leases()).find((lease) => lease.tabId === tabId)?.sessionId;
+    if (holder === undefined) return;
+    const before = (await transitionStore.stateOf(holder, tabId)) ?? beginTransitionState(undefined);
+    const { state, rule } = await applyTransition(before, to, transitionLookups(holder));
+    await transitionStore.save(holder, tabId, state);
+    if (rule === "pending" && before.pending?.to !== to) {
+      // Where a gate and a puzzled owner's log can read it; the owner is asked by the next call.
+      reportTestDiagnostic(`agent.transition.pending ${tabId}`);
+    }
+  }
+
+  /** What a tab the session has just taken is already on: known, and nothing to answer for. */
+  async function seedTransitionKnown(sessionId: string, tabId: number, requested?: string): Promise<void> {
+    const snapshot = await getTabSnapshot(tabId).catch(() => undefined);
+    let state = beginTransitionState(undefined);
+    // Both, because a tab created with a url answers before it has committed on one: the requested
+    // origin is where it is going, and the snapshot is where it is.
+    for (const url of [requested, snapshot?.url]) {
+      const origin = url === undefined ? undefined : siteOfUrl(url);
+      if (origin !== undefined) state = noteKnownOrigin(state, origin);
+    }
+    await transitionStore.save(sessionId, tabId, state);
+  }
+
+  /**
+   * The question standing for one tab, as every reader of it asks (T369 review F1, F4).
+   *
+   * Two things are decided here rather than at each call site. It goes through the same queue every
+   * write goes through (T369 review F4), so an arrival the browser has already reported but whose
+   * job has not run yet is *seen*: read beside the queue instead, the check answered from the state
+   * the job was about to replace, and the call FR-187 exists to hold went through on a tab that had
+   * moved. And a store that will not answer means "no question" (F1): FR-187 asks the owner about a
+   * move this worker knows of, and a worker that knows of none must let the call through exactly as
+   * it would have - the failure is said out loud rather than turned into a refusal the agent cannot
+   * act on.
+   */
+  async function pendingTransitionOf(sessionId: string, tabId: number): Promise<{ from: string; to: string } | undefined> {
+    try {
+      return await queueTransition(async () => (await transitionStore.stateOf(sessionId, tabId))?.pending);
+    } catch {
+      reportTestDiagnostic("agent.transition.check-failed");
+      return undefined;
+    }
+  }
+
+  /**
    * One live agent session as this worker knows it (data-model AgentSession).
    *
    * `context` is per session on purpose: the channel nonce and the runtime epoch are the binding
@@ -600,10 +760,35 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // gone cannot be debugged at all. Both are announced here rather than discovered at the next
     // call, because what they end is an attachment the owner can see in their own browser.
     onTabNavigated: (tabId) => void diagnostics.refresh(tabId).catch(() => undefined),
+    /**
+     * Where a `navigate` is taking the tab, for as long as it is taking it (014 rule (e)).
+     *
+     * The tool announces it rather than the runtime inferring it, because only the tool knows what
+     * the call asked for: the arrival signal says where a tab is and never who sent it there.
+     */
+    transitions: {
+      expectNavigate: (sessionId, tabId, url) =>
+        queueTransition(async () => {
+          const origin = siteOfUrl(url);
+          if (origin === undefined) return;
+          const state = (await transitionStore.stateOf(sessionId, tabId)) ?? beginTransitionState(undefined);
+          await transitionStore.save(sessionId, tabId, { ...state, expectedNavigate: origin });
+        }),
+      endNavigate: (sessionId, tabId) =>
+        queueTransition(async () => {
+          const state = await transitionStore.stateOf(sessionId, tabId);
+          if (state?.expectedNavigate === undefined) return;
+          const { expectedNavigate: _expected, ...rest } = state;
+          await transitionStore.save(sessionId, tabId, rest);
+        }),
+    },
     onTabReleased: (tabId) => {
       // The lease is over, so every holder is: the diagnostics buffers go with their grant, and the
       // attachment an effect made for this tab goes with the tab (004/T121, R-113).
       void diagnostics.release(tabId).catch(() => undefined);
+      // And what this session knew about where that tab had been (014 data-model): the owner has
+      // their tab back, and its history with an agent is not something to keep a record of.
+      void queueTransition(() => transitionStore.forgetTab(tabId));
       void attachments
         .release(tabId)
         // And the size this session laid the page out at (012/S2c F5) - *after* the release, never
@@ -782,6 +967,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * mid-recording loses nothing (D-008-2).
    */
   const actions = createActionContext();
+
+  /**
+   * Which calls have put something into a page (014 FR-181, R-185 §2).
+   *
+   * The same moment the recording's scratch pad is written - the runner measured its target and is
+   * about to dispatch the gesture or the keys - kept as its own fact because it answers a different
+   * question and must survive being read. The recording's note is *taken* by the decorator that
+   * draws the ring; this one is read when an interrupt arrives, which may be before or after that,
+   * and reading a record that had been consumed would say "nothing was delivered" about a page
+   * that had already been typed into. Dropped when the call answers, either way.
+   */
+  const inputDelivered = new Set<string>();
   const recorder: AgentRecorder =
     options.recorder ??
     createRecorder({
@@ -832,7 +1029,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // Where the gesture actually landed, for the ring a recorded frame draws (008/R-136). The
     // coordinate is the runner's own measurement of the target's box; the decorator that builds the
     // label has no way to compute it and must not guess one.
-    onDelivered: (callId, delivery) => actions.noteDelivery(callId, delivery),
+    onDelivered: (callId, delivery) => {
+      actions.noteDelivery(callId, delivery);
+      // 014 FR-181: the same moment, read for a different question - was anything put into
+      // the page before the owner interrupted this step.
+      inputDelivered.add(callId);
+    },
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -923,12 +1125,309 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     };
   }
 
+  /**
+   * The calls that are not about a tab, however their arguments read (014 FR-187, R-186 §3).
+   *
+   * Four of them name no tab at all - listing the browser's tabs, opening one, taking one, the
+   * recorder and the downloads list - and holding those behind a card about some *other* tab would
+   * leave a session unable to do the one thing that gets it out of the situation. `browser_batch`
+   * is here for a different reason: it does name a tab, and it decides for itself, step by step
+   * (`batch.ts`), because a card raised in the middle of an approved sequence is a question about
+   * step four rather than about the session's work.
+   *
+   * And two that name the tab and are *leaving* it (owner's ruling, 2026-09-22): closing the tab
+   * and handing it back do nothing on the site nobody decided about - they are the same act as the
+   * `navigate` elsewhere that FR-188 already admits. Holding them would mean an agent that met an
+   * undecided site could not let go of the tab until somebody answered a card, which is a worse
+   * answer to "I should not be here" than simply going.
+   */
+  const TRANSITION_PASS_THROUGH = new Set<AgentToolName>([
+    "tabs_context",
+    "tabs_create",
+    "tabs_claim",
+    "gif_recorder",
+    "downloads_context",
+    "browser_batch",
+    "tabs_close",
+    "tabs_release",
+  ]);
+
+  /**
+   * How many times one call may ask about a tab that keeps moving (T369 follow-up).
+   *
+   * Three because each round is a card a person reads and answers; a page that commits again every
+   * time one is answered would otherwise hold both of them in a loop with no end.
+   */
+  const TRANSITION_ASK_ROUNDS = 3;
+
+  /** What the agent is told when the page moved the tab under every question (T369 follow-up). */
+  const TRANSITION_KEPT_MOVING_HINT =
+    "The tab kept moving while the owner was asked; nothing ran, and nobody declined it. " +
+    "Read the page or navigate somewhere this session has already decided about, then re-run it.";
+
+  /** The tab a call *names*; a tab it merely carries as its session's is not what it is about. */
+  function namedTabOf(request: AgentNativeRequest): number | undefined {
+    const named = (request.args as { tabId?: unknown }).tabId;
+    return typeof named === "number" ? named : undefined;
+  }
+
+  /**
+   * The owner's question about where the tab went, asked before the call runs (FR-187).
+   *
+   * Answered here rather than in each runner because the claim is "any tool, reads included": a
+   * read passes no gate of its own, so the only place every call meets is the dispatch point. The
+   * call is answered with a refusal, or this returns `undefined` and the call proceeds exactly as
+   * it would have - nothing about the tool's own decisions changes.
+   */
+  async function heldByTransition(request: AgentToolRequest): Promise<AgentNativeResponse | undefined> {
+    if (TRANSITION_PASS_THROUGH.has(request.tool)) return undefined;
+    // A batch step is its batch's business (above): the batch stops before it rather than asking.
+    if (request.callId.includes(STEP_SEPARATOR)) return undefined;
+    const tabId = namedTabOf(request);
+    if (tabId === undefined) return undefined;
+    const { callId } = request;
+    /**
+     * One call, asked as many times as the tab has moved, and no more (T369 follow-up).
+     *
+     * The owner's yes is spent on the pair it named (F3), so a tab that committed again while the
+     * card stood leaves this call facing a destination nobody has decided about - and running it
+     * there is the very thing FR-187 exists to prevent. So it asks again, about where the tab
+     * actually is. The bound is three because each round is a question a person has to read: a
+     * page that commits every time one is answered would otherwise walk them through an unbounded
+     * sequence of cards for a single call.
+     */
+    for (let round = 0; round < TRANSITION_ASK_ROUNDS; round += 1) {
+      const pending = await pendingTransitionOf(request.sessionId, tabId);
+      if (pending === undefined) return undefined;
+      /**
+       * The way out, admitted without a card (FR-188): a `navigate` somewhere other than where the
+       * tab ended up is the session *leaving*, and holding it would be asking the owner's
+       * permission to stop doing the thing they have not agreed to.
+       */
+      if (request.tool === "navigate") {
+        const url = (request.args as { url?: unknown }).url;
+        const asked = typeof url === "string" ? siteOfUrl(url) : undefined;
+        if (asked !== undefined && asked !== pending.to) return undefined;
+      }
+      const answer = await prompts.ask({
+        callId,
+        hostCallId: request.hostCallId,
+        // The check runs on after an interrupt won the race above it; its card must not (F2).
+        stopped: request.stopped,
+        sessionId: request.sessionId,
+        // The card is about the destination, which is the site the call would act on.
+        site: pending.to,
+        tool: request.tool,
+        kind: "transition",
+        transition: { from: pending.from, to: pending.to },
+        argsSummary: summariseToolCall(request.tool, request.args as Record<string, unknown>),
+      });
+      if (answer.decision === "busy") return { callId, outcome: "busy", reason: "prompt-pending" };
+      // 011 FR-146, as for a consent card: nothing ran, and the person is told where to click.
+      if (answer.decision === "timed-out") return noAnswerResponse(callId, answer);
+      if (answer.decision === "stopped") return { callId, outcome: "stopped", reason: "owner-stopped" };
+      if (answer.decision === "interrupted") return { callId, outcome: "stopped", reason: "owner-interrupted" };
+      if (answer.decision === "released") {
+        return { callId, outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } };
+      }
+      if (answer.decision === "deny") {
+        // FR-188: this call is refused and nothing else is. The question stays pending, so the next
+        // call on this tab asks again - and the answer carries the notice, added below as it is to
+        // every answer about a tab that has moved.
+        return { callId, outcome: "denied", reason: "site-transition-declined" };
+      }
+      const applied = await queueTransition(async () => {
+        const state = await transitionStore.stateOf(request.sessionId, tabId);
+        /**
+         * The answer applies to the move it was asked about, and to no other (T369 review F3).
+         *
+         * Applied to whatever is pending *now*, the owner's yes about B would admit C - a site
+         * they were never shown, on a click that did not mention it. So nothing is recorded, and
+         * the round above asks about where the tab has actually gone.
+         */
+        if (state?.pending?.to !== pending.to) {
+          reportTestDiagnostic(`agent.transition.moved-on ${tabId}`);
+          return false;
+        }
+        await transitionStore.save(request.sessionId, tabId, clearPending(state));
+        await transitionStore.allowForSession(request.sessionId, pending.from, pending.to);
+        // FR-188's second half, and the only way this list ever grows (FR-191).
+        if (answer.rememberTransition) await transitionStore.remember(pending.from, pending.to);
+        return true;
+      });
+      notify();
+      if (applied) return undefined;
+    }
+    /**
+     * Three rounds, and the tab is still somewhere nobody has decided about.
+     *
+     * Refused in the word a declined transition already has - the agent branches on `reason`, and
+     * a new one here would be a vocabulary change for a case that is a page misbehaving - with a
+     * hint that says what actually happened, because "declined" on its own would tell the agent
+     * the owner said no, which they did not. The question stays pending: the call may be sent
+     * again, and it will ask about wherever the tab has settled.
+     */
+    reportTestDiagnostic(`agent.transition.kept-moving ${tabId}`);
+    return {
+      callId,
+      outcome: "denied",
+      reason: "site-transition-declined",
+      hint: TRANSITION_KEPT_MOVING_HINT,
+    };
+  }
+
+  /**
+   * What the call the tab moved during adds to its own answer (FR-186).
+   *
+   * Its outcome is untouched: the click landed or it did not, and saying otherwise because the page
+   * then went somewhere would be the dishonest answer this feature exists to avoid. The notice
+   * rides in `hint` because the response frame is strict (R-187 §6), and it is appended to a hint
+   * the runner already wrote rather than replacing it - the runner's sentence is about the call,
+   * and this one is about the tab.
+   */
+  async function withTransitionNotice(
+    request: AgentNativeRequest,
+    response: AgentNativeResponse,
+  ): Promise<AgentNativeResponse> {
+    const tabId = namedTabOf(request);
+    if (tabId === undefined) return response;
+    const pending = await pendingTransitionOf(request.sessionId, tabId);
+    if (pending === undefined) return response;
+    // The field is bounded at 400 characters; a runner's own sentence is never dropped for this,
+    // and the bound is applied by the one helper the batch's own step hint uses (T369 review F7).
+    const hint = hintWithTransitionNotice(pending.from, pending.to, response.hint);
+    return hint === undefined || hint === response.hint ? response : { ...response, hint };
+  }
+
+  /** A tab the session has just taken is on an origin it knows about (FR-185's "already knew"). */
+  async function seedAfterTabTool(request: AgentNativeRequest, response: AgentNativeResponse): Promise<void> {
+    if (response.outcome !== "ok") return;
+    if (request.tool !== "tabs_create" && request.tool !== "tabs_claim") return;
+    const tabId = (response.result as { tabId?: number } | undefined)?.tabId ?? namedTabOf(request);
+    if (tabId === undefined) return;
+    const requested = (request.args as { url?: unknown }).url;
+    await queueTransition(() =>
+      seedTransitionKnown(request.sessionId, tabId, typeof requested === "string" ? requested : undefined),
+    );
+  }
+
+  /**
+   * One call, raced against the owner's 中斷 (014 FR-179, FR-180, R-185 §2).
+   *
+   * The stop flag is a thing runners read at their own checkpoints, and that is right for the
+   * owner's Stop: a step that already reached the page must still report what the page did. It
+   * cannot answer within a second, though - a `wait` sits a whole poll between reads and a runner
+   * parked on a page that never replies has no checkpoint at all - so this seam answers the call
+   * itself and lets the runner run on into nothing (FR-182).
+   *
+   * `browser_batch` is deliberately not raced here. Its answer is the one that has something more
+   * to say - which steps ran, which one was interrupted, which never started (FR-180) - and its
+   * current step *is* raced, one level down, so the bound is met by the step and the batch composes
+   * the honest report a moment later.
+   */
+  /**
+   * The answer the owner's 中斷 gives a call, wherever in its life it landed (FR-180, FR-181).
+   *
+   * One function because there is more than one place the race can be won now, and the two honest
+   * sentences must not drift apart between them: the choice is made by the one fact that separates
+   * them - whether anything of this call had already reached the page.
+   */
+  function interruptedAnswer(callId: string): AgentNativeResponse {
+    return {
+      callId,
+      outcome: "stopped",
+      reason: "owner-interrupted",
+      hint: inputDelivered.has(callId) ? INTERRUPT_HINTS.mayHaveTakenEffect : INTERRUPT_HINTS.nothingDelivered,
+    };
+  }
+
   async function dispatchTool(request: AgentToolRequest): Promise<AgentNativeResponse> {
     // Before routing, deliberately: a runner reached at all is a runner that has already begun
     // asking the page something, and this is the one state in which nothing on that tab can answer.
     const blocked = blockedByDialog(request);
     if (blocked) return blocked;
-    return recordAfter(request, await runTool(request));
+    const { callId } = request;
+    const handle = stops.begin(callId, request.sessionId);
+    /**
+     * The card's 中斷 turns on here and off again below (FR-178).
+     *
+     * It is told at the two moments the answer changes - a call began, a call ended - rather than
+     * polled, because the panel holds a picture and re-reads it when the worker says something
+     * moved. With no panel connected the publish is a no-op, so an agent working alone pays
+     * nothing for a control nobody is looking at.
+     */
+    notify();
+    /**
+     * The registration ends on every route out of this function, including the ones nobody planned
+     * (T369 review F1).
+     *
+     * `end()` used to be written once per branch, and the branches that were missing it were the
+     * failures: a runner that rejected and the transition check's own storage read. A registration
+     * left behind is not untidiness - it is what the panel counts for its 中斷 control and what the
+     * next press reports having ended, so the owner would be told a call nobody was waiting for was
+     * running, and then that they stopped it.
+     *
+     * The one route that must *not* end here is the interrupt: the runner is still running, and its
+     * own late answer ends the registration then (FR-182).
+     */
+    let runnerLeftRunning = false;
+    /** The handle, as the runners and the transition check read it (T369 review F2). */
+    const watched: AgentToolRequest = { ...request, stopped: handle.stopped };
+    const interruption = Symbol("interrupted");
+    try {
+      /**
+       * 014 FR-187: before the runner, and after `begin()` so the owner's 中斷 reaches the card.
+       *
+       * A call held here has not started: nothing has been asked of the page, so a decline costs
+       * the agent this call and nothing else, and the tab is still the session's either way.
+       *
+       * Raced like the runner below it (T369 review F2): this check is a storage read, and a read
+       * on a worker that has just woken is not instant. Outside the race it would be a stretch of
+       * the call's life in which 中斷 does nothing at all, which is exactly what FR-179's bound is
+       * about. The check runs on into nothing, and its own card is refused at the raise.
+       */
+      const held = await Promise.race([
+        heldByTransition(watched),
+        handle.interrupted().then(() => interruption),
+      ]);
+      if (held === interruption) return interruptedAnswer(callId);
+      if (held) return await withTransitionNotice(request, held as AgentNativeResponse);
+      const running = runTool(watched);
+      if (request.tool === "browser_batch") {
+        return await withTransitionNotice(request, await recordAfter(request, await running));
+      }
+      const finished = await Promise.race([running, handle.interrupted().then(() => interruption)]);
+      if (finished !== interruption) {
+        const answered = await recordAfter(request, finished as AgentNativeResponse);
+        // A tab the session has just taken is known to be where it is, before its next call can
+        // mistake that for a move (FR-185).
+        await seedAfterTabTool(request, answered);
+        return await withTransitionNotice(request, answered);
+      }
+      /**
+       * The owner won the race. What the runner eventually answers is not an answer to anything:
+       * the host has been told this call is over, and a second frame under the same id would settle
+       * a call that is already settled. It is named where a gate can read it and dropped (FR-182),
+       * and the registration ends then rather than now, because until the runner returns it is
+       * still running - and nothing here interrupts it, which is the whole difference from a Stop.
+       */
+      runnerLeftRunning = true;
+      void running
+        .catch(() => undefined)
+        .finally(() => {
+          reportTestDiagnostic(`agent.call.late-result ${callId}`);
+          handle.end();
+          inputDelivered.delete(callId);
+          notify();
+        });
+      return interruptedAnswer(callId);
+    } finally {
+      if (!runnerLeftRunning) {
+        handle.end();
+        inputDelivered.delete(callId);
+        notify();
+      }
+    }
   }
 
   /**
@@ -946,6 +1445,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     "upload_image",
     "resize_window",
     "dialog",
+    // 014/FR-196: a page laid out at a size the session chose looks, on film, like a page that
+    // narrowed by itself. The size is the action, so the frame is taken like any other.
+    "viewport",
   ] satisfies AgentToolName[]);
 
   /** The tab a recorded call was about; the session's own main tab when the call names none. */
@@ -957,24 +1459,29 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   }
 
   /**
-   * One line on the card for a picture the session put into one of the owner's pages (013/FR-174).
+   * One line on the card for a file the session put into one of the owner's pages (013/FR-174,
+   * 014/FR-196).
    *
    * Here rather than inside the upload runner for the same reason the restore's line is here: the
    * activity list is this file's, and a runner that wrote to it would need the map passed in. Only
    * an `ok` answer earns a line - a refused or stale call changed nothing on the page, and a card
-   * entry for it would be a fact about nothing - and only `upload_image`: whether `file_upload`
-   * gets one too is the owner's parity decision to make, not a side effect of this slice.
+   * entry for it would be a fact about nothing.
+   *
+   * 013 gave the line to `upload_image` alone and left the parity to the owner; 014 takes the
+   * decision (FR-196). Both tools put a file into a page the owner is watching, so both leave a
+   * trace - and for `file_upload` the delivery is always `input`, because setting files on an input
+   * named by `ref` is the only thing it does.
    *
    * The pieces, never a sentence: the site the tab is on and the delivery the *page* reported. A
    * tab whose site cannot be named still gets the line, with the site left out, because what
    * happened to the page happened either way.
    */
-  async function noteUploadedImage(
-    request: AgentToolRequest,
-    response: AgentNativeResponse,
-  ): Promise<void> {
-    if (request.tool !== "upload_image" || response.outcome !== "ok") return;
-    const delivery = (response.result as { delivery?: unknown } | undefined)?.delivery;
+  async function noteUpload(request: AgentToolRequest, response: AgentNativeResponse): Promise<void> {
+    if (response.outcome !== "ok") return;
+    const delivery =
+      request.tool === "file_upload"
+        ? "input"
+        : (response.result as { delivery?: unknown } | undefined)?.delivery;
     if (delivery !== "input" && delivery !== "drop") return;
     const tabId = await recordedTabOf(request);
     const tab = tabId === undefined ? undefined : await getTabSnapshot(tabId);
@@ -1063,7 +1570,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     }
     if (upload.handles(request.tool)) {
       const answered = await upload.run(request);
-      await noteUploadedImage(request, answered);
+      await noteUpload(request, answered);
       return answered;
     }
     if (downloadTools.handles(request.tool)) {
@@ -1100,11 +1607,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       return bound.ok ? bound.binding.site : undefined;
     },
     dispatch: dispatchTool,
+    // 014 FR-187: the batch asks this before every step, and stops rather than raising a card.
+    pendingTransition: (sessionId, tabId) => pendingTransitionOf(sessionId, tabId),
     reportDiagnostic: reportTestDiagnostic,
   });
 
   async function handleToolCall(request: AgentNativeRequest): Promise<AgentNativeResponse> {
     const { callId } = request;
+    // An `always` answered for this very call: the host placed it, so it has written (FR-194).
+    settleUploadRecord(callId);
     /**
      * The call names its session, and that is the session it is answered as (004 US2).
      *
@@ -1147,10 +1658,22 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * asked for.
    */
   async function releaseSession(ending: string, questions: PromptEnding = "timed-out"): Promise<void> {
-    // Its own questions, and nobody else's: another session's owner may be sitting in front of a
-    // prompt that is perfectly alive (004/T103a). Settled first, so a call parked on a question
-    // is answered in the word the ending deserves before the session it belongs to is gone.
-    prompts.cancelSession(ending, questions);
+    /**
+     * Its own questions, and nobody else's (004/T103a): another session's owner may be sitting in
+     * front of a prompt that is perfectly alive. Settled first, so a call parked on a question is
+     * answered in the word the ending deserves before the session it belongs to is gone.
+     *
+     * A directory question is never `timed-out` (S3 review, the minor finding). The default word
+     * for a session simply ending is "nobody answered", which is right for a card whose call has
+     * nowhere to be answered anyway - but this one's call is in the *host*, which reads that word
+     * as `upload-not-answered` and tells the agent the owner ran out of time. Nothing was decided
+     * and nothing refused it: that is `interrupted`, whatever ended the session.
+     */
+    const standing = prompts.currentSession() === ending ? prompts.current() : undefined;
+    prompts.cancelSession(ending, standing?.kind === "upload-directory" ? "interrupted" : questions);
+    // And everything it knew about where its tabs had been, and every pair it was told 繼續 about
+    // (014 data-model): 繼續 was an answer about *this* session's work, and the session is over.
+    await queueTransition(() => transitionStore.forgetSession(ending)).catch(() => undefined);
     // And its half of a pairing card, if it was waiting on one (011 review M2): the card stays up
     // for the sessions that are still there, and this one stops being told about it.
     pairing.sessionEnded(ending);
@@ -1242,6 +1765,162 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
 
   /** This worker's view of which browser run it belongs to (013/R-184); read once, on first ask. */
   const browserRun = sessionBrowserRun();
+
+  /**
+   * The owner's upload directories, as the relay last reported them (014 FR-194).
+   *
+   * In memory and nowhere else: the file is the host's, this is a picture of it, and a copy that
+   * outlived the link would show the owner a list nobody had confirmed. `undefined` until a relay
+   * answers - which an old relay never does - so the panel can tell "no directories" from "nobody
+   * has told me".
+   */
+  let uploadRoots: { roots: string[]; path: string; malformed?: boolean; preserved?: string } | undefined;
+  /** Revokes the relay has not confirmed; re-sent on every fresh link until it does (FR-192). */
+  const uploadRootsToRemove = new Set<string>();
+  /**
+   * The owner's "from now on" answers, and which of them the host's list did not come back with
+   * (S3 review F2).
+   *
+   * Two sets rather than a flag, because the two states are different questions: one is waiting for
+   * the list that follows every answer, and the other is a directory that list arrived without -
+   * which is the panel's notice. It is the only place the owner's answer and the host's file are
+   * both known, and it holds nothing across a worker eviction on purpose: the file is the truth,
+   * and a remembered complaint about a write that may have succeeded since would be furniture.
+   */
+  const uploadRootsAnswered = new Set<string>();
+  const uploadRootsNotRecorded = new Set<string>();
+  /**
+   * The `always` answers whose host call has not arrived yet, by that call's id.
+   *
+   * The list is asked for when it does (or when {@link UPLOAD_ROOTS_RECORD_WAIT_MS} passes without
+   * it), and only then do its directories join `uploadRootsAnswered`: a listing that arrives before
+   * the host has written was read before the write, and is no verdict on the answer.
+   */
+  const uploadRecordsAwaited = new Map<string, { directories: string[]; timer: ReturnType<typeof setTimeout> }>();
+
+  function settleUploadRecord(callId: string): void {
+    const awaited = uploadRecordsAwaited.get(callId);
+    if (awaited === undefined) return;
+    uploadRecordsAwaited.delete(callId);
+    clearTimeout(awaited.timer);
+    for (const directory of awaited.directories) uploadRootsAnswered.add(directory);
+    bridge.requestUploadRoots();
+    notify();
+  }
+
+  /**
+   * Which site a directory question belongs to (014/R-187 §3).
+   *
+   * The request names a session and not a tab - the paths are the host's business and the tab is
+   * not part of the question - but a card belongs to a session's work, and the panel says whose.
+   * So it is the session's own tab: the active one it holds, or the first, which for a
+   * `file_upload` is the tab the call was about.
+   */
+  async function siteOfSession(sessionId: string): Promise<string | undefined> {
+    const held = (await tabs.leases()).filter((lease) => lease.sessionId === sessionId);
+    let fallback: string | undefined;
+    for (const lease of held) {
+      const tab = await getTabSnapshot(lease.tabId);
+      const site = tab === undefined ? undefined : siteOfUrl(tab.url);
+      if (site === undefined) continue;
+      if (tab?.active === true) return site;
+      fallback ??= site;
+    }
+    return fallback;
+  }
+
+  /**
+   * The owner's answer to one file the host is holding (014 FR-193, R-187 §3).
+   *
+   * The card is an ordinary `ask`, which is what gives it 011's bounds, its waiting ticks and its
+   * badge for a panel nobody has open - the person is being asked about their own disk and there is
+   * no reason for that question to behave differently from every other. Its five endings become
+   * the five words of the answer frame, and the list is asked for again afterwards because an
+   * answer may have changed it.
+   */
+  async function askUploadDirectory(request: {
+    sessionId: string;
+    callId: string;
+    files: Array<{ path: string; directory: string }>;
+  }): Promise<void> {
+    const site = await siteOfSession(request.sessionId);
+    if (site === undefined) {
+      /**
+       * No tab, so no session's work this could belong to (S3 review F3).
+       *
+       * Not asked, and not declined either: `deny` is the owner's word for "no", and this is a
+       * card that was never raised - nobody saw a path, nobody pressed anything. `interrupted` is
+       * the ending that says exactly that, and the host turns it into the stop that refused
+       * nothing, which an agent may simply make again once the session holds a tab.
+       */
+      reportTestDiagnostic("agent.upload.consent-no-site");
+      bridge.sendUploadConsentResult(request.callId, "interrupted");
+      return;
+    }
+    const answer = await prompts.ask({
+      callId: request.callId,
+      sessionId: request.sessionId,
+      site,
+      tool: "file_upload",
+      kind: "upload-directory",
+      files: request.files,
+      // How many, never which, in the card's one line - the paths themselves are the card's body,
+      // shown in full because that is the decision (FR-193).
+      argsSummary: summariseToolCall("file_upload", { files: request.files }),
+    });
+    const decision =
+      answer.decision === "allow"
+        ? answer.rememberDirectory
+          ? "always"
+          : "once"
+        : answer.decision === "deny"
+          ? "deny"
+          : answer.decision === "timed-out"
+            ? "timed-out"
+            : answer.decision === "busy"
+              ? // S3 review F3: the owner is already answering something else, so this card was
+                // never raised. Its own word, because the host has one - `prompt-pending`, which
+                // every other tool of this product answers that situation with - and calling it an
+                // interrupt would tell the agent the owner ended a step they never saw.
+                "busy"
+              : // `stopped`, `released` and `interrupted` are the same fact to the host: nothing was
+                // decided and the call is over. `interrupted` is the word for it, and the host turns
+                // it into the stop that says nothing refused the call (FR-179).
+                "interrupted";
+    // 011 FR-146 (S3 review F1): the sentence that says where to click, on the one ending that has
+    // one. It is the controller's, set when the card was raised into a panel nobody had open, and
+    // the host puts it on the answer the agent reads - dropping it here left the person with a
+    // refusal and no way to learn what would have prevented it.
+    const hint = answer.decision === "timed-out" ? answer.hint : undefined;
+    if (decision === "always") {
+      // What the owner has just been promised (S3 review F2): the list asked for once the host has
+      // written is the one that says whether the host kept it.
+      const directories: string[] = [];
+      for (const file of request.files) {
+        // Except a drive or a share root, which the host refuses to remember and uploads once
+        // instead (S3 review F7): a list without it is not a write that failed. The rule is the
+        // contract's, read here rather than restated, so the two ends cannot drift.
+        if (isRootDirectory(file.directory)) continue;
+        directories.push(file.directory);
+        uploadRootsNotRecorded.delete(file.directory);
+      }
+      const previous = uploadRecordsAwaited.get(request.callId);
+      if (previous !== undefined) clearTimeout(previous.timer);
+      uploadRecordsAwaited.set(request.callId, {
+        directories,
+        timer: setTimeout(() => settleUploadRecord(request.callId), UPLOAD_ROOTS_RECORD_WAIT_MS),
+      });
+      bridge.sendUploadConsentResult(request.callId, decision, hint);
+      // Not the list yet: the host writes only after this answer reaches it, and places the call
+      // only after writing - so the call arriving is when the list is worth reading (FR-194).
+      notify();
+      return;
+    }
+    bridge.sendUploadConsentResult(request.callId, decision, hint);
+    // Nothing this answer did can have changed the file, but another session may have.
+    bridge.requestUploadRoots();
+    notify();
+  }
 
   const bridge = createAgentBridge({
     connectNative: options.connectNative ?? connectAgentNativeHost,
@@ -1378,6 +2057,56 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       void tabs
         .beginReconciliation(new Date().toISOString())
         .then(scheduleReconcileAlarm, () => reportTestDiagnostic("agent.reconcile.arm-failed"));
+      /**
+       * The list, on every link (014 FR-194, R-187 §4).
+       *
+       * Asked for here rather than once at startup because the relay is what answers it, and a new
+       * relay is a new process that has just read the file: this is the moment the panel's rows can
+       * be made true again. A relay from before the feature drops the request and the rows stay
+       * absent, which is exactly what an old host should look like.
+       */
+      bridge.requestUploadRoots();
+      // And the revokes it never confirmed (FR-192): the press is made again, not forgotten.
+      for (const root of uploadRootsToRemove) bridge.removeUploadRoot(root);
+    },
+    /**
+     * The host is holding a `file_upload` about a file outside the owner's directories (FR-193).
+     *
+     * Raised as a card and answered on the link; nothing is awaited by the caller, because the
+     * frame handler must not be held for the two minutes a person may take. The answer's own frame
+     * is what the host is waiting on.
+     */
+    onUploadConsentRequest(request) {
+      void askUploadDirectory(request).catch(() => {
+        reportTestDiagnostic("agent.upload.consent-failed");
+        // A question that could not be raised is not an answer the owner gave: the host is told
+        // nothing was decided, which it reads as the stop that refused nothing.
+        bridge.sendUploadConsentResult(request.callId, "interrupted");
+      });
+    },
+    onUploadRoots(listing) {
+      uploadRoots = listing;
+      // A revoke the relay has now confirmed is no longer pending; one still on the list is, and
+      // is asked for again on the next link.
+      for (const root of [...uploadRootsToRemove]) {
+        if (!listing.roots.includes(root)) uploadRootsToRemove.delete(root);
+      }
+      /**
+       * And the other direction (S3 review F2): a "from now on" the list did not come back with.
+       *
+       * This listing is the answer to the request made right after the owner answered, so a
+       * directory missing from it is a write that did not happen - the one thing the panel can say
+       * about it and the agent's `upload-directory-not-recorded` cannot say to the owner. A later
+       * listing that does carry it clears the notice, because the file is what is true.
+       */
+      for (const directory of [...uploadRootsAnswered]) {
+        uploadRootsAnswered.delete(directory);
+        if (!listing.roots.includes(directory)) uploadRootsNotRecorded.add(directory);
+      }
+      for (const directory of [...uploadRootsNotRecorded]) {
+        if (listing.roots.includes(directory)) uploadRootsNotRecorded.delete(directory);
+      }
+      notify();
     },
     scheduleRetry: scheduleRetryAlarm,
     onStatusChange(status) {
@@ -1486,6 +2215,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
             ...new Set(session.tabs.map((tab) => hostOfUrl(tab.url)).filter((host): host is string => host !== undefined)),
           ],
           state: session.sessionId === waitingOn ? ("waiting" as const) : ("working" as const),
+          // What the card's 中斷 control is enabled by (014 FR-178), read from the registry that
+          // would answer the press - never a second tally that could disagree with it.
+          inFlight: stops.inFlight(session.sessionId),
           ...(recording === undefined ? {} : { recording }),
           // What happened on this session's tabs while the owner may have been looking elsewhere
           // (008 FR-113), and the one thing the panel is telling them without asking (FR-114).
@@ -1505,6 +2237,24 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         ...(plan ? { plan } : {}),
         bridge: bridge.status(),
         ...(agentName === undefined ? {} : { agentName }),
+        // The owner's remembered moves (014 FR-191), for the site list's own section. Always
+        // present, empty included: this worker knows the answer, and "none" is a fact.
+        transitions: await transitionStore.allowances(),
+        // The host's own list, when a relay has said what it is (014 FR-194). Absent means nobody
+        // has told this worker - an old relay, or a link that has not answered yet - which the
+        // panel shows as no section at all rather than as an empty one.
+        ...(uploadRoots === undefined
+          ? {}
+          : {
+              uploadRoots: {
+                ...uploadRoots,
+                // S3 review F2: beside the list, what the owner allowed and the host did not keep.
+                // Bounded as the contract bounds it; a notice is a sentence, not a second list.
+                ...(uploadRootsNotRecorded.size === 0
+                  ? {}
+                  : { notRecorded: [...uploadRootsNotRecorded].slice(0, 16) }),
+              },
+            }),
         diagnostics: await readBridgeDiagnostics(),
       };
     },
@@ -1523,6 +2273,19 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // is let go of, and every later navigation - including the ones no tool of ours started -
       // becomes something the grant can be re-checked against (C1).
       void diagnostics.start().catch(() => reportTestDiagnostic("agent.diagnostics.start-failed"));
+      /**
+       * 014 FR-185: every tab change in this browser, for as long as this worker lives.
+       *
+       * Subscribed once and here, beside the diagnostics grant's own subscription and for the same
+       * reason: the moves that matter most are the ones no tool of ours made - a redirect, a form
+       * submit, the owner typing a url - and `tabs.onUpdated` is the only signal this extension has
+       * for them without a new permission (R-186). A tab no session holds falls out inside.
+       */
+      watchTabUpdates((tabId, update) => {
+        void queueTransition(() => noteTabArrival(tabId, update.url)).catch(() =>
+          reportTestDiagnostic("agent.transition.note-failed"),
+        );
+      });
       // 004/T099l: a group still titled "Agent" from a browser restart or an extension reload
       // belongs to no session this worker can reach, and the owner reads it as an agent driving
       // their tabs. Nothing else in the life of a worker gets the chance to answer for it.
@@ -1623,6 +2386,25 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       await siteModes.clear(site);
       notify();
     },
+    /**
+     * 014 FR-192: the row is gone and the next such move asks again, in every session.
+     *
+     * Only the persisted record: a session that was told 繼續 keeps that answer until it ends, by
+     * design (contracts/transitions.md) - the owner allowed that session's work, and refusing its
+     * next call would be taking back a yes they gave to something that is still going on.
+     */
+    async clearTransition(from: string, to: string): Promise<void> {
+      await queueTransition(() => transitionStore.forget(from, to));
+      notify();
+    },
+    async clearUploadRoot(root: string): Promise<void> {
+      // Remembered before it is sent: a link that drops in this moment is exactly the case the
+      // re-send on the next `relay-ack` exists for (FR-192).
+      uploadRootsToRemove.add(root);
+      bridge.removeUploadRoot(root);
+      notify();
+      await Promise.resolve();
+    },
     async stopSessionFromOwner(sessionId: string): Promise<void> {
       if (!sessions.has(sessionId)) {
         reportTestDiagnostic("agent.stop.other-session");
@@ -1641,6 +2423,33 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         reportTestDiagnostic("agent.session.end-failed");
         notify();
       }
+    },
+    interruptSession(sessionId: string): { interrupted: number } {
+      if (!sessions.has(sessionId)) {
+        reportTestDiagnostic("agent.interrupt.other-session");
+        return { interrupted: 0 };
+      }
+      /**
+       * Two things end, and nothing else happens (FR-179).
+       *
+       * The calls in flight are flagged first, so the dispatcher's race resolves before the card
+       * comes down and the parked call is answered once, by the seam that owns its answer. Then
+       * the question itself: a card the owner interrupted is withdrawn with no decision recorded -
+       * `interrupted` is not a quiet decline, and the site it was about keeps whatever mode it had.
+       *
+       * What is deliberately absent is the whole requirement: no `releaseSession`, no lease
+       * handed back, no debugger detached, no group unmarked, no recording exported, no viewport
+       * cleared. The session is exactly as it was, minus the step the owner ended.
+       */
+      const interrupted = stops.interruptSession(sessionId);
+      prompts.cancelSession(sessionId, "interrupted");
+      if (interrupted.interrupted > 0) {
+        // FR-182: one line on the card, so the owner reads afterwards what they did. Nothing is
+        // noted for a press that ended nothing - the panel tells them that in the moment instead.
+        noteActivity(sessionId, { at: Date.now(), kind: "interrupt", outcome: "interrupted" });
+      }
+      notify();
+      return interrupted;
     },
     async releaseSessionTabs(sessionId: string): Promise<void> {
       if (!sessions.has(sessionId)) return;
@@ -1661,6 +2470,10 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           await diagnostics.release(tab.tabId).catch(() => undefined);
           await attachments.release(tab.tabId).catch(() => undefined);
           dialogs.forget(tab.tabId);
+          // And where the session had seen that tab go (014 data-model, T369 review F6): the same
+          // record `tabs_release` drops. Chrome hands the same tab ids out again, so one left
+          // behind is a question waiting to be asked about the owner's own browsing.
+          await queueTransition(() => transitionStore.forgetTab(tab.tabId));
         } catch {
           reportTestDiagnostic("agent.release.tab-failed");
         }

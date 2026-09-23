@@ -128,6 +128,56 @@ describe("T191 session card", () => {
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 
+  /**
+   * 014/T358 — 中斷 beside 停止 (FR-178).
+   *
+   * Three claims, and the third is the one that is easy to get wrong. The control names one
+   * session, as every control on this card does. It reads as available exactly when the worker
+   * says that session has a call in flight. And it is *pressable* either way: the count is a
+   * picture that can be a moment old, so a press that finds nothing running says so rather than
+   * doing nothing at all (US1 scenario 5).
+   */
+  it("interrupts exactly the session whose card was pressed, while it has a call in flight", () => {
+    renderShell();
+    project(port, {
+      ...SESSIONS,
+      sessions: [
+        { ...SESSIONS.sessions[0]!, inFlight: 1 },
+        { ...SESSIONS.sessions[1]!, inFlight: 0 },
+      ],
+    });
+
+    const button = within(card("session-a")).getByRole("button", { name: ui("agent.session.interrupt") });
+    expect(button.getAttribute("aria-disabled")).toBe("false");
+    fireEvent.click(button);
+
+    expect(port.sent).toEqual([{ type: "ui.agent.session-interrupt", payload: { sessionId: "session-a" } }]);
+    expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("says nothing was running rather than sending a command, when the session is idle", () => {
+    renderShell();
+    project(port, {
+      ...SESSIONS,
+      sessions: [{ ...SESSIONS.sessions[0]!, inFlight: 0 }],
+    });
+
+    const idle = within(card("session-a")).getByRole("button", { name: ui("agent.session.interrupt") });
+    expect(idle.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(idle);
+
+    expect(port.sent, "a session with nothing running was sent an interrupt").toEqual([]);
+    expect(card("session-a").textContent).toContain(ui("agent.session.nothingToInterrupt"));
+  });
+
+  it("reads a projection from before the count as nothing in flight", () => {
+    renderShell();
+    project(port, SESSIONS);
+
+    const button = within(card("session-a")).getByRole("button", { name: ui("agent.session.interrupt") });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+  });
+
   it("says a session holds no tabs rather than listing nothing", () => {
     renderShell();
     project(port, {
@@ -337,6 +387,27 @@ describe("T191 session card", () => {
     expect(items[1]?.textContent).not.toContain("{size}");
   });
 
+  /** 014/T358 — the line for the step the owner ended themselves (FR-182). */
+  it("says the owner interrupted a step", () => {
+    const t = (key: string): string => lookup(key, "en-US");
+    const INTERRUPTED = { at: 1_700_000_006_000, kind: "interrupt", outcome: "interrupted" } as const;
+    // No site and no message: the owner pressed a control on this card, and what the step was is
+    // not something the panel should claim to know afterwards.
+    expect(activityText(INTERRUPTED, t)).toBe("You interrupted a step");
+
+    renderShell();
+    project(port, {
+      ...IDLE,
+      sessions: [
+        { sessionId: "session-i", agentId: "agent-1", tabs: [], sites: [], state: "working", activity: [INTERRUPTED] },
+      ],
+    });
+
+    const item = within(card("session-i")).getAllByRole("listitem")[0];
+    expect(item?.textContent).toContain(ui("agent.activity.interrupt"));
+    expect(item?.textContent).toContain(ui("agent.activity.interrupted"));
+  });
+
   /**
    * 013/T337 — the picture a session put into the owner's page, on the card (FR-174).
    *
@@ -345,11 +416,19 @@ describe("T191 session card", () => {
    * a file handed to a form and a file dropped on a page are two different things to read about;
    * the worker sends the delivery word and the host name, and the panel writes both sentences.
    */
-  it("says a screenshot was put into a form, and that one was dropped on a page", () => {
+  it("says a file was put into a form, and that a screenshot was dropped on a page", () => {
     const t = (key: string): string => lookup(key, "en-US");
     const DELIVERED = { at: 1_700_000_005_000, kind: "upload", outcome: "delivered" } as const;
+    /**
+     * 014/T385: the `input` sentence is no longer only a screenshot's.
+     *
+     * `file_upload` earns the same line now (FR-196), and it puts one of the owner's *own* files
+     * into the form - so a sentence that said "Screenshot" would be the panel telling them
+     * something that is not true about their own upload. The drop sentence keeps the word: only
+     * `upload_image` can drop, and what it drops is always a picture this session took.
+     */
     expect(activityText({ ...DELIVERED, site: "fixtures.test", message: "input" }, t)).toBe(
-      "Screenshot put into a form on fixtures.test",
+      "File put into a form on fixtures.test",
     );
     expect(activityText({ ...DELIVERED, site: "fixtures.test", message: "drop" }, t)).toBe(
       "Screenshot dropped on fixtures.test",
@@ -373,7 +452,7 @@ describe("T191 session card", () => {
     });
 
     const item = within(card("session-u")).getAllByRole("listitem")[0];
-    expect(item?.textContent).toContain("Screenshot put into a form on fixtures.test");
+    expect(item?.textContent).toContain("File put into a form on fixtures.test");
     expect(item?.textContent).toContain(ui("agent.activity.delivered"));
     expect(item?.textContent).not.toContain("{site}");
   });

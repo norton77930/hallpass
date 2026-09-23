@@ -101,15 +101,19 @@ the host needs no reinstall.
 - **Diagnostics** (console, network records, evaluating script) need a separate per-site grant you
   tick in the panel. Evaluating script also counts as an action.
 - **Uploads** are limited to directories you list in `%LOCALAPPDATA%\hallpass\config.json` under
-  `uploadRoots` (empty by default, so no uploads until you add one).
+  `uploadRoots` (empty by default). A file outside them is not refused any more: the panel asks,
+  and *this directory from now on* adds it to the list for you.
+- **A move to a site you have not decided about** is reported by the call that caused it and asked
+  at the next call on that tab: continue, always allow this pair, or decline.
 - **Downloads** land in Chrome's download folder as usual; the agent is told the name and state and
   never starts, opens, moves or deletes one.
 - **Form values** are readable except password, hidden, one-time-code and payment-card fields,
   which are reported as redacted.
 - **Dialogs**: cancelling and acknowledging an alert never ask; pressing OK is gated like a click,
   except when it follows an action you just approved. Dialog text is logged on the session card.
-- **Stop** ends the session and tells the agent you stopped it. **Release tabs** hands every tab
-  back to you while the session continues.
+- **Stop** ends the session and tells the agent you stopped it. **Interrupt** ends only the step
+  that is running and keeps the session. **Release tabs** hands every tab back to you while the
+  session continues.
 
 Sensitive sites — banking, health, anything you would not hand to a stranger — do not belong in
 `skip-checks`. The agent uses your profile and sees what you see.
@@ -123,19 +127,19 @@ The agent sees these as `mcp__hallpass__<name>` in Claude Code.
 | `tabs_context` | List every tab in the browser and who holds each one |
 | `tabs_create` / `tabs_close` | Open a tab in the session's group; close one it owns |
 | `tabs_claim` / `tabs_release` | Take one of your tabs into the session; give it back |
-| `navigate` | Go to a URL or back/forward; stays on the page if it asks to (`force` to leave) |
+| `navigate` | Go to a URL or back/forward; stays on the page if it asks to (`force` to leave); landing on a site you have not decided about is reported and asked at the next call |
 | `resize_window` | Resize the window holding a tab; restored when the session lets go |
-| `viewport` | Give a tab an emulated viewport for a layout check; cleared when the session lets go |
+| `viewport` | Give a tab an emulated viewport for a layout check; cleared when the session lets go; adds a frame to an open recording |
 | `read_page` / `get_page_text` / `find` | Structure with refs and field values; visible text; elements by description |
 | `screenshot` | PNG of a tab, optionally cropped to a region and taken at a smaller `scale`; the answer carries an `imageId` for `upload_image` |
-| `click` / `right_click` / `double_click` / `triple_click` / `hover` / `drag` | Pointer actions delivered as real input |
+| `click` / `right_click` / `double_click` / `triple_click` / `hover` / `drag` | Pointer actions delivered as real input; a click that lands the tab on a site you have not decided about is reported and asked at the next call |
 | `type` / `key` / `scroll` / `form_input` | Keyboard, scrolling and form controls |
 | `computer` | Act at a viewport point when the page's structure does not describe the target |
 | `browser_batch` | Several steps on one tab in one call, approved once under follow-a-plan |
 | `wait` | Fixed time, a page condition, or the next download to finish |
 | `downloads_context` | The downloads this session caused, with paths and states |
 | `read_console` / `read_network` / `evaluate` | Diagnostics, behind the per-site grant |
-| `file_upload` | Put your files (from allowed roots) into a file input |
+| `file_upload` | Put your files into a file input; one outside your allowed directories asks you (this file once / its directory from now on / decline) |
 | `upload_image` | Put a screenshot the session took into a file input or onto a drop target |
 | `gif_recorder` | Start, stop, export or clear a recording of the session |
 | `dialog` | Accept or dismiss an alert, confirm or prompt |
@@ -152,6 +156,42 @@ These three run in CI on Windows. Two more suites need a real Chrome and run loc
 release: the packaged gate (`tests/e2e/packaged/agent-*.spec.ts`, attaching to a Chrome started
 with `--remote-debugging-port=9222`) and the acceptance probes, which drive the bridge with a real
 coding-agent session. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run both.
+
+## What 0.6.0 adds
+
+**Interrupt** sits beside Stop on the session card. It ends the step that is running — within a
+second, whatever that step was waiting for — and keeps everything else: the pairing, the tabs and
+their group, the site modes, an open recording, an emulated viewport. The agent is told you ended
+the step, and whether anything had already reached the page, so it can decide for itself whether
+to try it again. Stop is unchanged: it ends the session.
+
+**A move to another site is a question.** When a tab the agent is driving leaves the site it was on
+for one you have never decided about — a redirect after a click, a login provider, a shortened link
+— the call that caused it says so in its answer, and the *next* call on that tab shows a card
+naming both sites: **continue** (this session), **always allow** (this pair, remembered), or
+**decline** (this call only; the session keeps going and the question waits for the next call).
+Calls that leave are never held: a navigation elsewhere, closing the tab or handing it back go
+through. Remembered pairs are listed in the panel with when each was last used, and a **Revoke**
+beside each.
+
+**A file outside your upload directories is a question too.** `file_upload` used to refuse it
+outright, which meant editing `config.json` by hand before the agent could be useful. Now the local
+host holds the call and the panel asks, naming every file in full and the directory each one sits
+in: **this file once**, **this directory from now on** (added to your list), or **decline**. A
+drive or a share root is never added to the list — those files go through as a one-call yes, and
+the answer says why. The allowed directories are listed in the panel, each with a **Revoke**, and
+the list is still writable only from there and from the file itself: nothing an agent can call
+reads it or widens it.
+
+And the three tails 013 left: a successful `file_upload` leaves a line on the session card the way
+`upload_image` does; the `upload_image` card says which of the two deliveries you are being asked
+about (a file field, or a point on the page); and `viewport` now adds a frame to a recording, so a
+page that suddenly narrows on the GIF says why.
+
+**Upgrading:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from the zip) —
+a 0.5.0 host refuses files outside the allowed directories with `upload-not-allowed` instead of
+asking. The extension asks the host what it can do, so a 0.6.0 extension with an old host behind it
+simply behaves as 0.5.0 did.
 
 ## What 0.5.0 adds
 

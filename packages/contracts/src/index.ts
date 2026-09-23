@@ -85,6 +85,16 @@ export {
   agentLinkFrameSchema,
   AGENT_PROMPT_KINDS,
   ATTENTION_SENTENCES,
+  // 014: the owner's own vocabulary - what a stop or an interrupt says, the reasons the
+  // three consent surfaces answer with, the two sentences an interrupted call may carry, and
+  // the shape of a path on the owner's machine.
+  AGENT_STOP_REASONS,
+  AGENT_CONSENT_REASONS,
+  INTERRUPT_HINTS,
+  UPLOAD_HINTS,
+  isRootDirectory,
+  transitionNoticeText,
+  absolutePathSchema,
   promptWaitingFrameSchema,
   agentBridgeRecordSchema,
   agentRefusalSchema,
@@ -148,6 +158,7 @@ export {
   AGENT_ACTIVITY_KEPT,
   agentActivityItemSchema,
   agentBridgeStatusSchema,
+  agentEffectPromptSchema,
   agentPanelStateSchema,
   agentPanelMessageSchema,
   agentPanelCommandSchema,
@@ -162,6 +173,8 @@ export type {
   AgentControlFrame,
   AgentLinkFrame,
   AgentPromptKind,
+  AgentStopReason,
+  AgentConsentReason,
   PromptWaitingFrame,
   AgentBridgeRecord,
   AgentRefusal,

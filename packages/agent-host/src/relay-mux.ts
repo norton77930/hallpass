@@ -1,4 +1,5 @@
 import { AGENT_LINK_PROTOCOL, agentLinkFrameSchema } from "@hallpass/contracts";
+import type { UploadRootsListing } from "./upload-config-store.js";
 
 /**
  * The relay's multiplexer (004 R-111, T090).
@@ -51,6 +52,21 @@ export type RelayMuxOptions = {
   /** Towards Chrome, i.e. the worker. */
   toWorker: (frame: unknown) => void;
   log?: (code: string, detail?: string) => void;
+  /**
+   * The owner's upload directories, for the two frames addressed to the relay itself (014 R-187 §4).
+   *
+   * Injected rather than imported, for the same reason everything else here is: this file is the
+   * routing and holds no file, no socket and no timer. It is also what keeps the claim of FR-195
+   * checkable - the store has exactly two callers, this one and the server's consent flow, and
+   * neither is reachable from an MCP request.
+   *
+   * Absent is a relay that cannot answer: the frames are dropped as any unaddressed frame is, and
+   * the panel shows no directory rows, which is precisely what an old relay looks like.
+   */
+  uploadRoots?: {
+    list: () => Promise<UploadRootsListing>;
+    remove: (root: string) => Promise<{ listing: UploadRootsListing }>;
+  };
 };
 
 /**
@@ -205,6 +221,35 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
     },
 
     fromWorker(frame) {
+      /**
+       * The two frames whose addressee is this process (014 R-187 §4).
+       *
+       * They are answered before the routing below rather than inside it, because they name no call
+       * and no session: the list is one per machine, and a frame that named a session would be a
+       * list per agent. Everything about them is checked against the declared shape first - a
+       * `root` that is not an absolute path never reaches the store.
+       */
+      const type = frameField(frame, "type");
+      if (type === "upload-roots-list" || type === "upload-roots-remove") {
+        const parsed = agentLinkFrameSchema.safeParse(frame);
+        const store = options.uploadRoots;
+        if (!parsed.success || store === undefined) {
+          log("relay.mux.dropped", `upload-roots type=${type}`);
+          return;
+        }
+        const answer =
+          parsed.data.type === "upload-roots-remove"
+            ? store.remove(parsed.data.root).then((change) => change.listing)
+            : store.list();
+        void answer
+          .then((listing) => options.toWorker({ type: "upload-roots", ...listing }))
+          .catch(() => {
+            // A file this process could not read or write is not an answer; the panel keeps the row
+            // it has, with its pending note, and asks again on the next `relay-ack`.
+            log("relay.mux.dropped", `upload-roots failed type=${type}`);
+          });
+        return;
+      }
       const callId = frameField(frame, "callId");
       if (callId !== undefined) {
         const sessionId = calls.get(callId);

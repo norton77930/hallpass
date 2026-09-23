@@ -9,6 +9,9 @@ import {
   promptWaitingFrameSchema,
   AGENT_TOOL_DESCRIPTORS,
   ATTENTION_SENTENCES,
+  INTERRUPT_HINTS,
+  UPLOAD_HINTS,
+  isRootDirectory,
   type AgentNativeResponse,
   type AgentToolName,
   type PromptWaitingFrame,
@@ -18,7 +21,8 @@ import { IMPLEMENTED_AGENT_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "./too
 import { agentIdFilePath, hostDataDirectory } from "./host-paths.js";
 import { CallRouter, KEEP_ALIVE_CAP_MS } from "./router.js";
 import { createScreenshotCache, SCREENSHOT_UPLOAD_SENTENCES } from "./screenshot-cache.js";
-import { readUploadConfig, resolveUploadFiles } from "./upload-policy.js";
+import { readUploadConfig, resolveUploadFiles, type UploadCandidate } from "./upload-policy.js";
+import { createUploadConfigStore } from "./upload-config-store.js";
 
 /**
  * The MCP server the agent (Claude Code) spawns and talks to over stdio (T012, R-102).
@@ -174,6 +178,25 @@ export const SCREENSHOT_RETENTION_ENV = "HALLPASS_SCREENSHOT_RETENTION_MS";
 export const SCREENSHOT_BUDGET_ENV = "HALLPASS_SCREENSHOT_BUDGET_CHARS";
 
 /**
+ * How long a `file_upload` waits for the owner's answer about a directory (014 FR-193).
+ *
+ * The worker's own closed-panel bound is two minutes (`CLOSED_PANEL_TIMEOUT_MS`), and the question
+ * is raised there, so this is that bound plus the margin a frame takes to travel: it exists to end
+ * a call whose worker has stopped answering at all, not to end the *person's* thinking time. Under
+ * it and the call answers twice; far over it and an agent is held by a browser that is gone.
+ */
+export const UPLOAD_CONSENT_BOUND_MS = 125_000;
+
+/**
+ * The gate's lever on the bound above (014, documented in the spec file header).
+ *
+ * A journey that proves "nobody answered" cannot wait two minutes for it, and the bound is the
+ * product's own promise everywhere else. Same rule as every other override here: anything that is
+ * not a positive finite number leaves the promise standing.
+ */
+export const UPLOAD_CONSENT_BOUND_ENV = "HALLPASS_UPLOAD_CONSENT_BOUND_MS";
+
+/**
  * The override, or nothing at all. Exported so the fall-back is a tested rule (S2c review F3).
  *
  * Anything that is not a positive finite number - a word, a zero, a negative, an empty variable -
@@ -189,6 +212,67 @@ export function positiveEnv(name: string, env: NodeJS.ProcessEnv = process.env):
 
 /** What the owner is told the connection came through; the panel shows it beside the agent's name. */
 const AGENT_ORIGIN = "stdio:local";
+
+/** The six endings of a directory question (014/R-187 §1); the host maps each to an answer. */
+type UploadConsentDecision = "once" | "always" | "deny" | "timed-out" | "interrupted" | "busy";
+
+/**
+ * How a directory question ended here, with what the worker said about it (S3 review F1).
+ *
+ * `hint` is the worker's own sentence for a card nobody could see, carried through to the answer
+ * the agent reads: the two endings that are not the owner deciding are exactly the two where the
+ * person at the terminal is the only one who can unstick the call. The two local endings -
+ * no worker that could ask, and a link that went away - are words of this process alone.
+ */
+type UploadConsentAnswer = {
+  decision: UploadConsentDecision | "unavailable" | "link-lost";
+  hint?: string;
+};
+
+/** The capability a worker advertises when it can raise the directory card (014/R-187 §1). */
+const UPLOAD_CONSENT_FEATURE = "upload-consent";
+
+/**
+ * Which of the files on a card have a directory worth remembering (014 FR-194, S3 review F7).
+ *
+ * "These directories from now on" adds each file's own parent, and for a file sitting at `D:\` or
+ * on a share root that parent is the whole drive or the whole share: one press, and everything on
+ * it is uploadable without another question for as long as the row stands. That is not a directory
+ * the owner can review on their panel in any useful sense, so it is not written - the files there
+ * are uploaded the way "this time" uploads them, by path, for this call alone.
+ *
+ * Exported because it is the whole of the rule and this file is an entry point: a test that had to
+ * prove it end-to-end would need a file at a real drive root, which Windows refuses to a process
+ * that is not elevated.
+ */
+export function splitRememberableDirectories(files: readonly UploadCandidate[]): {
+  remember: UploadCandidate[];
+  onceOnly: UploadCandidate[];
+} {
+  const remember: UploadCandidate[] = [];
+  const onceOnly: UploadCandidate[] = [];
+  for (const file of files) {
+    (isRootDirectory(file.directory) ? onceOnly : remember).push(file);
+  }
+  return { remember, onceOnly };
+}
+
+/**
+ * What the agent is told when the owner's "from now on" could not be written (S3 review F2).
+ *
+ * The store's own refusal, verbatim beside the code: it names the directory the owner answered
+ * about and what stopped it, and nowhere else in the product is that stated. The paths are the
+ * owner's own and the agent named them in this very call, so nothing is disclosed that the reader
+ * did not already have. Bounded at what `hint` carries, because a handful of long paths can outrun
+ * it and a truncated sentence is a better answer than a frame that will not parse.
+ */
+function uploadNotRecordedHint(refused: readonly { candidate: string; reason: string }[]): string {
+  const detail = refused.map(({ candidate, reason }) => `${candidate} (${reason})`).join("; ");
+  return `The owner allowed it, but the host could not record: ${detail}. Nothing was uploaded and the allowed directories are unchanged.`.slice(
+    0,
+    400,
+  );
+}
 
 /**
  * The contract's bound on an identity field (`agentControlFrameSchema`). Both the agent id and the
@@ -290,6 +374,37 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    */
   let browserRun: string | undefined;
   let linkDroppedSincePairing = false;
+
+  /**
+   * What the worker on the other end says it can be asked (014/R-187 §1).
+   *
+   * Read from every pairing answer, which is the frame that arrives on every established link, so
+   * a browser that was upgraded - or downgraded - between two calls is taken at its latest word. A
+   * worker that advertises nothing is a 0.5.0 extension, and the host must not send it a frame it
+   * would drop as unknown: the call would then hang on this side's bound for a question nobody was
+   * ever asked.
+   */
+  let workerFeatures = new Set<string>();
+
+  /**
+   * The owner's upload directories, written when they answer "from now on" (014 FR-194).
+   *
+   * This is the only route by which this list grows, and this is the only place in the server that
+   * touches the store - the relay does the listing and the revoking, because it is the process the
+   * panel can reach. No MCP request handler reaches either (FR-195, asserted by T381): the call
+   * that gets here is holding a file the *host* resolved, and it gets here only behind an answer
+   * the owner gave in their own browser.
+   */
+  const uploadRoots = createUploadConfigStore();
+  const uploadConsentBoundMs = positiveEnv(UPLOAD_CONSENT_BOUND_ENV) ?? UPLOAD_CONSENT_BOUND_MS;
+  /** The questions this session is holding, by the call each belongs to. */
+  const uploadConsents = new Map<string, (answer: UploadConsentAnswer) => void>();
+
+  function settleUploadConsents(decision: UploadConsentAnswer["decision"]): void {
+    for (const settle of [...uploadConsents.values()]) {
+      settle({ decision });
+    }
+  }
 
   /** The dial loop towards the relay, started once the MCP client has said who it is. */
   let link: RelayDial | undefined;
@@ -621,6 +736,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         // the browser is on the other end of the link (R-184), and whether the pictures this
         // session is holding are still that browser's is a question about the run, not the answer.
         noteBrowserRun(control.data.browserRunId);
+        // And what it can be asked beyond answering calls (014/R-187 §1). Taken from every answer,
+        // not only the first: the browser on the other end can be upgraded under a live session.
+        workerFeatures = new Set(control.data.features ?? []);
         // An `unpair` while a session is open arrives as a decline, which is what makes unpairing
         // effective immediately (FR-032): every later call reads this same settled answer.
         //
@@ -652,6 +770,29 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         log("agent.stop.received");
         router.failAll("stopped", "owner-stopped");
         return;
+      /**
+       * The owner's answer to a directory question (014/R-187 §1).
+       *
+       * It names the call it is about, exactly as a response frame does, because that is what the
+       * relay routes it by and what this session matches it against: two calls can be holding two
+       * questions, and an answer applied to the wrong one would upload a file nobody was shown.
+       */
+      case "upload-consent-result": {
+        const settle = uploadConsents.get(control.data.callId);
+        if (!settle) {
+          // The bound fired, or the link dropped and the call was already answered. Nothing runs.
+          log("agent.upload.consent-late");
+          return;
+        }
+        log("agent.upload.consent", control.data.decision);
+        settle({
+          decision: control.data.decision,
+          // Carried, never composed here: the sentence belongs to the end that knows whether the
+          // card was raised into a panel nobody had open (011 FR-146).
+          ...(control.data.hint === undefined ? {} : { hint: control.data.hint }),
+        });
+        return;
+      }
       default:
         // `pair-request`, `unpair` and `hello` travel the other way; a worker sending one is not
         // speaking this protocol and is ignored rather than acted on.
@@ -700,6 +841,16 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * verdicts draw with `target-unconfirmed`.
          */
         router.failAll("failed", "call-unconfirmed");
+        /**
+         * A question whose panel has gone (014 FR-193, S3 review the minor finding).
+         *
+         * The call holding it never crossed the link, so it is not in the router and nothing above
+         * settles it: left alone it would sit out the whole consent bound for an answer that can no
+         * longer arrive. The word is `bridge-lost`, the 004 vocabulary for "nothing left this
+         * process and there is no link to carry it" - not `owner-interrupted`, which names a person
+         * who did nothing here and reads to an agent as a decision rather than as a dropped socket.
+         */
+        settleUploadConsents("link-lost");
         resetPairing();
         /**
          * 013/R-184 - the port going away is *not* the end of the retention (gate finding F4).
@@ -794,6 +945,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           ...rest,
           imageId: issued.imageId,
           upload: issued.retained ? SCREENSHOT_UPLOAD_SENTENCES.retained : SCREENSHOT_UPLOAD_SENTENCES.oversize,
+          // 014 FR-186: and whatever the worker had to say about the tab itself (below).
+          ...(outcome.hint === undefined ? {} : { hint: outcome.hint }),
         };
         return {
           content: [
@@ -802,7 +955,29 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           ],
         };
       }
-      return { content: [{ type: "text" as const, text: JSON.stringify(outcome.result ?? []) }] };
+      /**
+       * 014 FR-186: a `hint` on a call that *worked* still reaches the agent.
+       *
+       * Until now `hint` rode only on the error reply, which was enough for the one thing that
+       * carried it (a question nobody answered, 011 FR-146) - that call never succeeds. The
+       * transition notice is the opposite case: the click landed, the page then took the tab
+       * somewhere nobody decided about, and the answer has to say so *and* report the click
+       * honestly. It is merged into the result object rather than sent as a second text block,
+       * because a second block would make the whole answer stop parsing as one JSON document for
+       * every client that reads it as one. A result that is not an object - an array from
+       * `tabs_context`, nothing at all - carries no hint: those are the calls that name no tab.
+       */
+      const result = outcome.result ?? [];
+      const carriesHint =
+        outcome.hint !== undefined && typeof result === "object" && result !== null && !Array.isArray(result);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(carriesHint ? { ...(result as Record<string, unknown>), hint: outcome.hint } : result),
+          },
+        ],
+      };
     }
     return {
       isError: true,
@@ -945,6 +1120,44 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     return placeCall(tool, args, extra);
   }
 
+  /**
+   * Asks the owner about files outside their allowed directories, and waits (014 FR-193, R-187 §2).
+   *
+   * The only frame this process sends *during* a call that has not been made. It goes to the worker
+   * because the panel is the only place the owner can be asked, and it carries paths because the
+   * question is about their own files - those paths go nowhere else: not to a page, not into a log,
+   * not into the answer the agent reads.
+   *
+   * `unavailable` is a worker that never advertised the capability. It is checked rather than
+   * discovered, because an unknown frame type is *dropped* on both sides of this link: asking a
+   * worker that cannot answer would hold the call for the whole bound and then refuse it anyway.
+   */
+  function askUploadConsent(callId: string, files: readonly UploadCandidate[]): Promise<UploadConsentAnswer> {
+    if (!workerFeatures.has(UPLOAD_CONSENT_FEATURE)) {
+      log("agent.upload.consent-unsupported");
+      return Promise.resolve({ decision: "unavailable" });
+    }
+    if (!link?.send({ type: "upload-consent-request", sessionId, callId, files: [...files] })) {
+      return Promise.resolve({ decision: "link-lost" });
+    }
+    log("agent.upload.consent-asked", String(files.length));
+    return new Promise<UploadConsentAnswer>((resolve) => {
+      const finish = (answer: UploadConsentAnswer): void => {
+        clearTimeout(timer);
+        uploadConsents.delete(callId);
+        resolve(answer);
+      };
+      const timer = setTimeout(() => {
+        log("agent.upload.consent-bound");
+        // The host's own backstop, which fires only when the *worker* never answered: there is no
+        // panel to have been closed that this end knows about, so there is no sentence to repeat.
+        finish({ decision: "timed-out" });
+      }, uploadConsentBoundMs);
+      (timer as { unref?: () => void }).unref?.();
+      uploadConsents.set(callId, finish);
+    });
+  }
+
   async function placeCall(
     tool: AgentToolName,
     args: Record<string, unknown>,
@@ -995,86 +1208,218 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       };
     }
     /**
-     * The one tool whose arguments change on this side of the link (US7, FR-051).
-     *
-     * The agent names paths because it is asking for the owner's own files; the browser is handed
-     * bytes because it has no business resolving a path and no way to read one. This process - the
-     * owner's own, started by their own agent - is where that translation happens, behind the
-     * allowed-roots rule, and a path outside them is refused here, before it is opened and before
-     * anything crosses to the browser.
-     */
-    if (tool === "file_upload") {
-      const paths = Array.isArray(args.paths) ? args.paths.filter((path): path is string => typeof path === "string") : [];
-      const resolved = await resolveUploadFiles(paths, await readUploadConfig());
-      if (!resolved.ok) {
-        // The code, never the path: the log says which rule refused, not what the owner has on disk.
-        log("agent.upload.refused", resolved.code);
-        return { callId, outcome: "denied", reason: resolved.reason };
-      }
-      const { paths: _dropped, ...rest } = args;
-      args = { ...rest, files: resolved.files };
-    }
-    /**
-     * The other tool whose arguments change on this side of the link (013 US1, FR-169, FR-172).
-     *
-     * `file_upload`'s shape exactly, with the disk swapped for this session's own memory: the agent
-     * names a picture it was handed, the browser is handed bytes, and the id does not exist on the
-     * far side. Both of FR-172's refusals are decided here, before the call crosses - so a picture
-     * the host cannot resolve never raises a consent card and never touches a page.
-     */
-    if (tool === "upload_image") {
-      const request = agentUploadImageRequestSchema.safeParse(args);
-      if (!request.success) {
-        // The MCP input schema cannot carry "exactly one of ref / coordinate", nor the file-name
-        // rule, so this is where both become a refusal - and the kind, never the arguments, is what
-        // the log gets.
-        log("agent.upload-image.refused", "invalid-arguments");
-        return { callId, outcome: "failed", reason: "invalid-arguments" };
-      }
-      const { imageId, ref, coordinate, filename, tabId: target } = request.data;
-      const held = screenshots.take(imageId);
-      if (held.kind === "unknown") {
-        log("agent.upload-image.refused", "unknown-image-id");
-        return {
-          callId,
-          outcome: "denied",
-          // Two different facts for two different next moves: this session never gave out that id,
-          // so quoting it again - or waiting - will not help.
-          reason: "unknown-image-id; take a new screenshot and quote its imageId",
-        };
-      }
-      if (held.kind === "gone") {
-        log("agent.upload-image.refused", held.why);
-        return {
-          callId,
-          outcome: "denied",
-          reason: `image-no-longer-available (${held.why}); take a new screenshot`,
-        };
-      }
-      args = {
-        tabId: target,
-        target: ref === undefined ? { coordinate } : { ref },
-        file: { name: filename, type: held.file.type, bytesBase64: held.file.bytesBase64 },
-      };
-    }
-    // The tab travels as a field of the frame as well as inside the arguments, because it is what
-    // the router's one-call-per-tab rule is keyed by (FR-043). A tool that names no tab concerns no
-    // page and does not contend with anything.
-    const tabId = typeof args.tabId === "number" ? args.tabId : undefined;
-    /**
      * 011: this call is reachable by a progress notification for as long as it is outstanding.
      *
      * Registered for every call, not only the ones that end up waiting on the owner, because which
      * ones those are is decided in the worker - a click on an `ask` site raises a card, the same
      * click on a `skip-checks` site does not - and the frame that says so names the call by id.
+     *
+     * Before the `file_upload` branch, not after it (S3 review F1): the directory question waits
+     * *here*, in this process, before the call has crossed the link - so a token registered on the
+     * way out would be registered after the one wait it was needed for had already ended, and every
+     * tick about it would arrive at a call this map had never heard of. The `finally` below covers
+     * the whole of the call, which is the whole of the time a tick can be about it.
      */
     const progressToken = extra?._meta?.progressToken;
     if (extra && progressToken !== undefined) {
       callProgress.set(callId, { extra, token: progressToken });
     }
-    let response: AgentNativeResponse;
     try {
-      response = await router.call({
+      /**
+       * What this call has to tell the agent beside its own result (014 FR-186, S3 review F7).
+       *
+       * One slot, filled before the call crosses the link and merged into the answer afterwards:
+       * the only thing that fills it today is an `always` the host would not write down, and that
+       * is a fact about a call that then *succeeds* - so it cannot ride on a refusal.
+       */
+      let uploadHint: string | undefined;
+      /**
+       * The one tool whose arguments change on this side of the link (US7, FR-051).
+       *
+       * The agent names paths because it is asking for the owner's own files; the browser is handed
+       * bytes because it has no business resolving a path and no way to read one. This process - the
+       * owner's own, started by their own agent - is where that translation happens, behind the
+       * allowed-roots rule, and a path outside them is refused here, before it is opened and before
+       * anything crosses to the browser.
+       */
+      if (tool === "file_upload") {
+        const paths = Array.isArray(args.paths) ? args.paths.filter((path): path is string => typeof path === "string") : [];
+        let resolved = await resolveUploadFiles(paths, await readUploadConfig());
+        /**
+         * The one refusal the owner can overturn (014 FR-193, contracts/upload-directory.md).
+         *
+         * Every other code is final and is answered as 0.5.0 answered it. This one becomes a question
+         * on the owner's panel - the paths are shown to them and to nobody else - and the call waits
+         * here, before anything has crossed the link, which is what lets a "once" upload proceed
+         * without the list ever having grown.
+         */
+        if (!resolved.ok && resolved.code === "outside-roots") {
+          const answer = await askUploadConsent(callId, resolved.outside);
+          const decision = answer.decision;
+          if (decision === "deny") {
+            log("agent.upload.refused", "declined");
+            return { callId, outcome: "denied", reason: "upload-declined" };
+          }
+          if (decision === "timed-out") {
+            log("agent.upload.refused", "not-answered");
+            return {
+              callId,
+              outcome: "denied",
+              reason: "upload-not-answered",
+              // 011 FR-146, as every other unanswered question carries it: nobody answered *because
+              // the card was in a panel nobody had opened*, and that is the one case the person can
+              // do something about. The worker is the end that knows, so it is the end that says so.
+              ...(answer.hint === undefined ? {} : { hint: answer.hint }),
+            };
+          }
+          if (decision === "interrupted") {
+            // Nothing was delivered: the call never left this process, so there is one honest hint.
+            return {
+              callId,
+              outcome: "stopped",
+              reason: "owner-interrupted",
+              hint: INTERRUPT_HINTS.nothingDelivered,
+            };
+          }
+          if (decision === "busy") {
+            /**
+             * The owner was already being asked something else (S3 review F3).
+             *
+             * The card was never raised, so nothing was interrupted and nothing was declined: the
+             * worker holds one question at a time and two sessions can meet on one owner. It is
+             * the word every other tool of this product answers that situation with, and the one
+             * an agent already knows means "make the call again in a moment".
+             */
+            log("agent.upload.consent-busy");
+            return { callId, outcome: "busy", reason: "prompt-pending" };
+          }
+          if (decision === "link-lost") {
+            // The link went away between the resolution and the question. Nothing was asked and
+            // nothing was sent, which is what `bridge-lost` already says everywhere else here.
+            log("agent.upload.consent-unsent");
+            return { callId, outcome: "failed", reason: "bridge-lost" };
+          }
+          if (decision === "unavailable") {
+            // No worker that could ask, so 0.5.0's refusal stands - in the word that says *why* the
+            // owner was not asked, which is the one thing they can do something about (FR-195).
+            log("agent.upload.refused", resolved.code);
+            return { callId, outcome: "denied", reason: "upload-outside-allowed-directories" };
+          }
+          const outside = resolved.outside;
+          if (decision === "always") {
+            /**
+             * Not every parent is a directory (S3 review F7).
+             *
+             * A file at `D:\` or on a share root has the whole drive or the whole share for a
+             * parent, and remembering that would answer every future question about everything on
+             * it. Those files are uploaded the way "this time" uploads them - by path, for this
+             * call - and the agent is told why, in the sentence both ends share.
+             */
+            const { remember, onceOnly } = splitRememberableDirectories(outside);
+            if (onceOnly.length > 0) {
+              log("agent.upload.root-directory", String(onceOnly.length));
+              uploadHint = UPLOAD_HINTS.rootNotRemembered;
+            }
+            // Written before the upload proceeds, and the re-resolution below reads the file back:
+            // what the owner is promised is that the list they saw is the list the host will use.
+            const change =
+              remember.length > 0
+                ? await uploadRoots.add(remember.map((file) => file.directory))
+                : { written: true, refused: [] };
+            if (!change.written) {
+              /**
+               * The owner said yes and the file would not take it (S3 review F2).
+               *
+               * Answered in its own word rather than falling through to the roots refusal below:
+               * that one means this browser cannot ask the question at all, and telling an agent
+               * to have the owner reinstall an extension - over a config file that could not be
+               * renamed over - sends the person to fix the one thing that was working. The store's
+               * own refusal is the only statement of *why*, so it rides along as the hint.
+               */
+              log("agent.upload.roots-unchanged");
+              return {
+                callId,
+                outcome: "denied",
+                reason: "upload-directory-not-recorded",
+                hint: uploadNotRecordedHint(change.refused),
+              };
+            }
+            resolved = await resolveUploadFiles(
+              paths,
+              await readUploadConfig(),
+              // The files on a root the list will never carry are admitted by name for this call,
+              // exactly as "this time" admits them (S3 review F7).
+              onceOnly.length === 0 ? undefined : { allowFiles: onceOnly.map((file) => file.path) },
+            );
+          } else {
+            // "These files, this once": exactly the paths on the card, for this call and no other.
+            resolved = await resolveUploadFiles(paths, await readUploadConfig(), {
+              allowFiles: outside.map((file) => file.path),
+            });
+          }
+        }
+        if (!resolved.ok) {
+          // The code, never the path: the log says which rule refused, not what the owner has on disk.
+          log("agent.upload.refused", resolved.code);
+          return {
+            callId,
+            outcome: "denied",
+            // A file still outside the list after the owner said yes is a list that could not be
+            // written; the word stays the one that means "not in the allowed directories".
+            reason: resolved.code === "outside-roots" ? "upload-outside-allowed-directories" : resolved.reason,
+          };
+        }
+        const { paths: _dropped, ...rest } = args;
+        args = { ...rest, files: resolved.files };
+      }
+      /**
+       * The other tool whose arguments change on this side of the link (013 US1, FR-169, FR-172).
+       *
+       * `file_upload`'s shape exactly, with the disk swapped for this session's own memory: the agent
+       * names a picture it was handed, the browser is handed bytes, and the id does not exist on the
+       * far side. Both of FR-172's refusals are decided here, before the call crosses - so a picture
+       * the host cannot resolve never raises a consent card and never touches a page.
+       */
+      if (tool === "upload_image") {
+        const request = agentUploadImageRequestSchema.safeParse(args);
+        if (!request.success) {
+          // The MCP input schema cannot carry "exactly one of ref / coordinate", nor the file-name
+          // rule, so this is where both become a refusal - and the kind, never the arguments, is what
+          // the log gets.
+          log("agent.upload-image.refused", "invalid-arguments");
+          return { callId, outcome: "failed", reason: "invalid-arguments" };
+        }
+        const { imageId, ref, coordinate, filename, tabId: target } = request.data;
+        const held = screenshots.take(imageId);
+        if (held.kind === "unknown") {
+          log("agent.upload-image.refused", "unknown-image-id");
+          return {
+            callId,
+            outcome: "denied",
+            // Two different facts for two different next moves: this session never gave out that id,
+            // so quoting it again - or waiting - will not help.
+            reason: "unknown-image-id; take a new screenshot and quote its imageId",
+          };
+        }
+        if (held.kind === "gone") {
+          log("agent.upload-image.refused", held.why);
+          return {
+            callId,
+            outcome: "denied",
+            reason: `image-no-longer-available (${held.why}); take a new screenshot`,
+          };
+        }
+        args = {
+          tabId: target,
+          target: ref === undefined ? { coordinate } : { ref },
+          file: { name: filename, type: held.file.type, bytesBase64: held.file.bytesBase64 },
+        };
+      }
+      // The tab travels as a field of the frame as well as inside the arguments, because it is what
+      // the router's one-call-per-tab rule is keyed by (FR-043). A tool that names no tab concerns no
+      // page and does not contend with anything.
+      const tabId = typeof args.tabId === "number" ? args.tabId : undefined;
+      const response = await router.call({
         callId,
         // 004 S1: every call frame names its session now, so the relay can route several servers'
         // calls through one worker. The session id is the one the server already minted at
@@ -1084,11 +1429,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         ...(tabId === undefined ? {} : { tabId }),
         args,
       });
+      log("agent.call.completed", response.outcome);
+      // The worker's own hint wins: it is about what happened to the *page*, and this one is about
+      // what this process did not write down (S3 review F7).
+      return uploadHint === undefined || response.hint !== undefined ? response : { ...response, hint: uploadHint };
     } finally {
       callProgress.delete(callId);
     }
-    log("agent.call.completed", response.outcome);
-    return response;
   }
 
   server.server.oninitialized = () => {

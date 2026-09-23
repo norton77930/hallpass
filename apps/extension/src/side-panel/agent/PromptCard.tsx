@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
-import { TOOL_SUMMARY_KEYS } from "../agent-panel-keys.js";
+import { TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
 
 /**
@@ -131,6 +131,124 @@ export function PromptCard(props: {
     );
   }
 
+  /**
+   * 014 FR-187, FR-188: the tab moved, and the next call on it is waiting on this.
+   *
+   * Its own card rather than a variant of the consent one below, because what is decided is not
+   * the same thing: the consent card asks whether an *action* may happen, and this asks whether
+   * the session may keep working where the *browser* has taken it - a question the tool's own
+   * sentence would hide entirely. It is the same `dialog` with the same focus handling, so a
+   * keyboard owner answers it exactly as they answer the other two.
+   */
+  if (prompt && onTop === "consent" && prompt.kind === "transition" && prompt.transition) {
+    const moved = prompt.transition;
+    const answer = (allow: boolean, remember = false): void => {
+      props.send({
+        type: "ui.agent.effect-decide",
+        payload: {
+          promptId: prompt.promptId,
+          allow,
+          // Only with a yes (FR-188): "always" is part of allowing this move, never of refusing it.
+          ...(allow && remember ? { rememberTransition: true } : {}),
+        },
+      });
+    };
+    return (
+      <section
+        ref={cardRef}
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="agent-prompt-title"
+        className="agent-prompt"
+        data-prompt="transition"
+      >
+        <h2 id="agent-prompt-title">{t("agent.promptTitle")}</h2>
+        {/* Both origins, as inert text: they are the question, and neither is a page's own word. */}
+        <p>
+          {t("agent.prompt.transition")
+            .replace("{from}", () => moved.from)
+            .replace("{to}", () => moved.to)}
+        </p>
+        <div className="agent-prompt-actions">
+          <button type="button" className="agent-primary" onClick={() => answer(true)}>
+            {t("agent.transitionContinue")}
+          </button>
+          <button type="button" onClick={() => answer(true, true)}>
+            {t("agent.transitionAlways")}
+          </button>
+          <button type="button" onClick={() => answer(false)}>
+            {t("agent.transitionDecline")}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  /**
+   * 014 FR-193, FR-194: a file outside the directories the owner allowed.
+   *
+   * The one card whose body is the owner's *own* data, shown in full and on purpose: a card saying
+   * "a file outside your directories" is a card about nothing in particular, and a path they cannot
+   * read is a decision they cannot make. Those paths are on this screen and nowhere else - the page
+   * is never told a file name, and neither is the agent.
+   *
+   * Three answers again, and again not the same three: this call's files, their directories from
+   * now on, and no. The middle one is the only thing in this product that widens what the local
+   * host may read, which is why it is a button of its own rather than a checkbox beside a yes.
+   */
+  if (prompt && onTop === "consent" && prompt.kind === "upload-directory" && prompt.files) {
+    const files = prompt.files;
+    const answer = (allow: boolean, remember = false): void => {
+      props.send({
+        type: "ui.agent.effect-decide",
+        payload: {
+          promptId: prompt.promptId,
+          allow,
+          // Only with a yes: a refusal that carried "from now on" would be the owner saying no to
+          // these files and yes to every file beside them.
+          ...(allow && remember ? { rememberDirectory: true } : {}),
+        },
+      });
+    };
+    return (
+      <section
+        ref={cardRef}
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="agent-prompt-title"
+        className="agent-prompt"
+        data-prompt="upload-directory"
+      >
+        <h2 id="agent-prompt-title">{t("agent.promptTitle")}</h2>
+        <p>{t("agent.prompt.uploadDirectory").replace("{agent}", () => props.promptAgent)}</p>
+        {/* Inert text, each on its own line: a path is not a link and not something to interpret. */}
+        <ul className="agent-prompt-files">
+          {files.map((file) => (
+            <li key={file.path} data-upload-file={file.path}>
+              {file.path}
+              {/* S3 review F7: the folder "these directories from now on" would remember, named under
+                  the path rather than left for the owner to derive - the one they press about. */}
+              <span className="agent-prompt-file-directory" data-upload-directory={file.directory}>
+                {t("agent.uploadFileDirectory").replace("{directory}", () => file.directory)}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <div className="agent-prompt-actions">
+          <button type="button" className="agent-primary" onClick={() => answer(true)}>
+            {t("agent.uploadOnce")}
+          </button>
+          <button type="button" onClick={() => answer(true, true)}>
+            {t("agent.uploadAlways")}
+          </button>
+          <button type="button" onClick={() => answer(false)}>
+            {t("agent.uploadDecline")}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   if (prompt && onTop === "consent") {
     const answer = (allow: boolean, always = false): void => {
       props.send({
@@ -164,7 +282,17 @@ export function PromptCard(props: {
               ? t("agent.prompt.beforeunloadForce").replace("{site}", () => prompt.site)
               : t("agent.consentBody")
                   .replace("{agent}", () => props.promptAgent)
-                  .replace("{action}", () => t(TOOL_SUMMARY_KEYS[prompt.tool]))
+                  .replace(
+                    "{action}",
+                    () =>
+                      // 014 FR-196: the delivery when the question names one, the tool's own
+                      // sentence when it does not. Still a key rather than the worker's English.
+                      t(
+                        prompt.delivery === undefined
+                          ? TOOL_SUMMARY_KEYS[prompt.tool]
+                          : UPLOAD_DELIVERY_SUMMARY_KEYS[prompt.delivery],
+                      ),
+                  )
                   .replace("{site}", () => prompt.site)}
         </p>
         {/*

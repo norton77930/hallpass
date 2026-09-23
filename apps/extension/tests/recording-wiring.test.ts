@@ -48,7 +48,20 @@ const PAIR_REQUEST = {
 function installChrome(): void {
   const local: Record<string, unknown> = {};
   const session: Record<string, unknown> = {};
-  const tabs = [{ id: 7, url: "https://agent.test/one", title: "Agent one", groupId: -1, active: true, windowId: 900 }];
+  // `width`/`height` are the tab's own content size, which is what `viewport reset` answers with
+  // when nothing was emulated (012 FR-159).
+  const tabs = [
+    {
+      id: 7,
+      url: "https://agent.test/one",
+      title: "Agent one",
+      groupId: -1,
+      active: true,
+      windowId: 900,
+      width: 1187,
+      height: 707,
+    },
+  ];
   const area = (store: Record<string, unknown>) => ({
     async get(keys: string[]) {
       const out: Record<string, unknown> = {};
@@ -70,6 +83,11 @@ function installChrome(): void {
         // the `ok` the recorder's rule is about. Everything else here is a probe.
         if ((message as { type?: string }).type === "content.deliver-image") {
           return { ok: true, delivery: "drop", file: { name: "screenshot.png", size: 8 }, point: { x: 40, y: 50 } };
+        }
+        // 014: and the page's answer to a file of the owner's own, so a recorded `file_upload`
+        // reaches the `ok` its own card line is about.
+        if ((message as { type?: string }).type === "content.set-files") {
+          return { ok: true, files: [{ name: "receipt.txt", size: 5 }] };
         }
         return { documentEpoch: "doc-1", canonicalOrigin: "https://agent.test" };
       },
@@ -275,6 +293,61 @@ describe("008 recording wiring", () => {
 
     const session = (await runtime.projection()).sessions.find((view) => view.sessionId === "session-r1");
     expect(session?.activity ?? []).toEqual([]);
+  });
+
+  /**
+   * 014/T385 — and one line for a file of the owner's own (FR-196).
+   *
+   * 013 gave the line to `upload_image` alone, because whether `file_upload` earned one too was the
+   * owner's parity decision rather than that slice's to take. It is taken here: both tools put a
+   * file into one of the owner's pages, and only one of them left a trace the owner could read
+   * afterwards. The delivery is always `input` - setting files on an input named by `ref` is the
+   * only thing `file_upload` does, so there is no second path to tell apart.
+   */
+  it("notes a delivered file on the session's card (014/T385, FR-196)", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await runtime.siteModes.set("https://agent.test", { mode: "skip-checks" });
+
+    port.emit({
+      callId: "call-f1",
+      sessionId: "session-r1",
+      tool: "file_upload",
+      tabId: 7,
+      args: {
+        tabId: 7,
+        ref: "t_attachment",
+        files: [{ name: "receipt.txt", type: "text/plain", bytesBase64: "aGVsbG8=" }],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(port.sent.some((sent) => (sent as { callId?: string }).callId === "call-f1")).toBe(true),
+    );
+
+    const session = (await runtime.projection()).sessions.find((view) => view.sessionId === "session-r1");
+    expect(session?.activity).toMatchObject([
+      { kind: "upload", outcome: "delivered", site: "https://agent.test", message: "input" },
+    ]);
+  });
+
+  /**
+   * 014/T385 — a page laid out at another size is something the session did to it (FR-196).
+   *
+   * `viewport` was left out of the recorded list in 012 and the omission shows in the film: the
+   * page suddenly narrows and no frame says why. The `reset` below is the honest one to drive here,
+   * because it needs no debugger attachment - nothing was emulated, so the tool answers from the
+   * tab's own content size - and the claim under test is the list, not the emulation.
+   */
+  it("adds a frame for the size a session gave a page (014/T385, FR-196)", async () => {
+    const { port, recorder } = await pairedRuntime();
+
+    port.emit({ callId: "call-v1", sessionId: "session-r1", tool: "viewport", args: { tabId: 7, action: "reset" } });
+    await vi.waitFor(() =>
+      expect(port.sent.some((sent) => (sent as { callId?: string }).callId === "call-v1")).toBe(true),
+    );
+
+    expect(recorder.notes).toEqual([
+      { sessionId: "session-r1", tabId: 7, tool: "viewport", label: "viewport cleared" },
+    ]);
   });
 
   it("adds no frame for a read", async () => {

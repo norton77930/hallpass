@@ -149,6 +149,21 @@ export type AgentBridgeDeps = {
    */
   onRelayStarted?: (relayPid: number, recordPath: string | undefined) => void;
   onStatusChange?: (status: AgentBridgeStatus) => void;
+  /**
+   * The host is holding a `file_upload` for a file outside the owner's directories (014/R-187 §3).
+   *
+   * Its *presence* is what this worker advertises on every pairing answer: the host asks only a
+   * side that said it could ask, because an unknown frame type is dropped on both ends of this
+   * link and a question nobody raises is a call held until its bound for nothing. So the
+   * capability and the handler are one fact, declared once, here.
+   */
+  onUploadConsentRequest?: (request: {
+    sessionId: string;
+    callId: string;
+    files: Array<{ path: string; directory: string }>;
+  }) => void;
+  /** The relay's answer about the owner's upload directories (014 FR-194), for the panel's rows. */
+  onUploadRoots?: (listing: { roots: string[]; path: string; malformed?: boolean; preserved?: string }) => void;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -173,8 +188,29 @@ export type AgentBridge = {
    * arithmetic nobody chose. Composed by the runtime, which is where the question lives.
    */
   sendWaiting(frame: PromptWaitingFrame): void;
+  /**
+   * The owner's answer to one directory question, by the call the host asked about (014).
+   *
+   * `hint` rides with it only when nobody could see the card (011 FR-146, S3 review F1): the host
+   * puts it on the answer the agent reads, which is the only channel left to a person who has not
+   * opened the panel their question is in.
+   */
+  sendUploadConsentResult(callId: string, decision: UploadConsentDecision, hint?: string): void;
+  /**
+   * Asks the relay what the owner's upload directories are (014 FR-194).
+   *
+   * Sent on every established link and after every answered question, because the panel's rows are
+   * meant to be a picture of the file: the owner may have edited it by hand, and another session's
+   * "from now on" writes to the same list.
+   */
+  requestUploadRoots(): void;
+  /** The owner's revoke of one directory, made again on the next link until the relay answers. */
+  removeUploadRoot(root: string): void;
   disconnect(): void;
 };
+
+/** The six things the owner's answer can be (014/R-187 §1); the runtime maps its card to one. */
+export type UploadConsentDecision = "once" | "always" | "deny" | "timed-out" | "interrupted" | "busy";
 
 const defaultTimer: AgentReconnectTimer = {
   set: (callback, delayMs) => setTimeout(callback, delayMs),
@@ -296,6 +332,18 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           setStatus("connected");
           deps.onRelayStarted?.(link.data.relayPid, link.data.recordPath);
           return;
+        case "upload-roots":
+          // The relay's answer about the owner's own file (014 FR-194). It is a fact about their
+          // machine, shown to them: it never goes to a page, a call or an agent.
+          deps.onUploadRoots?.({
+            roots: [...link.data.roots],
+            path: link.data.path,
+            ...(link.data.malformed === undefined ? {} : { malformed: link.data.malformed }),
+            // S3 review F4: where a document the host could not read was kept, passed through as
+            // every other field of this frame is - the panel is the one place it means anything.
+            ...(link.data.preserved === undefined ? {} : { preserved: link.data.preserved }),
+          });
+          return;
         default:
           // `hello-ack` belongs to the relay's loopback half; a relay sending one up the native
           // port is not speaking this protocol.
@@ -347,6 +395,11 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
               sessionId: pairing.sessionId,
               accepted,
               ...(browserRunId === undefined ? {} : { browserRunId }),
+              // 014/R-187 §1: what this worker can be asked beyond answering calls. Derived from
+              // the handler rather than declared beside it, so the advertisement cannot outlive
+              // the thing it advertises - a host told "I can ask" by a worker that cannot would
+              // hold every outside-roots upload until its own bound.
+              ...(deps.onUploadConsentRequest === undefined ? {} : { features: ["upload-consent"] }),
             }),
           )
           .catch(() =>
@@ -359,6 +412,22 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           );
         return;
       }
+      case "upload-consent-request":
+        /**
+         * The one frame the host sends *during* a call it has not made (014/R-187 §1).
+         *
+         * It carries the owner's own paths, which is why it exists at all: the host is the only
+         * side that can see them and the panel is the only place they can be shown. The worker
+         * passes them straight to the runtime and keeps none - no page, no call and no log here
+         * ever learns a file name (FR-151).
+         */
+        deps.reportDiagnostic?.("agent.bridge.upload-consent");
+        deps.onUploadConsentRequest?.({
+          sessionId: control.data.sessionId,
+          callId: control.data.callId,
+          files: control.data.files.map((file) => ({ path: file.path, directory: file.directory })),
+        });
+        return;
       case "stop":
         deps.reportDiagnostic?.("agent.bridge.stop");
         deps.onStop?.({
@@ -437,6 +506,15 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
       // `send` is a no-op with no port: a tick that lands in the moment between the link going away
       // and the runtime cancelling the question it was about is lost, which is what it is.
       send(frame);
+    },
+    sendUploadConsentResult(callId: string, decision: UploadConsentDecision, hint?: string): void {
+      send({ type: "upload-consent-result", callId, decision, ...(hint === undefined ? {} : { hint }) });
+    },
+    requestUploadRoots(): void {
+      send({ type: "upload-roots-list" });
+    },
+    removeUploadRoot(root: string): void {
+      send({ type: "upload-roots-remove", root });
     },
     disconnect(): void {
       const open = port;

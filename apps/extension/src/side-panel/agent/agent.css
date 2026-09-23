@@ -272,6 +272,20 @@
   margin-top: var(--sp-2);
 }
 
+/*
+  014 FR-178: 中斷 reads as unavailable while the session has nothing in flight, and stays
+  pressable - the count it reads is a picture that can be a moment old, and a control that did
+  nothing at all in that moment would look broken rather than idle.
+*/
+.agent-interrupt[aria-disabled="true"] {
+  opacity: 0.55;
+}
+
+.agent-session-nothing {
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
 /* ---------- session cards ---------- */
 
 .agent-session-sites {

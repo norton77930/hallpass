@@ -803,6 +803,27 @@ describe("T028 agent effect tools", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  /**
+   * 014/T356 (FR-179): the owner interrupted the step while its card stood.
+   *
+   * The word matters more here than anywhere else. `denied` would be a decision about the click,
+   * recorded as the owner refusing it; `owner-stopped` would tell the agent its session and its
+   * tabs are gone. The truth is neither: the step ended, nothing was decided, and the site keeps
+   * whatever mode it had.
+   */
+  it("answers owner-interrupted when the owner interrupts the session while its prompt stands", async () => {
+    const { runner, execute, prompts, siteModes } = harness();
+
+    const pending = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.cancelSession("session-h1", "interrupted");
+
+    await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "stopped", reason: "owner-interrupted" });
+    expect(execute).not.toHaveBeenCalled();
+    // Nothing was decided about the site: the next call asks again.
+    await expect(siteModes.list()).resolves.toEqual([]);
+  });
+
   it("remembers the mode the owner chose from inside the prompt (FR-042)", async () => {
     const { runner, prompts, siteModes } = harness();
 
@@ -974,6 +995,48 @@ describe("T028 agent effect tools", () => {
         arguments: { targetHandle: "t_nickname", value: "agent-set" },
       }),
     );
+  });
+
+  /**
+   * 014/T369 review F5 — the marker the interrupt's two sentences are chosen by (FR-181).
+   *
+   * An interrupt answers "nothing was delivered" or "it may have taken effect", and the only fact
+   * that separates them is whether this call had already put something into the page. The browser-
+   * level deliveries write it; the two effects that still run *inside* the page did not, so an
+   * interrupt landing after a scroll or a form input had gone out told the agent nothing had
+   * happened - the one sentence this feature must not get wrong.
+   */
+  it("marks a page-executed effect as delivered before the page runs it", async () => {
+    for (const [tool, args, executed] of [
+      [
+        "scroll",
+        { tabId: AGENT_TAB, direction: "down", amount: "medium" },
+        { ok: true, effect: "scrolled", scrollTop: 80, targetVisibility: "not-applicable", documentChanged: false },
+      ],
+      [
+        "form_input",
+        { tabId: AGENT_TAB, ref: "t_nickname", value: "agent-set" },
+        { ok: true, effect: "value-set", valueMatched: true, documentChanged: false },
+      ],
+    ] as const) {
+      const delivered: Array<{ callId: string; order: number }> = [];
+      let executions = 0;
+      const { runner, siteModes } = harness({
+        onDelivered: (callId) => delivered.push({ callId, order: executions }),
+        execute: vi.fn(async () => {
+          executions += 1;
+          return executed as PageExecutionOutcome;
+        }),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(clickRequest({ tool, args: args as Record<string, unknown> }));
+
+      expect(response.outcome, tool).toBe("ok");
+      // Before the page ran it, not after: an interrupt that lands while the page is still
+      // deciding is exactly the case the marker exists for.
+      expect(delivered, tool).toEqual([{ callId: "call-1", order: 0 }]);
+    }
   });
 
   /**

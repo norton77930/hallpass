@@ -2,13 +2,13 @@ import {
   agentToolArgSchemas,
   isAgentEffectTool,
   type AgentBatchStepResult,
-  type AgentNativeRequest,
   type AgentNativeResponse,
   type AgentToolName,
 } from "@hallpass/contracts";
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { StatedPlanStep } from "./gate.js";
 import type { StatedPlanStore } from "./plans.js";
+import { hintWithTransitionNotice } from "./transitions.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { batchStepCallId, type AgentStopSignals, type AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
@@ -53,12 +53,23 @@ export type AgentBatchDeps = {
   siteOfTab: (sessionId: string, tabId: number, callId: string) => Promise<string | undefined>;
   /** One step, answered exactly as it would have been if the agent had sent it by itself. */
   dispatch: (request: AgentToolRequest) => Promise<AgentNativeResponse>;
+  /**
+   * The move nobody has decided about yet, on the tab this batch is running on (014 FR-187).
+   *
+   * Asked here, before each step, rather than left to the step's own dispatch, because the answer
+   * would otherwise be a card raised in the middle of a sequence the owner is not watching - and
+   * the person deciding "may this session work on that site" deserves to be asked about *the
+   * session*, not about step four of something they approved as a whole. The batch stops instead,
+   * says where the tab went, and the agent's next single call is what asks.
+   */
+  pendingTransition?: (sessionId: string, tabId: number) => Promise<{ from: string; to: string } | undefined>;
   reportDiagnostic?: (code: string) => void;
 };
 
 export type AgentBatchRunner = {
   handles(tool: AgentToolName): boolean;
-  run(request: AgentNativeRequest): Promise<AgentNativeResponse>;
+  /** The dispatch point's own request: a batch reads the stop handle on it (014 FR-179). */
+  run(request: AgentToolRequest): Promise<AgentNativeResponse>;
 };
 
 type ParsedStep = { tool: AgentToolName; args: Record<string, unknown> };
@@ -81,7 +92,7 @@ function parsedArgs(tool: AgentToolName, args: Record<string, unknown>): Record<
 }
 
 export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
-  async function runBatch(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function runBatch(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId } = request;
     const parsed = agentToolArgSchemas.browser_batch.safeParse(request.args);
     if (!parsed.success) {
@@ -106,6 +117,8 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
     if (site !== undefined && mode === "follow-a-plan") {
       const asked = await deps.prompts.askPlan({
         callId,
+        // Whether the owner ended this batch before its one question could be raised (014 FR-179).
+        stopped: request.stopped,
         sessionId: request.sessionId,
         site,
         steps: steps.map((step, index) => ({
@@ -118,6 +131,8 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
       if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
       // 006 FR-087: the owner's Stop, in the word every stopped call gets; nothing ran here either.
       if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
+      // 014 FR-179: interrupted before a single step ran, so there is no partial report to make.
+      if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
       if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
       // The tab may have been handed back while the plan stood (006 FR-087, S1 review): every
       // step would refuse on its own, but a plan stated for a tab the session no longer holds is
@@ -140,13 +155,54 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
 
     const handle = deps.stops.begin(callId, request.sessionId);
     const results: AgentBatchStepResult[] = [];
+    /**
+     * Where the owner's 中斷 caught it, and what its step said (014 FR-180).
+     *
+     * `undefined` is an ordinary batch, which answers exactly what it always did. When it is set,
+     * the answer stops being `ok`: the sequence did not finish and saying it did - with a list the
+     * agent would have to read backwards to discover otherwise - is the dishonest shape this
+     * feature exists to avoid.
+     */
+    let interruptedAt: number | undefined;
+    /** Where the *browser* stopped it: the tab is somewhere nobody has decided about (FR-187). */
+    let stoppedAt: number | undefined;
     try {
       for (const [index, step] of steps.entries()) {
+        const moved = await deps.pendingTransition?.(request.sessionId, tabId);
+        if (moved) {
+          // The step never started, and it says why in the same three lists an interrupt uses:
+          // what ran, where it stopped, what was never attempted.
+          stoppedAt = index;
+          // The same bound the single call's answer applies (T369 review F7): the notice gives way
+          // to the field's 400 characters, never the step's own three words about what happened.
+          const notice = hintWithTransitionNotice(moved.from, moved.to);
+          results.push({
+            index,
+            outcome: "stopped",
+            reason: "site-transition",
+            ...(notice === undefined ? {} : { hint: notice }),
+          });
+          for (let rest = index + 1; rest < steps.length; rest += 1) {
+            results.push({ index: rest, outcome: "stopped", reason: "not-run" });
+          }
+          break;
+        }
         if (handle.stopped()) {
+          /**
+           * 014 FR-180: the owner interrupted between steps, so this is the step the batch was on.
+           *
+           * It is named as the interrupted one, and it is deliberately *not* in `completed`: the
+           * three lists together say that nothing of it ran, which is more than its own line could
+           * say on its own. A stop keeps the word it has always had for every remaining step.
+           */
+          if (handle.reason() === "owner-interrupted") {
+            interruptedAt = index;
+            results.push({ index, outcome: "stopped", reason: "owner-interrupted" });
+          }
           // FR-046: Stop ends the current call and every queued step. The steps already answered
           // keep their answers - a step that reached the page is reported as what the page did,
           // never as prevented - and the ones that never started say so in the owner's word.
-          for (let rest = index; rest < steps.length; rest += 1) {
+          for (let rest = interruptedAt === undefined ? index : index + 1; rest < steps.length; rest += 1) {
             results.push({ index: rest, outcome: "stopped", reason: "not-run" });
           }
           break;
@@ -185,6 +241,18 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
          * step would answer `blocked-by-dialog` anyway - the dispatch point sees to that - so
          * running them would spend the batch on refusals and bury the one answer that matters.
          */
+        /**
+         * The step itself was interrupted (014 FR-180): the dispatch point answered it while it
+         * was in flight, so the batch stops here and carries the step's own sentence outwards -
+         * only that step knows whether its input had already reached the page (FR-181).
+         */
+        if (response.outcome === "stopped" && response.reason === "owner-interrupted") {
+          interruptedAt = index;
+          for (let rest = index + 1; rest < steps.length; rest += 1) {
+            results.push({ index: rest, outcome: "stopped", reason: "not-run" });
+          }
+          break;
+        }
         const raisedDialog =
           response.outcome === "ok" &&
           typeof response.result === "object" &&
@@ -205,7 +273,51 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
       // owner approved once, as part of a sequence that is over.
       if (planId !== undefined) deps.plans.clear(planId);
     }
-    return { callId, outcome: "ok", result: { results } };
+    if (stoppedAt !== undefined) {
+      /**
+       * The same shape an interrupt answers with, and for the same reason (S1 ruling): the host
+       * composes an error reply from the outcome and the reason alone, so a top-level `stopped`
+       * would reach the agent with none of the three lists. The word `site-transition` is on the
+       * step, which is where the agent reads why the sequence ended.
+       */
+      return {
+        callId,
+        outcome: "ok",
+        result: {
+          results,
+          completed: results.filter((step) => step.outcome === "ok").map((step) => step.index),
+          stoppedAt,
+          notRun: results.filter((step) => step.index > stoppedAt).map((step) => step.index),
+        },
+      };
+    }
+    if (interruptedAt === undefined) return { callId, outcome: "ok", result: { results } };
+    /**
+     * The three groups the agent asked for by asking "how far did it get" (014 FR-180, US1
+     * scenario 2).
+     *
+     * `completed` is what ended `ok` - the only outcome that means the page did the thing - and
+     * the two lists around it are positions, not prose: the steps that never started are named so
+     * the agent can re-send exactly them, and the interrupted one is named so it can decide
+     * whether to check the page first.
+     *
+     * The answer stays `ok`, which is what a partially-run batch has always answered: the host
+     * composes an *error* reply from the outcome and the reason alone and drops the result with
+     * them (`mcp-server.ts` `toolReply`), so a `stopped` batch would reach the agent as three
+     * words and none of the three lists. The interruption is therefore said where it survives the
+     * trip - on the step it happened to, which carries `owner-interrupted` and, when its input had
+     * already gone out, the sentence that says so (FR-181).
+     */
+    return {
+      callId,
+      outcome: "ok",
+      result: {
+        results,
+        completed: results.filter((step) => step.outcome === "ok").map((step) => step.index),
+        interruptedAt,
+        notRun: results.filter((step) => step.index > interruptedAt).map((step) => step.index),
+      },
+    };
   }
 
   return {

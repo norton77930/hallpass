@@ -76,11 +76,30 @@ export type PromptWaitingTick = {
  * FR-087). Neither is "nobody answered": Stop ends the session and the parked call with it, and
  * Release takes back the tab the question was about, so the call is refused as any unheld tab is.
  */
-export type PromptEnding = "timed-out" | "stopped" | "released";
+/**
+ * 014 FR-179: and a fourth, which is none of the three.
+ *
+ * The owner interrupted the step the question belonged to. Not `timed-out` - somebody acted, at
+ * once. Not `stopped` - the session and its tabs are still there. And emphatically not a decline:
+ * a decline is a decision about what was asked, and this is the question ending before one was
+ * made, so nothing is recorded about the site, the pair or the directory it was about.
+ */
+export type PromptEnding = "timed-out" | "stopped" | "released" | "interrupted";
 
 /** Spelt out per ending rather than as `{ decision: PromptEnding }`, so a consumer's checks narrow. */
 export type PromptDecision =
-  | { decision: "allow"; rememberMode?: SiteMode }
+  /**
+   * 014 FR-188: `rememberTransition` is the transition card's 一律允許, and it is a flag of its own
+   * rather than a second spelling of `rememberMode` because the two remember different things - a
+   * mode is a decision about one site, and this is a decision about one *ordered pair* of them.
+   */
+  /**
+   * 014 FR-193: `rememberDirectory` is the directory card's 這些資料夾以後都可以, and it is a third
+   * flag for the same reason the second one exists - a mode is about a site, a pair is about two
+   * origins, and this is about a directory on the owner's own disk. One flag for three would let a
+   * yes meant for one of them be read as another.
+   */
+  | { decision: "allow"; rememberMode?: SiteMode; rememberTransition?: boolean; rememberDirectory?: boolean }
   | { decision: "deny" }
   /**
    * `hint` is where the person has to click, present only when this question expired with no panel
@@ -89,7 +108,9 @@ export type PromptDecision =
    */
   | { decision: "timed-out"; hint?: string }
   | { decision: "stopped" }
-  | { decision: "released" };
+  | { decision: "released" }
+  /** 014 FR-179: the owner ended the step this question belonged to; nothing was decided. */
+  | { decision: "interrupted" };
 
 export type PlanDecision =
   /** The owner's yes, minus any steps they struck out (US5, the batch approval). */
@@ -98,7 +119,9 @@ export type PlanDecision =
   /** The same hint a single question's expiry carries (011 FR-146). */
   | { decision: "timed-out"; hint?: string }
   | { decision: "stopped" }
-  | { decision: "released" };
+  | { decision: "released" }
+  /** 014 FR-179: the same ending for a whole batch's question. */
+  | { decision: "interrupted" };
 
 /**
  * Which call a question belongs to (003/B5).
@@ -124,6 +147,17 @@ export type PromptOwner = {
    * when a session ends this is the only thing that tells its own questions from another agent's.
    */
   sessionId: string;
+  /**
+   * Whether the call this question belongs to has already been ended (014 FR-179, T369 review F2).
+   *
+   * The dispatch point's own stop handle, handed down. The interrupt can land in the window between
+   * a call being registered and its runner getting as far as asking: the call has been answered
+   * `owner-interrupted` by then, and a card raised afterwards belongs to nobody - the owner's 繼續
+   * on it would deliver input, or record a decision about a site, for a call the agent was told was
+   * over. Read once, at the moment the question is raised; after that the existing cancellations
+   * are what take a standing card down.
+   */
+  stopped?: (() => boolean) | undefined;
   /**
    * Which of the person's questions this is, for the "still waiting" ticks alone (011 R-162).
    *
@@ -155,7 +189,13 @@ export type AgentPromptController = {
   /** The same, for a whole batch the owner answers once. */
   askPlan(plan: Omit<AgentPlanPrompt, "planId"> & PromptOwner): Promise<PlanDecision | { decision: "busy" }>;
   /** The panel's answer. Returns whether it settled a prompt that was still alive. */
-  decide(promptId: string, allow: boolean, rememberMode?: SiteMode): boolean;
+  decide(
+    promptId: string,
+    allow: boolean,
+    rememberMode?: SiteMode,
+    rememberTransition?: boolean,
+    rememberDirectory?: boolean,
+  ): boolean;
   /** The panel's answer to a plan. Returns whether it settled a plan that was still alive. */
   decidePlan(planId: string, approve: boolean, excludedIndexes?: readonly number[]): boolean;
   /**
@@ -365,7 +405,10 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     currentSession() {
       return pending?.sessionId;
     },
-    ask({ callId, hostCallId, sessionId, promptKind, ...prompt }) {
+    ask({ callId, hostCallId, sessionId, promptKind, stopped, ...prompt }) {
+      // Before anything is built, and before `busy` (014 FR-179): a call that is already over is
+      // not waiting for an answer, and the panel must not be given a card nobody can act on.
+      if (stopped?.()) return Promise.resolve({ decision: "interrupted" as const });
       if (pending) {
         // Not queued: a queued prompt would be shown to the owner about a call that may already
         // have timed out at the host, and the agent would have no way to tell.
@@ -385,7 +428,8 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
         }));
       });
     },
-    askPlan({ callId, hostCallId, sessionId, promptKind: _promptKind, ...plan }) {
+    askPlan({ callId, hostCallId, sessionId, promptKind: _promptKind, stopped, ...plan }) {
+      if (stopped?.()) return Promise.resolve({ decision: "interrupted" as const });
       if (pending) {
         return Promise.resolve({ decision: "busy" as const });
       }
@@ -405,7 +449,7 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
         }));
       });
     },
-    decide(promptId, allow, rememberMode) {
+    decide(promptId, allow, rememberMode, rememberTransition, rememberDirectory) {
       if (pending?.effect?.promptId !== promptId) {
         // Either the owner answered a prompt that has already expired, or the panel is showing one
         // this worker no longer has. Nothing runs either way, and it is said out loud.
@@ -414,7 +458,20 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
       }
       const settle = pending.settleEffect;
       close();
-      settle?.(allow ? { decision: "allow", ...(rememberMode ? { rememberMode } : {}) } : { decision: "deny" });
+      settle?.(
+        allow
+          ? {
+              decision: "allow",
+              ...(rememberMode ? { rememberMode } : {}),
+              // Only ever with a yes: "remember this pair" is part of allowing it, and a decline
+              // that carried it would be the owner saying no and yes to the same move.
+              ...(rememberTransition ? { rememberTransition: true } : {}),
+              // The same rule for the directory card's "from now on" (014 FR-193): it is the yes
+              // that widens the host's list, and a no never widens anything.
+              ...(rememberDirectory ? { rememberDirectory: true } : {}),
+            }
+          : { decision: "deny" },
+      );
       deps.onChange?.();
       return true;
     },

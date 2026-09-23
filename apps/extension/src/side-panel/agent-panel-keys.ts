@@ -36,6 +36,19 @@ export const TOOL_SUMMARY_KEYS: Record<AgentToolName, string> = Object.fromEntri
 ) as Record<AgentToolName, string>;
 
 /**
+ * The two sentences `upload_image` has, when the question knows which one it is (014 FR-196).
+ *
+ * One tool, two acts the owner would answer differently: handing a screenshot to a file field, and
+ * dropping it at a point on the page. The generic sentence above covers both and says neither,
+ * which is the right answer only while the projection cannot tell them apart - so these are keyed
+ * off `AgentEffectPrompt.delivery` and used exactly when it is present.
+ */
+export const UPLOAD_DELIVERY_SUMMARY_KEYS: Record<"input" | "drop", string> = {
+  input: "agent.summary.upload_image.input",
+  drop: "agent.summary.upload_image.drop",
+};
+
+/**
  * One reviewed word per outcome an activity item can carry (008 FR-113).
  *
  * Keyed off the contract's own value the same way the tool summaries are, so an outcome added to
@@ -58,6 +71,8 @@ export const ACTIVITY_OUTCOME_KEYS: Record<AgentActivityItem["outcome"], string>
   // 013: what became of a picture the session put into a page (FR-174). Delivery, never
   // acceptance: what the page then does with the file is the page's own business.
   delivered: "agent.activity.delivered",
+  // 014: the owner ended a step and kept everything else (FR-182).
+  interrupted: "agent.activity.interrupted",
 };
 
 /**
@@ -104,6 +119,20 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.sitePermissive",
   "agent.diagnosticsLabel",
   "agent.diagnosticsGranted",
+  // The moves the owner remembered, listed in the same place and revoked the same way (014 FR-191).
+  "agent.transitionsTitle",
+  "agent.transitionRow",
+  "agent.transitionLastUsed",
+  "agent.transitionNeverUsed",
+  "agent.transitionRevoke",
+  // The directories the local host may read uploads from, and their revoke (014 FR-191, FR-192).
+  "agent.uploadRootsTitle",
+  "agent.uploadRootsPath",
+  "agent.uploadRootsMalformed",
+  "agent.uploadRootsPreserved",
+  "agent.uploadRootNotRecorded",
+  "agent.uploadRootRevoke",
+  "agent.uploadRootPending",
   // The session cards (FR-087).
   "agent.session.label",
   "agent.session.sites",
@@ -112,6 +141,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.session.waiting",
   "agent.session.stop",
   "agent.session.release",
+  // The second control beside Stop, and what it says when nothing was running (014 FR-178).
+  "agent.session.interrupt",
+  "agent.session.nothingToInterrupt",
   // The recording line (008 FR-109).
   "agent.session.recording",
   "agent.session.recordingFull",
@@ -130,10 +162,23 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.activity.uploadInput",
   "agent.activity.uploadDrop",
   "agent.activity.unknownSite",
+  // The step the owner ended themselves (014 FR-182).
+  "agent.activity.interrupt",
   // The dialog questions and the non-blocking notice (008 FR-114, FR-115).
   "agent.prompt.dialogAccept",
   "agent.prompt.dialogQuote",
   "agent.prompt.beforeunloadForce",
+  // The move a tab made, and the owner's three answers to it (014 FR-187, FR-188).
+  "agent.prompt.transition",
+  "agent.transitionContinue",
+  "agent.transitionAlways",
+  "agent.transitionDecline",
+  // The files outside the owner's directories, and their three answers (014 FR-193).
+  "agent.prompt.uploadDirectory",
+  "agent.uploadFileDirectory",
+  "agent.uploadOnce",
+  "agent.uploadAlways",
+  "agent.uploadDecline",
   "agent.notice.dialogAccepted",
   "agent.notice.dialogFollows",
   "agent.notice.dismiss",
@@ -158,6 +203,7 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.denyPlan",
   ...Object.values(MODE_KEYS),
   ...Object.values(TOOL_SUMMARY_KEYS),
+  ...Object.values(UPLOAD_DELIVERY_SUMMARY_KEYS),
   ...Object.values(ACTIVITY_OUTCOME_KEYS),
   ...Object.values(WINDOW_STATE_KEYS),
 ];

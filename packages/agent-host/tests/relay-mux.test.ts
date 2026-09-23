@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AGENT_LINK_PROTOCOL } from "@hallpass/contracts";
 import { createRelayMux, type MuxConnection } from "../src/relay-mux.js";
 
@@ -449,5 +449,103 @@ describe("relay multiplexer", () => {
 
     mux.closed(connection);
     expect(mux.pendingCallCount()).toBe(0);
+  });
+
+  /**
+   * 014/T376 — the two frames that are the relay's own business (FR-194, R-187 §4).
+   *
+   * Every other frame from the worker is somebody's answer and is routed to that somebody. These
+   * two are addressed to the relay itself: it is the one process that both talks to this worker and
+   * can read the owner's config file, so the panel's list of upload directories and its revoke
+   * arrive here and are answered here. A session id on them would imply a list per agent, which is
+   * the opposite of what the list is.
+   *
+   * A relay without the store - which is any relay from before this feature - drops them exactly as
+   * it drops anything else addressed to nobody, and the panel simply shows no directory rows.
+   */
+  describe("upload roots", () => {
+    const listing = { roots: ["C:\\Users\\o\\docs"], path: "C:\\Users\\o\\AppData\\Local\\hallpass\\config.json" };
+
+    function createRootsHarness(store: {
+      list: () => Promise<typeof listing>;
+      remove: (root: string) => Promise<{ listing: typeof listing }>;
+    }): { mux: ReturnType<typeof createRelayMux>; toWorker: unknown[]; logs: string[] } {
+      const toWorker: unknown[] = [];
+      const logs: string[] = [];
+      const mux = createRelayMux({
+        token: TOKEN,
+        relayPid: RELAY_PID,
+        toWorker: (frame) => toWorker.push(frame),
+        log: (code, detail) => logs.push(detail === undefined ? code : `${code} ${detail}`),
+        uploadRoots: store,
+      });
+      return { mux, toWorker, logs };
+    }
+
+    it("answers the worker's list request with the list the host would use", async () => {
+      const { mux, toWorker } = createRootsHarness({
+        list: () => Promise.resolve(listing),
+        remove: () => Promise.reject(new Error("not this test")),
+      });
+
+      mux.fromWorker({ type: "upload-roots-list" });
+
+      await vi.waitFor(() => expect(toWorker).toEqual([{ type: "upload-roots", ...listing }]));
+    });
+
+    it("removes the directory the owner revoked and answers with what is left", async () => {
+      const removed: string[] = [];
+      const after = { roots: [], path: listing.path, malformed: true };
+      const { mux, toWorker } = createRootsHarness({
+        list: () => Promise.resolve(listing),
+        remove: (root) => {
+          removed.push(root);
+          return Promise.resolve({ listing: after });
+        },
+      });
+
+      mux.fromWorker({ type: "upload-roots-remove", root: "C:\\Users\\o\\docs" });
+
+      await vi.waitFor(() => expect(toWorker).toEqual([{ type: "upload-roots", ...after }]));
+      expect(removed).toEqual(["C:\\Users\\o\\docs"]);
+    });
+
+    it("drops both frames when this relay has no store behind it, and says so", async () => {
+      const { mux, toWorker, logs } = createHarness();
+
+      mux.fromWorker({ type: "upload-roots-list" });
+      mux.fromWorker({ type: "upload-roots-remove", root: "C:\\Users\\o\\docs" });
+
+      await vi.waitFor(() => expect(logs.filter((line) => line.startsWith("relay.mux.dropped"))).toHaveLength(2));
+      expect(toWorker).toEqual([]);
+    });
+
+    it("still drops a frame addressed to nobody, and one whose type it does not know", () => {
+      const { mux, toWorker, logs } = createRootsHarness({
+        list: () => Promise.reject(new Error("not this test")),
+        remove: () => Promise.reject(new Error("not this test")),
+      });
+
+      mux.fromWorker({ type: "upload-roots", roots: [], path: listing.path });
+      mux.fromWorker({ type: "something-else" });
+
+      expect(toWorker).toEqual([]);
+      expect(logs.filter((line) => line.startsWith("relay.mux.dropped"))).toEqual([
+        "relay.mux.dropped unaddressed type=upload-roots",
+        "relay.mux.dropped unaddressed type=something-else",
+      ]);
+    });
+
+    it("refuses a remove whose root is not a path, rather than asking the store about it", async () => {
+      const { mux, toWorker, logs } = createRootsHarness({
+        list: () => Promise.reject(new Error("not this test")),
+        remove: () => Promise.reject(new Error("not this test")),
+      });
+
+      mux.fromWorker({ type: "upload-roots-remove", root: "docs" });
+
+      await vi.waitFor(() => expect(logs.some((line) => line.startsWith("relay.mux.dropped"))).toBe(true));
+      expect(toWorker).toEqual([]);
+    });
   });
 });

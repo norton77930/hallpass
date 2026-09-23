@@ -1,7 +1,6 @@
 import {
   agentToolArgSchemas,
   type AgentActivityItem,
-  type AgentNativeRequest,
   type AgentNativeResponse,
   type AgentNotice,
   type AgentToolName,
@@ -12,6 +11,7 @@ import type { TabOwnership } from "../agent-tab-manager.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { ownershipRefusal } from "./ownership.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import type { AgentToolRequest } from "./stop.js";
 
 /**
  * The dialogs a page opens, and the one decision answering them can cost (008/T225, US3,
@@ -112,7 +112,8 @@ export type AgentDialogsDeps = {
 
 export type AgentDialogs = {
   handles(tool: string): boolean;
-  run(request: AgentNativeRequest): Promise<AgentNativeResponse>;
+  /** The dispatch point's own request: the dialog's question reads the stop handle on it (FR-179). */
+  run(request: AgentToolRequest): Promise<AgentNativeResponse>;
   /**
    * The debugger fan-out's one dialog consumer (R-138): exactly two methods are read and every
    * other event - of this domain or any other - is dropped here.
@@ -320,7 +321,7 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
     }
   }
 
-  async function runDialog(request: AgentNativeRequest): Promise<AgentNativeResponse> {
+  async function runDialog(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId } = request;
     const parsed = agentToolArgSchemas[DIALOG_TOOL].safeParse(request.args);
     if (!parsed.success) return { callId, outcome: "failed", reason: "invalid-arguments" };
@@ -369,6 +370,11 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
       if (decision.decision === "prompt") {
         const asked = await deps.prompts.ask({
           callId,
+          // Which call the host knows it as, when this answer is a batch step (011 review H1).
+          hostCallId: request.hostCallId,
+          // And whether the owner ended the call while the runner was still getting here (FR-179):
+          // an Allow on a card nobody is waiting for would press OK on a page for a settled call.
+          stopped: request.stopped,
           sessionId: request.sessionId,
           site,
           tool: DIALOG_TOOL,
@@ -385,6 +391,8 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
         if (asked.decision === "busy") return { callId, outcome: "busy", reason: "prompt-pending" };
         if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
         if (asked.decision === "stopped") return { callId, outcome: "stopped", reason: "owner-stopped" };
+        // 014 FR-179: the step ended, the session did not. The dialog is left exactly as it is.
+        if (asked.decision === "interrupted") return { callId, outcome: "stopped", reason: "owner-interrupted" };
         if (asked.decision === "deny") {
           // FR-114: refusing is not leaving the page stuck. The dialog is dismissed - which is the
           // answer that changes nothing - and the agent is told the owner said no. The owner's

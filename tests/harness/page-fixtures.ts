@@ -63,6 +63,29 @@ const FIXTURES = [
   "localized",
   "long",
   "dialogs",
+  // 014/T359: a field that takes the first keystroke and then stops answering for a while.
+  "slow-input",
+  /**
+   * 014/T367: the three pages a site transition needs.
+   *
+   * `transition-a` is the page the session works on; its links go through `/go-b` and `/go-bc`,
+   * which are *redirects* rather than direct links, because the move this feature is about is the
+   * one the agent did not ask for - a click whose destination the server chooses. `transition-b`
+   * is an ordinary page on another origin, and `transition-batch` is a sequence whose second step
+   * leaves.
+   */
+  "transition-a",
+  "transition-b",
+  "transition-batch",
+  /**
+   * 014/T382: a form that takes more than one file at once.
+   *
+   * The `form` fixture's attachment input is single-file, which is the ordinary case and the one
+   * every other upload journey uses. The directory question is asked once per *call*, so proving
+   * "two files from two directories, one card" needs an input that would actually accept both -
+   * otherwise the page refuses the upload for its own reasons and the card proves nothing.
+   */
+  "upload-multi",
 ] as const;
 
 type FixtureName = (typeof FIXTURES)[number];
@@ -459,6 +482,48 @@ Nothing here navigates or submits.</p>
 ${filler(6)}`,
       );
 
+    case "slow-input":
+      /**
+       * 014/T359 — the one state FR-181 is about: the input has been delivered and nothing has
+       * answered yet.
+       *
+       * The field takes the first keystroke and then blocks its own renderer, so the worker's key
+       * dispatch is still outstanding when the owner presses 中斷 - which is exactly the moment an
+       * honest answer cannot say "nothing happened" and must not say "verified". It blocks by
+       * spinning rather than by never returning, so the tab comes back to life on its own and the
+       * next test meets an ordinary browser; the window is long enough for a person-speed press
+       * and short enough to sit well inside the spec's own timeout.
+       *
+       * One keystroke only: the handler removes itself, so the page is ordinary afterwards and the
+       * late result this produces is the late result the gate then reads about.
+       */
+      return html(
+        "Slow input fixture",
+        `<h1>Slow input page</h1>
+<p>The field below accepts the first keystroke and then stops answering for a while. Nothing here navigates,
+submits, or carries anything sensitive.</p>
+<label>Slow field <input type="text" name="slow" id="slow" aria-label="Slow field"></label>
+<p id="took">no keystroke yet</p>
+<script>
+  (function () {
+    var field = document.getElementById('slow');
+    var took = document.getElementById('took');
+    function hold() {
+      field.removeEventListener('keydown', hold);
+      took.textContent = 'first keystroke taken';
+      var until = Date.now() + 6000;
+      // Deliberately synchronous: an asynchronous wait would leave the renderer free to answer the
+      // very dispatch this fixture exists to leave outstanding.
+      while (Date.now() < until) {
+        /* hold the renderer */
+      }
+    }
+    field.addEventListener('keydown', hold);
+  })();
+</script>
+${filler(4)}`,
+      );
+
     case "dialogs":
       /**
        * 008/T228 — every dialog US3 names, on one page (FR-110..FR-117).
@@ -573,6 +638,59 @@ ${filler(6)}`,
       // being - and a smaller caller-chosen `max_chars` can be shown to carry less than a larger one.
       return html("Long fixture", `<h1>Long page</h1><p>A page long enough to exceed the text read's own ceiling.</p>${filler(300)}`);
 
+    case "transition-a":
+      /**
+       * 014/T367 — where a session works, with two ways to be taken somewhere else.
+       *
+       * Both are `/go-…` paths on *this* origin that answer 302: the agent clicks a link on the
+       * page it is on, and the server decides where the tab ends up, which is exactly the move
+       * FR-185 is about (a click, a redirect, a form post - none of them asked for by name).
+       */
+      return html(
+        "Transition A",
+        `<h1>Transition A</h1>
+<p>The page a session works on. Its two links are redirects the server resolves.</p>
+<button type="button" id="safe-button" onclick="document.getElementById('clicked').textContent = 'clicked at ' + new Date().toISOString()">Safe action</button>
+<p id="clicked">not clicked yet</p>
+<button type="button" id="to-b" onclick="window.location.href = '/go-b'">Go to B</button>
+<button type="button" id="to-bc" onclick="window.location.href = '/go-bc'">Go to B then C</button>
+${filler(6)}`,
+      );
+
+    case "transition-b":
+      return html(
+        "Transition B",
+        `<h1>Transition B</h1>
+<p>An ordinary page on another origin. Nothing here is sensitive and nothing here navigates by itself.</p>
+<button type="button" id="safe-button" onclick="document.getElementById('clicked').textContent = 'clicked at ' + new Date().toISOString()">Safe action</button>
+<p id="clicked">not clicked yet</p>
+<p><a href="https://${HOST}:${TEST_PAGE_ALLOW_PORT}/transition-a" id="back-to-a">Back to A</a></p>
+${filler(6)}`,
+      );
+
+    case "transition-batch":
+      // A sequence whose second step leaves: two safe buttons around one link that redirects to a
+      // third origin, so a batch can be stopped between two steps that would both have worked.
+      return html(
+        "Transition batch",
+        `<h1>Transition batch</h1>
+<p>Three steps, the middle of which takes the tab to another origin.</p>
+<button type="button" id="safe-button" onclick="document.getElementById('clicked').textContent = 'clicked at ' + new Date().toISOString()">Safe action</button>
+<p id="clicked">not clicked yet</p>
+<button type="button" id="to-c" onclick="window.location.href = '/go-c'">Leave for C</button>
+${filler(4)}`,
+      );
+
+    case "upload-multi":
+      return html(
+        "Upload multi",
+        `<h1>Upload several files</h1>
+<p>One file input that accepts more than one file, and says what it was given.</p>
+<label>Attachments <input type="file" name="attachments" multiple onchange="document.getElementById('uploaded').textContent = this.files.length === 0 ? 'no file chosen' : Array.from(this.files).map(function (file) { return file.name + ':' + file.size; }).join(', ')"></label>
+<p id="uploaded">no file chosen</p>
+${filler(4)}`,
+      );
+
     case "origin-change":
       return html(
         "Origin-change fixture",
@@ -618,6 +736,29 @@ function handle(port: number, request: IncomingMessage, response: ServerResponse
 <button type="button">Framed action</button>`,
       ),
     );
+    return;
+  }
+
+  /**
+   * 014/T367 — the redirects themselves (FR-185).
+   *
+   * A 302 rather than a link straight to the other origin, because the two are different facts:
+   * a link's destination is in the page the agent read, and a redirect's is not. The agent asks
+   * for a path on the origin it is already on, and the tab ends up somewhere else - which is the
+   * whole of what the owner is then asked about.
+   *
+   * `/go-bc` chains: it redirects to `/go-c` on B, which redirects again to C, so two commits
+   * happen with no call in between (the collapse of FR-189).
+   */
+  const redirects: Record<string, string> = {
+    "/go-b": `https://${HOST}:${TEST_PAGE_UNKNOWN_PORT}/transition-b`,
+    "/go-c": `https://${HOST}:${TEST_PAGE_DENY_PORT}/transition-b`,
+    "/go-bc": `https://${HOST}:${TEST_PAGE_UNKNOWN_PORT}/go-c`,
+  };
+  const redirect = redirects[path];
+  if (redirect) {
+    response.writeHead(302, { location: redirect, "cache-control": "no-store" });
+    response.end();
     return;
   }
 

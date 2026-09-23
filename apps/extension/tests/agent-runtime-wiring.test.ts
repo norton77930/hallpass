@@ -185,6 +185,9 @@ describe("T018 agent runtime wiring", () => {
       // 013/R-184: the runtime puts this browser's run id on the answer, out of
       // `chrome.storage.session`. Opaque by design, so the test reads that it is there and no more.
       browserRunId: expect.any(String),
+      // 014/R-187: and what this worker can be asked - the host asks about an upload directory
+      // only where a card can actually be raised.
+      features: ["upload-consent"],
     });
 
     await runtime.tabs.adopt("session-h1", 7);

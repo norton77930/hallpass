@@ -263,4 +263,153 @@ describe("T191 prompt cards", () => {
       ui("agent.consentBody").replace("{agent}", "Second Agent").replace("{action}", ui("agent.summary.click")).replace("{site}", SITE),
     );
   });
+
+  /**
+   * 014/T364 — the transition card (FR-187, FR-188).
+   *
+   * Three answers rather than the consent card's three, and they are not the same three: 繼續 is
+   * "for this session", 一律允許 is "for this pair, for good", and 拒絕 refuses this call only. The
+   * card names *both* origins, because "it was on your bank and is now somewhere else" is the
+   * question - a card naming only the destination would be a card about the wrong thing.
+   */
+  it("asks about a move with both origins, and sends the three answers as one command", () => {
+    renderShell();
+    const moved = {
+      promptId: "prompt-t1",
+      site: "https://b.test",
+      tool: "get_page_text" as const,
+      argsSummary: "read the page",
+      kind: "transition" as const,
+      transition: { from: "https://a.test", to: "https://b.test" },
+    };
+    project(port, { ...IDLE, prompt: moved });
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("data-prompt")).toBe("transition");
+    expect(dialog.textContent).toContain(
+      ui("agent.prompt.transition").replace("{from}", "https://a.test").replace("{to}", "https://b.test"),
+    );
+    // The tool's own sentence is not the question here: what is being decided is the move.
+    expect(dialog.textContent).not.toContain(moved.argsSummary);
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.transitionContinue") }));
+    expect(port.sent[0]).toEqual({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-t1", allow: true } });
+
+    project(port, { ...IDLE, prompt: moved });
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.transitionAlways") }));
+    expect(port.sent[1]).toEqual({
+      type: "ui.agent.effect-decide",
+      payload: { promptId: "prompt-t1", allow: true, rememberTransition: true },
+    });
+
+    project(port, { ...IDLE, prompt: moved });
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.transitionDecline") }));
+    // A decline never carries "remember": that would be saying no and yes to the same move.
+    expect(port.sent[2]).toEqual({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-t1", allow: false } });
+    for (const sent of port.sent) expect(agentPanelCommandSchema.safeParse(sent).success).toBe(true);
+  });
+
+  /**
+   * 014/T380 — the directory card (FR-193, FR-194).
+   *
+   * The one card whose body is the owner's own data, and it is shown in full on purpose: "a file
+   * outside your directories" is a card about nothing in particular, and a path they cannot read is
+   * a decision they cannot make. Those paths go nowhere else - not to the page, not to the agent,
+   * not into a recording - which is why the host holds the call until this is answered.
+   *
+   * Its three answers are the third distinct set on this panel: this call's files, their
+   * directories from now on, and no.
+   */
+  it("lists every path in full and sends the three answers as one command", () => {
+    renderShell();
+    const files = [
+      { path: "C:\\Users\\owner\\docs\\receipt.txt", directory: "C:\\Users\\owner\\docs" },
+      { path: "D:\\photos\\holiday.png", directory: "D:\\photos" },
+    ];
+    const asking = {
+      promptId: "prompt-u1",
+      site: SITE,
+      tool: "file_upload" as const,
+      argsSummary: "put 2 of your files into a form on the page",
+      kind: "upload-directory" as const,
+      files,
+    };
+    project(port, { ...IDLE, prompt: asking });
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("data-prompt")).toBe("upload-directory");
+    expect(dialog.textContent).toContain(ui("agent.prompt.uploadDirectory").replace("{agent}", "Claude Code"));
+    // Both paths, in full: the decision is about these files and where they live.
+    for (const file of files) expect(dialog.textContent).toContain(file.path);
+    /**
+     * And the directory under each of them (S3 review F7).
+     *
+     * 這些資料夾以後都可以 remembers the *directory*, and the card used to show only the path - so
+     * the owner pressed a button about a folder the card never named. For `D:\photos\holiday.png`
+     * that folder is `D:\photos`; for a file sitting on a drive root it would be the whole drive.
+     */
+    for (const file of files) {
+      expect(dialog.textContent).toContain(ui("agent.uploadFileDirectory").replace("{directory}", file.directory));
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.uploadOnce") }));
+    expect(port.sent[0]).toEqual({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-u1", allow: true } });
+
+    project(port, { ...IDLE, prompt: asking });
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.uploadAlways") }));
+    expect(port.sent[1]).toEqual({
+      type: "ui.agent.effect-decide",
+      payload: { promptId: "prompt-u1", allow: true, rememberDirectory: true },
+    });
+
+    project(port, { ...IDLE, prompt: asking });
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.uploadDecline") }));
+    // A decline never widens a list: it carries no "from now on".
+    expect(port.sent[2]).toEqual({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-u1", allow: false } });
+    for (const sent of port.sent) expect(agentPanelCommandSchema.safeParse(sent).success).toBe(true);
+  });
+
+  /**
+   * 014/T385 — which of the two things `upload_image` does is being asked about (FR-196).
+   *
+   * One tool, two quite different acts: handing a screenshot to a file field the owner can see, and
+   * dropping it at a point on the page. The card said "into the page" for both, which is the
+   * generic sentence's price - and it is worth paying only while the projection cannot tell them
+   * apart. It can now (`delivery`), so the sentence is the one the owner is actually deciding
+   * about; a projection without the field keeps the generic one.
+   */
+  it("says how a screenshot would be put into the page when the prompt names the delivery", () => {
+    renderShell();
+    const asking = {
+      promptId: "prompt-i1",
+      site: SITE,
+      tool: "upload_image" as const,
+      argsSummary: "put a screenshot the agent took into a file input on the page",
+    };
+
+    project(port, { ...IDLE, prompt: { ...asking, delivery: "input" as const } });
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.consentBody")
+        .replace("{agent}", "Claude Code")
+        .replace("{action}", ui("agent.summary.upload_image.input"))
+        .replace("{site}", SITE),
+    );
+
+    project(port, { ...IDLE, prompt: { ...asking, delivery: "drop" as const } });
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.consentBody")
+        .replace("{agent}", "Claude Code")
+        .replace("{action}", ui("agent.summary.upload_image.drop"))
+        .replace("{site}", SITE),
+    );
+
+    // Nothing said about the delivery leaves the tool's own sentence, exactly as before.
+    project(port, { ...IDLE, prompt: asking });
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.consentBody")
+        .replace("{agent}", "Claude Code")
+        .replace("{action}", ui("agent.summary.upload_image"))
+        .replace("{site}", SITE),
+    );
+  });
 });

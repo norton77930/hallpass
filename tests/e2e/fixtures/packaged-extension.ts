@@ -537,3 +537,23 @@ export const test = base.extend<PackagedFixtures>({
 });
 
 export { expect } from "@playwright/test";
+
+/**
+ * 014/T366, T368 — turn off the loopback exemption for this gate (contracts/transitions.md).
+ *
+ * Every fixture in this harness is served from `127.0.0.1`, which rule (a) exempts for the good
+ * reason that a page on the owner's own machine is not a site they were handed to. So a gate about
+ * transitions has to say "treat loopback as an ordinary site", and it says it in the worker's own
+ * storage before the first held tab moves. The switch only ever makes the product ask about
+ * *more* than it would in the owner's browser - it can widen prompting and never privilege - and
+ * the branded-Chrome run on real sites is what proves rule (a) as shipped.
+ */
+export async function setTransitionTestSwitch(worker: PackagedWorker, on: boolean): Promise<void> {
+  await worker.evaluate(async (enabled: boolean) => {
+    if (enabled) {
+      await chrome.storage.local.set({ agentTransitionsTestNoLoopbackExemption: true });
+      return;
+    }
+    await chrome.storage.local.remove("agentTransitionsTestNoLoopbackExemption");
+  }, on);
+}

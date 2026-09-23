@@ -252,6 +252,8 @@ describe("T095 several agent sessions in one worker", () => {
       // 013/R-184: the browser run rides every pairing answer, and it is one browser, so both
       // sessions name the same opaque id. Its value is nothing a test may assert.
       browserRunId: expect.any(String),
+      // 014/R-187: and what this worker can be asked, on the same frame for the same reason.
+      features: ["upload-consent"],
     });
     expect((await runtime.pairing.state()).pending).toBeUndefined();
 
@@ -377,7 +379,11 @@ describe("T095 several agent sessions in one worker", () => {
     // One server dialled the new relay and greeted again; the other never came back.
     port.emit(announce("session-b"));
     port.emit(pairRequest("session-b"));
-    await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+    // Counted by the answers rather than by everything on the link: a fresh relay also draws the
+    // acknowledgement and 014's list request, which are facts about the link and not about pairing.
+    await vi.waitFor(() =>
+      expect(port.sent.filter((frame) => (frame as { type?: string }).type === "pair-result")).toHaveLength(3),
+    );
 
     fake.fireAlarm(AGENT_RECONCILE_ALARM);
     await vi.waitFor(() => expect(storedSessions(fake)["session-a"]).toBeUndefined());
@@ -667,6 +673,7 @@ describe("T189 owner controls from the panel and the projection they read", () =
       // The same browser run as before the session was stopped (013/R-184): stopping a session is
       // not the browser going away, and the id lives in storage the worker did not lose.
       browserRunId: expect.any(String),
+      features: ["upload-consent"],
     });
     port.emit({ callId: "again-a", sessionId: "session-a", tool: "tabs_context", args: {} });
     await vi.waitFor(() => expect(port.sent).toHaveLength(5));
