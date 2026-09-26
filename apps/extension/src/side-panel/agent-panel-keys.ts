@@ -186,6 +186,7 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.pairingTitle",
   "agent.pairingBody",
   "agent.pairingOrigin",
+  "agent.pairingWaiting",
   "agent.forwardingDisclosure",
   "agent.accept",
   "agent.ignore",

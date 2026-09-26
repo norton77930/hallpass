@@ -108,3 +108,49 @@ export async function acceptPairing(panel: PairingPanel, options: PairingOptions
   }
   throw new Error(`agent-pairing-not-confirmed:${await panel.panelText()}`);
 }
+
+/**
+ * The part of `McpHarnessClient` the helper below uses, named structurally for the same reason
+ * `PairingPanel` is.
+ */
+export type PairingCaller = {
+  callTool(
+    name: string,
+    args?: Record<string, unknown>,
+    options?: { timeoutMs?: number },
+  ): Promise<{ isError: boolean; text: string }>;
+  stderr(): string;
+};
+
+/**
+ * 004 FR-059a — the pairing request is raised by a tool call, never by connecting.
+ *
+ * So a journey that pairs has to *call* first: this starts a `tabs_context` (a read that touches no
+ * tab), accepts the card that call raised through `acceptPairing`, and then requires the call itself
+ * to have come back answered - the call waiting on the owner and the owner answering are one
+ * exchange, and a journey that saw only half of it would prove nothing about the other.
+ */
+export async function pairWithFirstCall(
+  client: PairingCaller,
+  panel: PairingPanel,
+  options: PairingOptions,
+): Promise<PairingOutcome> {
+  const { timeoutMs = 30_000 } = options;
+  // Past the SDK's 60 s default and the host's own pairing bound, so the harness is never what ends
+  // the call; the card wait below is the bound this helper answers to.
+  const first = client.callTool("tabs_context", {}, { timeoutMs: timeoutMs + 60_000 });
+  // Settled either way, so a card that never came does not leave an unhandled rejection behind.
+  const answered = first.then(
+    (result) => ({ result }),
+    (error: unknown) => ({ error }),
+  );
+  const outcome = await acceptPairing(panel, options);
+  const settled = await answered;
+  if ("error" in settled) {
+    throw new Error(`agent-pairing-first-call-failed:${String(settled.error)}\nstderr:\n${client.stderr()}`);
+  }
+  if (settled.result.isError) {
+    throw new Error(`agent-pairing-first-call-refused:${settled.result.text}\nstderr:\n${client.stderr()}`);
+  }
+  return outcome;
+}

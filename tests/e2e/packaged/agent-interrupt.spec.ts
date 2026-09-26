@@ -3,7 +3,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { INTERRUPT_HINTS } from "@hallpass/contracts";
 import { AGENT_GROUP_TITLE } from "../../../apps/extension/src/chrome-adapters/tab-groups.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -96,7 +96,7 @@ test.describe("agent interrupt", () => {
       const live = client;
       const call = callerFor(() => client);
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(live, panel, { locale });
 
       const created = (await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number };
       const tabId = created.tabId;

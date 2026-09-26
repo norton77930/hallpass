@@ -68,8 +68,18 @@ export type VerifyEffectInput = {
   nonce: string;
   /** How long to let a navigation the effect started actually unload the old document. */
   settleMs: number;
-  /** Absent means the caller cannot re-probe; the document's own evidence then decides alone. */
-  probe?: PagePostEffectProbe | undefined;
+  /**
+   * Absent means the caller cannot re-probe; the document's own evidence then decides alone.
+   *
+   * The agent's probe may also answer `deadline` (015/T401): a frame that did not answer in time.
+   * Here it is what every other not-ok answer is - the document could not be confirmed intact - so
+   * the verdict is unchanged; only the page binding reports it by its own name.
+   */
+  probe?:
+    | ((
+        input: Parameters<PagePostEffectProbe>[0],
+      ) => Promise<Awaited<ReturnType<PagePostEffectProbe>> | { ok: false; reason: "deadline" }>)
+    | undefined;
   /**
    * The tab to probe, when it is not the active one. The agent's tab usually is not (003 A8): a
    * probe of the active tab would report a stale context for a document that never moved.
@@ -87,6 +97,16 @@ export type VerifyEffectInput = {
    * about it either way, so those verify exactly as before.
    */
   pointConfirmation?: "hit" | "missed" | "unconfirmed" | undefined;
+  /**
+   * Told the moment the settle wait ends, before the re-probe (015/T406, FR-200, FR-202).
+   *
+   * A press's outcomes - where the tab is now, the tabs and downloads it started - are collected
+   * over exactly this wait, so the caller has to know when it is over; reading them here lets the
+   * reads run beside the probe rather than after it, which is what keeps a press that caused
+   * nothing from answering any later than it did before. Not called when verification ends before
+   * the wait (a scroll, or evidence that already says the document moved).
+   */
+  onSettled?: (() => void) | undefined;
 };
 
 /**
@@ -111,6 +131,7 @@ export async function verifyPageEffect(input: VerifyEffectInput): Promise<Effect
   if (input.settleMs > 0) {
     await new Promise<void>((resolve) => setTimeout(resolve, input.settleMs));
   }
+  input.onSettled?.();
   if (effect.documentChanged) {
     return "document-changed";
   }

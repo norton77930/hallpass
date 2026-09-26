@@ -1,7 +1,7 @@
 import { DEFAULT_BOUNDS } from "@hallpass/contracts";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -80,7 +80,7 @@ test.describe("agent form values", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(client, panel, { locale });
 
       const call = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
         const result = await live.callTool(tool, args);

@@ -47,7 +47,14 @@ Rules that hold for every tool:
 
 Length-prefixed JSON both ways. Request `{ callId, tool, tabId?, args }`; response
 `{ callId, outcome, result? }` where `outcome` is the ToolCall outcome enum. Control frames on the
-same channel: `pair-request`/`pair-result`, `unpair`, `stop`. The host never logs page-derived content;
+same channel: `pair-request`/`pair-result`, `unpair`, `stop`. A refusing `pair-result`
+(`accepted: false`) is an unpair unless its `features` contain `PAIRING_DECLINED_MARKER`
+(`"declined-this-request"`), which marks the owner's decline of that one request (FR-032a): the
+host ends the calls waiting on it `denied`/`not-paired` with `PAIRING_REFUSAL_HINTS.declined` and
+asks afresh on the next call, while an unmarked refusal (an unpair, or any extension older than
+FR-032a) stays sticky with `PAIRING_REFUSAL_HINTS.unpaired`. The mark rides in `features` because
+the frame is strict and a 0.6.0 host would drop a frame with a new key; an abandoned request or a
+failed decision is answered with nothing. The host never logs page-derived content;
 only stable codes (`agent.call.completed`, `agent.pair.requested`, …), mirroring the remote proxy's
 redaction test.
 

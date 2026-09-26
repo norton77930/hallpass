@@ -2,14 +2,20 @@ import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 import {
   agentControlFrameSchema,
   agentNativeResponseSchema,
+  agentToolArgSchemas,
   agentUploadImageRequestSchema,
   promptWaitingFrameSchema,
+  AGENT_015_REASON_OUTCOMES,
   AGENT_TOOL_DESCRIPTORS,
+  AGENT_UPLOAD_MAX_BASE64_CHARS,
   ATTENTION_SENTENCES,
   INTERRUPT_HINTS,
+  PAIRING_DECLINED_MARKER,
+  PAIRING_REFUSAL_HINTS,
   UPLOAD_HINTS,
   isRootDirectory,
   type AgentNativeResponse,
@@ -229,8 +235,73 @@ type UploadConsentAnswer = {
   hint?: string;
 };
 
+/**
+ * What the one upload check made of a call (015 FR-211): the arguments that may cross the link, or
+ * the answer that refuses it. `hint` is an `always` the host would not write down (014 FR-186).
+ */
+type PreparedUpload =
+  | { ok: true; args: Record<string, unknown>; hint?: string }
+  | { ok: false; response: AgentNativeResponse };
+
+/**
+ * What a batch whose upload step was refused adds for the agent (015 FR-210, FR-212).
+ *
+ * `laterCall` rides on an `unknown-image-id` refusal because the one id an agent can hold that this
+ * host never issued, inside a batch, is the one it expects from a screenshot step *earlier in the
+ * same batch* - which has not run when the steps are checked. `split` is the only next move for a
+ * batch whose uploads, each within bounds, together outgrow the one frame the batch travels in.
+ */
+const BATCH_UPLOAD_HINTS = {
+  laterCall: "A screenshot taken inside this batch can be uploaded in a later call.",
+  split: "Split the uploads across calls.",
+} as const;
+
+/**
+ * The shape a standalone `file_upload` is held to before the host ever sees it (015 S3 review F2).
+ *
+ * MCP validates a standalone call against the tool's own `inputShape` - the descriptor's, the very
+ * map it was registered with - as a plain object, so a missing `ref` is refused and a stray key is
+ * dropped. A batch step's arguments are an opaque record to that validation, so `prepareUpload`
+ * applies the same map the same way: taken from the descriptor rather than written again, because a
+ * second copy is what would let a step and a call be held to two shapes.
+ */
+const fileUploadInputSchema = z.object(
+  (() => {
+    const descriptor = AGENT_TOOL_DESCRIPTORS.find((candidate) => candidate.name === "file_upload");
+    if (!descriptor) {
+      throw new Error("the contract describes no file_upload tool");
+    }
+    return descriptor.inputShape;
+  })(),
+);
+
+/** The two tools `prepareUpload` checks, as batch steps (015 FR-210). */
+function isUploadStep(step: unknown): step is { tool: "file_upload" | "upload_image"; args: Record<string, unknown> } {
+  const tool = typeof step === "object" && step !== null ? (step as { tool?: unknown }).tool : undefined;
+  return tool === "file_upload" || tool === "upload_image";
+}
+
+/** The content a rewritten upload carries, in the unit the frame bound is written in. */
+function uploadedChars(args: Record<string, unknown>): number {
+  const files = Array.isArray(args.files) ? args.files : args.file === undefined ? [] : [args.file];
+  return files.reduce<number>((sum, file) => {
+    const bytes = (file as { bytesBase64?: unknown }).bytesBase64;
+    return sum + (typeof bytes === "string" ? bytes.length : 0);
+  }, 0);
+}
+
 /** The capability a worker advertises when it can raise the directory card (014/R-187 §1). */
 const UPLOAD_CONSENT_FEATURE = "upload-consent";
+
+/**
+ * The capability a worker advertises when it takes `pair-withdraw` and a `pair-request` that names
+ * its exchange (015 FR-219).
+ *
+ * A 0.7.0 worker parses `pair-request` strictly, so a `requestId` it has never heard of makes it
+ * drop the whole request: no card, and the agent times out. That is the upgrade window - host
+ * reinstalled, extension not reloaded yet - so the id is sent only to a worker that said so.
+ */
+const PAIR_WITHDRAW_FEATURE = "pair-withdraw";
 
 /**
  * Which of the files on a card have a directory worth remembering (014 FR-194, S3 review F7).
@@ -299,8 +370,13 @@ function clampIdentity(value: string, field: string): string {
  * (FR-057), the exchange is re-requested on the next attach and the waiting call settles on the
  * owner's real answer - so the only outcome a drop can still reach is `timed-out`: the bound passed
  * and nobody answered, which is the fact, and still not a decision the owner never made.
+ *
+ * 003 FR-032a splits the owner's no in two. `declined` answers the one exchange it settles and is
+ * never stored as `pairing` - the next call asks again. `unpaired` is FR-032's sticky refusal, and
+ * also what an unmarked refusal from an older extension is taken as. `denied` is left for the one
+ * refusal that is neither: a call that found no exchange at all to wait on.
  */
-type PairingOutcome = "paired" | "denied" | "timed-out";
+type PairingOutcome = "paired" | "declined" | "unpaired" | "denied" | "timed-out";
 
 function log(code: string, detail?: string): void {
   process.stderr.write(detail === undefined ? `${code}\n` : `${code} ${detail}\n`);
@@ -378,8 +454,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
   /**
    * What the worker on the other end says it can be asked (014/R-187 §1).
    *
-   * Read from every pairing answer, which is the frame that arrives on every established link, so
-   * a browser that was upgraded - or downgraded - between two calls is taken at its latest word. A
+   * Read from every pairing answer, which the first call on every established link asks for and
+   * waits on (004 FR-059a), so a browser that was upgraded - or downgraded - between two calls is
+   * taken at its latest word before the call that could ask it anything. A
    * worker that advertises nothing is a 0.5.0 extension, and the host must not send it a frame it
    * would drop as unknown: the call would then hang on this side's bound for a question nobody was
    * ever asked.
@@ -444,6 +521,49 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * every fresh exchange, so a later request that the owner *could* see is not hinted at.
    */
   let pairingPanelClosed = false;
+  /**
+   * The id of the open pairing exchange, and the ids of the ones this session withdrew (015 FR-216,
+   * FR-218, contracts/pairing-withdraw.md).
+   *
+   * Minted once per exchange - a re-send after a drop (T099a) is the same exchange and keeps it - so
+   * the worker can echo it and this process can tell an answer to the card in front of the owner
+   * from an answer to one it already stopped waiting on. Without it the owner's late "no" to a
+   * withdrawn card settled the next call's fresh request, which they had not seen. The withdrawn
+   * set is bounded because it only has to outlive the round trip of a card being taken down.
+   */
+  let pairingRequestId: string | undefined;
+  const withdrawnPairingRequests = new Set<string>();
+  const WITHDRAWN_PAIRING_REQUESTS_KEPT = 32;
+
+  /**
+   * Tells the worker this session stopped waiting on an exchange (015 FR-216).
+   *
+   * Sent when the bound passes and when the session closes with one open; the worker takes the
+   * session off the card and drops the card when nobody is left on it. Optional on the link
+   * (FR-219): a worker that does not know the frame drops it and its own mirrored bound ends the
+   * card, as in 0.7.0 - so a link that is down is no reason to hold anything here either.
+   *
+   * An exchange raised for a worker that never advertised `pair-withdraw` has no id (FR-219): it is
+   * still withdrawn, naming none, and nothing is remembered for a late answer to be matched against -
+   * that answer is handled as 0.7.0 handled it.
+   */
+  function withdrawPairing(requestId: string | undefined): void {
+    if (requestId !== undefined) {
+      withdrawnPairingRequests.add(requestId);
+      if (withdrawnPairingRequests.size > WITHDRAWN_PAIRING_REQUESTS_KEPT) {
+        const [oldest] = withdrawnPairingRequests;
+        withdrawnPairingRequests.delete(oldest!);
+      }
+    }
+    const sent = link?.send({
+      type: "pair-withdraw",
+      agentId,
+      sessionId,
+      ...(requestId === undefined ? {} : { requestId }),
+    });
+    // Said as it happened: a withdrawal the link could not carry told no card anything.
+    log(sent ? "agent.pair.withdraw-sent" : "agent.pair.withdraw-unsent");
+  }
 
   const router = new CallRouter({
     send: (frame) => {
@@ -462,14 +582,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
   });
 
   function resetPairing(): void {
-    // A dropped link means the worker's answer can no longer arrive, so the next relay starts the
-    // pairing exchange again. The *owner's* decision is durable in the extension, not here: a
-    // re-request for an already-paired agent is answered immediately and never prompts.
+    // A dropped link means the worker's answer can no longer arrive, so the next call on the new
+    // link starts the pairing exchange again (004 FR-059a: the re-link itself asks nothing). The
+    // *owner's* decision is durable in the extension, not here: a re-request for an already-paired
+    // agent is answered immediately and never prompts.
     //
     // 004/T099a: an exchange the owner has not answered yet is *not* settled here. FR-057 brings
     // the link back without the owner doing anything, so the drop is an interruption, not an end -
-    // the pending promise and its bound are kept, the next attach re-requests the pairing, and the
-    // call waiting on it settles on the answer the owner is still about to give. Only the bound
+    // the pending promise and its bound are kept, the next attach re-sends the waiting call's
+    // request, and that call settles on the answer the owner is still about to give. Only the bound
     // passing with no attach ends it, as `timed-out`.
     pairRequested = false;
     if (!pairingPending) {
@@ -484,8 +605,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * FR-168 asks for two things at once: the retention survives a worker recycling, and it ends when
    * the browser exits. S1 read both off the link dropping, which cannot be right - a recycled
    * service worker takes the native host down with it, so the two events look identical from here.
-   * The browser run is the fact that separates them, and it arrives on the one frame the worker
-   * sends on every (re)established link, before any call is released to read the cache.
+   * The browser run is the fact that separates them, and it arrives on the pairing answer - which,
+   * since 004 FR-059a, the first call on each (re)established link asks for and waits on before it
+   * can read the cache, because a drop discards the answer given on the old link.
    *
    * The rule, in the order the branches read: a worker that names no run leaves S1's answer
    * standing (a drop clears), because a mixed install must not silently start keeping pictures
@@ -571,6 +693,11 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       // worker's ticks are what change either.
       pairingBoundNowMs = pairingBoundMs;
       pairingPanelClosed = false;
+      // 015 FR-219: only a worker that advertised `pair-withdraw` is sent an id; for any other the
+      // request stays the 0.7.0 shape its strict parse accepts. Decided per exchange, from the
+      // features of the last answer, so a re-send after a drop (T099a) keeps what was decided.
+      const requestId = workerFeatures.has(PAIR_WITHDRAW_FEATURE) ? randomBytes(16).toString("hex") : undefined;
+      pairingRequestId = requestId;
       pairing = new Promise<PairingOutcome>((resolve) => {
         let done = false;
         const requestedAt = Date.now();
@@ -598,6 +725,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           pairRequested = false;
           settlePairing = undefined;
           log("agent.pair.withdrawn");
+          // 015 FR-216: and the worker is told, so the card the agent was just answered about leaves
+          // the owner's panel instead of waiting out the worker's own mirror of this bound.
+          withdrawPairing(requestId);
         };
         let timer = setTimeout(expire, pairingBoundNowMs);
         (timer as { unref?: () => void }).unref?.();
@@ -631,6 +761,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       displayName: clampIdentity(displayName, "displayName"),
       origin: AGENT_ORIGIN,
       sessionId,
+      // 015 FR-216: the exchange's own id, which the worker echoes on its answer.
+      ...(pairingRequestId === undefined ? {} : { requestId: pairingRequestId }),
     });
   }
 
@@ -669,10 +801,10 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return;
     }
     router.noteWaiting(frame);
-    // The worker sends ticks only while no panel is connected (011 review M1), so the open-panel
-    // branch below is for a frame this server did not expect - an older worker, or a panel that
-    // opened between the raise and the tick. Its neutral text says the wait and nothing about
-    // clicking anything, and the server's own pairing ticker stays the progress source in that case.
+    // The worker starts ticking only for a question nobody can see (011 review M1, D-011-7), and
+    // keeps ticking if the panel then comes back into sight - the keep-alive for the bound already
+    // granted - with `panelConnected` true. That open-panel branch gets the neutral text: the wait,
+    // and nothing about clicking anything.
     const message = frame.panelConnected
       ? frame.kind === "pairing"
         ? PAIRING_PROGRESS_MESSAGE
@@ -723,7 +855,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return;
     }
     switch (control.data.type) {
-      case "pair-result":
+      case "pair-result": {
         if (control.data.agentId !== agentId) {
           // The worker answers per agent, and one browser can hold several pairings. An answer
           // about somebody else - typically the owner unpairing a different agent - must not
@@ -731,18 +863,64 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           log("agent.pair.result-for-other-agent");
           return;
         }
-        log("agent.pair.answered", control.data.accepted ? "accepted" : "declined");
+        /**
+         * 015 FR-218: an answer to a card this session already withdrew is not applied at all.
+         *
+         * It is the owner answering a question the agent had already been told nobody answered, and
+         * applied it would settle whatever exchange is open now - a request they never saw. An
+         * answer naming no request is a 0.7.0 worker's and is handled as 0.7.0 handled it (FR-219).
+         */
+        if (control.data.requestId !== undefined && withdrawnPairingRequests.has(control.data.requestId)) {
+          log("agent.pair.late-ignored");
+          return;
+        }
+        // 003 FR-032a: the owner's decline of this one request, as opposed to an unpair.
+        const declined = !control.data.accepted && (control.data.features ?? []).includes(PAIRING_DECLINED_MARKER);
+        log("agent.pair.answered", control.data.accepted ? "accepted" : declined ? "declined" : "unpaired");
         // Before the answer itself: the frame is also this worker's statement about which run of
         // the browser is on the other end of the link (R-184), and whether the pictures this
         // session is holding are still that browser's is a question about the run, not the answer.
         noteBrowserRun(control.data.browserRunId);
         // And what it can be asked beyond answering calls (014/R-187 §1). Taken from every answer,
         // not only the first: the browser on the other end can be upgraded under a live session.
-        workerFeatures = new Set(control.data.features ?? []);
-        // An `unpair` while a session is open arrives as a decline, which is what makes unpairing
-        // effective immediately (FR-032): every later call reads this same settled answer.
+        // The decline marker is about this one answer, not something the worker can be asked, so it
+        // is not kept among the capabilities (FR-032a review F2).
+        workerFeatures = new Set((control.data.features ?? []).filter((feature) => feature !== PAIRING_DECLINED_MARKER));
+        if (declined) {
+          /**
+           * A decline answers the request it was raised for, and only that one (FR-032a).
+           *
+           * With no exchange open there is nothing for it to answer - the request it was raised
+           * for was withdrawn at its bound (FR-059) and the agent already has its `timed-out` - so
+           * it is dropped rather than stored: stored, it would refuse the *next* request before
+           * the owner had seen it. With one open, the calls waiting on it end `declined` and the
+           * exchange is cleared exactly as `expire` clears it, so the next call raises a fresh
+           * card. Nothing is remembered and no cool-down applies.
+           */
+          if (!pairingPending) {
+            log("agent.pair.decline-late");
+            return;
+          }
+          settlePairing?.("declined");
+          pairing = undefined;
+          pairRequested = false;
+          settlePairing = undefined;
+          pairingPending = false;
+          /**
+           * 013/R-180 for a decline. A session reaches an open exchange holding pictures only by
+           * having been paired, unpaired while its link was down (so the unpair never arrived),
+           * and having re-raised the request after the re-link. The owner saying no to that
+           * request is saying no to this session holding their screen; a never-paired session
+           * has nothing to clear, so this costs nothing there.
+           */
+          screenshots.clear();
+          return;
+        }
+        // An `unpair` while a session is open arrives as an unmarked refusal, which is what makes
+        // unpairing effective immediately (FR-032): every later call reads this same settled answer.
+        // An extension from before FR-032a marks nothing, and the spec says to read that as unpair.
         //
-        // Both arms reassign `pairing`, not just the declining one: the prompt's own bound may
+        // Both arms reassign `pairing`, not just the refusing one: the prompt's own bound may
         // already have fired, and the owner answering a minute later is still the owner answering.
         // Without the reassignment the settled `timed-out` would be the answer for the rest of the
         // session, which is a refusal the owner never made.
@@ -750,10 +928,10 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
           pairing = Promise.resolve<PairingOutcome>("paired");
           settlePairing?.("paired");
         } else {
-          pairing = Promise.resolve<PairingOutcome>("denied");
-          settlePairing?.("denied");
+          pairing = Promise.resolve<PairingOutcome>("unpaired");
+          settlePairing?.("unpaired");
           /**
-           * 013/R-180, site 2 of 2 - an unpair arrives as a decline naming this agent, and takes
+           * 013/R-180, site 2 of 2 - an unpair arrives as a refusal naming this agent, and takes
            * effect immediately (FR-032). The owner withdrawing the pairing withdraws what this
            * session is holding of their screen with it, so a later re-pair starts with nothing.
            */
@@ -762,6 +940,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         settlePairing = undefined;
         pairingPending = false;
         return;
+      }
       case "bridge-unavailable":
         log("agent.bridge.unavailable");
         router.failAll("failed", "bridge-unavailable");
@@ -819,9 +998,18 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       onAttached(relayPid) {
         attached = true;
         log("agent.relay.attached", String(relayPid));
-        requestPairing();
-        // After the pairing request, so a call released here reads the exchange this attach
-        // started rather than the absence of one.
+        /**
+         * 004 FR-059a: connecting asks the owner nothing - only a tool call raises a pairing request.
+         *
+         * The one request sent here is a call's own, carried over a drop (T099a): a call is still
+         * waiting on an exchange the owner has not answered, and the new link is where their answer
+         * will arrive. With no call waiting, nothing is sent; the next call raises the request, and
+         * its answer - which names the browser run (R-184) and the worker's capabilities (R-187) -
+         * arrives before that call does anything that depends on either.
+         */
+        if (pairingPending) {
+          requestPairing();
+        }
         for (const notify of [...attachWaiters]) {
           notify();
         }
@@ -858,8 +1046,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * R-180 cleared here, reading a dropped link as the browser having exited. A recycled
          * service worker kills the native host too, so that read forgot a picture FR-168 promises
          * to keep across exactly that recycling. What is recorded instead is that the link dropped:
-         * the worker's next pairing answer names its browser run, and `noteBrowserRun` decides
-         * there whether this is the same browser coming back or a new one.
+         * the worker's next pairing answer names its browser run - asked for by the next call, which
+         * waits on it before reading the cache (004 FR-059a) - and `noteBrowserRun` decides there
+         * whether this is the same browser coming back or a new one.
          */
         linkDroppedSincePairing = true;
         log("agent.relay.detached");
@@ -1158,6 +1347,315 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     });
   }
 
+  /**
+   * The one check between an agent-shaped upload and the link (015 FR-211, contracts/batch-upload.md).
+   *
+   * Everything that decides which of the owner's files - or which of this session's pictures - may
+   * reach a page sits in this one function, so a standalone call and a batch step cannot be checked
+   * two ways: a second copy is what would let the two drift apart (the contract suite asserts there
+   * is none). `response` is the standalone answer, word for word; `hint` is the one thing a call that
+   * then *succeeds* still has to be told (014 FR-186, S3 review F7).
+   */
+  async function prepareUpload(
+    callId: string,
+    tool: "file_upload" | "upload_image",
+    args: Record<string, unknown>,
+  ): Promise<PreparedUpload> {
+    const refuse = (response: AgentNativeResponse): PreparedUpload => ({ ok: false, response });
+    /** An `always` the host would not write down (a disk or share root): said beside the result. */
+    let uploadHint: string | undefined;
+    /**
+     * The one tool whose arguments change on this side of the link (US7, FR-051).
+     *
+     * The agent names paths because it is asking for the owner's own files; the browser is handed
+     * bytes because it has no business resolving a path and no way to read one. This process - the
+     * owner's own, started by their own agent - is where that translation happens, behind the
+     * allowed-roots rule, and a path outside them is refused here, before it is opened and before
+     * anything crosses to the browser.
+     */
+    if (tool === "file_upload") {
+      /**
+       * The standalone call's own shape, first (015 S3 review F2).
+       *
+       * A no-op for a standalone call, which MCP has already held to it. For a batch step it is what
+       * refuses a step with no target - or with bytes instead of paths - before anything crosses,
+       * rather than leaving the worker to refuse it after the steps before it have run; and what
+       * drops a stray key exactly as MCP drops one, so no field the agent wrote reaches the worker
+       * unless the standalone call could have carried it too.
+       */
+      const request = fileUploadInputSchema.safeParse(args);
+      if (!request.success) {
+        log("agent.upload.refused", "invalid-arguments");
+        return refuse({ callId, outcome: "failed", reason: "invalid-arguments" });
+      }
+      args = request.data;
+      const paths = request.data.paths as string[];
+      let resolved = await resolveUploadFiles(paths, await readUploadConfig());
+      /**
+       * The one refusal the owner can overturn (014 FR-193, contracts/upload-directory.md).
+       *
+       * Every other code is final and is answered as 0.5.0 answered it. This one becomes a question
+       * on the owner's panel - the paths are shown to them and to nobody else - and the call waits
+       * here, before anything has crossed the link, which is what lets a "once" upload proceed
+       * without the list ever having grown.
+       */
+      if (!resolved.ok && resolved.code === "outside-roots") {
+        const answer = await askUploadConsent(callId, resolved.outside);
+        const decision = answer.decision;
+        if (decision === "deny") {
+          log("agent.upload.refused", "declined");
+          return refuse({ callId, outcome: "denied", reason: "upload-declined" });
+        }
+        if (decision === "timed-out") {
+          log("agent.upload.refused", "not-answered");
+          return refuse({
+            callId,
+            outcome: "denied",
+            reason: "upload-not-answered",
+            // 011 FR-146, as every other unanswered question carries it: nobody answered *because
+            // the card was in a panel nobody had opened*, and that is the one case the person can
+            // do something about. The worker is the end that knows, so it is the end that says so.
+            ...(answer.hint === undefined ? {} : { hint: answer.hint }),
+          });
+        }
+        if (decision === "interrupted") {
+          // Nothing was delivered: the call never left this process, so there is one honest hint.
+          return refuse({
+            callId,
+            outcome: "stopped",
+            reason: "owner-interrupted",
+            hint: INTERRUPT_HINTS.nothingDelivered,
+          });
+        }
+        if (decision === "busy") {
+          /**
+           * The owner was already being asked something else (S3 review F3).
+           *
+           * The card was never raised, so nothing was interrupted and nothing was declined: the
+           * worker holds one question at a time and two sessions can meet on one owner. It is
+           * the word every other tool of this product answers that situation with, and the one
+           * an agent already knows means "make the call again in a moment".
+           */
+          log("agent.upload.consent-busy");
+          return refuse({ callId, outcome: "busy", reason: "prompt-pending" });
+        }
+        if (decision === "link-lost") {
+          // The link went away between the resolution and the question. Nothing was asked and
+          // nothing was sent, which is what `bridge-lost` already says everywhere else here.
+          log("agent.upload.consent-unsent");
+          return refuse({ callId, outcome: "failed", reason: "bridge-lost" });
+        }
+        if (decision === "unavailable") {
+          // No worker that could ask, so 0.5.0's refusal stands - in the word that says *why* the
+          // owner was not asked, which is the one thing they can do something about (FR-195).
+          log("agent.upload.refused", resolved.code);
+          return refuse({ callId, outcome: "denied", reason: "upload-outside-allowed-directories" });
+        }
+        const outside = resolved.outside;
+        if (decision === "always") {
+          /**
+           * Not every parent is a directory (S3 review F7).
+           *
+           * A file at `D:\` or on a share root has the whole drive or the whole share for a
+           * parent, and remembering that would answer every future question about everything on
+           * it. Those files are uploaded the way "this time" uploads them - by path, for this
+           * call - and the agent is told why, in the sentence both ends share.
+           */
+          const { remember, onceOnly } = splitRememberableDirectories(outside);
+          if (onceOnly.length > 0) {
+            log("agent.upload.root-directory", String(onceOnly.length));
+            uploadHint = UPLOAD_HINTS.rootNotRemembered;
+          }
+          // Written before the upload proceeds, and the re-resolution below reads the file back:
+          // what the owner is promised is that the list they saw is the list the host will use.
+          const change =
+            remember.length > 0
+              ? await uploadRoots.add(remember.map((file) => file.directory))
+              : { written: true, refused: [] };
+          if (!change.written) {
+            /**
+             * The owner said yes and the file would not take it (S3 review F2).
+             *
+             * Answered in its own word rather than falling through to the roots refusal below:
+             * that one means this browser cannot ask the question at all, and telling an agent
+             * to have the owner reinstall an extension - over a config file that could not be
+             * renamed over - sends the person to fix the one thing that was working. The store's
+             * own refusal is the only statement of *why*, so it rides along as the hint.
+             */
+            log("agent.upload.roots-unchanged");
+            return refuse({
+              callId,
+              outcome: "denied",
+              reason: "upload-directory-not-recorded",
+              hint: uploadNotRecordedHint(change.refused),
+            });
+          }
+          resolved = await resolveUploadFiles(
+            paths,
+            await readUploadConfig(),
+            // The files on a root the list will never carry are admitted by name for this call,
+            // exactly as "this time" admits them (S3 review F7).
+            onceOnly.length === 0 ? undefined : { allowFiles: onceOnly.map((file) => file.path) },
+          );
+        } else {
+          // "These files, this once": exactly the paths on the card, for this call and no other.
+          resolved = await resolveUploadFiles(paths, await readUploadConfig(), {
+            allowFiles: outside.map((file) => file.path),
+          });
+        }
+      }
+      if (!resolved.ok) {
+        // The code, never the path: the log says which rule refused, not what the owner has on disk.
+        log("agent.upload.refused", resolved.code);
+        return refuse({
+          callId,
+          outcome: "denied",
+          // A file still outside the list after the owner said yes is a list that could not be
+          // written; the word stays the one that means "not in the allowed directories".
+          reason: resolved.code === "outside-roots" ? "upload-outside-allowed-directories" : resolved.reason,
+        });
+      }
+      const { paths: _dropped, ...rest } = args;
+      return {
+        ok: true,
+        args: { ...rest, files: resolved.files },
+        ...(uploadHint === undefined ? {} : { hint: uploadHint }),
+      };
+    }
+    /**
+     * The other tool whose arguments change on this side of the link (013 US1, FR-169, FR-172).
+     *
+     * `file_upload`'s shape exactly, with the disk swapped for this session's own memory: the agent
+     * names a picture it was handed, the browser is handed bytes, and the id does not exist on the
+     * far side. Both of FR-172's refusals are decided here, before the call crosses - so a picture
+     * the host cannot resolve never raises a consent card and never touches a page.
+     */
+    const request = agentUploadImageRequestSchema.safeParse(args);
+    if (!request.success) {
+      // The MCP input schema cannot carry "exactly one of ref / coordinate", nor the file-name
+      // rule, so this is where both become a refusal - and the kind, never the arguments, is what
+      // the log gets.
+      log("agent.upload-image.refused", "invalid-arguments");
+      return refuse({ callId, outcome: "failed", reason: "invalid-arguments" });
+    }
+    const { imageId, ref, coordinate, filename, tabId: target } = request.data;
+    const held = screenshots.take(imageId);
+    if (held.kind === "unknown") {
+      log("agent.upload-image.refused", "unknown-image-id");
+      return refuse({
+        callId,
+        outcome: "denied",
+        // Two different facts for two different next moves: this session never gave out that id,
+        // so quoting it again - or waiting - will not help.
+        reason: "unknown-image-id; take a new screenshot and quote its imageId",
+      });
+    }
+    if (held.kind === "gone") {
+      log("agent.upload-image.refused", held.why);
+      return refuse({
+        callId,
+        outcome: "denied",
+        reason: `image-no-longer-available (${held.why}); take a new screenshot`,
+      });
+    }
+    return {
+      ok: true,
+      args: {
+        tabId: target,
+        target: ref === undefined ? { coordinate } : { ref },
+        file: { name: filename, type: held.file.type, bytesBase64: held.file.bytesBase64 },
+      },
+    };
+  }
+
+  /**
+   * A batch's upload steps, put through `prepareUpload` before the batch crosses (015 FR-210 -
+   * FR-214, contracts/batch-upload.md, R-200).
+   *
+   * The standalone check itself, not a copy of it: each upload step in step order, each awaited
+   * before the next - one question at a time, all of them before the first step runs, so a "no"
+   * refuses a batch nothing of which has happened (D-015-5). The first refusal answers the batch in
+   * the standalone words with the step named, and nothing is sent.
+   *
+   * Every question is raised under the batch's own call id, which is what an interrupt, a stop and
+   * the waiting ticks name (FR-214). So an interrupt while a step's question stands is answered
+   * exactly as a standalone one - `owner-interrupted` with "nothing delivered", which is true of the
+   * whole batch: it has not left this process - and it carries its step like every other refusal
+   * here, because the rule that names the step does not pick and choose.
+   *
+   * An `always` for one step is written before the next is resolved (R-200 §3): that is the owner's
+   * own decision taking effect, so a later step in the directory they just allowed is not asked.
+   */
+  async function prepareBatchUploads(callId: string, args: Record<string, unknown>): Promise<PreparedUpload> {
+    const rawSteps: unknown[] = Array.isArray(args.steps) ? args.steps : [];
+    if (!rawSteps.some(isUploadStep)) {
+      // Nothing to check: the batch crosses exactly as the agent wrote it, as it always has.
+      return { ok: true, args };
+    }
+    if (!agentToolArgSchemas.browser_batch.safeParse(args).success) {
+      // The MCP input schema already holds a batch to this shape; this is the backstop for the one
+      // thing a malformed batch would otherwise do here - carry its paths across unread (FR-213).
+      log("agent.batch.refused", "invalid-arguments");
+      return { ok: false, response: { callId, outcome: "failed", reason: "invalid-arguments" } };
+    }
+    const tabId = args.tabId as number;
+    const steps: unknown[] = [];
+    let hint: string | undefined;
+    let totalChars = 0;
+    for (const [index, step] of rawSteps.entries()) {
+      if (!isUploadStep(step)) {
+        steps.push(step);
+        continue;
+      }
+      // Checked on the batch's tab, which is the tab the worker will parse it with, and handed back
+      // without it: a step that names a tab is one the contract refuses (agentBatchStepSchema).
+      const prepared = await prepareUpload(callId, step.tool, { ...step.args, tabId });
+      if (!prepared.ok) {
+        const { response } = prepared;
+        log("agent.batch.upload-refused", String(index + 1));
+        const neverIssued = step.tool === "upload_image" && response.reason?.startsWith("unknown-image-id") === true;
+        return {
+          ok: false,
+          response: {
+            ...response,
+            reason: `step ${index + 1}: ${response.reason ?? ""}`,
+            ...(neverIssued
+              ? {
+                  hint:
+                    response.hint === undefined
+                      ? BATCH_UPLOAD_HINTS.laterCall
+                      : `${response.hint} ${BATCH_UPLOAD_HINTS.laterCall}`,
+                }
+              : {}),
+          },
+        };
+      }
+      const { tabId: _batchTab, ...stepArgs } = prepared.args;
+      totalChars += uploadedChars(stepArgs);
+      hint ??= prepared.hint;
+      steps.push({ ...step, args: stepArgs });
+    }
+    /**
+     * One frame carries the whole batch, and the per-call bound exists because of that frame
+     * (R-200 §4). Checked after every step, because only then is the content known - so an owner
+     * may have been asked, and an `always` written, for a batch refused here; that is their own
+     * decision about a directory, and it stands.
+     */
+    if (totalChars > AGENT_UPLOAD_MAX_BASE64_CHARS) {
+      log("agent.batch.refused", "batch-upload-too-large");
+      return {
+        ok: false,
+        response: {
+          callId,
+          outcome: AGENT_015_REASON_OUTCOMES["batch-upload-too-large"],
+          reason: "batch-upload-too-large",
+          hint: BATCH_UPLOAD_HINTS.split,
+        },
+      };
+    }
+    return { ok: true, args: { ...args, steps }, ...(hint === undefined ? {} : { hint }) };
+  }
+
   async function placeCall(
     tool: AgentToolName,
     args: Record<string, unknown>,
@@ -1192,8 +1690,12 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         return { callId, outcome: "failed", reason: "bridge-lost" };
       }
     }
-    // A request the bound withdrew (FR-059) is raised again here rather than never: the owner was
-    // away for the last call, not for the session. A no-op while an exchange is open or answered.
+    // The one place a pairing request is raised (004 FR-059a): the first call of a session, the
+    // first after a link dropped (which discarded the answer given on the old one), and the next
+    // after the bound withdrew one (FR-059) - the owner was away for the last call, not for the
+    // session. A no-op while an exchange is open or answered. Every call waits on the answer below
+    // before it touches anything the answer decides: the screenshot cache (R-184) and what the
+    // worker can be asked (R-187).
     requestPairing();
     const pairingOutcome = await awaitPairing(extra);
     if (pairingOutcome !== "paired") {
@@ -1205,6 +1707,10 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         // 011 FR-146: nobody answered *because the card was in a panel nobody had opened*, which
         // is the one case where there is something the person can do about it.
         ...(pairingOutcome === "timed-out" && pairingPanelClosed ? { hint: ATTENTION_SENTENCES.pairing } : {}),
+        // 003 FR-032a: the same `not-paired`, and what the agent may do next - which for a
+        // decline and an unpair are opposite instructions.
+        ...(pairingOutcome === "declined" ? { hint: PAIRING_REFUSAL_HINTS.declined } : {}),
+        ...(pairingOutcome === "unpaired" ? { hint: PAIRING_REFUSAL_HINTS.unpaired } : {}),
       };
     }
     /**
@@ -1233,187 +1739,22 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
        * is a fact about a call that then *succeeds* - so it cannot ride on a refusal.
        */
       let uploadHint: string | undefined;
-      /**
-       * The one tool whose arguments change on this side of the link (US7, FR-051).
-       *
-       * The agent names paths because it is asking for the owner's own files; the browser is handed
-       * bytes because it has no business resolving a path and no way to read one. This process - the
-       * owner's own, started by their own agent - is where that translation happens, behind the
-       * allowed-roots rule, and a path outside them is refused here, before it is opened and before
-       * anything crosses to the browser.
-       */
-      if (tool === "file_upload") {
-        const paths = Array.isArray(args.paths) ? args.paths.filter((path): path is string => typeof path === "string") : [];
-        let resolved = await resolveUploadFiles(paths, await readUploadConfig());
-        /**
-         * The one refusal the owner can overturn (014 FR-193, contracts/upload-directory.md).
-         *
-         * Every other code is final and is answered as 0.5.0 answered it. This one becomes a question
-         * on the owner's panel - the paths are shown to them and to nobody else - and the call waits
-         * here, before anything has crossed the link, which is what lets a "once" upload proceed
-         * without the list ever having grown.
-         */
-        if (!resolved.ok && resolved.code === "outside-roots") {
-          const answer = await askUploadConsent(callId, resolved.outside);
-          const decision = answer.decision;
-          if (decision === "deny") {
-            log("agent.upload.refused", "declined");
-            return { callId, outcome: "denied", reason: "upload-declined" };
-          }
-          if (decision === "timed-out") {
-            log("agent.upload.refused", "not-answered");
-            return {
-              callId,
-              outcome: "denied",
-              reason: "upload-not-answered",
-              // 011 FR-146, as every other unanswered question carries it: nobody answered *because
-              // the card was in a panel nobody had opened*, and that is the one case the person can
-              // do something about. The worker is the end that knows, so it is the end that says so.
-              ...(answer.hint === undefined ? {} : { hint: answer.hint }),
-            };
-          }
-          if (decision === "interrupted") {
-            // Nothing was delivered: the call never left this process, so there is one honest hint.
-            return {
-              callId,
-              outcome: "stopped",
-              reason: "owner-interrupted",
-              hint: INTERRUPT_HINTS.nothingDelivered,
-            };
-          }
-          if (decision === "busy") {
-            /**
-             * The owner was already being asked something else (S3 review F3).
-             *
-             * The card was never raised, so nothing was interrupted and nothing was declined: the
-             * worker holds one question at a time and two sessions can meet on one owner. It is
-             * the word every other tool of this product answers that situation with, and the one
-             * an agent already knows means "make the call again in a moment".
-             */
-            log("agent.upload.consent-busy");
-            return { callId, outcome: "busy", reason: "prompt-pending" };
-          }
-          if (decision === "link-lost") {
-            // The link went away between the resolution and the question. Nothing was asked and
-            // nothing was sent, which is what `bridge-lost` already says everywhere else here.
-            log("agent.upload.consent-unsent");
-            return { callId, outcome: "failed", reason: "bridge-lost" };
-          }
-          if (decision === "unavailable") {
-            // No worker that could ask, so 0.5.0's refusal stands - in the word that says *why* the
-            // owner was not asked, which is the one thing they can do something about (FR-195).
-            log("agent.upload.refused", resolved.code);
-            return { callId, outcome: "denied", reason: "upload-outside-allowed-directories" };
-          }
-          const outside = resolved.outside;
-          if (decision === "always") {
-            /**
-             * Not every parent is a directory (S3 review F7).
-             *
-             * A file at `D:\` or on a share root has the whole drive or the whole share for a
-             * parent, and remembering that would answer every future question about everything on
-             * it. Those files are uploaded the way "this time" uploads them - by path, for this
-             * call - and the agent is told why, in the sentence both ends share.
-             */
-            const { remember, onceOnly } = splitRememberableDirectories(outside);
-            if (onceOnly.length > 0) {
-              log("agent.upload.root-directory", String(onceOnly.length));
-              uploadHint = UPLOAD_HINTS.rootNotRemembered;
-            }
-            // Written before the upload proceeds, and the re-resolution below reads the file back:
-            // what the owner is promised is that the list they saw is the list the host will use.
-            const change =
-              remember.length > 0
-                ? await uploadRoots.add(remember.map((file) => file.directory))
-                : { written: true, refused: [] };
-            if (!change.written) {
-              /**
-               * The owner said yes and the file would not take it (S3 review F2).
-               *
-               * Answered in its own word rather than falling through to the roots refusal below:
-               * that one means this browser cannot ask the question at all, and telling an agent
-               * to have the owner reinstall an extension - over a config file that could not be
-               * renamed over - sends the person to fix the one thing that was working. The store's
-               * own refusal is the only statement of *why*, so it rides along as the hint.
-               */
-              log("agent.upload.roots-unchanged");
-              return {
-                callId,
-                outcome: "denied",
-                reason: "upload-directory-not-recorded",
-                hint: uploadNotRecordedHint(change.refused),
-              };
-            }
-            resolved = await resolveUploadFiles(
-              paths,
-              await readUploadConfig(),
-              // The files on a root the list will never carry are admitted by name for this call,
-              // exactly as "this time" admits them (S3 review F7).
-              onceOnly.length === 0 ? undefined : { allowFiles: onceOnly.map((file) => file.path) },
-            );
-          } else {
-            // "These files, this once": exactly the paths on the card, for this call and no other.
-            resolved = await resolveUploadFiles(paths, await readUploadConfig(), {
-              allowFiles: outside.map((file) => file.path),
-            });
-          }
+      if (tool === "file_upload" || tool === "upload_image") {
+        const prepared = await prepareUpload(callId, tool, args);
+        if (!prepared.ok) {
+          return prepared.response;
         }
-        if (!resolved.ok) {
-          // The code, never the path: the log says which rule refused, not what the owner has on disk.
-          log("agent.upload.refused", resolved.code);
-          return {
-            callId,
-            outcome: "denied",
-            // A file still outside the list after the owner said yes is a list that could not be
-            // written; the word stays the one that means "not in the allowed directories".
-            reason: resolved.code === "outside-roots" ? "upload-outside-allowed-directories" : resolved.reason,
-          };
-        }
-        const { paths: _dropped, ...rest } = args;
-        args = { ...rest, files: resolved.files };
+        args = prepared.args;
+        uploadHint = prepared.hint;
       }
-      /**
-       * The other tool whose arguments change on this side of the link (013 US1, FR-169, FR-172).
-       *
-       * `file_upload`'s shape exactly, with the disk swapped for this session's own memory: the agent
-       * names a picture it was handed, the browser is handed bytes, and the id does not exist on the
-       * far side. Both of FR-172's refusals are decided here, before the call crosses - so a picture
-       * the host cannot resolve never raises a consent card and never touches a page.
-       */
-      if (tool === "upload_image") {
-        const request = agentUploadImageRequestSchema.safeParse(args);
-        if (!request.success) {
-          // The MCP input schema cannot carry "exactly one of ref / coordinate", nor the file-name
-          // rule, so this is where both become a refusal - and the kind, never the arguments, is what
-          // the log gets.
-          log("agent.upload-image.refused", "invalid-arguments");
-          return { callId, outcome: "failed", reason: "invalid-arguments" };
+      // 015 FR-210: a batch's upload steps get the same check, before the batch crosses the link.
+      if (tool === "browser_batch") {
+        const prepared = await prepareBatchUploads(callId, args);
+        if (!prepared.ok) {
+          return prepared.response;
         }
-        const { imageId, ref, coordinate, filename, tabId: target } = request.data;
-        const held = screenshots.take(imageId);
-        if (held.kind === "unknown") {
-          log("agent.upload-image.refused", "unknown-image-id");
-          return {
-            callId,
-            outcome: "denied",
-            // Two different facts for two different next moves: this session never gave out that id,
-            // so quoting it again - or waiting - will not help.
-            reason: "unknown-image-id; take a new screenshot and quote its imageId",
-          };
-        }
-        if (held.kind === "gone") {
-          log("agent.upload-image.refused", held.why);
-          return {
-            callId,
-            outcome: "denied",
-            reason: `image-no-longer-available (${held.why}); take a new screenshot`,
-          };
-        }
-        args = {
-          tabId: target,
-          target: ref === undefined ? { coordinate } : { ref },
-          file: { name: filename, type: held.file.type, bytesBase64: held.file.bytesBase64 },
-        };
+        args = prepared.args;
+        uploadHint = prepared.hint;
       }
       // The tab travels as a field of the frame as well as inside the arguments, because it is what
       // the router's one-call-per-tab rule is keyed by (FR-043). A tool that names no tab concerns no
@@ -1443,8 +1784,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     displayName = client?.name ?? displayName;
     initialized = true;
     log("agent.mcp.initialized", displayName);
+    // The link is dialled now, because the greeting carries the client's name; the owner is asked
+    // nothing until a tool call needs the pairing (004 FR-059a).
     startLink();
-    requestPairing();
   };
 
   await server.connect(new StdioServerTransport());
@@ -1465,7 +1807,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
            * and treating that as the end would strand the session's tab group behind an id the
            * reconnect still uses. So the process that knows - this one - says so, and only then
            * lets the link go. `close()` waits for the socket, so the frame is not lost to the exit.
+           *
+           * 015 FR-216: an exchange still open is withdrawn first, so the card leaves the panel with
+           * the session rather than outliving the agent that raised it.
            */
+          if (pairingPending) {
+            withdrawPairing(pairingRequestId);
+          }
           link.send({ type: "stop", sessionId });
           await link.stop();
         }

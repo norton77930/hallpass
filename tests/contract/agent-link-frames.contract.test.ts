@@ -1,6 +1,6 @@
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AGENT_LINK_PROTOCOL } from "@hallpass/contracts";
-import { contractSchema, expectAccepted, expectRejected } from "./helpers.js";
+import { contractExport, contractSchema, expectAccepted, expectRejected } from "./helpers.js";
 
 /**
  * 004/T076 — the loopback link between the relay and an mcp-server (contracts README §1).
@@ -116,6 +116,45 @@ describe("T076 agent link frames", () => {
     // rather than optional: an optional field would let that drop happen again silently.
     expectRejected(frame, withoutSession, "a pair-result naming no session");
     expectRejected(frame, { ...result, sessionId: "" }, "a pair-result with an empty session");
+  });
+
+  /**
+   * 003 FR-032a - a decline and an unpair reach the agent as different answers, and the difference
+   * rides where an installed 0.6.0 host still parses it.
+   *
+   * The frame is strict, so a new key would make that host drop the whole answer - including the
+   * unpair FR-032 says takes effect at once. `features` has been an open list since 0.6.0, so the
+   * mark goes there, and its absence is the unpair the spec says an unmarked refusal means.
+   */
+  it("marks a decline inside the field an older host already accepts (FR-032a)", () => {
+    const frame = contractSchema("agentControlFrameSchema");
+    const marker = contractExport<string>("PAIRING_DECLINED_MARKER");
+    const refusal = { type: "pair-result", agentId: "claude-code", sessionId: SESSION, accepted: false };
+
+    expect(marker.length).toBeGreaterThan(0);
+    expect(marker.length).toBeLessThanOrEqual(64);
+    expectAccepted(frame, { ...refusal, features: [marker] }, "a decline");
+    expectAccepted(frame, { ...refusal, features: ["upload-consent", marker] }, "a decline from a worker that can ask");
+    expectAccepted(frame, refusal, "an unmarked refusal, which is an unpair");
+    // Why not a key of its own: this is what the host would do with it.
+    expectRejected(frame, { ...refusal, declined: true }, "a decline carried in a key the frame does not declare");
+  });
+
+  it("says what each refusal means in both languages, sized for the hint (FR-032a)", () => {
+    const hints = contractExport<Record<string, string>>("PAIRING_REFUSAL_HINTS");
+    const response = contractSchema("agentNativeResponseSchema");
+
+    expect(Object.keys(hints).sort()).toEqual(["declined", "unpaired"]);
+    for (const [kind, hint] of Object.entries(hints)) {
+      const lines = hint.split("\n");
+      expect(lines, `${kind} is two lines`).toHaveLength(2);
+      expect(lines[1], `${kind}'s second line is zh-TW`).toMatch(/[一-鿿]/);
+      expect(hint, `${kind} carries no placeholder`).not.toContain("{");
+      // `reason` stays the code every client already branches on; the sentence is the hint.
+      expectAccepted(response, { callId: "c-1", outcome: "denied", reason: "not-paired", hint }, `${kind} as a hint`);
+    }
+    expect(hints["declined"]).toContain("declined");
+    expect(hints["unpaired"]).toContain("/mcp");
   });
 
   it("reads the relay's record and refuses the 003 one", () => {

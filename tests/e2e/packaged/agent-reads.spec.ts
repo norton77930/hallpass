@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -70,7 +70,7 @@ test.describe("agent reads", () => {
       await panel.clickIfPresent(ui("agent.retry"));
       // T098a: the prompt by its own key, Accept clicked, and pairing confirmed by a signal that
       // is false when nothing is paired - the panel's section heading is on screen either way.
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(live, panel, { locale });
 
       const call = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
         const result = await live.callTool(tool, args);
@@ -214,7 +214,7 @@ test.describe("agent reads", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(live, panel, { locale });
 
       const created = await live.callTool("tabs_create", { url: `${SITE}/ordinary` });
       expect(created.isError, created.text).toBe(false);

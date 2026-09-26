@@ -49,9 +49,13 @@ test("packaged MV3 worker injects, probes, collects, and reinjects the built cla
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab?.id === undefined) throw new Error("missing-active-tab");
 
-    let initialProbe = "unexpected-success";
+    // Before the injection nothing may answer the probe. The agent build declares agent-content.js
+    // on every page (004 FR-062), whose listener leaves frames it does not know unanswered, so a
+    // silent `undefined` is as much "no content runtime here" as a missing receiver is.
+    let initialProbe: string;
     try {
-      await chrome.tabs.sendMessage(tab.id, input.probe, { frameId: 0 });
+      const answer: unknown = await chrome.tabs.sendMessage(tab.id, input.probe, { frameId: 0 });
+      initialProbe = answer === undefined ? "no-answer" : `unexpected-answer ${JSON.stringify(answer)}`;
     } catch (error) {
       initialProbe = error instanceof Error ? error.message : String(error);
     }
@@ -95,7 +99,7 @@ test("packaged MV3 worker injects, probes, collects, and reinjects the built cla
     }),
   });
 
-  expect(result.initialProbe).toMatch(/receiving end does not exist|could not establish connection/i);
+  expect(result.initialProbe).toMatch(/^no-answer$|receiving end does not exist|could not establish connection/i);
   expect(result.probe.canonicalOrigin).toBe("https://localhost:19443");
   expect(result.collected).toMatchObject({
     canonicalOrigin: "https://localhost:19443",

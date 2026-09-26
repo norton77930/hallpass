@@ -62,6 +62,43 @@ export async function getWindowFacts(
   }
 }
 
+/**
+ * The owner's last-focused normal window, now and on every move (fix 2026-09-23, panel in another
+ * window). The panel port compares it with the window each Hallpass panel is in, so the badge and
+ * the question's bound follow the panel the owner can actually see.
+ *
+ * Three choices, each for a reason:
+ * - "normal" windows only, on both the read and the event: a devtools or popup window taking focus
+ *   is not the owner leaving the window their panel is in.
+ * - `WINDOW_ID_NONE` is never passed on. Chrome sends it whenever every Chrome window loses focus -
+ *   the owner switching to the terminal their agent runs in, which is exactly when a pairing card
+ *   arrives. The window they will come back to is still the last one they used, so it stands.
+ * - The first read is `getLastFocused`, and a focus event that lands before it answers wins: the
+ *   event is newer than whatever the read found. A read that fails leaves the window unknown, which
+ *   the panel port counts as "not seen" until the first event says otherwise.
+ */
+export function watchLastFocusedWindow(listener: (windowId: number) => void): void {
+  const windows = chrome.windows;
+  if (!windows) return;
+  let heardEvent = false;
+  const none = windows.WINDOW_ID_NONE ?? -1;
+  windows.onFocusChanged?.addListener(
+    (windowId) => {
+      if (windowId === none || windowId < 0) return;
+      heardEvent = true;
+      listener(windowId);
+    },
+    { windowTypes: ["normal"] },
+  );
+  void Promise.resolve()
+    .then(() => windows.getLastFocused({ windowTypes: ["normal"] }))
+    .then((window) => {
+      if (heardEvent || typeof window?.id !== "number" || window.id < 0) return;
+      listener(window.id);
+    })
+    .catch(() => undefined);
+}
+
 /** Puts a window back into the state it was in before `resize_window` took it out of it (FR-119). */
 export async function setWindowState(windowId: number, state: WindowState): Promise<void> {
   await chrome.windows.update(windowId, { state: state as chrome.windows.WindowState });

@@ -44,7 +44,15 @@ export type AgentIndicatorDeps = {
    * Sends one tab its indicator message. Addressed to the top frame: the indicator is one badge on
    * the page, not one per frame, and the declared script runs in every frame of it.
    */
-  send: (tabId: number, message: IndicatorMessage) => void;
+  send: (tabId: number, message: IndicatorMessage) => Promise<void>;
+  /**
+   * Puts the declared content script into a tab that has none. A tab already open when the
+   * extension was (re)loaded never got it - the browser injects declared scripts only into
+   * documents loaded afterwards - so a raise sent there finds no receiver.
+   */
+  inject: (tabId: number) => Promise<void>;
+  /** A page that cannot be injected (the browser's own pages, the store) is only worth a diagnostic. */
+  reportDiagnostic: (code: string) => void;
   /** Which session holds this tab right now, if any. The lease is the only authority (R-117). */
   holderOf: (tabId: number) => Promise<string | undefined>;
   /** The owner's language, as the browser reports it. */
@@ -73,14 +81,23 @@ export function createAgentIndicator(deps: AgentIndicatorDeps): AgentIndicator {
 
   return {
     raise(tabId) {
-      deps.send(tabId, shown());
+      // A raise nobody received means the page has no content script (an extension reload leaves
+      // every open tab without one). Inject it once; its own announcement is then answered with
+      // this tab's state, so nothing is resent here. Only the raise does this: a failed lower has
+      // nothing on the page to take down, and the announcement's answer never injects - which is
+      // what keeps inject -> announce -> answer from ever becoming a loop.
+      void deps
+        .send(tabId, shown())
+        .catch(() => deps.inject(tabId).catch(() => deps.reportDiagnostic("agent.indicator.inject-failed")));
     },
     lower(tabId) {
-      deps.send(tabId, { type: "indicator", show: false });
+      void deps.send(tabId, { type: "indicator", show: false }).catch(() => undefined);
     },
     async answerAnnouncement(tabId) {
       const holder = await deps.holderOf(tabId);
-      deps.send(tabId, holder === undefined ? { type: "indicator", show: false } : shown());
+      void deps
+        .send(tabId, holder === undefined ? { type: "indicator", show: false } : shown())
+        .catch(() => undefined);
     },
   };
 }

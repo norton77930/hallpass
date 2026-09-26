@@ -107,6 +107,58 @@ function drawGlow(doc: Document): void {
 }
 
 /**
+ * The answer that came before the page had a body, one per document.
+ *
+ * The agent script runs at `document_start` and announces at once; the worker's answer routinely
+ * lands while the parser is still in `<head>`, and a message dropped then was never sent again -
+ * a tab that loaded while held showed no indicator at all. So the latest message waits here and is
+ * applied the moment a body exists. Latest wins: a second show replaces the first, and a hide
+ * clears the wait outright, so nothing is drawn for a tab that has already left the session.
+ */
+type PendingIndicator = { message: IndicatorMessage; host: IndicatorHost; stop: () => void };
+const pendingByDocument = new WeakMap<Document, PendingIndicator>();
+
+function clearPending(doc: Document): void {
+  pendingByDocument.get(doc)?.stop();
+  pendingByDocument.delete(doc);
+}
+
+/**
+ * Keeps the latest message for when the body appears. Two cues, whichever comes first: a mutation
+ * observer, because the body is parsed well before `DOMContentLoaded` and the owner should see the
+ * indicator as soon as the page does; and `DOMContentLoaded` itself, for a document with no
+ * observer to offer. One watcher per document - a later message only replaces what it will draw.
+ */
+function deferUntilBody(message: IndicatorMessage, host: IndicatorHost): void {
+  const { doc } = host;
+  const waiting = pendingByDocument.get(doc);
+  if (waiting) {
+    waiting.message = message;
+    waiting.host = host;
+    return;
+  }
+
+  const onReady = (): void => {
+    const pending = pendingByDocument.get(doc);
+    if (!pending || !doc.body) return;
+    clearPending(doc);
+    applyIndicator(pending.message, pending.host);
+  };
+  const Observer = doc.defaultView?.MutationObserver ?? globalThis.MutationObserver;
+  const observer = Observer ? new Observer(onReady) : undefined;
+  observer?.observe(doc, { childList: true, subtree: true });
+  doc.addEventListener("DOMContentLoaded", onReady);
+  pendingByDocument.set(doc, {
+    message,
+    host,
+    stop: () => {
+      observer?.disconnect();
+      doc.removeEventListener("DOMContentLoaded", onReady);
+    },
+  });
+}
+
+/**
  * Applies one `indicator` message. Returns whether the message was one this module owns, so the
  * entry can tell "handled" from "not mine" without inspecting the shape a second time.
  */
@@ -114,6 +166,12 @@ export function applyIndicator(message: unknown, host: IndicatorHost): boolean {
   if (!isIndicatorMessage(message)) return false;
   const { doc } = host;
   removeIndicator(doc);
+  if (message.show && !doc.body) {
+    deferUntilBody(message, host);
+    return true;
+  }
+  // Whatever was waiting for the body is superseded by this message, drawn or hidden.
+  clearPending(doc);
   if (!message.show) return true;
   if (!doc.body) return true;
 

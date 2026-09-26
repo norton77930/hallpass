@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 import { lookup } from "../src/locales/catalog.js";
+import { createAgentIndicator, type IndicatorMessage } from "../src/service-worker/agent-tools/indicator.js";
 
 /**
  * 004/T107b — who sends the indicator (FR-062, SC-032).
@@ -62,10 +63,17 @@ const PAIR_REQUEST = {
   sessionId: "session-a",
 };
 
+type InjectCall = { target: unknown; files?: string[] | undefined; world?: string | undefined };
+
 function installChrome(): {
   sent: SentMessage[];
+  injected: InjectCall[];
+  /** Tabs whose page has no receiver: sendMessage rejects there, as after an extension reload. */
+  deaf: Set<number>;
   emit: (message: unknown, sender: ContentSender) => void;
 } {
+  const injected: InjectCall[] = [];
+  const deaf = new Set<number>();
   const local: Record<string, unknown> = {};
   const session: Record<string, unknown> = {};
   const sent: SentMessage[] = [];
@@ -94,7 +102,12 @@ function installChrome(): {
     i18n: { getUILanguage: () => "zh-TW" },
     storage: { local: area(local), session: area(session) },
     alarms: { create() {}, clear: async () => true, onAlarm: { addListener() {} } },
-    scripting: { async executeScript() {} },
+    scripting: {
+      async executeScript(details: InjectCall) {
+        injected.push({ target: details.target, files: details.files, world: details.world });
+        return [];
+      },
+    },
     tabs: {
       async get(tabId: number) {
         const tab = tabs.find((candidate) => candidate.id === tabId);
@@ -123,6 +136,7 @@ function installChrome(): {
       },
       async sendMessage(tabId: number, message: unknown, options?: { frameId?: number }) {
         sent.push({ tabId, message, ...(options === undefined ? {} : { options }) });
+        if (deaf.has(tabId)) throw new Error("Could not establish connection. Receiving end does not exist.");
         return undefined;
       },
     },
@@ -131,6 +145,8 @@ function installChrome(): {
   };
   return {
     sent,
+    injected,
+    deaf,
     emit(message, sender) {
       for (const listener of listeners) listener(message, sender);
     },
@@ -304,5 +320,104 @@ describe("T107b the indicator's sender", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(fake.sent).toEqual([]);
+  });
+});
+
+/**
+ * A tab that was open before the extension was reloaded has no declared content script: the browser
+ * injects declared scripts into documents loaded after the extension, never into the ones already
+ * there. A raise sent to such a tab has no receiver, and the owner would see no indicator until a
+ * page reload. So a raise that finds nobody injects the declared script into the top frame, and the
+ * script's own announcement is what brings the indicator up - no second send.
+ */
+describe("a raise to a tab with no content script", () => {
+  let fake: ReturnType<typeof installChrome>;
+
+  beforeEach(() => {
+    fake = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("injects the declared content script into the top frame of that tab, once", async () => {
+    fake.deaf.add(7);
+    const runtime = composeAgentRuntime({ connectNative: () => fakePort() });
+    runtime.start();
+
+    await runtime.tabs.claim("session-a", 7);
+
+    await expect.poll(() => fake.injected, { timeout: 1000 }).toEqual([
+      { target: { tabId: 7, frameIds: [0] }, files: ["agent-content.js"], world: "ISOLATED" },
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fake.injected).toHaveLength(1);
+  });
+
+  it("injects nothing when the page received the raise", async () => {
+    const runtime = composeAgentRuntime({ connectNative: () => fakePort() });
+    runtime.start();
+
+    await runtime.tabs.claim("session-a", 7);
+    await expect.poll(() => fake.sent.length, { timeout: 1000 }).toBe(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fake.injected).toEqual([]);
+  });
+
+  it("injects nothing when a lower finds nobody: there is no indicator to take down", async () => {
+    const runtime = composeAgentRuntime({ connectNative: () => fakePort() });
+    runtime.start();
+    await runtime.tabs.claim("session-a", 7);
+    await expect.poll(() => fake.sent.length, { timeout: 1000 }).toBe(1);
+    fake.deaf.add(7);
+
+    await runtime.tabs.release("session-a", 7);
+    await expect.poll(() => fake.sent.length, { timeout: 1000 }).toBe(2);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fake.injected).toEqual([]);
+  });
+});
+
+describe("the sender's injection fallback, by its deps", () => {
+  function withDeps(options: { sendFails: boolean; injectFails?: boolean }) {
+    const calls = { sent: [] as IndicatorMessage[], injected: [] as number[], reported: [] as string[] };
+    const indicator = createAgentIndicator({
+      send: async (_tabId, message) => {
+        calls.sent.push(message);
+        if (options.sendFails) throw new Error("Receiving end does not exist.");
+      },
+      inject: async (tabId) => {
+        calls.injected.push(tabId);
+        if (options.injectFails) throw new Error("Cannot access a chrome:// URL");
+      },
+      reportDiagnostic: (code) => void calls.reported.push(code),
+      holderOf: async () => "session-a",
+      locale: () => "en-US",
+    });
+    return { indicator, calls };
+  }
+
+  it("swallows a failed injection and reports it, without retrying", async () => {
+    const { indicator, calls } = withDeps({ sendFails: true, injectFails: true });
+
+    indicator.raise(9);
+
+    await expect.poll(() => calls.reported, { timeout: 1000 }).toEqual(["agent.indicator.inject-failed"]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.injected).toEqual([9]);
+    expect(calls.sent).toHaveLength(1);
+  });
+
+  it("does not inject when an announcement's answer finds nobody, so nothing can loop", async () => {
+    const { indicator, calls } = withDeps({ sendFails: true });
+
+    await indicator.answerAnnouncement(9);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.injected).toEqual([]);
+    expect(calls.reported).toEqual([]);
   });
 });

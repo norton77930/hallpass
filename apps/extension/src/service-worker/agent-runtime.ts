@@ -16,6 +16,7 @@ import {
 import { setAttention } from "../chrome-adapters/action-badge.js";
 import { downloadFile, watchDownloadChanged, watchDownloadCreated } from "../chrome-adapters/downloads.js";
 import { createOffscreenAdapter } from "../chrome-adapters/offscreen.js";
+import { injectAgentContent } from "../chrome-adapters/scripting.js";
 import { getTabSnapshot, queryTabSnapshots, watchTabUpdates } from "../chrome-adapters/tabs.js";
 import { getWindowFacts, setWindowState } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
@@ -350,10 +351,17 @@ export function deriveAttention(input: {
   return (input.pairingPending || input.promptPending) && !input.panelConnected;
 }
 
-/** What the runtime needs of the panel port: is anybody looking, and tell me when that changes. */
+/**
+ * What the runtime needs of the panel port: is anybody looking, and tell me when that changes.
+ *
+ * "Looking" is a panel in the window the owner last focused, not any panel anywhere (fix
+ * 2026-09-23, panel in another window): a panel open in another window left the badge off and the
+ * card on the 45 s bound while the owner saw nothing. The panel port works that out; the runtime,
+ * the pairing controller and the prompt controller only read the answer.
+ */
 export type AgentPanelPresence = {
-  isConnected: () => boolean;
-  onPresenceChange: (listener: (connected: boolean) => void) => void;
+  isVisible: () => boolean;
+  onPresenceChange: (listener: (visible: boolean) => void) => void;
 };
 
 export type AgentRuntime = {
@@ -496,7 +504,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   /** What the icon was last told. `undefined` until the first derivation, which always speaks. */
   let attention: boolean | undefined;
   const markAttention = options.setAttention ?? setAttention;
-  const panelConnected = (): boolean => panelPresence?.isConnected() ?? true;
+  // Named for the field it fills (`panelConnected` in the ticks and the derivation), but it is the
+  // panel port's *visible*: a panel in the focused window (fix 2026-09-23, panel in another window).
+  const panelConnected = (): boolean => panelPresence?.isVisible() ?? true;
 
   function refreshAttention(): void {
     const next = deriveAttention({
@@ -532,6 +542,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     now: () => new Date().toISOString(),
     panelPresence: panelConnected,
     onWaiting: sendWaiting,
+    // A session joining (or leaving) a card already on screen changes only its count (item 2).
+    onWaitersChange: notify,
     onChange(state) {
       // Whatever is not the prompt on screen is over: answered, ignored, abandoned or unpaired.
       for (const agentId of [...pairingRequestedAt.keys()]) {
@@ -547,15 +559,17 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * The in-page indicator, sent (004/T107b, FR-062).
    *
    * Addressed to the top frame of the tab: the declared content script runs in every frame, and an
-   * indicator per iframe would be several badges on one page. The answer is never read - a content
-   * script that does not answer resolves `sendMessage` with `undefined` (004/T107a) and a tab with
-   * no runtime rejects it - because nothing here depends on the page having heard: the page asks
-   * again on its next load, which is the whole shape of the announcement.
+   * indicator per iframe would be several badges on one page. The answer's value is never read - a
+   * content script that does not answer resolves `sendMessage` with `undefined` (004/T107a) - but a
+   * rejection is: it means the tab has no content script at all (open since before the extension
+   * was reloaded), and the indicator injects one for a raise.
    */
   const indicator = createAgentIndicator({
-    send: (tabId, message: IndicatorMessage) => {
-      void chrome.tabs?.sendMessage?.(tabId, message, { frameId: 0 })?.catch?.(() => undefined);
+    send: async (tabId, message: IndicatorMessage) => {
+      await chrome.tabs?.sendMessage?.(tabId, message, { frameId: 0 });
     },
+    inject: injectAgentContent,
+    reportDiagnostic: reportTestDiagnostic,
     holderOf: async (tabId) => (await tabs.leases()).find((lease) => lease.tabId === tabId)?.sessionId,
     // The owner's browser decides the language; the worker has no other opinion about it.
     locale: () => chrome.i18n?.getUILanguage?.() ?? "en-US",
@@ -1035,6 +1049,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // the page before the owner interrupted this step.
       inputDelivered.add(callId);
     },
+    // 015/T405, T406 (FR-200): what a press started. Without it a press can report neither the
+    // downloads it began nor, honestly, that nothing happened in its window.
+    downloads: { createdSince: (session, sinceMs) => downloads.createdSince(session, sinceMs) },
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -1973,7 +1990,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         // Who is waiting, for the ticks alone (011): the card is about an agent, but the frame the
         // relay routes is addressed to a session, and this is the session that raised the card.
         sessionId: request.sessionId,
+        // The host's id for this exchange (015 FR-218), kept beside the waiting session so a
+        // withdrawal of an earlier question cannot take down the one being asked now.
+        ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
       });
+    },
+    /**
+     * The host stopped waiting for this session's answer (015 FR-216, FR-217). The worker's own
+     * expiry, run now instead of at its mirrored bound: the card, the panel and the icon follow it
+     * exactly as they follow the clock, so there is no second path to keep in step.
+     */
+    onPairWithdraw({ agentId, sessionId, requestId }) {
+      pairing.withdraw(agentId, sessionId, requestId);
     },
     /**
      * Which run of the browser is answering (013/R-184, FR-168).
@@ -2227,8 +2255,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       });
       const agentName = state.paired[0]?.displayName;
       const requestedAt = state.pending ? pairingRequestedAt.get(state.pending.agentId) : undefined;
+      // Zero only in the moment between the card being raised and its first session joining it.
+      const waitingSessions = state.pending ? pairing.waitingSessions(state.pending.agentId) : 0;
       return {
-        ...(state.pending ? { pending: { ...state.pending, ...(requestedAt === undefined ? {} : { requestedAt }) } } : {}),
+        ...(state.pending
+          ? {
+              pending: {
+                ...state.pending,
+                ...(requestedAt === undefined ? {} : { requestedAt }),
+                ...(waitingSessions === 0 ? {} : { waitingSessions }),
+              },
+            }
+          : {}),
         paired: state.paired,
         sessions: cards,
         tabs: browserTabs,
@@ -2261,8 +2299,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     bindPanelPresence(presence: AgentPanelPresence): void {
       panelPresence = presence;
       // A panel opening is an answer arriving at a question the person could not see, and a panel
-      // closing can leave one standing that nobody can. Both change what the icon should say.
-      presence.onPresenceChange(() => refreshAttention());
+      // closing can leave one standing that nobody can. Both change what the icon should say - and
+      // so does the owner moving to or from the window a panel is in (fix 2026-09-23).
+      // And the questions themselves (D-011-7): one that goes out of sight while it waits is from
+      // then on one raised with nobody looking - ticks, and the two-minute bound from its raise.
+      presence.onPresenceChange(() => {
+        pairing.panelPresenceChanged();
+        prompts.panelPresenceChanged();
+        refreshAttention();
+      });
     },
     start(): void {
       // 011 FR-152: once, on wake, before anything else can raise a question. A worker Chrome

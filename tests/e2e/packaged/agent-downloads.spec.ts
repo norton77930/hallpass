@@ -1,9 +1,10 @@
 import { existsSync, rmSync } from "node:fs";
+import type { BrowserContext } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
-import { expect, test } from "../fixtures/packaged-extension.js";
+import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
 const copy = copyFor(locale);
@@ -93,7 +94,7 @@ test.describe("agent downloads", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(client, panel, { locale });
 
       const call = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
         const result = await live.callTool(tool, args);
@@ -166,7 +167,98 @@ test.describe("agent downloads", () => {
       if (savedPath && existsSync(savedPath)) rmSync(savedPath, { force: true });
     }
   });
+
+  /**
+   * 015 SC-111 (FR-207 - FR-209, T418, contracts/downloads.md): every finished download, once, in
+   * finishing order.
+   *
+   * `/two-downloads` starts a slow file and then a fast one from one press; the server holds the
+   * slow file's body back, so the file that began second finishes first. Two `download-complete`
+   * waits answer the fast file and then the slow one - the order the browser itself records them
+   * finishing in - and a third wait repeats neither.
+   */
+  test("answers two downloads once each, in the order they finished (SC-111)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const saved: string[] = [];
+    try {
+      const tabId = ((await call("tabs_create", { url: `${SITE}/two-downloads` })) as { tabId: number }).tabId;
+      await setSiteMode(panel, SITE, "skip-checks");
+
+      const trigger = await refFor(call, tabId, "Download both");
+      await call("click", { tabId, target: { ref: trigger } });
+
+      const first = (await call("wait", { tabId, condition: "download-complete", maxMs: 15_000 })) as WaitAnswer;
+      expect(first.outcome, JSON.stringify(first)).toBe("condition-met");
+      expect(first.download?.url, JSON.stringify(first)).toBe(`${SITE}/two-downloads/fast.csv`);
+      expect(first.download?.state).toBe("complete");
+      if (first.download?.filename) saved.push(first.download.filename);
+
+      const second = (await call("wait", { tabId, condition: "download-complete", maxMs: 15_000 })) as WaitAnswer;
+      expect(second.outcome, JSON.stringify(second)).toBe("condition-met");
+      expect(second.download?.url, JSON.stringify(second)).toBe(`${SITE}/two-downloads/slow.csv`);
+      expect(second.download?.state).toBe("complete");
+      if (second.download?.filename) saved.push(second.download.filename);
+      expect(second.download?.id).not.toBe(first.download?.id);
+
+      // Reality: the browser has both items, and it finished them in the order they were answered.
+      const real = await extensionWorker.evaluate(
+        async (ids: number[]) =>
+          Promise.all(
+            ids.map(async (id) => {
+              const [item] = await chrome.downloads.search({ id });
+              return { id, state: item?.state ?? "", endTime: item?.endTime ?? "" };
+            }),
+          ),
+        [first.download!.id, second.download!.id],
+      );
+      expect(real.map((item) => item.state)).toEqual(["complete", "complete"]);
+      expect(Date.parse(real[0]!.endTime), JSON.stringify(real)).toBeLessThanOrEqual(Date.parse(real[1]!.endTime));
+
+      // Never twice: with both answered, a third wait answers neither and ends at its bound.
+      const third = await client.callTool("wait", { tabId, condition: "download-complete", maxMs: 1_000 });
+      expect(third.isError, third.text).toBe(true);
+      expect(JSON.parse(third.text)).toMatchObject({ outcome: "failed", reason: "bound-reached" });
+
+      await call("tabs_close", { tabId });
+    } finally {
+      await client.close().catch(() => undefined);
+      // The test caused the files; the test removes them. The extension has no way to (FR-076).
+      for (const file of saved) if (existsSync(file)) rmSync(file, { force: true });
+    }
+  });
 });
+
+async function pairedSession(fixtures: {
+  extensionContext: BrowserContext;
+  extensionId: string;
+  extensionWorker: PackagedWorker;
+}): Promise<{ panel: SidePanelDriver; client: McpHarnessClient; call: (tool: string, args?: Record<string, unknown>) => Promise<unknown> }> {
+  const { extensionContext, extensionId, extensionWorker } = fixtures;
+  const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
+  await ownerPage.goto(`${SITE}/waiting`);
+  await ownerPage.bringToFront();
+  const ownerTabId = await extensionWorker.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id === undefined) throw new Error("active-tab-missing");
+    return tab.id;
+  });
+  const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
+  await panel.waitForText(ui("agent.appTitle"));
+  const client = await startMcpClient({ clientName: "Claude Code" });
+  await panel.clickIfPresent(ui("agent.retry"));
+  await pairWithFirstCall(client, panel, { locale });
+  const call = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
+    const result = await client.callTool(tool, args);
+    expect(result.isError, `${tool} failed: ${result.text}\nstderr:\n${client.stderr()}`).toBe(false);
+    return result.json;
+  };
+  return { panel, client, call };
+}
 
 async function refFor(
   call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,

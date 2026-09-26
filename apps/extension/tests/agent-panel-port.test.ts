@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AGENT_PANEL_PORT_NAME, agentPanelMessageSchema } from "@hallpass/contracts";
+import { AGENT_PANEL_PORT_NAME, agentPanelMessageSchema, PAIRING_DECLINED_MARKER } from "@hallpass/contracts";
 import { createAgentPanelPort, type AgentPanelPortLike } from "../src/service-worker/agent-panel-port.js";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
@@ -85,10 +85,40 @@ function installChrome(seed: { tabs?: unknown[]; session?: Record<string, unknow
   };
 }
 
-function setup() {
+/**
+ * The browser's last-focused normal window, as the worker is told it (fix 2026-09-23, panel in
+ * another window). `watch` answers at once with what is known, as the real adapter does once
+ * `getLastFocused` resolves, and again on every move.
+ */
+function fakeFocus(initial?: number) {
+  const listeners: Array<(windowId: number) => void> = [];
+  let current = initial;
+  return {
+    watch(listener: (windowId: number) => void) {
+      listeners.push(listener);
+      if (current !== undefined) listener(current);
+    },
+    move(windowId: number) {
+      current = windowId;
+      for (const listener of listeners) listener(windowId);
+    },
+  };
+}
+
+function setup(options: { focus?: ReturnType<typeof fakeFocus>; setAttention?: (on: boolean) => void } = {}) {
   const nativePort = fakeNativePort();
-  const runtime = composeAgentRuntime({ connectNative: () => nativePort });
-  const panel = createAgentPanelPort({ extensionId: EXTENSION_ID, sidePanelUrl: PANEL_URL, runtime });
+  const runtime = composeAgentRuntime({
+    connectNative: () => nativePort,
+    ...(options.setAttention ? { setAttention: options.setAttention } : {}),
+  });
+  const panel = createAgentPanelPort({
+    extensionId: EXTENSION_ID,
+    sidePanelUrl: PANEL_URL,
+    runtime,
+    ...(options.focus ? { watchFocusedWindow: options.focus.watch } : {}),
+  });
+  // What `agent-entry.ts` does: the runtime reads the panel port's presence.
+  if (options.focus) runtime.bindPanelPresence(panel);
   runtime.start();
   // The relay's first frame, which is what makes the link `connected` (004/T099h): an open Port on
   // its own only means Chrome accepted the host's name.
@@ -211,7 +241,7 @@ describe("T019 agent panel port", () => {
           sessionId: "session-h1",
           accepted: true,
           browserRunId: expect.any(String),
-          features: ["upload-consent"],
+          features: ["upload-consent", "pair-withdraw"],
         },
       ]));
     await vi.waitFor(() =>
@@ -223,8 +253,8 @@ describe("T019 agent panel port", () => {
     expect((port.sent.at(-1) as { payload: { pending?: unknown } }).payload.pending).toBeUndefined();
   });
 
-  /** 006 FR-084/FR-085 (S1 review): the projection dates each question, and Ignore answers nobody. */
-  it("dates the pending request and the prompt, and drops the request on ignore without answering the host", async () => {
+  /** 006 FR-084 (amended 2026-09-24)/FR-085: the projection dates each question, and Ignore answers the host as a decline of this request. */
+  it("dates the pending request and the prompt, and answers the host with a marked decline on ignore", async () => {
     const { panel, nativePort, runtime } = setup();
     const port = fakePanelPort();
     panel.accept(port);
@@ -248,10 +278,39 @@ describe("T019 agent panel port", () => {
     await vi.waitFor(() =>
       expect((port.sent.at(-1) as { payload: { pending?: unknown } }).payload.pending).toBeUndefined(),
     );
-    // Nothing went down the link: no answer at all is what leaves the request to expire (FR-084).
-    expect(nativePort.sent).toEqual([{ type: "relay-ack", relayPid: 4242 }, { type: "upload-roots-list" }]);
+    // The waiting session is told at once, marked as a decline of this request (FR-032a) so the host
+    // asks afresh on the next call rather than treating it as an unpair.
+    await vi.waitFor(() => expect(nativePort.sent).toHaveLength(3));
+    expect(nativePort.sent[2]).toMatchObject({
+      type: "pair-result",
+      agentId: "agent-1",
+      sessionId: "session-h1",
+      accepted: false,
+      features: expect.arrayContaining([PAIRING_DECLINED_MARKER]),
+    });
     runtime.prompts.cancel();
     await asked;
+  });
+
+  /** Item 2 (2026-09-24): a second session joining the card is published, with the count the card shows. */
+  it("publishes the number of sessions waiting on the pairing card when another one joins", async () => {
+    const { panel, nativePort } = setup();
+    const port = fakePanelPort();
+    panel.accept(port);
+
+    nativePort.emit({ type: "hello", sessionId: "session-h1", agentId: "agent-1", displayName: "Claude Code" });
+    nativePort.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+    await vi.waitFor(() =>
+      expect(port.sent.at(-1)).toMatchObject({ payload: { pending: { agentId: "agent-1", waitingSessions: 1 } } }),
+    );
+    const before = port.sent.length;
+
+    nativePort.emit({ type: "hello", sessionId: "session-h2", agentId: "agent-1", displayName: "Claude Code" });
+    nativePort.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h2" });
+    await vi.waitFor(() =>
+      expect(port.sent.at(-1)).toMatchObject({ payload: { pending: { agentId: "agent-1", waitingSessions: 2 } } }),
+    );
+    expect(port.sent.length).toBeGreaterThan(before);
   });
 
   it("unpairs on the owner's command and tells the open session at once", async () => {
@@ -276,6 +335,26 @@ describe("T019 agent panel port", () => {
       }),
     );
     await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ payload: { paired: [] } }));
+  });
+
+  it("answers the owner's Decline as a decline of that request, not as an unpair (FR-032a)", async () => {
+    const { panel, nativePort } = setup();
+    const port = fakePanelPort();
+    panel.accept(port);
+    nativePort.emit({ type: "hello", sessionId: "session-h1", agentId: "agent-1", displayName: "Claude Code" });
+    nativePort.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+    await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ payload: { pending: expect.anything() } }));
+
+    port.emit({ type: "ui.agent.pair-decide", payload: { agentId: "agent-1", accepted: false } });
+
+    await vi.waitFor(() => expect(nativePort.sent).toHaveLength(3));
+    expect(nativePort.sent[2]).toMatchObject({
+      type: "pair-result",
+      agentId: "agent-1",
+      sessionId: "session-h1",
+      accepted: false,
+      features: expect.arrayContaining([PAIRING_DECLINED_MARKER]),
+    });
   });
 
   it("retries the bridge on the owner's Connect", async () => {
@@ -568,6 +647,194 @@ describe("T019 agent panel port", () => {
 
       await vi.waitFor(() => expect(diagnostics).toContain("agent.panel.projection-failed"));
       expect(port.sent).toEqual([]);
+    });
+  });
+
+  /**
+   * Fix 2026-09-23, panel in another window.
+   *
+   * Observed live: the owner saw no card and no badge, and the pairing request ran out at 45 s -
+   * the open-panel bound - because a Hallpass panel was open in a *different* window. Chrome's side
+   * panel is per window, so "some panel is connected" is not "the owner can see a card". What
+   * counts is a connected panel in the window the owner last focused; the badge, the pairing bound
+   * and the consent bound all read that, while the cards themselves still go to every panel.
+   */
+  describe("a panel the owner can see is one in the last-focused window", () => {
+    const WINDOW_ID_MESSAGE = (windowId: number) => ({ type: "ui.agent.panel-window", payload: { windowId } });
+    const HELLO = { type: "hello", sessionId: "session-h1", agentId: "agent-1", displayName: "Claude Code" };
+    const PAIR_REQUEST = {
+      type: "pair-request",
+      agentId: "agent-1",
+      displayName: "Claude Code",
+      origin: "stdio:local",
+      sessionId: "session-h1",
+    };
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("counts a panel in another window as not seen: badge on, 120 s bound with ticks", async () => {
+      vi.useFakeTimers();
+      const marks: boolean[] = [];
+      const focus = fakeFocus(1);
+      const { panel, runtime, nativePort } = setup({ focus, setAttention: (on) => marks.push(on) });
+      const other = fakePanelPort();
+      panel.accept(other);
+      other.emit(WINDOW_ID_MESSAGE(2));
+
+      expect(panel.isConnected(), "a panel is connected").toBe(true);
+      expect(panel.isVisible(), "but not in the window the owner is using").toBe(false);
+
+      nativePort.emit(HELLO);
+      nativePort.emit(PAIR_REQUEST);
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      expect(marks.at(-1), "the badge is on").toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(nativePort.sent).toContainEqual({
+        type: "prompt-waiting",
+        sessionId: "session-h1",
+        kind: "pairing",
+        panelConnected: false,
+        waitedMs: 5_000,
+        boundMs: 120_000,
+      });
+      // Past the open-panel bound the card still stands: this is the 120 s one.
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect((await runtime.pairing.state()).pending).toBeDefined();
+      // The card itself still reached the panel in the other window.
+      expect(JSON.stringify(other.sent.at(-1))).toContain("agent-1");
+    });
+
+    it("turns the badge off when the owner moves to the window that has the panel", async () => {
+      const marks: boolean[] = [];
+      const focus = fakeFocus(1);
+      const { panel, runtime, nativePort } = setup({ focus, setAttention: (on) => marks.push(on) });
+      const other = fakePanelPort();
+      panel.accept(other);
+      other.emit(WINDOW_ID_MESSAGE(2));
+      nativePort.emit(HELLO);
+      nativePort.emit(PAIR_REQUEST);
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      expect(marks.at(-1)).toBe(true);
+
+      focus.move(2);
+
+      expect(panel.isVisible()).toBe(true);
+      expect(marks.at(-1), "the card is now in front of the owner").toBe(false);
+
+      // And back: the owner left the window with the panel, the question is out of sight again.
+      focus.move(1);
+      expect(marks.at(-1)).toBe(true);
+    });
+
+    it("keeps the open-panel 45 s bound, with no ticks, for a panel in the focused window", async () => {
+      vi.useFakeTimers();
+      const focus = fakeFocus(1);
+      const { panel, runtime, nativePort } = setup({ focus });
+      const here = fakePanelPort();
+      panel.accept(here);
+      here.emit(WINDOW_ID_MESSAGE(1));
+      expect(panel.isVisible()).toBe(true);
+
+      nativePort.emit(HELLO);
+      nativePort.emit(PAIR_REQUEST);
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(nativePort.sent.some((frame) => (frame as { type?: string }).type === "prompt-waiting")).toBe(false);
+      await vi.advanceTimersByTimeAsync(41_000);
+      expect((await runtime.pairing.state()).pending, "the 45 s bound ran out").toBeUndefined();
+    });
+
+    /**
+     * 011 D-011-7: the bound follows the panel going out of sight, not only the moment of the raise.
+     * Observed live 2026-09-24: card raised in the panel's window, owner moved away, badge on - and
+     * the card still vanished at 45 s.
+     */
+    it("extends a card raised in sight to 120 s with ticks once the owner moves away, and never shortens it back", async () => {
+      vi.useFakeTimers();
+      const focus = fakeFocus(1);
+      const { panel, runtime, nativePort } = setup({ focus });
+      const here = fakePanelPort();
+      panel.accept(here);
+      here.emit(WINDOW_ID_MESSAGE(1));
+      nativePort.emit(HELLO);
+      nativePort.emit(PAIR_REQUEST);
+      await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+      const consent = runtime.prompts.ask({
+        callId: "call-1",
+        sessionId: "session-h1",
+        site: "https://agent.test",
+        tool: "click",
+        argsSummary: "click a page element",
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      const waiting = () => nativePort.sent.filter((frame) => (frame as { type?: string }).type === "prompt-waiting");
+      expect(waiting(), "nothing said while the card is in front of the owner").toEqual([]);
+
+      focus.move(2);
+      expect(waiting()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ kind: "pairing", boundMs: 120_000, waitedMs: 10_000, panelConnected: false }),
+          expect.objectContaining({ kind: "ask", callId: "call-1", boundMs: 120_000, waitedMs: 10_000, panelConnected: false }),
+        ]),
+      );
+
+      // Back to the panel's window: nothing is shortened.
+      focus.move(1);
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect((await runtime.pairing.state()).pending, "the card outlived 45 s").toBeDefined();
+      expect(runtime.prompts.current(), "the consent question outlived 25 s").toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect((await runtime.pairing.state()).pending, "two minutes from the raise").toBeUndefined();
+      await expect(consent).resolves.toMatchObject({ decision: "timed-out" });
+    });
+
+    it("counts a panel that has not said which window it is in as not seen", () => {
+      const focus = fakeFocus(1);
+      const { panel } = setup({ focus });
+      panel.accept(fakePanelPort());
+
+      expect(panel.isConnected()).toBe(true);
+      expect(panel.isVisible()).toBe(false);
+    });
+
+    it("counts nothing as seen while the focused window is not yet known", () => {
+      const focus = fakeFocus();
+      const { panel } = setup({ focus });
+      const here = fakePanelPort();
+      panel.accept(here);
+      here.emit(WINDOW_ID_MESSAGE(1));
+
+      expect(panel.isVisible()).toBe(false);
+      focus.move(1);
+      expect(panel.isVisible()).toBe(true);
+    });
+
+    it("refuses a window report that is not a window id, and it changes nothing", () => {
+      const diagnostics: string[] = [];
+      const focus = fakeFocus(1);
+      const nativePort = fakeNativePort();
+      const runtime = composeAgentRuntime({ connectNative: () => nativePort });
+      const panel = createAgentPanelPort({
+        extensionId: EXTENSION_ID,
+        sidePanelUrl: PANEL_URL,
+        runtime,
+        watchFocusedWindow: focus.watch,
+        reportDiagnostic: (code) => diagnostics.push(code),
+      });
+      const port = fakePanelPort();
+      panel.accept(port);
+
+      port.emit({ type: "ui.agent.panel-window", payload: { windowId: "1" } });
+      port.emit({ type: "ui.agent.panel-window", payload: { windowId: 1, extra: true } });
+      port.emit({ type: "ui.agent.panel-window", payload: { windowId: -1 } });
+
+      expect(panel.isVisible()).toBe(false);
+      expect(diagnostics.filter((code) => code === "agent.panel.command-rejected")).toHaveLength(3);
     });
   });
 });

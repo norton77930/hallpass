@@ -441,7 +441,7 @@ describe("T290 the ticks while a pairing waits", () => {
       initial: { paired: [{ ...CLAUDE, acceptedAt: "2026-09-20T00:00:00.000Z" }] },
     });
 
-    await expect(controller.decidePairing({ ...CLAUDE, sessionId: "session-h1" })).resolves.toBe(true);
+    await expect(controller.decidePairing({ ...CLAUDE, sessionId: "session-h1" })).resolves.toBe("accepted");
     await vi.advanceTimersByTimeAsync(4 * PROMPT_WAITING_TICK_MS);
 
     // Nothing is waiting: the owner answered this question once, and SC-020 says they are not
@@ -529,7 +529,7 @@ describe("T290 the ticks while a pairing waits", () => {
 
   it("refuses an answer to a card whose wait already ran out", async () => {
     const { controller } = controllerWith({ panelConnected: false });
-    let answered: boolean | "waiting" = "waiting";
+    let answered: string = "waiting";
     void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1" }).then((accepted) => {
       answered = accepted;
     });
@@ -547,6 +547,107 @@ describe("T290 the ticks while a pairing waits", () => {
     // And the withdrawn request is never answered: a `pair-result` now would settle that session as
     // decided, where the server means to ask again on its next call.
     expect(answered).toBe("waiting");
+  });
+});
+
+/**
+ * 015/T421 — the host says it stopped waiting, and the card follows at once (FR-216, FR-217).
+ *
+ * Until now the card was kept to a mirrored bound the worker could only guess at, so a host that
+ * withdrew early - its session closed, or its own clock ran ahead - left an Accept button standing
+ * for a request nobody held. `pair-withdraw` is the host saying so, and the worker's answer to it is
+ * the same quiet expiry its own clock already ran: that session leaves the waiting list, and the
+ * card goes only with the last one.
+ */
+describe("T421 a pairing request the host withdrew", () => {
+  const CLAUDE = { agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local" };
+
+  function controllerWith() {
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    const ticks: PairingWaitingTick[] = [];
+    const changes: PairingState[] = [];
+    let waitersChanged = 0;
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => "2026-09-26T00:00:00.000Z",
+      panelPresence: () => false,
+      onWaiting: (tick) => ticks.push(tick),
+      onChange: (state) => changes.push(state),
+      onWaitersChange: () => {
+        waitersChanged += 1;
+      },
+    });
+    return { controller, ticks, changes, waitersChanged: () => waitersChanged };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("drops the card and clears attention when the only waiting session is withdrawn", async () => {
+    const { controller, ticks, changes } = controllerWith();
+    let answered = "waiting";
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1", requestId: "req-1" }).then((answer) => {
+      answered = answer;
+    });
+    await controller.ready();
+    expect((await controller.state()).pending).toBeDefined();
+
+    controller.withdraw("agent-1", "session-h1", "req-1");
+    await controller.ready();
+
+    // Well inside SC-113's two seconds: no clock was advanced at all.
+    expect((await controller.state()).pending, "FR-217: nobody is waiting, so the card is over").toBeUndefined();
+    expect(changes.at(-1)?.pending, "the panel and the icon are told").toBeUndefined();
+    expect(deriveAttention({ pairingPending: false, promptPending: false, panelConnected: false })).toBe(false);
+    expect(controller.waitingSessions("agent-1")).toBe(0);
+    // Quiet, as the worker's own expiry is: the host has already answered its agent.
+    const heard = ticks.length;
+    await vi.advanceTimersByTimeAsync(4 * PROMPT_WAITING_TICK_MS);
+    expect(ticks).toHaveLength(heard);
+    expect(answered).toBe("waiting");
+  });
+
+  it("keeps the card, one connection fewer, while another session still waits", async () => {
+    const { controller, ticks, waitersChanged } = controllerWith();
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1", requestId: "req-1" });
+    await controller.ready();
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h2", requestId: "req-2" });
+    await controller.ready();
+    expect(controller.waitingSessions("agent-1")).toBe(2);
+    const changedBefore = waitersChanged();
+
+    controller.withdraw("agent-1", "session-h1", "req-1");
+    await controller.ready();
+
+    expect((await controller.state()).pending, "session-h2 is still being asked").toBeDefined();
+    expect(controller.waitingSessions("agent-1"), "the card counts one connection").toBe(1);
+    expect(waitersChanged(), "the count change is announced").toBeGreaterThan(changedBefore);
+    const heard = ticks.length;
+    await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS);
+    expect(ticks.slice(heard).map((tick) => tick.sessionId)).toEqual(["session-h2"]);
+  });
+
+  it("ignores a withdrawal of an earlier exchange once the session has asked again", async () => {
+    const { controller } = controllerWith();
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1", requestId: "req-1" });
+    await controller.ready();
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1", requestId: "req-2" });
+    await controller.ready();
+
+    // The withdrawal names the exchange it ends (FR-218): it must not take the newer question down.
+    controller.withdraw("agent-1", "session-h1", "req-1");
+    await controller.ready();
+
+    expect((await controller.state()).pending).toBeDefined();
+    expect(controller.waitingSessions("agent-1")).toBe(1);
   });
 });
 
@@ -604,5 +705,165 @@ describe("H1 a question raised inside a batch", () => {
     expect(controller.current()).toBeDefined();
     controller.cancel("call-12");
     await expect(asked).resolves.toEqual({ decision: "timed-out" });
+  });
+});
+
+/**
+ * 011 D-011-7 — a question whose panel goes out of sight while it waits.
+ *
+ * The bound used to be read once, at raise: a card raised while the person was in the panel's
+ * window kept its 45 s / 25 s after they moved to another one, so the badge came on and the wait
+ * stayed short (observed live 2026-09-24). From the moment the panel stops being visible the
+ * question is one raised with no panel visible - ticks, the where-to-click sentence and two minutes
+ * counted from the raise. The reverse stays as R-163 says: a panel coming into sight never shortens.
+ */
+describe("D-011-7 a question whose panel goes out of sight mid-wait", () => {
+  const CLAUDE = { agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local" };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("extends a consent question to two minutes from the raise and starts ticking at once", async () => {
+    let visible = true;
+    const { ticks, onWaiting } = collector();
+    const controller = createAgentPromptController({ panelPresence: () => visible, onWaiting });
+
+    const asked = controller.ask({ ...PROMPT });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(ticks, "nothing is said about a card in front of the person").toEqual([]);
+
+    visible = false;
+    controller.panelPresenceChanged();
+    // Told twice (every focus move and window report announces): still one question, one ticker.
+    controller.panelPresenceChanged();
+
+    // At once, not five seconds later: the server's bound may be about to pass.
+    expect(ticks).toEqual([
+      { kind: "ask", callId: "call-1", sessionId: "session-h1", waitedMs: 10_000, boundMs: CLOSED_PANEL_TIMEOUT_MS, panelConnected: false },
+    ]);
+    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
+    expect(controller.current(), "the question expired at the bound it was raised with").toBeDefined();
+    expect(ticks.at(-1)?.waitedMs).toBe(35_000);
+    expect(ticks.map((tick) => tick.waitedMs)).toEqual([10_000, 15_000, 20_000, 25_000, 30_000, 35_000]);
+
+    await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - 35_000 - 1);
+    expect(controller.current(), "two minutes counted from the raise, not from the move").toBeDefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(asked).resolves.toEqual({ decision: "timed-out", hint: ATTENTION_SENTENCES.consent });
+  });
+
+  it("extends a pairing card to two minutes from the raise and starts ticking at once", async () => {
+    let visible = true;
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    const ticks: PairingWaitingTick[] = [];
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => "2026-09-24T00:00:00.000Z",
+      panelPresence: () => visible,
+      onWaiting: (tick) => ticks.push(tick),
+    });
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1" });
+    await controller.ready();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(ticks).toEqual([]);
+
+    visible = false;
+    controller.panelPresenceChanged();
+    controller.panelPresenceChanged();
+
+    expect(ticks).toEqual([
+      { kind: "pairing", sessionId: "session-h1", waitedMs: 20_000, boundMs: CLOSED_PANEL_TIMEOUT_MS, panelConnected: false },
+    ]);
+    await vi.advanceTimersByTimeAsync(PAIRING_BOUND_MS);
+    await controller.ready();
+    expect((await controller.state()).pending, "the card outlived the open-panel 45 s").toBeDefined();
+    expect(ticks.at(-1)?.waitedMs).toBe(65_000);
+
+    await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - 65_000);
+    await controller.ready();
+    expect((await controller.state()).pending, "and ended at two minutes from the raise").toBeUndefined();
+  });
+
+  it("never shortens a running bound when the panel comes back into sight", async () => {
+    let visible = true;
+    const { ticks, onWaiting } = collector();
+    const prompts = createAgentPromptController({ panelPresence: () => visible, onWaiting });
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    const pairing = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => "2026-09-24T00:00:00.000Z",
+      panelPresence: () => visible,
+    });
+    void prompts.ask({ ...PROMPT });
+    void pairing.decidePairing({ ...CLAUDE, sessionId: "session-h1" });
+    await pairing.ready();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    visible = false;
+    prompts.panelPresenceChanged();
+    pairing.panelPresenceChanged();
+    await vi.advanceTimersByTimeAsync(5_000);
+    visible = true;
+    prompts.panelPresenceChanged();
+    pairing.panelPresenceChanged();
+
+    await vi.advanceTimersByTimeAsync(100_000);
+    await pairing.ready();
+    expect(prompts.current(), "the consent question kept its two minutes").toBeDefined();
+    expect((await pairing.state()).pending, "the pairing card kept its two minutes").toBeDefined();
+    // Still said, as for any question raised with nobody looking: it is the host's keep-alive.
+    expect(ticks.at(-1)?.waitedMs).toBe(110_000);
+  });
+
+  it("stops telling the agent the panel is closed once it is back in sight, and keeps the keep-alive", async () => {
+    let visible = true;
+    const { ticks, onWaiting } = collector();
+    const prompts = createAgentPromptController({ panelPresence: () => visible, onWaiting });
+    const pairingTicks: PairingWaitingTick[] = [];
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    const pairing = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => "2026-09-24T00:00:00.000Z",
+      panelPresence: () => visible,
+      onWaiting: (tick) => pairingTicks.push(tick),
+    });
+    void prompts.ask({ ...PROMPT });
+    void pairing.decidePairing({ ...CLAUDE, sessionId: "session-h1" });
+    await pairing.ready();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    visible = false;
+    prompts.panelPresenceChanged();
+    pairing.panelPresenceChanged();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ticks.at(-1)?.panelConnected).toBe(false);
+    expect(pairingTicks.at(-1)?.panelConnected).toBe(false);
+
+    visible = true;
+    prompts.panelPresenceChanged();
+    pairing.panelPresenceChanged();
+    const before = { prompt: ticks.length, pairing: pairingTicks.length };
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // The card is in front of the person again: the ticks go on (the host's keep-alive for the two
+    // minutes already granted) but no longer say the panel is closed.
+    expect(ticks.slice(before.prompt).map((tick) => tick.panelConnected)).toEqual([true, true]);
+    expect(pairingTicks.slice(before.pairing).map((tick) => tick.panelConnected)).toEqual([true, true]);
+    // And the bound stays the two minutes it was given.
+    expect(ticks.at(-1)?.boundMs).toBe(CLOSED_PANEL_TIMEOUT_MS);
   });
 });

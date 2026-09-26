@@ -11,7 +11,7 @@ import {
 import { evaluateConditionOnLeasedTab } from "../content-broker.js";
 import { DEFAULT_WAIT_POLL_MS } from "../shared-port.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
-import type { AgentPageBinding, AgentPageBindings } from "./page-binding.js";
+import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { discoverRefFrame, resolveRef, type RefFrame } from "./refs.js";
 import type { AgentStopSignals } from "./stop.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
@@ -207,7 +207,7 @@ export function createAgentWait(deps: AgentWaitDeps): AgentWaitRunner {
       const context = deps.context.forCall(request.sessionId, callId);
       const bound = await deps.bindings.bind(args.tabId, context);
       if (!bound.ok) {
-        return answer(callId, bound.reason === "not-actionable" ? "not-actionable" : "stale", bound.reason);
+        return bindingFailureResponse(callId, bound, "not-actionable");
       }
       const binding = bound.binding;
       let targetHandle = args.ref;

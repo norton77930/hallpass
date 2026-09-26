@@ -1,6 +1,6 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -77,7 +77,7 @@ test.describe("agent diagnostics", () => {
       await panel.clickIfPresent(ui("agent.retry"));
       // T098a: the prompt by its own key, Accept clicked, and pairing confirmed by a signal that
       // is false when nothing is paired - the panel's section heading is on screen either way.
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(live, panel, { locale });
 
       const created = (await ok(live, "tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number };
       const tabId = created.tabId;

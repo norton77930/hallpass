@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
-import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
+import { createAgentPageBindings, PAGE_NOT_RESPONDING_HINT } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads } from "../src/service-worker/agent-tools/reads.js";
 
 /**
@@ -323,5 +323,36 @@ describe("T034 agent read tools", () => {
     const response = await runner.run(request("read_page", { tabId: AGENT_TAB, filter: "visible" }));
 
     expect(response).toEqual({ callId: "call-1", outcome: "failed", reason: "invalid-arguments" });
+  });
+});
+
+/** 015/FR-205 - a read whose page did not answer the binding probe in time is not `stale`. */
+describe("015 reads: page-not-responding binding", () => {
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("answers failed page-not-responding with the hint, never stale", async () => {
+    const collect = vi.fn();
+    const runner = createAgentReads({
+      context: testSessionContexts(),
+      bindings: { bind: async () => ({ ok: false, reason: "page-not-responding" }), invalidate() {} },
+      tabOwnership: async () => ({ state: "this" }),
+      collect: collect as unknown as typeof import("../src/service-worker/content-broker.js").collectFromActiveTab,
+    });
+
+    const response = await runner.run(request("get_page_text", { tabId: AGENT_TAB }));
+
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "page-not-responding",
+      hint: PAGE_NOT_RESPONDING_HINT,
+    });
+    expect(collect).not.toHaveBeenCalled();
   });
 });

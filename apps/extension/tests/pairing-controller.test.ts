@@ -111,18 +111,18 @@ describe("T015 pairing controller", () => {
 
     await controller.decide("agent-1", true);
 
-    await expect(decision).resolves.toBe(true);
+    await expect(decision).resolves.toBe("accepted");
     expect(stored().paired).toEqual([{ ...CLAUDE, acceptedAt: AT }]);
   });
 
   /**
-   * 006 FR-084 (S1 review): Ignore is not a decline. The prompt leaves the panel and nothing is
-   * answered - the host's own bound expires the request and its next call raises it again - so
-   * the agent is not left with a standing refusal the owner never made.
+   * 006 FR-084 as amended 2026-09-24: Ignore answers the waiting session at once as a decline of
+   * this request (FR-032a) - not a standing refusal: nothing is stored, and the next request is a
+   * fresh question.
    */
-  it("drops the prompt on ignore without answering the session that raised it", async () => {
+  it("answers the session that raised the prompt as declined on ignore, and asks afresh next time", async () => {
     const { controller, stored, projections } = controllerWith();
-    let settled: boolean | undefined;
+    let settled: string | undefined;
     void controller.decidePairing(CLAUDE).then((accepted) => {
       settled = accepted;
     });
@@ -134,31 +134,49 @@ describe("T015 pairing controller", () => {
     expect(projections.at(-1)?.pending).toBeUndefined();
     expect(stored().paired).toEqual([]);
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(settled).toBeUndefined();
+    expect(settled).toBe("declined");
     // The next request is a fresh question, and the owner's accept settles that one.
     const again = controller.decidePairing(CLAUDE);
     await controller.ready();
     expect((await controller.state()).pending).toEqual(CLAUDE);
     await controller.decide("agent-1", true);
-    await expect(again).resolves.toBe(true);
+    await expect(again).resolves.toBe("accepted");
   });
 
   it("answers an already-paired agent at once, with no prompt", async () => {
     const { controller } = controllerWith({ paired: [{ ...CLAUDE, acceptedAt: AT }] });
 
-    await expect(controller.decidePairing(CLAUDE)).resolves.toBe(true);
+    await expect(controller.decidePairing(CLAUDE)).resolves.toBe("accepted");
     expect((await controller.state()).pending).toBeUndefined();
   });
 
-  it("answers false on decline and stores nothing", async () => {
+  /**
+   * 003 FR-032a: the owner's decline and an unpair are different answers, and the bridge marks only
+   * the first - so the controller has to say which one settled a waiting session.
+   */
+  it("answers 'declined' on decline, stores nothing, and asks afresh next time", async () => {
     const { controller, stored } = controllerWith();
 
     const decision = controller.decidePairing(CLAUDE);
     await controller.ready();
     await controller.decide("agent-1", false);
 
-    await expect(decision).resolves.toBe(false);
+    await expect(decision).resolves.toBe("declined");
     expect(stored().paired).toEqual([]);
+    // Not remembered: the next request is a fresh card.
+    void controller.decidePairing(CLAUDE);
+    await controller.ready();
+    expect((await controller.state()).pending).toEqual(CLAUDE);
+  });
+
+  it("answers 'unpaired' to a session still waiting when the agent is unpaired", async () => {
+    const { controller } = controllerWith();
+
+    const decision = controller.decidePairing(CLAUDE);
+    await controller.ready();
+    await controller.unpair("agent-1");
+
+    await expect(decision).resolves.toBe("unpaired");
   });
 
   it("makes an unpair effective immediately for the next call", async () => {
@@ -195,8 +213,8 @@ describe("T096b pairing across several sessions of one agent", () => {
 
     await controller.decide("agent-1", true);
 
-    await expect(first).resolves.toBe(true);
-    await expect(second).resolves.toBe(true);
+    await expect(first).resolves.toBe("accepted");
+    await expect(second).resolves.toBe("accepted");
     expect(stored().paired).toEqual([{ ...CLAUDE, acceptedAt: AT }]);
   });
 
@@ -211,7 +229,7 @@ describe("T096b pairing across several sessions of one agent", () => {
     expect(projections.filter((state) => state.pending?.agentId === "agent-1")).toHaveLength(1);
   });
 
-  it("refuses every waiting session when the prompt is abandoned", async () => {
+  it("settles every waiting session as abandoned, not as any answer of the owner's", async () => {
     const { controller } = controllerWith();
 
     const first = controller.decidePairing(CLAUDE);
@@ -220,15 +238,16 @@ describe("T096b pairing across several sessions of one agent", () => {
 
     await controller.abandonPending();
 
-    await expect(first).resolves.toBe(false);
-    await expect(second).resolves.toBe(false);
+    // The link went away; the owner decided nothing (FR-032a). The bridge answers this with silence.
+    await expect(first).resolves.toBe("abandoned");
+    await expect(second).resolves.toBe("abandoned");
   });
 
   it("still answers an already-paired agent's every session at once, with no prompt", async () => {
     const { controller } = controllerWith({ paired: [{ ...CLAUDE, acceptedAt: AT }] });
 
-    await expect(controller.decidePairing(CLAUDE)).resolves.toBe(true);
-    await expect(controller.decidePairing(CLAUDE)).resolves.toBe(true);
+    await expect(controller.decidePairing(CLAUDE)).resolves.toBe("accepted");
+    await expect(controller.decidePairing(CLAUDE)).resolves.toBe("accepted");
     expect((await controller.state()).pending).toBeUndefined();
   });
 });
@@ -290,7 +309,7 @@ describe("T111f the stored record outranks the cache", () => {
     writeElsewhere({ paired: [{ ...OTHER, acceptedAt: AT }] });
     await controller.decide("agent-1", true);
 
-    await expect(decision).resolves.toBe(true);
+    await expect(decision).resolves.toBe("accepted");
     expect(stored().paired).toEqual([{ ...OTHER, acceptedAt: AT }, { ...CLAUDE, acceptedAt: AT }]);
   });
 });
@@ -336,14 +355,14 @@ describe("T111g an external accept settles the waiting sessions", () => {
     // The only thing that happens: the durable record gains the agent. No `decide` call.
     writeElsewhere({ paired: [{ ...CLAUDE, acceptedAt: AT }] });
 
-    await expect(decision).resolves.toBe(true);
+    await expect(decision).resolves.toBe("accepted");
     expect((await controller.state()).pending).toBeUndefined();
   });
 
   it("leaves a session waiting when the external write pairs a different agent", async () => {
     const { controller, writeElsewhere } = controllerWith(EMPTY_PAIRING_STATE);
 
-    let settled: boolean | undefined;
+    let settled: string | undefined;
     void controller.decidePairing(CLAUDE).then((accepted) => {
       settled = accepted;
     });
@@ -368,5 +387,72 @@ describe("T111g an external accept settles the waiting sessions", () => {
 
     await expect(controller.isPaired("agent-1")).resolves.toBe(false);
     expect(projections.at(-1)?.paired).toEqual([]);
+  });
+});
+
+/**
+ * Live finding 2026-09-24: the host withdraws a request at its bound and asks again on the next call,
+ * so one session can reach the worker twice for one card. Only the newest may be answered - two
+ * answers for one Ignore reached the host as two declines, and the second refused the agent's next
+ * request before the owner had seen it.
+ */
+describe("FR-032a one answer per session", () => {
+  it("answers only a session's newest request and lets the withdrawn one go silently", async () => {
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => AT,
+    });
+
+    const first = controller.decidePairing({ ...CLAUDE, sessionId: "s-1" });
+    await controller.ready();
+    const second = controller.decidePairing({ ...CLAUDE, sessionId: "s-1" });
+    await controller.ready();
+    const other = controller.decidePairing({ ...CLAUDE, sessionId: "s-2" });
+    await controller.ready();
+
+    await controller.ignore("agent-1");
+
+    await expect(first).resolves.toBe("abandoned");
+    await expect(second).resolves.toBe("declined");
+    await expect(other).resolves.toBe("declined");
+  });
+});
+
+/**
+ * 003 FR-032a review F1: a transition whose write failed is not believed. Before FR-032a a failed
+ * decision left the session sticky-refused, so a half-applied prompt was unreachable; now the host
+ * re-requests after its bound, and that re-request must reach the panel as a prompt.
+ */
+describe("FR-032a F1 a failed write is not taken", () => {
+  it("raises the prompt to the panel on the re-request after a failed write", async () => {
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    let failNext = true;
+    const projections: PairingState[] = [];
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        if (failNext) {
+          failNext = false;
+          throw new Error("storage unavailable");
+        }
+        stored = state;
+      },
+      now: () => AT,
+      onChange: (state) => projections.push(state),
+    });
+
+    await expect(controller.decidePairing(CLAUDE)).rejects.toThrow("storage unavailable");
+    expect((await controller.state()).pending).toBeUndefined();
+    expect(projections).toEqual([]);
+
+    void controller.decidePairing(CLAUDE);
+    await controller.ready();
+
+    expect((await controller.state()).pending).toEqual(CLAUDE);
+    expect(projections.at(-1)?.pending).toEqual(CLAUDE);
   });
 });

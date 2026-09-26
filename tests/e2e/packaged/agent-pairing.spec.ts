@@ -76,6 +76,10 @@ test.describe("agent pairing", () => {
       // period. It is present only while the page is (006 FR-082), so it is clicked if it is there.
       await clickIfPresent(ui("agent.retry"));
 
+      // --- SC-020: the first tool call is what asks the owner (FR-059a: connecting asks nothing). ---
+      // Not awaited: it waits on the owner's answer, which is given below.
+      const firstCall = first.callTool("tabs_context", {}, { timeoutMs: 120_000 });
+
       // --- The pairing prompt, with the agent's stated name and the forwarding disclosure. ---
       await waitForText(ui("agent.pairingTitle"));
       const prompt = await panelText();
@@ -86,8 +90,8 @@ test.describe("agent pairing", () => {
       // 006: paired shows as the status row; the card is gone with the decision.
       await waitForText(ui("agent.status.connected"));
 
-      // --- SC-020: the first tool call now goes all the way through and comes back. ---
-      const context = await first.callTool("tabs_context");
+      // --- SC-020: the call that raised the prompt now goes all the way through and comes back. ---
+      const context = await firstCall;
       expect(context.isError, `mcp-server stderr:\n${first.stderr()}`).toBe(false);
       /**
        * 004/T111, the last of the B20 family. This asserted an empty list, because a session used

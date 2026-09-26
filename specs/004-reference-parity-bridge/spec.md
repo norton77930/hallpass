@@ -406,6 +406,15 @@ observe the tool state changed as in the reference's run.
 - **FR-059 (PR-020 — MUST)**: The call that raises a pairing request MUST wait for the owner's answer for
   at least 30 seconds and succeed if the owner accepts within that time, in the same call. If the bound
   passes without an answer the call MUST answer "not paired: no answer" and the request is withdrawn.
+- **FR-059a (PR-020 — MUST, amendment 2026-09-24, owner decision)**: Only a tool call MAY raise a pairing
+  request. An agent connecting - its client starting, the MCP handshake, the link to the browser being
+  (re)established, the extension being reloaded - MUST NOT put a pairing card in front of the owner.
+  Origin: with several coding-agent windows open, every connect and every extension reload raised a card
+  the owner had not asked for (observed 2026-09-24). The earlier raise-on-connect was an implementation
+  choice (T100) made while a call could wait at most ~60 s; since 011 a call waits up to 2 minutes with
+  a where-to-click notice, so nothing is lost by asking at the first call. Whatever the host learned from
+  the answer on connect (browser run, worker features, 013/R-184, 014/R-187) MUST still be known before
+  the first call that needs it.
 - **FR-060 (PR-020, PR-007 — MUST)**: A paired session MUST be able to list every tab in the browser with
   its title, address, active state and window, each marked as held by this session, by another named
   session, or by no session (the owner's). Listing MUST NOT read page content.

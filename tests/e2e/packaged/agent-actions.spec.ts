@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -77,7 +77,7 @@ test.describe("agent actions", () => {
       await panel.clickIfPresent(ui("agent.retry"));
       // T098a: the prompt by its own key, Accept clicked, and pairing confirmed by a signal that
       // is false when nothing is paired - the panel's section heading is on screen either way.
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(client, panel, { locale });
 
       // --- The session opens its own tab. It is the only tab any effect below may touch. ---
       const created = await call("tabs_create", { url: `${SITE}/ordinary` });

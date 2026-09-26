@@ -187,7 +187,8 @@ describe("T018 agent runtime wiring", () => {
       browserRunId: expect.any(String),
       // 014/R-187: and what this worker can be asked - the host asks about an upload directory
       // only where a card can actually be raised.
-      features: ["upload-consent"],
+      // 015 FR-219: and that it takes a withdrawal, which is what lets the host name its exchange.
+      features: ["upload-consent", "pair-withdraw"],
     });
 
     await runtime.tabs.adopt("session-h1", 7);
@@ -377,7 +378,7 @@ describe("T018 agent runtime wiring", () => {
       let connected = false;
       const presenceListeners: Array<(value: boolean) => void> = [];
       runtime.bindPanelPresence({
-        isConnected: () => connected,
+        isVisible: () => connected,
         onPresenceChange: (listener) => presenceListeners.push(listener),
       });
       runtime.start();
@@ -588,6 +589,50 @@ describe("T018 agent runtime wiring", () => {
     );
     // The ring went with the session (FR-080): nothing of it is left in session storage.
     await vi.waitFor(() => expect(JSON.stringify(fake.session)).not.toContain("report.csv"));
+  });
+
+  /**
+   * 015/T405, T406 (FR-200) - the download observer reaches the press path. Without it a press
+   * reports no downloads and, honestly, no `observedForMs` either; a press after which nothing
+   * happened answering with its window is what shows the runtime handed the observer over.
+   */
+  it("answers a press that caused nothing with the window it observed", async () => {
+    (globalThis as { chrome: Record<string, unknown> }).chrome.debugger = {
+      async getTargets() {
+        return [];
+      },
+      async attach() {},
+      async detach() {},
+      async sendCommand(_target: unknown, method: string) {
+        if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        return {};
+      },
+      onEvent: { addListener() {} },
+      onDetach: { addListener() {} },
+    };
+    const port = fakePort();
+    const runtime = composeAgentRuntime({ connectNative: () => port });
+    runtime.start();
+    port.emit(HELLO);
+    port.emit(PAIR_REQUEST);
+    await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+    await runtime.pairing.decide("agent-1", true);
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+    await runtime.tabs.adopt("session-h1", 7);
+    await runtime.siteModes.set("https://agent.test", { mode: "skip-checks" });
+
+    port.emit({
+      callId: "call-1",
+      sessionId: "session-h1",
+      tool: "computer",
+      tabId: 7,
+      args: { tabId: 7, action: "left_click", x: 400, y: 300 },
+    });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(2), { timeout: 3_000 });
+
+    const answer = port.sent[1] as { outcome?: string; result?: { observed?: Record<string, unknown> } };
+    expect(answer.outcome).toBe("ok");
+    expect(answer.result?.observed?.observedForMs).toEqual(expect.any(Number));
   });
 
   /**

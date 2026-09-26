@@ -31,6 +31,28 @@ below shows already exists in a first form the owner has not yet seen.
 - **D-011-4** — The pointer: the owner watches the current glide on a real site first; the upgrade
   to a curved path with a spring settle is specified below but gated on D-011-5.
 
+**Amendment (2026-09-24, owner-reported defect, fixed in bfae830)**:
+
+- **D-011-6** — "No panel is connected" in D-011-3, FR-146, FR-147, FR-148 and the Attention state
+  means **no Hallpass panel is open in the window the person is using** — the browser's last-focused
+  normal window — not "no panel document exists anywhere". Observed 2026-09-23 during an owner demo:
+  a panel open in another window counted as connected, so the pairing card was drawn where nobody was
+  looking, the badge stayed off, the 45 s bound applied and the calls ended `not-paired: no answer`.
+  The panel reports its own window when it connects; the worker follows window focus. A panel whose
+  window is not yet known counts as not visible (the person is told rather than left waiting).
+  Cards are still delivered to every connected panel. Live-verified on branded Chrome 2026-09-24:
+  panel closed → bound 120 s with the closed-panel sentence and the badge shown. Not yet exercised
+  live: the panel-in-another-window arrangement itself (unit-tested). *Live-verified 2026-09-24:*
+  panel in window B, owner in window A → 120 s, closed-panel sentence and badge.
+- **D-011-7 (2026-09-24, owner-approved follow-up)** — The bound was chosen once, when the question
+  was raised: a card raised while the person was in the panel's window kept the 45 s / 25 s bound even
+  after they moved to another window, so the badge came on but the wait stayed short (observed live
+  2026-09-24). When the panel stops being visible while a pairing or consent question waits, that
+  question MUST from then on behave as one raised with no panel visible: the progress notice with the
+  where-to-click sentence starts, and the wait is extended to 2 minutes counted from when the question
+  was raised. The reverse is unchanged: a panel becoming visible never shortens a running bound
+  (edge case above).
+
 **Authoritative Source Order**: Constitution (IV explicit uncertainty, V least privilege, VII
 observable, XI defined failure) → `docs/product-requirements-draft.md` PR-020 (pairing) and the
 draft candidate FR-017 (attention-required notification, chosen here in its in-product,
@@ -218,8 +240,11 @@ arrival; for the upgraded form, assert the path is not a straight segment and th
 - **Pending question**: kind (pairing | ask | plan | dialog | diagnostics), session, raised-at,
   bound (25 s / 45 s / 120 s), whether a panel was connected when raised.
 - **Attention state**: badge text + title, derived from "any pending question and no panel
-  connected"; cleared on answer, expiry or panel connect.
-- **Panel presence**: the set of connected panel documents; empty = closed.
+  visible" (D-011-6); cleared on answer, expiry, or a panel becoming visible (connecting in, or focus
+  moving to, the person's window).
+- **Panel presence**: the set of connected panel documents, each with the window it reported;
+  *visible* = one of them is in the last-focused normal window (D-011-6). Wherever this spec says
+  "no panel connected" / "panel closed", read "no panel visible".
 
 ## Success Criteria *(mandatory)*
 

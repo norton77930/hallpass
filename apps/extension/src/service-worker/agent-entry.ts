@@ -1,4 +1,5 @@
 import { AGENT_PANEL_PORT_NAME } from "@hallpass/contracts";
+import { watchLastFocusedWindow } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
 import { createAgentPanelPort, type AgentPanelPortLike } from "./agent-panel-port.js";
 import { composeAgentRuntime } from "./agent-runtime.js";
@@ -32,6 +33,9 @@ export function startAgentPath(input: { extensionId: string; sidePanelUrl: strin
     // a port that could not be written - on the worker console, where the blind-panel
     // investigation of 2026-09-16 had nothing to read.
     reportDiagnostic: reportTestDiagnostic,
+    // Which window the owner is in, so "a panel is open" means one they can see (fix 2026-09-23,
+    // panel in another window).
+    watchFocusedWindow: watchLastFocusedWindow,
   });
   // The two halves are introduced here because neither can be built with the other in hand: the
   // panel port is built from the runtime, and the runtime needs to know whether anybody is looking

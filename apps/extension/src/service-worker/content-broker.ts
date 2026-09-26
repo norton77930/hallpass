@@ -121,7 +121,22 @@ function contentFrame(input: {
  * of magnitude above a real page round trip so it can only end a hang, never a working page. It is a
  * termination bound for this path only and is not a latency target for anything else.
  */
-const CONTENT_OPERATION_DEADLINE_MS = 10_000;
+export const CONTENT_OPERATION_DEADLINE_MS = 10_000;
+
+/**
+ * The failures `withDeadline` itself raised (015/T401, FR-206, R-197).
+ *
+ * A deadline is a different fact from every other way a round trip can fail: the page is still
+ * there, its frame simply did not answer in time, and asking again may well work. The failure it
+ * raises keeps its existing code - every caller that classifies by code reads it exactly as before -
+ * and is remembered here as well, so the one caller that has to tell "did not answer" from "is not
+ * there" (`probeActiveTab`) can, without a new failure code in the port vocabulary.
+ */
+const deadlineFailures = new WeakSet<object>();
+
+function isDeadline(error: unknown): boolean {
+  return typeof error === "object" && error !== null && deadlineFailures.has(error);
+}
 
 function withDeadline<T>(
   operation: Promise<T>,
@@ -130,7 +145,9 @@ function withDeadline<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(pageFailure(code, outcomeCode));
+      const failure = pageFailure(code, outcomeCode);
+      deadlineFailures.add(failure);
+      reject(failure);
     }, CONTENT_OPERATION_DEADLINE_MS);
     operation.then(
       (value) => {
@@ -1309,6 +1326,17 @@ function isKeyPressKey(value: unknown): value is KeyPressKey {
 }
 
 /**
+ * What `probeActiveTab` answers: the port's own answers, plus `deadline` (015/T401, FR-206).
+ *
+ * `deadline` is a frame that took the probe and did not answer within the content deadline. It is
+ * not `stale-context` - the tab is there, on the same origin, and nothing says its document moved -
+ * so a caller that reports it has to be able to say so rather than calling a live page gone
+ * (R-197: measured at 10 033 ms on a `complete` tab on the right URL). A caller that only asks "is
+ * the document intact" reads it as the not-ok it is.
+ */
+export type ActiveTabProbeResult = Awaited<ReturnType<PagePostEffectProbe>> | { ok: false; reason: "deadline" };
+
+/**
  * Post-effect verification probe. It asks the runtime that is already bound to the leased tab for
  * its current document binding and never injects: a document that replaced itself has no runtime
  * to answer, and that silence is exactly the evidence the worker needs. It runs after the effect
@@ -1329,7 +1357,7 @@ export async function probeActiveTab(input: {
    * into an unverified one (003 M2 review A8, FR-040).
    */
   tab?: number;
-}): ReturnType<PagePostEffectProbe> {
+}): Promise<ActiveTabProbeResult> {
   let page: ActivePageBinding;
   try {
     page = await resolveBoundPage(input.tab);
@@ -1344,6 +1372,8 @@ export async function probeActiveTab(input: {
     return { ok: true, documentEpoch: binding.documentEpoch, canonicalOrigin: binding.canonicalOrigin };
   } catch (error) {
     if (isNoReceiver(error)) return { ok: false, reason: "document-replaced" };
+    // 015/T401: the frame is there and did not answer in time - its own answer, never `stale`.
+    if (isDeadline(error)) return { ok: false, reason: "deadline" };
     return { ok: false, reason: "stale-context" };
   }
 }

@@ -86,7 +86,29 @@ const FIXTURES = [
    * otherwise the page refuses the upload for its own reasons and the card proves nothing.
    */
   "upload-multi",
+  /**
+   * 015/T417: one press, two downloads, finishing out of the order they began - a slow file first
+   * (its body held back by the server, see `TWO_DOWNLOADS_SLOW_MS`) and a fast one second, so the
+   * second finishes first and a `download-complete` wait has two completions to answer in order.
+   */
+  "two-downloads",
+  /**
+   * 015/T403: every outcome a press can have, one control each (FR-200, FR-201, SC-109) - a link
+   * that navigates this tab, a link that opens a new tab, a link to a file the server sends as an
+   * attachment, a link whose handler cancels it, and a button that opens a tab from script.
+   */
+  "press-outcomes",
+  /**
+   * 015/T413: a form a whole batch fills in (FR-210) - a text field, a file input for a file of the
+   * owner's own, a second one for a screenshot, and a submit whose own handler writes down all three.
+   * Two inputs rather than one, because "both files arrived" is only a fact about a page that could
+   * hold both at once.
+   */
+  "batch-upload",
 ] as const;
+
+/** 015/T417: how long the slow file of `/two-downloads` holds back the rest of its body. */
+const TWO_DOWNLOADS_SLOW_MS = 1_500;
 
 type FixtureName = (typeof FIXTURES)[number];
 
@@ -691,6 +713,60 @@ ${filler(4)}`,
 ${filler(4)}`,
       );
 
+    case "two-downloads":
+      return html(
+        "Two downloads",
+        `<h1>Two downloads</h1>
+<p>One press starts a slow file and then a fast one; the fast one finishes first.</p>
+<button type="button" id="download-both" onclick="document.getElementById('slow').click(); document.getElementById('fast').click(); document.getElementById('started').textContent = 'started both'">Download both</button>
+<p id="started">nothing started yet</p>
+<p><a id="slow" download="slow.csv" href="/two-downloads/slow.csv">Download slow file</a> · <a id="fast" download="fast.csv" href="/two-downloads/fast.csv">Download fast file</a></p>
+${filler(4)}`,
+      );
+
+    case "press-outcomes":
+      // 015/T403: one control per outcome. The cancelled link keeps a real address, which is the
+      // whole point of it - a link with an address that goes nowhere is what FR-201's hint is for.
+      // 015/T402: `#busy` holds the page's main thread for 15 s, so the press that delivers its
+      // click is not answered by the renderer until then (FR-206, R-197).
+      return html(
+        "Press outcomes",
+        `<h1>Press outcomes</h1>
+<p>Each control below causes a different thing when pressed.</p>
+<ul>
+  <li><a id="same-tab" href="/ordinary?from=press-outcomes">Go to the ordinary page</a></li>
+  <li><a id="cross-origin" href="https://${HOST}:${TEST_PAGE_UNKNOWN_PORT}/ordinary?from=cross-origin">Go to another site</a></li>
+  <li><a id="redirected" href="/press-outcomes/go">Go through a redirect</a></li>
+  <li><a id="new-tab" href="/ordinary?from=new-tab" target="_blank">Open the ordinary page in a new tab</a></li>
+  <li><a id="download" href="/press-outcomes/report.csv">Download the report</a></li>
+  <li><a id="cancelled" href="/ordinary?from=cancelled" onclick="event.preventDefault(); document.getElementById('handled').textContent = 'handled by the page'">A link the page handles itself</a></li>
+</ul>
+<button type="button" id="open-tab" onclick="window.open('/ordinary?from=window-open')">Open a tab from script</button>
+<button type="button" id="busy" onclick="const end = Date.now() + 15000; while (Date.now() < end) {}">Keep the page busy</button>
+<p id="handled">nothing handled yet</p>
+${filler(4)}`,
+      );
+
+    case "batch-upload":
+      // 015/T413: every report is written by the page's own handlers, so a step that never ran
+      // leaves its line exactly as it was served. No control is named `document` or `title`: an
+      // inline handler's scope includes the form, whose named controls would shadow both.
+      return html(
+        "Batch upload",
+        `<h1>Batch upload</h1>
+<p>A subject, an attachment, a picture, and a submit that reports all three.</p>
+<form id="batch-form" onsubmit="var f = this.elements; var list = function (input) { return Array.from(input.files).map(function (file) { return file.name + ':' + file.size; }).join(', ') || 'none'; }; document.getElementById('received').textContent = 'subject=' + f.subject.value + '; attachment=' + list(f.attachment) + '; picture=' + list(f.picture); return false">
+  <label>Subject <input type="text" name="subject" aria-label="Subject"></label>
+  <label>Attachment <input type="file" name="attachment" aria-label="Attachment" onchange="document.getElementById('attachment-report').textContent = Array.from(this.files).map(function (file) { return file.name + ':' + file.size; }).join(', ') || 'no file chosen'"></label>
+  <label>Picture <input type="file" name="picture" aria-label="Picture" onchange="document.getElementById('picture-report').textContent = Array.from(this.files).map(function (file) { return file.name + ':' + file.size + ':' + file.type; }).join(', ') || 'no file chosen'"></label>
+  <button type="submit" id="send">Send</button>
+</form>
+<p id="attachment-report">no file chosen</p>
+<p id="picture-report">no file chosen</p>
+<p id="received">nothing submitted yet</p>
+${filler(4)}`,
+      );
+
     case "origin-change":
       return html(
         "Origin-change fixture",
@@ -754,6 +830,8 @@ function handle(port: number, request: IncomingMessage, response: ServerResponse
     "/go-b": `https://${HOST}:${TEST_PAGE_UNKNOWN_PORT}/transition-b`,
     "/go-c": `https://${HOST}:${TEST_PAGE_DENY_PORT}/transition-b`,
     "/go-bc": `https://${HOST}:${TEST_PAGE_UNKNOWN_PORT}/go-c`,
+    // 015/T408: a same-origin redirect behind a press (SC-109's redirect variant).
+    "/press-outcomes/go": "/ordinary?from=redirect",
   };
   const redirect = redirects[path];
   if (redirect) {
@@ -765,6 +843,47 @@ function handle(port: number, request: IncomingMessage, response: ServerResponse
   if (path === "/manual.pdf") {
     response.writeHead(200, { "content-type": "application/pdf", "cache-control": "no-store" });
     response.end("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF");
+    return;
+  }
+
+  /**
+   * 015/T417 — the two files `/two-downloads` starts. Both are attachments. The slow one sends its
+   * headers and first line at once, so the browser creates the download straight away, and holds
+   * back the rest for `TWO_DOWNLOADS_SLOW_MS`; the fast one is whole at once.
+   */
+  if (path === "/two-downloads/slow.csv" || path === "/two-downloads/fast.csv") {
+    const slow = path.endsWith("slow.csv");
+    const head = "name,qty\n";
+    const rest = slow ? "slow,1\n" : "fast,2\n";
+    response.writeHead(200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="${slow ? "slow" : "fast"}.csv"`,
+      "content-length": String(Buffer.byteLength(head + rest)),
+      "cache-control": "no-store",
+    });
+    if (!slow) {
+      response.end(head + rest);
+      return;
+    }
+    response.write(head);
+    setTimeout(() => response.end(rest), TWO_DOWNLOADS_SLOW_MS);
+    return;
+  }
+
+  /**
+   * 015/T403 — the file `/press-outcomes`'s download link points at. An attachment by the server's
+   * own header, with no `download` attribute on the link: the press is an ordinary navigation that
+   * the browser turns into a download, which is the case the tab's own URL never shows.
+   */
+  if (path === "/press-outcomes/report.csv") {
+    const body = "name,qty\nreport,1\n";
+    response.writeHead(200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": 'attachment; filename="report.csv"',
+      "content-length": String(Buffer.byteLength(body)),
+      "cache-control": "no-store",
+    });
+    response.end(body);
     return;
   }
 

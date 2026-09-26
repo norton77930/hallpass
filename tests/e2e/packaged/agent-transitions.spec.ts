@@ -1,7 +1,7 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { transitionNoticeText } from "@hallpass/contracts";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { acceptPairing, pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, setTransitionTestSwitch, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -82,7 +82,7 @@ test.describe("agent transitions", () => {
       const first = alpha;
       const call = callerFor(() => alpha);
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(first, panel, { locale, timeoutMs: 45_000 });
 
       // ============ (5.1) the switch unset: a loopback destination asks nothing ============
       const loopbackTab = ((await call("tabs_create", { url: `${A}/transition-a` })) as { tabId: number }).tabId;
@@ -231,7 +231,7 @@ test.describe("agent transitions", () => {
       beta = await startMcpClient({ clientName: "Claude Code" });
       const secondSession = beta;
       const callBeta = callerFor(() => beta);
-      await acceptPairing(panel, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(secondSession, panel, { locale, timeoutMs: 45_000 });
       const tabBeta = ((await callBeta("tabs_create", { url: `${A}/transition-a` })) as { tabId: number }).tabId;
       await callBeta("navigate", { tabId: tabBeta, url: `${A}/go-b` });
       await expect.poll(() => urlOf(extensionWorker, tabBeta), { timeout: 20_000 }).toContain(":19445/");

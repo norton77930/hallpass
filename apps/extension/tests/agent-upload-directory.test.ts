@@ -168,7 +168,7 @@ describe("T378 the owner's answer about a directory", () => {
         agentId: "agent-1",
         sessionId: SESSION,
         accepted: true,
-        features: ["upload-consent"],
+        features: ["upload-consent", "pair-withdraw"],
       }),
     ]);
   });
@@ -295,7 +295,7 @@ describe("T378 the owner's answer about a directory", () => {
     try {
       const { port, runtime } = await pairedRuntime();
       // Nobody is looking: the controller takes the long bound and fixes the sentence at the raise.
-      runtime.bindPanelPresence({ isConnected: () => false, onPresenceChange: () => undefined });
+      runtime.bindPanelPresence({ isVisible: () => false, onPresenceChange: () => undefined });
 
       port.emit(CONSENT_REQUEST);
       await directoryCard(runtime);

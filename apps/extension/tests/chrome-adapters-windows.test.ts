@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { resizeWindow } from "../src/chrome-adapters/windows.js";
+import { resizeWindow, watchLastFocusedWindow } from "../src/chrome-adapters/windows.js";
 
 /**
  * resize_window on a window that is not in the "normal" state (found 2026-09-16 on the owner's
@@ -92,5 +92,61 @@ describe("resizeWindow on a window that is not in the normal state", () => {
     const resized = await resizeWindow(903, { width: 4000, height: 3000 });
 
     expect(resized.size).toEqual({ width: 1920, height: 1080 });
+  });
+});
+
+/**
+ * Fix 2026-09-23, panel in another window: the owner's last-focused normal window.
+ *
+ * The case that matters most is the owner leaving Chrome for the terminal their agent runs in -
+ * Chrome says `WINDOW_ID_NONE`, and the window they will come back to must still count.
+ */
+describe("watchLastFocusedWindow", () => {
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, "chrome");
+  });
+
+  function installChrome(lastFocused: Promise<{ id?: number }>) {
+    const listeners: Array<(windowId: number) => void> = [];
+    const filters: unknown[] = [];
+    (globalThis as { chrome?: unknown }).chrome = {
+      windows: {
+        WINDOW_ID_NONE: -1,
+        getLastFocused: () => lastFocused,
+        onFocusChanged: {
+          addListener(listener: (windowId: number) => void, filter: unknown) {
+            listeners.push(listener);
+            filters.push(filter);
+          },
+        },
+      },
+    };
+    return { focus: (windowId: number) => listeners.forEach((listener) => listener(windowId)), filters };
+  }
+
+  it("reads the last-focused window, follows moves, and keeps it while Chrome has no focus", async () => {
+    const chrome = installChrome(Promise.resolve({ id: 1 }));
+    const seen: number[] = [];
+
+    watchLastFocusedWindow((windowId) => seen.push(windowId));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    chrome.focus(2);
+    chrome.focus(-1);
+
+    expect(seen).toEqual([1, 2]);
+    expect(chrome.filters).toEqual([{ windowTypes: ["normal"] }]);
+  });
+
+  it("lets a focus move that lands before the first read win over it", async () => {
+    let answer!: (window: { id: number }) => void;
+    const chrome = installChrome(new Promise((resolve) => (answer = resolve)));
+    const seen: number[] = [];
+
+    watchLastFocusedWindow((windowId) => seen.push(windowId));
+    chrome.focus(2);
+    answer({ id: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(seen).toEqual([2]);
   });
 });

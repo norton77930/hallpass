@@ -2,7 +2,7 @@ import type { Page } from "@playwright/test";
 import { AGENT_READ_PAGE_MAX_CHARS } from "@hallpass/contracts";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -65,7 +65,7 @@ test.describe("agent refs", () => {
       const live = client;
       const call = callerFor(() => client);
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(client, panel, { locale });
 
       // ============= 1. a ref from the first of three reads still resolves and clicks =============
       const created = (await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number };

@@ -27,7 +27,7 @@ import {
   type FrameSubtreeNode,
 } from "./frames.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
-import type { AgentPageBinding, AgentPageBindings } from "./page-binding.js";
+import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { captureFrameFacts, photographTab, type PhotographDeps } from "./photograph.js";
@@ -567,8 +567,9 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     const bound = await deps.bindings.bind(tabId, context);
     if (!bound.ok) {
       // FR-039: a restricted scheme, a PDF, the web store - one word for the whole family, and the
-      // read's word for it rather than the effect's.
-      return answer(callId, bound.reason === "not-actionable" ? "not-readable" : "stale", bound.reason);
+      // read's word for it rather than the effect's. 015/FR-205: a page that did not answer is not
+      // `stale` either.
+      return bindingFailureResponse(callId, bound, "not-readable");
     }
 
     if (tool === "get_page_text") {

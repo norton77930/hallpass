@@ -9,7 +9,7 @@ import type { SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
-import type { AgentPageBinding, AgentPageBindings } from "./page-binding.js";
+import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { discoverRefFrame } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
@@ -107,10 +107,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     const context = deps.context.forCall(request.sessionId, callId);
     const bound = await deps.bindings.bind(tabId, context);
     if (!bound.ok) {
-      return {
-        ok: false,
-        response: answer(callId, bound.reason === "not-actionable" ? "not-actionable" : "stale", bound.reason),
-      };
+      return { ok: false, response: bindingFailureResponse(callId, bound, "not-actionable") };
     }
     const binding = bound.binding;
 

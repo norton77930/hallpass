@@ -29,6 +29,14 @@ export function questionOnTop(state: Pick<AgentPanelState, "pending" | "prompt" 
   // A stable sort: two questions with the same stamp keep the fixed order above.
   return candidates.sort((left, right) => stamp(left.at) - stamp(right.at))[0]?.kind;
 }
+/** How long the pairing card stays highlighted after another connection joins it (item 2, 2026-09-24). */
+export const PAIRING_JOINED_HIGHLIGHT_MS = 1500;
+
+/** Whether the owner asked for less motion, read as `indicator.ts` reads it. */
+function prefersStillness(): boolean {
+  return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+}
+
 /** How long a notice stays up on its own before the panel takes it away (FR-114). */
 export const NOTICE_AUTO_HIDE_MS = 8000;
 
@@ -103,20 +111,56 @@ export function PromptCard(props: {
     cardRef.current?.querySelector<HTMLElement>("button, input, select")?.focus();
   }, [onTop, questionId]);
 
+  /**
+   * Item 2 (2026-09-24): another connection joining the pairing card already on screen. The card is
+   * about the agent, so it stays exactly as it was - which is why the owner could not tell a second
+   * request had arrived. A rise in the count briefly marks the card (a pulse, or a still change for
+   * an owner who asked for less motion); the first render and a fall in the count do not.
+   */
+  const pendingAgent = pending?.agentId;
+  const waitingSessions = pending?.waitingSessions;
+  const counted = useRef<{ agentId: string; count: number } | undefined>(undefined);
+  const [joined, setJoined] = useState<"pulse" | "still" | undefined>(undefined);
+  useEffect(() => {
+    const before = counted.current;
+    counted.current =
+      pendingAgent !== undefined && waitingSessions !== undefined ? { agentId: pendingAgent, count: waitingSessions } : undefined;
+    if (pendingAgent === undefined || waitingSessions === undefined) return;
+    if (before?.agentId !== pendingAgent || waitingSessions <= before.count) return;
+    setJoined(prefersStillness() ? "still" : "pulse");
+    const timer = setTimeout(() => setJoined(undefined), PAIRING_JOINED_HIGHLIGHT_MS);
+    return () => clearTimeout(timer);
+  }, [pendingAgent, waitingSessions]);
+
   if (pending && onTop === "pairing") {
     const accept = (): void => {
       props.send({ type: "ui.agent.pair-decide", payload: { agentId: pending.agentId, accepted: true } });
     };
-    // FR-084: ignore is not a decline. The request is left to expire at the host, never answered no.
+    // FR-084 (amended 2026-09-24): ignore declines this one request - the agent hears at once and
+    // may ask again on its next call; nothing is remembered. The worker does the answering.
     const ignore = (): void => {
       props.send({ type: "ui.agent.pair-ignore", payload: { agentId: pending.agentId } });
     };
     return (
-      <section ref={cardRef} role="dialog" aria-modal="false" aria-labelledby="agent-prompt-title" className="agent-prompt" data-prompt="pairing">
+      <section
+        ref={cardRef}
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="agent-prompt-title"
+        className="agent-prompt"
+        data-prompt="pairing"
+        {...(joined === undefined ? {} : { "data-joined": joined })}
+      >
         <h2 id="agent-prompt-title">{t("agent.pairingTitle")}</h2>
         {/* The agent's own stated name and origin, as inert text - it is remote input. */}
         <p>{t("agent.pairingBody").replace("{agent}", () => pending.displayName)}</p>
         <p>{t("agent.pairingOrigin").replace("{origin}", () => pending.origin)}</p>
+        {/* Always in the DOM, so a count that appears is announced; empty for a single connection. */}
+        <p className="agent-prompt-waiting" aria-live="polite">
+          {waitingSessions !== undefined && waitingSessions >= 2
+            ? t("agent.pairingWaiting").replace("{count}", () => String(waitingSessions))
+            : ""}
+        </p>
         {/* FR-035: the one sentence that says the agent may forward what it reads onward. */}
         <p>{t("agent.forwardingDisclosure")}</p>
         <div className="agent-prompt-actions">

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentControlFrameSchema, agentLinkFrameSchema } from "@hallpass/contracts";
+import { agentControlFrameSchema, agentLinkFrameSchema, PAIRING_DECLINED_MARKER } from "@hallpass/contracts";
 import {
   AGENT_RECONNECT_BASE_MS,
   AGENT_RECONNECT_MAX_MS,
@@ -50,7 +50,7 @@ function bridgeWith(overrides: Partial<Parameters<typeof createAgentBridge>[0]> 
   const statuses: string[] = [];
   const bridge = createAgentBridge({
     connectNative: () => port,
-    decidePairing: async () => true,
+    decidePairing: async () => "accepted" as const,
     callTool: async (request) => ({ callId: request.callId, outcome: "ok", result: [] }),
     scheduleRetry,
     onStatusChange: (status) => statuses.push(status),
@@ -73,7 +73,7 @@ describe("T013 agent bridge", () => {
   });
 
   it("answers a pairing request with the owner's decision", async () => {
-    const decidePairing = vi.fn(async () => true);
+    const decidePairing = vi.fn(async () => "accepted" as const);
     const { bridge, port } = bridgeWith({ decidePairing });
     bridge.connect();
 
@@ -147,24 +147,178 @@ describe("T013 agent bridge", () => {
     });
   });
 
-  it("echoes the asking session even when the decision throws (T094a)", async () => {
-    const decidePairing = vi.fn(async () => {
-      throw new Error("storage-gone");
-    });
-    const { bridge, port } = bridgeWith({ decidePairing });
+  /**
+   * 003 FR-032a - the owner's decline answers one request, and the frame has to say so.
+   *
+   * The mark rides in `features` because that is the one field of this strict frame a 0.6.0 host
+   * already accepts any member of: a new key would make that host drop the whole answer, and with it
+   * the unpair FR-032 says takes effect at once. The host reads an unmarked refusal as an unpair.
+   */
+  it("marks the owner's decline, beside what the worker can be asked (FR-032a)", async () => {
+    const { bridge, port } = bridgeWith({ decidePairing: async () => "declined" as const });
     bridge.connect();
 
-    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h2" });
+    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h3" });
     await vi.waitFor(() => expect(port.sent).toHaveLength(1));
-
-    // The refusal has to be routable for the same reason the acceptance does: a server left waiting
-    // on an answer that was dropped is indistinguishable from a bridge that is not there.
     expect(port.sent[0]).toEqual({
       type: "pair-result",
       agentId: "agent-1",
-      sessionId: "session-h2",
+      sessionId: "session-h3",
       accepted: false,
+      features: [PAIRING_DECLINED_MARKER],
     });
+    expect(agentControlFrameSchema.safeParse(port.sent[0]).success).toBe(true);
+
+    const withUpload = bridgeWith({ decidePairing: async () => "declined" as const, onUploadConsentRequest: () => undefined });
+    withUpload.bridge.connect();
+    withUpload.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h4" });
+    await vi.waitFor(() => expect(withUpload.port.sent).toHaveLength(1));
+    expect(withUpload.port.sent[0]).toMatchObject({ accepted: false, features: ["upload-consent", PAIRING_DECLINED_MARKER] });
+  });
+
+  it("leaves an unpair that settled a waiting request unmarked (FR-032a)", async () => {
+    const { bridge, port } = bridgeWith({ decidePairing: async () => "unpaired" as const });
+    bridge.connect();
+
+    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h5" });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+
+    expect(port.sent[0]).toEqual({ type: "pair-result", agentId: "agent-1", sessionId: "session-h5", accepted: false });
+  });
+
+  /**
+   * Neither of these is an answer of the owner's, so neither is sent as one (FR-032a).
+   *
+   * An unmarked refusal would now tell the agent the owner unpaired it and to reconnect; a marked one
+   * would tell it the owner declined. Silence leaves the host's own pairing bound to end the call as
+   * nobody having answered, and its next call asks again - which is also what an abandoned request
+   * already meant, since its link is gone and nothing sent here could reach the host anyway.
+   */
+  it("sends no answer when the decision fails or the request was abandoned", async () => {
+    const diagnostics: string[] = [];
+    const failing = bridgeWith({
+      decidePairing: async () => {
+        throw new Error("storage-gone");
+      },
+      reportDiagnostic: (code) => diagnostics.push(code),
+    });
+    failing.bridge.connect();
+    failing.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h2" });
+    await vi.waitFor(() => expect(diagnostics).toContain("agent.bridge.pairing-failed"));
+
+    const abandoned = bridgeWith({
+      decidePairing: async () => "abandoned" as const,
+      reportDiagnostic: (code) => diagnostics.push(code),
+    });
+    abandoned.bridge.connect();
+    abandoned.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h6" });
+    await vi.waitFor(() => expect(diagnostics).toContain("agent.bridge.pairing-abandoned"));
+
+    expect(failing.port.sent).toEqual([]);
+    expect(abandoned.port.sent).toEqual([]);
+  });
+
+  /**
+   * 015/T421 (FR-218, contracts/pairing-withdraw.md) — the answer names the exchange it answers.
+   *
+   * The host mints one id per pairing exchange and ignores an answer naming one it already
+   * withdrew, so the worker echoes the id of the request it is answering - and, facing a 0.7.0 host
+   * that sent none, sends none, which is the frame that host has always parsed.
+   */
+  it("echoes the request's id on its answer, and sends none when none was given (FR-218)", async () => {
+    const decidePairing = vi.fn(async () => "accepted" as const);
+    const { bridge, port } = bridgeWith({ decidePairing });
+    bridge.connect();
+
+    port.emit({
+      type: "pair-request",
+      agentId: "agent-1",
+      displayName: "Claude Code",
+      origin: "stdio:local",
+      sessionId: "session-h1",
+      requestId: "req-1",
+    });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+    expect(port.sent[0]).toEqual({
+      type: "pair-result",
+      agentId: "agent-1",
+      sessionId: "session-h1",
+      accepted: true,
+      requestId: "req-1",
+    });
+    expect(agentControlFrameSchema.safeParse(port.sent[0]).success).toBe(true);
+    // The controller keeps it beside the waiting session, so a withdrawal can name the same one.
+    expect(decidePairing).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-h1", requestId: "req-1" }));
+
+    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h2" });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+    expect(port.sent[1]).toEqual({ type: "pair-result", agentId: "agent-1", sessionId: "session-h2", accepted: true });
+  });
+
+  /**
+   * 015 FR-219 (S4 version-skew fix) - the worker says it can take a withdrawal before the host
+   * names an exchange to it.
+   *
+   * A 0.7.0 worker parses `pair-request` strictly, so a host that put `requestId` on it for that
+   * worker got no card at all. The host therefore sends the id only to a worker that advertised
+   * `pair-withdraw`, and this is the advertisement - derived from the handler, as `upload-consent`
+   * is, so it cannot outlive the thing it advertises.
+   */
+  it("advertises pair-withdraw beside what else it can be asked, only with a handler for it (FR-219)", async () => {
+    const withWithdraw = bridgeWith({ onPairWithdraw: () => undefined, onUploadConsentRequest: () => undefined });
+    withWithdraw.bridge.connect();
+    withWithdraw.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+    await vi.waitFor(() => expect(withWithdraw.port.sent).toHaveLength(1));
+    expect(withWithdraw.port.sent[0]).toMatchObject({ accepted: true, features: ["upload-consent", "pair-withdraw"] });
+    expect(agentControlFrameSchema.safeParse(withWithdraw.port.sent[0]).success).toBe(true);
+
+    const without = bridgeWith();
+    without.bridge.connect();
+    without.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h2" });
+    await vi.waitFor(() => expect(without.port.sent).toHaveLength(1));
+    expect(without.port.sent[0]).not.toHaveProperty("features");
+  });
+
+  it("hands a host's withdrawal to the runtime and answers nothing (FR-216, FR-217)", async () => {
+    const onPairWithdraw = vi.fn();
+    const diagnostics: string[] = [];
+    const { bridge, port } = bridgeWith({ onPairWithdraw, reportDiagnostic: (code) => diagnostics.push(code) });
+    bridge.connect();
+
+    port.emit({ type: "pair-withdraw", agentId: "agent-1", sessionId: "session-h1", requestId: "req-1" });
+    port.emit({ type: "pair-withdraw", agentId: "agent-1", sessionId: "session-h2" });
+    await Promise.resolve();
+
+    expect(onPairWithdraw.mock.calls).toEqual([
+      [{ agentId: "agent-1", sessionId: "session-h1", requestId: "req-1" }],
+      [{ agentId: "agent-1", sessionId: "session-h2" }],
+    ]);
+    expect(port.sent).toEqual([]);
+    expect(diagnostics).not.toContain("agent.bridge.frame-unexpected");
+  });
+
+  /**
+   * 015/T421 (FR-219) — the additive-frame rule the withdrawal relies on, seen from the decoder.
+   *
+   * A 0.7.0 worker meets `pair-withdraw` as a type it has never heard of. That worker is not this
+   * code, but the path it takes is: a frame outside the closed unions is dropped, answered with
+   * nothing, and costs the link nothing - so the next frame is still served.
+   */
+  it("drops a frame type it does not know without error, and keeps serving the link (FR-219)", async () => {
+    const diagnostics: string[] = [];
+    const { bridge, port } = bridgeWith({ reportDiagnostic: (code) => diagnostics.push(code) });
+    bridge.connect();
+    port.emit({ type: "relay-started", relayPid: 4242 });
+    port.sent.length = 0;
+
+    expect(() => port.emit({ type: "pair-rescind", agentId: "agent-1", sessionId: "session-h1" })).not.toThrow();
+    await Promise.resolve();
+    expect(port.sent).toEqual([]);
+    expect(diagnostics).toContain("agent.bridge.frame-rejected");
+    expect(bridge.status()).toBe("connected");
+
+    port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
   });
 
   it("answers a tool call from the injected handler, exactly once", async () => {

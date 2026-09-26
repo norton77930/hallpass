@@ -1,6 +1,6 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing, isAgentPaired } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall, isAgentPaired } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -85,7 +85,7 @@ test.describe("agent panel states", () => {
       alpha = await startMcpClient({ clientName: "Claude Code" });
       await panel.clickIfPresent(ui("agent.retry"));
       const promptedAt = Date.now();
-      await acceptPairing(panel, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(alpha, panel, { locale, timeoutMs: 45_000 });
       expect(Date.now() - promptedAt).toBeLessThan(45_000);
       const a = alpha;
 
