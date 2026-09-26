@@ -6,7 +6,7 @@ import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { UPLOAD_CONFIG_TEMPLATE } from "../../../packages/agent-host/src/upload-policy.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -124,7 +124,7 @@ test.describe("agent upload directory", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(live, panel, { locale, timeoutMs: 45_000 });
 
       const tabId = ((await ok(live, "tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
       await setSiteMode(panel, SITE, "skip-checks");
@@ -147,7 +147,7 @@ test.describe("agent upload directory", () => {
         env: { HALLPASS_UPLOAD_CONSENT_BOUND_MS: "6000" },
       });
       const hurried = impatient;
-      await acceptPairing(panel, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(hurried, panel, { locale, timeoutMs: 45_000 });
       const hurriedTab = ((await ok(hurried, "tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
       const hurriedRef = await fileInputRef(hurried, hurriedTab);
       const unanswered = await hurried.callTool("file_upload", {

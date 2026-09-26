@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -59,7 +59,7 @@ test.describe("agent panel: two panel documents at once", () => {
     try {
       alpha = await startMcpClient({ clientName: "Claude Code" });
       await panelA.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panelA, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(alpha, panelA, { locale, timeoutMs: 45_000 });
       const a = alpha;
       const callOn = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
         const result = await a.callTool(tool, args);
@@ -150,7 +150,7 @@ test.describe("overnight fixes of 2026-09-16, live", () => {
     try {
       alpha = await startMcpClient({ clientName: "Claude Code" });
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale, timeoutMs: 45_000 });
+      await pairWithFirstCall(alpha, panel, { locale, timeoutMs: 45_000 });
       const a = alpha;
       const callOn = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
         const result = await a.callTool(tool, args);

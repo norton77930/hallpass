@@ -3,7 +3,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { SCREENSHOT_UPLOAD_SENTENCES } from "../../../packages/agent-host/src/screenshot-cache.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -469,7 +469,7 @@ test.describe("agent upload image", () => {
       const next = await startMcpClient({ clientName: "Claude Code" });
       live = next;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(next, panel, { locale });
       const stale = await next.callTool("upload_image", { tabId, imageId, coordinate: ZONE_CENTRE });
       expect(stale.isError).toBe(true);
       // Not `expired` and not `evicted`: the new session never minted this id, so it cannot say
@@ -593,7 +593,7 @@ async function pairedSession(
 
   const client = await startMcpClient({ clientName: "Claude Code", ...(Object.keys(env).length === 0 ? {} : { env }) });
   await panel.clickIfPresent(ui("agent.retry"));
-  await acceptPairing(panel, { locale });
+  await pairWithFirstCall(client, panel, { locale });
 
   const call = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
     const result = await client.callTool(tool, args);

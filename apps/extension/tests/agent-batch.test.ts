@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentNativeRequest, AgentNativeResponse } from "@hallpass/contracts";
+import { agentBatchStepResultSchema, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
 import { createAgentBatch } from "../src/service-worker/agent-tools/batch.js";
 import { createStatedPlans } from "../src/service-worker/agent-tools/plans.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
@@ -90,6 +90,32 @@ describe("T047 browser_batch", () => {
     expect(seen.every((step) => step.args.tabId === AGENT_TAB)).toBe(true);
     // One call id per step, derived from the batch's, so an answer can be traced to its step.
     expect(new Set(seen.map((step) => step.callId)).size).toBe(2);
+  });
+
+  it("015/T407: a click step's press outcomes and hint reach the step result unchanged", async () => {
+    // What the press path answers for a link that opened a tab (015 FR-200, contracts
+    // press-outcomes.md "Applies to": batch steps carry the same `observed` and `hint`).
+    const observed = {
+      effect: "activated",
+      documentChanged: false,
+      verified: true,
+      verdict: "verified",
+      clicks: 1,
+      newTabs: [{ tabId: 12, url: `${SITE}/ordinary?from=new-tab`, held: false }],
+    };
+    const hint = `The press opened tab 12 (${SITE}/ordinary?from=new-tab). It is not held by this session; use tabs_claim to act on it.`;
+    const { runner } = harness({}, (request) => ({
+      callId: request.callId,
+      outcome: "ok",
+      result: { observed },
+      hint,
+    }));
+
+    const response = await runner.run(batchRequest([CLICK]));
+
+    const step = (response.result as { results: unknown[] }).results[0];
+    expect(step).toEqual({ index: 0, outcome: "ok", result: { observed }, hint });
+    expect(agentBatchStepResultSchema.safeParse(step).success).toBe(true);
   });
 
   it("stops at the first step that did not end ok and reports the rest as not run", async () => {

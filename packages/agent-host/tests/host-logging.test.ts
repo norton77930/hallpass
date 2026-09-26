@@ -85,9 +85,9 @@ describe("T067 host logging carries codes, not content", () => {
     });
 
     // The server dials the relay now (004/R-111), so a call made before it is attached would be
-    // answered `bridge-lost` and never reach the worker at all. The pairing prompt is the sign that
-    // the link is up.
-    await worker.waitForControlFrame("pair-request");
+    // answered `bridge-lost` and never reach the worker at all. The greeting is the sign that the
+    // link is up (004 FR-059a: connecting raises no pairing prompt any more).
+    await worker.waitForHello();
 
     await client.callTool("navigate", { tabId: 12, url: PAGE_QUERY_URL });
     await client.callTool("type", { tabId: 12, target: { ref: "tgt-1" }, text: TYPED_TEXT });

@@ -24,6 +24,21 @@ export async function injectContentRuntime(tabId: number, frameId = 0): Promise<
 }
 
 /**
+ * The declared agent content script, put into a tab that was open before the extension loaded.
+ *
+ * Top frame only: the indicator (glow and pill) is drawn there, and every injected frame would
+ * announce itself separately for the one answer the top frame needs. The script guards its own
+ * listener, so running it where it already is replaces rather than doubles it.
+ */
+export async function injectAgentContent(tabId: number): Promise<void> {
+  await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    files: ["agent-content.js"],
+    world: "ISOLATED",
+  });
+}
+
+/**
  * Where this frame sits in the page: its index among its parent's frames, all the way to the top.
  *
  * Runs in the frame it describes. `window.parent`, `window.top` and indexed access to `frames` are

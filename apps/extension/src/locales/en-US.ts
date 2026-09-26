@@ -150,6 +150,7 @@ export const messages = {
   "agent.indicator.focusMain": "Back to the agent's tab",
   "agent.pairingTitle": "An agent wants to connect to this browser",
   "agent.pairingOrigin": "Connected through {origin}",
+  "agent.pairingWaiting": "{count} connections waiting",
   "agent.forwardingDisclosure":
     "Everything this agent reads from your pages stays on this device between the browser and the agent, but the agent may send it on to its own model.",
   "agent.accept": "Allow pairing",

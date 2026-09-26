@@ -1,7 +1,7 @@
 import type { BrowserContext, Dialog as PlaywrightDialog, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -418,7 +418,7 @@ async function pairedSession(fixtures: {
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
-  await acceptPairing(panel, { locale });
+  await pairWithFirstCall(client, panel, { locale });
 
   const call = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
     const result = await client.callTool(tool, args);

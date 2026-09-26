@@ -155,6 +155,7 @@ export const messages: Record<MessageKey, string> = {
   "agent.indicator.focusMain": "回到代理程式的分頁",
   "agent.pairingTitle": "有 agent 想連上這個瀏覽器",
   "agent.pairingOrigin": "透過 {origin} 連線",
+  "agent.pairingWaiting": "{count} 個連線正在等待",
   "agent.forwardingDisclosure": "這個 agent 從你的網頁讀到的內容，只會在這台裝置上於瀏覽器和 agent 之間傳遞，但 agent 可能會再把內容送往它自己的模型。",
   "agent.accept": "允許配對",
   "agent.unpair": "解除與這個 agent 的配對",

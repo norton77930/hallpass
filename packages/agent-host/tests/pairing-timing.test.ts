@@ -14,11 +14,15 @@ import { startMcpClient, type McpHarnessClient } from "../../../tests/harness/mc
  * 004/T100 — pairing that survives a slow human (R-112, FR-059).
  *
  * The owner's E2: their reading time counted against the caller's own bound, so the first call of
- * a session failed while the prompt was still on screen. Three things together answer it, and this
- * file pins all three: the prompt is raised when the MCP session initialises rather than when the
- * first call needs it, the call that waits says so in MCP's own words every five seconds so a
- * client that honours progress does not give up on it, and the bound is long enough (45 s, never
- * under 30) that an owner who takes twenty seconds is answered in that same call.
+ * a session failed while the prompt was still on screen. Two things together answer it, and this
+ * file pins both: the call that waits says so in MCP's own words every five seconds so a client that
+ * honours progress does not give up on it, and the bound is long enough (45 s, never under 30) that
+ * an owner who takes twenty seconds is answered in that same call.
+ *
+ * T100 also raised the prompt when the MCP session initialised, to spend the owner's reading time
+ * before the first call. 004 FR-059a (2026-09-24) reverses that: with several agent windows open,
+ * every connect put a card in front of the owner that nobody had asked for. Only a tool call raises
+ * a pairing request now, and the first test below pins that.
  *
  * The bounds are read from the environment here for the same reason the rest of this suite does it:
  * the process an agent spawns takes no arguments, so a test's only lever is the environment.
@@ -59,17 +63,30 @@ describe("T100 pairing timing", () => {
     expect(PAIRING_PROGRESS_MS).toBe(5_000);
   });
 
-  it("asks the owner to pair as the MCP session starts, before any tool call", async () => {
-    client = await startMcpClient({ clientName: "Claude Code", env: { LOCALAPPDATA: dataDir } });
-    worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore" });
+  it("raises no pairing request as the MCP session starts, and raises it on the first tool call (FR-059a)", async () => {
+    client = await startMcpClient({
+      clientName: "Claude Code",
+      env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_PAIRING_TIMEOUT_MS: "20000" },
+    });
+    worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore", answers: TABS });
 
-    // No call has been made, and the owner is already looking at the prompt: the twenty seconds
-    // they take are spent before the agent's first call rather than inside it.
+    // Initialised and attached, and no call made: the owner has been asked nothing.
+    const hello = await worker.waitForHello();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(worker.controlFrames.filter((frame) => frame.type === "pair-request")).toEqual([]);
+
+    // The first call is what asks - and it waits for the answer in that same call (FR-059).
+    const pending = client.callTool("tabs_context");
     await expect(worker.waitForControlFrame("pair-request")).resolves.toMatchObject({
       type: "pair-request",
       displayName: "Claude Code",
     });
     expect(worker.requests).toEqual([]);
+    worker.send({ type: "pair-result", agentId: hello.agentId, sessionId: hello.sessionId, accepted: true });
+
+    const held = await pending;
+    expect(held.isError, held.text).toBe(false);
+    expect(held.json).toEqual([{ tabId: 7, url: "https://a.test/" }]);
   });
 
   it("reports progress while the owner decides and succeeds on that same call", async () => {
@@ -83,7 +100,7 @@ describe("T100 pairing timing", () => {
       },
     });
     worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore", answers: TABS });
-    const request = (await worker.waitForControlFrame("pair-request")) as { agentId: string; sessionId: string };
+    const request = await worker.waitForHello();
 
     const seen: Array<{ progress: number; total?: number }> = [];
     const pending = client.callTool("tabs_context", {}, { onProgress: (update) => seen.push(update) });
@@ -107,7 +124,7 @@ describe("T100 pairing timing", () => {
       env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_PAIRING_TIMEOUT_MS: "400" },
     });
     worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore" });
-    await worker.waitForControlFrame("pair-request");
+    await worker.waitForHello();
 
     const unanswered = await client.callTool("tabs_context");
 
@@ -121,7 +138,7 @@ describe("T100 pairing timing", () => {
       env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_PAIRING_TIMEOUT_MS: "400" },
     });
     worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore", answers: TABS });
-    await worker.waitForControlFrame("pair-request");
+    await worker.waitForHello();
     await client.callTool("tabs_context");
 
     // The owner was away for the first call. The second must ask them again rather than hand back

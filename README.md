@@ -157,6 +157,59 @@ release: the packaged gate (`tests/e2e/packaged/agent-*.spec.ts`, attaching to a
 with `--remote-debugging-port=9222`) and the acceptance probes, which drive the bridge with a real
 coding-agent session. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run both.
 
+## What 0.8.0 adds
+
+**A press says what it did.** The answer to a click (and every other press, standalone or as a
+batch step) now reports what followed it within the observation window: the tab went to a new
+page (with the new address), it opened new tabs (each with its id and address — not held by the
+session; take one with `tabs_claim`), it started downloads (named as `downloads_context` names
+them), or nothing happened. When a link was pressed and nothing followed, the answer says so and
+suggests reading the page or waiting before assuming the press did nothing.
+
+**A page that does not answer is not called stale.** When a page does not answer for 10 seconds,
+the call now ends as `page-not-responding` with a hint that the page is still open and the call can
+be retried. `stale` is left for a page that was replaced and a tab that is gone.
+
+**Every finished download, once.** `wait` for a finished download answers each finished, failed or
+cancelled download of the session exactly once, earliest-finished first — including ones that
+finished before the wait began.
+
+**Uploads inside a batch.** `file_upload` and `upload_image` work as `browser_batch` steps, under
+the very same checks as a standalone call. Any folder question is asked before the batch runs, one
+at a time in step order, and a "no" runs nothing at all. A screenshot taken inside the same batch
+cannot be uploaded by that batch; upload it in a later call.
+
+**A pairing card leaves when nobody is waiting.** When the agent behind a pairing card stops
+waiting (its wait ran out, or it disconnected), the card disappears from the panel and the "!"
+badge clears.
+
+**Upgrading:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from the zip) and
+reload the extension, in either order. During the upgrade the host and the extension may be on
+different versions: a new host names each pairing request only once the extension says it
+understands that, so a 0.8.0 host with a 0.7.0 extension (or the other way round) keeps working as
+0.7.0 did.
+
+## What 0.7.0 adds
+
+**Pairing asks only when the agent acts.** Connecting an agent no longer puts a card in the panel;
+the first tool call does. When several connections of the same agent wait, the card says how many,
+and marks a new one joining.
+
+**Ignore answers at once.** Ignoring a pairing card now ends the waiting call straight away as a
+refusal of that one request — the agent is told not to retry, and its next call simply asks again.
+Unpairing still refuses every later call of the session, and the answer now tells the agent to
+reconnect with `/mcp`.
+
+**The panel you can see decides.** The "!" badge and the two-minute wait follow the window you are
+in: a panel open in another window no longer hides a card from you or shortens the wait.
+
+**The red edge shows where it should.** A held tab that loads or navigates (F5 included) keeps its
+red edge, and so does a tab that was already open before the extension was reloaded.
+
+**Upgrading:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from the zip) —
+the silent connect and the one-request Ignore live in the host. An installed 0.6.0 host keeps
+refusing every later call of the session after an Ignore, as it always did.
+
 ## What 0.6.0 adds
 
 **Interrupt** sits beside Stop on the session card. It ends the step that is running — within a

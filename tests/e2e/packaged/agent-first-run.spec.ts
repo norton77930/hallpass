@@ -3,7 +3,7 @@ import { ATTENTION_SENTENCES } from "@hallpass/contracts";
 import { ATTENTION_BADGE_TEXT } from "../../../apps/extension/src/chrome-adapters/action-badge.js";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing, unpairAgent } from "../fixtures/agent-pairing.js";
+import { acceptPairing, pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -182,7 +182,7 @@ test.describe("agent first run: the panel nobody opened", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale, timeoutMs: 60_000 });
+      await pairWithFirstCall(live, panel, { locale, timeoutMs: 60_000 });
       const call = callThrough(live);
 
       heldTab = ((await call("tabs_create", { url: ORDINARY })) as { tabId: number }).tabId;
@@ -359,7 +359,7 @@ test.describe("agent first run: the panel nobody opened", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale, timeoutMs: 60_000 });
+      await pairWithFirstCall(live, panel, { locale, timeoutMs: 60_000 });
       const call = callThrough(live);
 
       heldTab = ((await call("tabs_create", { url: GESTURES })) as { tabId: number }).tabId;

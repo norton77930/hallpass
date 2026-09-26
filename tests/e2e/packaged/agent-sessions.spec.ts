@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { AGENT_GROUP_TITLE } from "../../../apps/extension/src/chrome-adapters/tab-groups.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -76,7 +76,7 @@ test.describe("agent sessions", () => {
       await panel.clickIfPresent(ui("agent.retry"));
       // T098a: the prompt by its own key, Accept clicked, and pairing confirmed by a signal that
       // is false when nothing is paired - the panel's section heading is on screen either way.
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(alpha, panel, { locale });
       // The second session is the same *agent* (the host's id is per machine, not per process), so
       // the owner is asked once and the second session joins on the pairing already granted.
       beta = await startMcpClient({ clientName: "Claude Code" });

@@ -1,3 +1,4 @@
+import { AGENT_015_REASON_OUTCOMES, type AgentNativeResponse } from "@hallpass/contracts";
 import {
   injectIfSupported,
   probeActiveTab,
@@ -30,8 +31,54 @@ export type AgentPageBinding = {
 export type AgentBindingFailure =
   /** A page this extension may not act on at all: a restricted scheme, a PDF, the web store. */
   | { ok: false; reason: "not-actionable" }
-  /** The tab is gone, or the runtime would not answer: nothing to act on and nothing observed. */
-  | { ok: false; reason: "stale" };
+  /** The tab is gone, or its runtime answered and refused the binding: nothing to act on. */
+  | { ok: false; reason: "stale" }
+  /**
+   * The page's frame took the probe and did not answer within the content deadline (015/T401,
+   * FR-205, FR-206, R-197). The tab is there and nothing says its document moved, so this is not
+   * `stale`: the page is still open and the same call may work if it is sent again.
+   */
+  | { ok: false; reason: "page-not-responding" };
+
+/**
+ * What the agent is told when the binding's probe hit the content deadline (015 contracts
+ * press-outcomes.md "Binding failure", data-model "Binding failure reason"). One sentence with no
+ * holes: it names what was observed and the two moves that can help.
+ */
+export const PAGE_NOT_RESPONDING_HINT =
+  "The page did not answer for 10 s; it is still open. Retry the call, or take a screenshot to see its state.";
+
+/**
+ * What the agent is told when an input it sent was not answered within the same deadline (015/T402,
+ * R-197, review F1). Unlike a probe that timed out, the press or keystroke already reached the page
+ * and its handler may have run - a submit may have gone - so "retry" would be the wrong advice. The
+ * sentence says the input may have taken effect and sends the agent to look before it sends it again,
+ * the same line 014 draws between an interrupted step that may have taken effect and one that did not.
+ */
+export const INPUT_NOT_ANSWERED_HINT =
+  "The input reached the page, which then did not answer for 10 s; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again.";
+
+/**
+ * A binding failure as the agent is told it (015/FR-205, FR-206). One mapping for every tool that
+ * binds: a page that did not answer in time is `failed` with the reason and the hint - never the
+ * `stale` that sends the agent to re-read a page that never went anywhere. Only the word for a page
+ * this extension may not touch differs by tool (a read says `not-readable`), so the caller names it.
+ */
+export function bindingFailureResponse(
+  callId: string,
+  failure: AgentBindingFailure,
+  notActionableOutcome: "not-actionable" | "not-readable",
+): AgentNativeResponse {
+  if (failure.reason === "page-not-responding") {
+    return {
+      callId,
+      outcome: AGENT_015_REASON_OUTCOMES["page-not-responding"],
+      reason: failure.reason,
+      hint: PAGE_NOT_RESPONDING_HINT,
+    };
+  }
+  return { callId, outcome: failure.reason === "not-actionable" ? notActionableOutcome : "stale", reason: failure.reason };
+}
 
 export type AgentPageBindings = {
   bind(tabId: number, context: AgentToolContext): Promise<{ ok: true; binding: AgentPageBinding } | AgentBindingFailure>;
@@ -93,7 +140,10 @@ export function createAgentPageBindings(): AgentPageBindings {
       }
       if (!probed.ok) {
         cache.delete(tabId);
-        return { ok: false, reason: probed.reason === "unsupported-page" ? "not-actionable" : "stale" };
+        if (probed.reason === "unsupported-page") return { ok: false, reason: "not-actionable" };
+        // 015/T401: a frame that did not answer in time is a live page, not a gone one (R-197).
+        if (probed.reason === "deadline") return { ok: false, reason: "page-not-responding" };
+        return { ok: false, reason: "stale" };
       }
       const binding: AgentPageBinding = {
         tabId,

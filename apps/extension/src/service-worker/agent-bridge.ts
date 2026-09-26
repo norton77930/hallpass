@@ -2,10 +2,12 @@ import {
   agentControlFrameSchema,
   agentLinkFrameSchema,
   agentNativeRequestSchema,
+  PAIRING_DECLINED_MARKER,
   type AgentNativeRequest,
   type AgentNativeResponse,
   type PromptWaitingFrame,
 } from "@hallpass/contracts";
+import type { PairingAnswer } from "./pairing-controller.js";
 
 /**
  * The worker's end of the local agent bridge (003/T013, R-102).
@@ -79,13 +81,21 @@ export type AgentPairingRequest = {
   origin: string;
   /** The agent session this connection belongs to; the host minted it, not the worker (D-M3-3). */
   sessionId: string;
+  /**
+   * The host's id for this pairing exchange (015 FR-218), absent from a 0.7.0 host. Passed on so a
+   * later `pair-withdraw` can be matched to the question it ends.
+   */
+  requestId?: string;
 };
 
 export type AgentBridgeDeps = {
   /** Opens the native port. Returns undefined when Chrome cannot reach the host at all. */
   connectNative: () => AgentPortLike | undefined;
-  /** The owner's answer, immediate for an already-paired agent and a prompt for a new one. */
-  decidePairing: (request: AgentPairingRequest) => Promise<boolean>;
+  /**
+   * The owner's answer, immediate for an already-paired agent and a prompt for a new one. Which of
+   * the refusals it was decides how the answer is marked, or whether one is sent (003 FR-032a).
+   */
+  decidePairing: (request: AgentPairingRequest) => Promise<PairingAnswer>;
   /**
    * Which run of the browser is answering (013/R-184, FR-168), carried on the pairing answer.
    *
@@ -142,6 +152,12 @@ export type AgentBridgeDeps = {
    * was current, which with several live is the wrong agent's work.
    */
   onSessionEnded?: (sessionId: string) => void;
+  /**
+   * The host stopped waiting for one session's pairing answer - its bound expired or the session
+   * closed (015 FR-216, FR-217). The card is the runtime's, so the bridge only passes it on; it
+   * answers nothing, because the host has already answered its agent.
+   */
+  onPairWithdraw?: (withdrawal: { agentId: string; sessionId: string; requestId?: string }) => void;
   /**
    * A relay announced itself on a freshly opened native port. It starts the reconciliation: the
    * sessions whose servers dial back in and greet again survive, the rest are released. The path
@@ -382,34 +398,57 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
             displayName: pairing.displayName,
             origin: pairing.origin,
             sessionId: pairing.sessionId,
+            ...(pairing.requestId === undefined ? {} : { requestId: pairing.requestId }),
           }),
           browserRun,
         ])
-          // The session is echoed from the request, on both arms. It is what the relay addresses
+          // The session is echoed from the request, on every arm. It is what the relay addresses
           // the answer by, so an answer that omitted it - which is what 003's shape did - is
           // dropped as unaddressed and the server waits out its whole pairing bound for nothing.
-          .then(([accepted, browserRunId]) =>
-            send({
-              type: "pair-result",
-              agentId: pairing.agentId,
-              sessionId: pairing.sessionId,
-              accepted,
-              ...(browserRunId === undefined ? {} : { browserRunId }),
+          .then(([answer, browserRunId]) => {
+            if (answer === "abandoned") {
+              // The link this request came over is gone and the owner decided nothing, so there is
+              // no answer to give (FR-032a). Sent as a refusal it would now tell the host the owner
+              // unpaired it; the host's own bound and re-request are what an abandoned card means.
+              deps.reportDiagnostic?.("agent.bridge.pairing-abandoned");
+              return;
+            }
+            const features = [
               // 014/R-187 §1: what this worker can be asked beyond answering calls. Derived from
               // the handler rather than declared beside it, so the advertisement cannot outlive
               // the thing it advertises - a host told "I can ask" by a worker that cannot would
               // hold every outside-roots upload until its own bound.
-              ...(deps.onUploadConsentRequest === undefined ? {} : { features: ["upload-consent"] }),
-            }),
-          )
-          .catch(() =>
+              ...(deps.onUploadConsentRequest === undefined ? [] : ["upload-consent"]),
+              // 015 FR-219: this worker takes a `pair-withdraw` and parses a `pair-request` that
+              // names its exchange. A 0.7.0 worker's strict parse refuses that `requestId` - and
+              // with it the whole card - so the host sends one only after reading this here.
+              ...(deps.onPairWithdraw === undefined ? [] : ["pair-withdraw"]),
+              // 003 FR-032a: the owner declined this request, which is not an unpair. In
+              // `features` because a new key would make a 0.6.0 host drop the whole frame; that
+              // host ignores the member and answers the refusal as it always has.
+              ...(answer === "declined" ? [PAIRING_DECLINED_MARKER] : []),
+            ];
             send({
               type: "pair-result",
               agentId: pairing.agentId,
               sessionId: pairing.sessionId,
-              accepted: false,
-            }),
-          );
+              accepted: answer === "accepted",
+              ...(browserRunId === undefined ? {} : { browserRunId }),
+              ...(features.length === 0 ? {} : { features }),
+              // 015 FR-218: the exchange this answers, echoed from the request as the session is.
+              // The host ignores an answer naming one it withdrew; a 0.7.0 host sent none, and gets
+              // none back - the frame it has always parsed.
+              ...(pairing.requestId === undefined ? {} : { requestId: pairing.requestId }),
+            });
+          })
+          /**
+           * The decision itself failed (its storage, typically) - which is not an answer of the
+           * owner's either, so none is sent (FR-032a). Until then this sent a refusal, and a refusal
+           * now says "declined" or "unpaired, reconnect", both of them things the owner did not do.
+           * The server's pairing bound ends the call as nobody having answered and its next call
+           * asks again, which is also the retry a transient storage failure wants.
+           */
+          .catch(() => deps.reportDiagnostic?.("agent.bridge.pairing-failed"));
         return;
       }
       case "upload-consent-request":
@@ -426,6 +465,16 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           sessionId: control.data.sessionId,
           callId: control.data.callId,
           files: control.data.files.map((file) => ({ path: file.path, directory: file.directory })),
+        });
+        return;
+      case "pair-withdraw":
+        // 015 FR-216, FR-217: the host's half of the pairing bound, said out loud. An older worker
+        // drops this type as unknown and falls back on its own mirrored bound (FR-219).
+        deps.reportDiagnostic?.("agent.bridge.pair-withdraw");
+        deps.onPairWithdraw?.({
+          agentId: control.data.agentId,
+          sessionId: control.data.sessionId,
+          ...(control.data.requestId === undefined ? {} : { requestId: control.data.requestId }),
         });
         return;
       case "stop":

@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { act, cleanup, fireEvent, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentPanelCommandSchema } from "@hallpass/contracts";
 import {
   IDLE,
@@ -12,6 +12,7 @@ import {
   uninstallAgentPort,
   type FakeAgentPort,
 } from "./helpers/agent-shell-harness.js";
+import { PAIRING_JOINED_HIGHLIGHT_MS } from "../src/side-panel/agent/PromptCard.js";
 
 /**
  * 006/T191 — the prompts, one at a time, on top of whatever else is on screen (FR-084, FR-085, US4).
@@ -53,8 +54,56 @@ describe("T191 prompt cards", () => {
 
     project(port, { ...NOT_PAIRED, pending: PENDING });
     fireEvent.click(screen.getByRole("button", { name: ui("agent.ignore") }));
-    // FR-084: ignore is not a decline. The request is left to expire, never answered no.
+    // FR-084 (amended 2026-09-24): the card only names the agent; the worker answers it as a decline of this request.
     expect(port.sent[1]).toEqual({ type: "ui.agent.pair-ignore", payload: { agentId: "agent-9" } });
+  });
+
+  /** Item 2 (2026-09-24): a new request joining the card on screen is visible, and heard. */
+  describe("connections waiting on the pairing card", () => {
+    const card = (): HTMLElement => screen.getByRole("dialog");
+    const status = (): HTMLElement => card().querySelector<HTMLElement>("[aria-live='polite']")!;
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    });
+
+    it("says nothing for one connection and gives the count from two", () => {
+      renderShell();
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 1 } });
+      expect(status().textContent).toBe("");
+
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 2 } });
+      expect(status().textContent).toBe(ui("agent.pairingWaiting").replace("{count}", "2"));
+    });
+
+    it("highlights the card when a connection joins, not on first render, and lets the highlight go", () => {
+      vi.useFakeTimers();
+      renderShell();
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 2 } });
+      expect(card().getAttribute("data-joined")).toBeNull();
+
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 3 } });
+      expect(card().getAttribute("data-joined")).toBe("pulse");
+      expect(status().textContent).toBe(ui("agent.pairingWaiting").replace("{count}", "3"));
+
+      act(() => {
+        vi.advanceTimersByTime(PAIRING_JOINED_HIGHLIGHT_MS);
+      });
+      expect(card().getAttribute("data-joined")).toBeNull();
+
+      // Fewer connections is not a new request.
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 2 } });
+      expect(card().getAttribute("data-joined")).toBeNull();
+    });
+
+    it("uses a still highlight when the owner asked for reduced motion", () => {
+      vi.stubGlobal("matchMedia", (query: string) => ({ matches: query === "(prefers-reduced-motion: reduce)", media: query }));
+      renderShell();
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 1 } });
+      project(port, { ...NOT_PAIRED, pending: { ...PENDING, waitingSessions: 2 } });
+      expect(card().getAttribute("data-joined")).toBe("still");
+    });
   });
 
   it("shows the consent card over the idle page: agent, action, site, and three answers", () => {

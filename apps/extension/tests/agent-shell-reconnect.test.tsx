@@ -147,6 +147,26 @@ describe("the agent panel reconnects its port when the worker goes away", () => 
     expect(port.connects).toBe(1);
   });
 
+  /**
+   * Fix 2026-09-23, panel in another window: the worker counts a panel as seen only in the window
+   * the owner last focused, so each connection - the first and every reconnect - says which window
+   * this panel document is in. A worker that restarted has forgotten, which is why it is every one.
+   */
+  it("tells the worker which window it is in on every connection", async () => {
+    (globalThis as { chrome: { windows?: unknown } }).chrome.windows = { getCurrent: async () => ({ id: 7 }) };
+    renderShell();
+    await act(async () => {});
+    expect(port.sent).toEqual([{ type: "ui.agent.panel-window", payload: { windowId: 7 } }]);
+
+    port.drop();
+    advance(250);
+    await act(async () => {});
+    expect(port.sent).toEqual([
+      { type: "ui.agent.panel-window", payload: { windowId: 7 } },
+      { type: "ui.agent.panel-window", payload: { windowId: 7 } },
+    ]);
+  });
+
   it("schedules nothing once the panel is unmounted after a drop", () => {
     renderShell();
     port.drop();

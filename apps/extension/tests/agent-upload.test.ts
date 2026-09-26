@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
-import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
+import { createAgentPageBindings, PAGE_NOT_RESPONDING_HINT } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import { createAgentUpload } from "../src/service-worker/agent-tools/upload.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
@@ -473,5 +473,32 @@ describe("T334 agent upload_image", () => {
       expect(response).toEqual({ callId: "call-2", outcome: "failed", reason: "invalid-arguments" });
     }
     expect(deliverImage).not.toHaveBeenCalled();
+  });
+});
+
+/** 015/FR-205 - an upload whose page did not answer the binding probe in time is not `stale`. */
+describe("015 upload: page-not-responding binding", () => {
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("answers failed page-not-responding with the hint, never stale", async () => {
+    const { runner, setFiles } = harness({
+      bindings: { bind: async () => ({ ok: false, reason: "page-not-responding" }), invalidate() {} },
+    });
+
+    const response = await runner.run(request());
+
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "page-not-responding",
+      hint: PAGE_NOT_RESPONDING_HINT,
+    });
+    expect(setFiles).not.toHaveBeenCalled();
   });
 });

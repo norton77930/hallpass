@@ -1744,6 +1744,41 @@ export const agentEffectObservationSchema = z.strictObject({
    */
   role: z.string().max(100).optional(),
   label: z.string().max(DEFAULT_BOUNDS.maxLabelChars).optional(),
+  /**
+   * Where the tab is after the settle wait, when the document changed and the URL could be read
+   * (015 FR-200). Omitted rather than guessed when the tab's URL is unknown.
+   */
+  url: z.string().max(2048).optional(),
+  /**
+   * Tabs the press opened during the settle wait, opener = the pressed tab (015 FR-200). `held` is
+   * always `false`: seeing a tab open does not make it the session's - `tabs_claim` does.
+   */
+  newTabs: z
+    .array(
+      z.strictObject({
+        tabId: z.number().int().nonnegative(),
+        url: z.string().max(2048),
+        held: z.literal(false),
+      }),
+    )
+    .min(1)
+    .max(10)
+    .optional(),
+  /** Downloads this session's observer recorded during the settle wait, in `downloads_context`'s identity (015 FR-200). */
+  downloads: z
+    .array(
+      z.strictObject({
+        id: z.number().int().nonnegative(),
+        filename: z.string().max(1024),
+        url: z.string().max(2048),
+        state: z.string().max(32),
+      }),
+    )
+    .min(1)
+    .max(10)
+    .optional(),
+  /** The settle wait actually spent, present only when none of the three above happened (015 FR-202). */
+  observedForMs: z.number().finite().nonnegative().optional(),
 });
 
 export type AgentEffectObservation = z.infer<typeof agentEffectObservationSchema>;
@@ -2416,6 +2451,22 @@ export const AGENT_CONSENT_REASONS = [
 export type AgentConsentReason = (typeof AGENT_CONSENT_REASONS)[number];
 
 /**
+ * The reasons 015 adds, each with the one outcome it answers with (015 data-model "Binding failure
+ * reason", contracts/batch-upload.md).
+ *
+ * `reason` is a free bounded string on the answer, so this is the one place the spelling and its
+ * outcome are pinned for the worker, the host and the gates.
+ */
+export const AGENT_015_REASON_OUTCOMES = {
+  /** The page binding's probe hit the content deadline; the page is still open (015 FR-205, FR-206). */
+  "page-not-responding": "failed",
+  /** A batch's uploads together exceed `AGENT_UPLOAD_MAX_BASE64_CHARS`; nothing was sent (015 FR-212). */
+  "batch-upload-too-large": "denied",
+} as const satisfies Record<string, AgentToolOutcome>;
+
+export type Agent015Reason = keyof typeof AGENT_015_REASON_OUTCOMES;
+
+/**
  * What an interrupted call is told, in the only two ways this product can say it honestly
  * (FR-180, FR-181, Constitution XI).
  *
@@ -2447,6 +2498,27 @@ export const UPLOAD_HINTS = {
   rootNotRemembered:
     "Drive and share roots are not remembered: those files were uploaded this once and no directory " +
     "was added. Move them into a folder if the owner should be able to allow it for good.",
+} as const;
+
+/**
+ * What a call refused for want of a pairing tells the agent about *why* (003 FR-032a).
+ *
+ * `reason` stays `not-paired` on both - every client and gate since 003 branches on it - and the
+ * difference rides in `hint`, which is where a sentence the agent relays to the person belongs. The
+ * two are opposite instructions: a decline answered one request, so the agent must not simply ask
+ * again but the session is not dead; an unpair ended the session's standing, so nothing but a
+ * reconnect helps. Here for the reason `ATTENTION_SENTENCES` is here - the host composes them and
+ * the gates assert them - and like those they carry no hole to fill (FR-151).
+ */
+export const PAIRING_REFUSAL_HINTS = {
+  declined:
+    "The owner declined this pairing request in Chrome. Do not call Hallpass tools again unless the person asks you to; " +
+    "the next call will show them a new request.\n" +
+    "擁有者在 Chrome 拒絕了這次配對要求。除非使用者要求,否則不要再呼叫 Hallpass 工具;下一次呼叫會再顯示新的配對要求。",
+  unpaired:
+    "The owner unpaired this agent in Hallpass, so every call in this session is refused until it reconnects. " +
+    "In Claude Code: run /mcp and reconnect the hallpass server.\n" +
+    "擁有者已在 Hallpass 取消這個 agent 的配對,這個工作階段在重新連線前的每個呼叫都會被拒絕。Claude Code:執行 /mcp 並重新連線 hallpass 伺服器。",
 } as const;
 
 /**
@@ -2531,6 +2603,25 @@ export const agentNativeResponseSchema = z.strictObject({
 export type AgentNativeResponse = z.infer<typeof agentNativeResponseSchema>;
 
 /**
+ * The mark a worker puts on a pairing refusal that is the owner's decline of *this* request
+ * (003 FR-032a).
+ *
+ * A refusal without it is an unpair: every later call of the session is refused unasked until it
+ * reconnects. That default is the spec's own rule for an extension that predates the amendment,
+ * and it is why the mark goes on the decline rather than on the unpair - the frame nobody marked
+ * keeps meaning what it always meant.
+ *
+ * It rides in `pair-result.features` rather than in a key of its own, and that is a compatibility
+ * decision, not a taxonomy one. Every frame here is a `z.strictObject`, so a new key makes an older
+ * host reject the whole answer and drop it (R-187 §6) - and the frame it would drop is the unpair
+ * FR-032 says takes effect at once. `features` has been an open list of short strings since 0.6.0,
+ * so a 0.6.0 host parses a marked answer, ignores the member it does not know, and settles it as
+ * the sticky refusal it has always been: never worse than before, only not yet better. Hosts older
+ * than 0.6.0 already refuse `features` itself, which is 014's documented "reinstall the host" case.
+ */
+export const PAIRING_DECLINED_MARKER = "declined-this-request";
+
+/**
  * The frames that are about the connection rather than about a page. They share the channel with
  * tool calls and share nothing else: a control frame is recognised by its `type`, and a tool
  * response can never be mistaken for one.
@@ -2554,6 +2645,11 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
      * id per agent session is what lets a reconnect reconcile the record it already has.
      */
     sessionId: z.string().min(1).max(128),
+    /**
+     * The host-minted id of this pairing exchange (015 FR-216, FR-219). Optional: a 0.7.0 host
+     * never sends it, and the worker then behaves as before.
+     */
+    requestId: z.string().min(1).max(128).optional(),
   }),
   z.strictObject({
     type: z.literal("pair-result"),
@@ -2579,9 +2675,10 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
      * An opaque id the worker mints once per browser start and keeps in `chrome.storage.session`,
      * so it survives the worker being recycled and dies when the browser exits - the two halves of
      * FR-168's retention promise, as one fact. It rides *this* frame because a pairing answer is
-     * what the worker sends on every (re)established link, and because the host awaits it before
-     * any call reads its screenshot cache: a run that changed means the browser restarted and the
-     * cache goes, while a run that did not means only the port went away and the pictures stay.
+     * what the first call on every (re)established link asks for (004 FR-059a: the link itself asks
+     * nothing), and because the host awaits it before that call reads its screenshot cache: a run
+     * that changed means the browser restarted and the cache goes, while a run that did not means
+     * only the port went away and the pictures stay.
      *
      * Optional in the shape, and additive: a worker from before this field says nothing about its
      * run and the host falls back to clearing on the link, which is what it did in S1. The link
@@ -2600,8 +2697,29 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
      * Added exactly as `browserRunId` above was (013/R-184): optional, on the frame the worker
      * sends on every established link, so a host that predates the field parses the answer and a
      * worker that predates it simply advertises nothing. The link protocol floor does not move.
+     *
+     * 003 FR-032a adds one member that is about this answer rather than about the worker:
+     * `PAIRING_DECLINED_MARKER` on a refusal says the owner declined this one request, and its
+     * absence says unpair. It lives here because this is the one field of this frame a 0.6.0 host
+     * already accepts arbitrary members of (see the marker's own comment).
      */
     features: z.array(z.string().min(1).max(64)).max(16).optional(),
+    /**
+     * Echoes the `requestId` of the `pair-request` this answers (015 FR-218). A host ignores an
+     * answer naming an exchange it withdrew; an answer without one is handled as in 0.7.0.
+     */
+    requestId: z.string().min(1).max(128).optional(),
+  }),
+  /**
+   * The host stopped waiting for this session's pairing answer - its bound expired or the session
+   * closed (015 FR-216, FR-217). The worker drops the session from the card's waiting list. A new
+   * frame `type`, so an older worker drops it and falls back on its own bound (FR-219).
+   */
+  z.strictObject({
+    type: z.literal("pair-withdraw"),
+    agentId: z.string().min(1).max(128),
+    sessionId: z.string().min(1).max(128),
+    requestId: z.string().min(1).max(128).optional(),
   }),
   z.strictObject({
     type: z.literal("unpair"),
@@ -3049,7 +3167,15 @@ const agentIdentitySchema = z.strictObject({
 const questionArrivalSchema = z.string().min(1).max(64).optional();
 
 /** A pairing request as the owner is shown it, with the moment it arrived. */
-const pendingPairingSchema = agentIdentitySchema.extend({ requestedAt: questionArrivalSchema });
+const pendingPairingSchema = agentIdentitySchema.extend({
+  requestedAt: questionArrivalSchema,
+  /**
+   * How many connections are waiting on this one card (item 2, 2026-09-24): every session of the
+   * agent joins the same card, and without the number a second request looked like nothing at all.
+   * Optional because an older worker never counted; the panel then shows no count.
+   */
+  waitingSessions: z.number().int().min(1).max(1024).optional(),
+});
 
 const pairedAgentSchema = z.strictObject({
   agentId: z.string().min(1).max(128),
@@ -3447,9 +3573,9 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
     }),
   }),
   /**
-   * The owner's Ignore on a pairing request (006 FR-084). Not a decline: the card leaves the panel
-   * and the host is answered nothing, so its own bound expires the request and its next call
-   * raises it again. A decline would stand for the rest of that agent's session.
+   * The owner's Ignore on a pairing request (006 FR-084, amended 2026-09-24). It names the agent
+   * and nothing else; the worker answers the waiting session with a marked decline of this one
+   * request (003 FR-032a), so the agent hears at once and its next call raises a fresh card.
    */
   z.strictObject({
     type: z.literal("ui.agent.pair-ignore"),

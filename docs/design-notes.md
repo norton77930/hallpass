@@ -206,6 +206,35 @@ their pairing and permission UI inside the panel and have no mechanism for the c
 chose the two zero-permission forms (words to the agent, a badge) over a system notification,
 which would add a permission for a benefit the terminal already gives.
 
+## §9 Honest answers (0.8.0)
+
+**Designed here.** An answer should say what happened, not only that a call returned. A press now
+reports what followed it within the settle wait it already had (400 ms, so no added latency): the
+tab's document was replaced (with the new address), new tabs were opened by it (with their ids and
+addresses, reported as not held — opening a tab does not hand it to the session; the agent claims
+it explicitly), downloads were started, or nothing of these, with the window stated. A pressed link
+that led nowhere gets a sentence telling the agent the page may have handled it itself, so it reads
+before concluding. A page that does not answer the extension within the 10-second content deadline
+is reported as not responding, with a retry hint, instead of as stale; stale now means only a
+replaced document or a closed tab. We found the case that made this matter by measurement: in
+Chromium, the first opener-keeping popup pressed on a tab after that tab crossed to another origin
+and came back can block the tab's renderer, with no extension involved. We cannot prevent that; we
+bound the press so the agent learns of it in 10 seconds rather than 30.
+
+Waiting for a finished download answers every finished, failed or cancelled download of the
+session once, earliest-finished first, including those that ended before the wait began.
+
+Uploads work as batch steps through the one host function a standalone upload uses — there is no
+second path to diverge. Every question an upload step needs is asked before the batch's first step
+runs, one at a time in step order, and a "no" runs nothing: a person deciding about a folder should
+never find half a batch already done on the page. A screenshot taken inside a batch is uploaded in
+a later call, because the host checks run before the batch exists on the page.
+
+A pairing card whose agent stopped waiting is withdrawn by the host and leaves the panel. The
+withdrawal is an optional message on the unchanged link protocol, and the host names each pairing
+exchange only after the extension says it understands that, so a host and an extension one version
+apart keep working during an upgrade.
+
 ## Permissions
 
 Every permission the extension declares traces to a capability above and to an acceptance

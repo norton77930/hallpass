@@ -90,8 +90,13 @@ export {
   // the shape of a path on the owner's machine.
   AGENT_STOP_REASONS,
   AGENT_CONSENT_REASONS,
+  // 015: the reasons this feature adds, each pinned to the outcome it answers with.
+  AGENT_015_REASON_OUTCOMES,
   INTERRUPT_HINTS,
   UPLOAD_HINTS,
+  // 003 FR-032a: a decline answers one request, an unpair the session; how each is marked and said.
+  PAIRING_DECLINED_MARKER,
+  PAIRING_REFUSAL_HINTS,
   isRootDirectory,
   transitionNoticeText,
   absolutePathSchema,
@@ -175,6 +180,7 @@ export type {
   AgentPromptKind,
   AgentStopReason,
   AgentConsentReason,
+  Agent015Reason,
   PromptWaitingFrame,
   AgentBridgeRecord,
   AgentRefusal,

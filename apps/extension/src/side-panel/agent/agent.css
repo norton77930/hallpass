@@ -242,6 +242,46 @@
   border-top: 1px solid var(--accent);
 }
 
+/* Item 2 (2026-09-24): how many connections wait on the pairing card; empty for one. */
+.agent-prompt-waiting:empty {
+  display: none;
+}
+
+.agent-prompt-waiting {
+  font-weight: 600;
+}
+
+/* Another connection joined the card: a brief pulse, or a still mark for reduced motion. */
+.agent-prompt[data-joined="pulse"] {
+  animation: agent-prompt-joined 1.5s ease-out;
+}
+
+.agent-prompt[data-joined="still"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes agent-prompt-joined {
+  0% {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    background: var(--surface-strong);
+  }
+  100% {
+    outline: 2px solid transparent;
+    outline-offset: 6px;
+    background: var(--surface);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-prompt[data-joined="pulse"] {
+    animation: none;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
 .agent-prompt ol {
   margin-bottom: var(--sp-2);
 }

@@ -2,7 +2,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { AGENT_GROUP_TITLE } from "../../../apps/extension/src/chrome-adapters/tab-groups.js";
 import { INDICATOR_MARKER_ATTRIBUTE } from "../../../apps/extension/src/content-runtime/indicator-marker.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing, unpairAgent } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -71,7 +71,7 @@ test.describe("agent claim", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(live, panel, { locale });
 
       const call = async (tool: string, args: Record<string, unknown> = {}): Promise<unknown> => {
         const result = await live.callTool(tool, args);
@@ -226,11 +226,13 @@ test.describe("agent claim", () => {
       slow = await startMcpClient({ clientName: "Claude Code" });
       const waiting = slow;
       await panel.clickIfPresent(ui("agent.retry"));
+      // The call is what raises the prompt (004 FR-059a), so it is issued first: this is the call
+      // FR-059 is about, and it must be held rather than refused for the whole of the owner's twenty
+      // seconds. Its client bound is past the SDK's 60 s default, which the card wait plus the twenty
+      // seconds could otherwise reach.
+      const held = waiting.callTool("tabs_context", {}, { timeoutMs: 120_000 });
       await panel.waitForText(ui("agent.pairingTitle"), 60_000);
       const promptedAt = Date.now();
-      // Issued while the owner is still deciding: this is the call FR-059 is about, and it must be
-      // held rather than refused for the whole of the owner's twenty seconds.
-      const held = waiting.callTool("tabs_context");
       await new Promise((resolve) => setTimeout(resolve, 20_000 - (Date.now() - promptedAt)));
       // Both sides' logs ride on the failure: a prompt that vanished inside the twenty seconds is the
       // link having dropped, the server says what it saw, and the worker's own record of why its

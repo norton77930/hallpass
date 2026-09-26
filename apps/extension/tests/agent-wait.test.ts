@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
-import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
+import { createAgentPageBindings, PAGE_NOT_RESPONDING_HINT } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentStopSignals } from "../src/service-worker/agent-tools/stop.js";
 import { createAgentWait } from "../src/service-worker/agent-tools/wait.js";
 
@@ -400,5 +400,32 @@ describe("T049 wait", () => {
     const response = await runner.run(waitRequest({ condition: "present", ref: "t_result", maxMs: 500 }));
 
     expect(response.outcome).toBe("ok");
+  });
+});
+
+/** 015/FR-205 - a wait whose page did not answer the binding probe in time is not `stale`. */
+describe("015 wait: page-not-responding binding", () => {
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("answers failed page-not-responding with the hint, never stale", async () => {
+    const { runner, evaluate } = harness({
+      bindings: { bind: async () => ({ ok: false, reason: "page-not-responding" }), invalidate() {} },
+    });
+
+    const response = await runner.run(waitRequest({ condition: "present", ref: "t_result", maxMs: 1_000 }));
+
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "page-not-responding",
+      hint: PAGE_NOT_RESPONDING_HINT,
+    });
+    expect(evaluate).not.toHaveBeenCalled();
   });
 });

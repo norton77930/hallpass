@@ -42,9 +42,11 @@ export const ASK_TIMEOUT_MS = 25_000;
  * only route left is the agent's own reply telling the person to click the toolbar icon, and two
  * minutes is how long that takes to read, reach for the mouse and answer.
  *
- * It is chosen once, when the question is raised, and never revised: a panel that opens mid-wait
+ * It is chosen when the question is raised and only ever lengthened: a panel that opens mid-wait
  * shows the card (the projection does that already) and must not shorten a bound the person is
  * already inside - re-arming on presence would expire the question exactly as somebody walked up.
+ * The one revision is the other way (D-011-7): a panel that goes out of sight while the question
+ * waits makes it one raised with nobody looking, two minutes counted from the raise.
  */
 export const CLOSED_PANEL_TIMEOUT_MS = 120_000;
 
@@ -218,6 +220,13 @@ export type AgentPromptController = {
    * that simply ended, whose call has nowhere to be answered anyway.
    */
   cancelSession(sessionId: string, ending?: PromptEnding): void;
+  /**
+   * The panel's visibility may have changed (011 D-011-7): re-reads `panelPresence`, and a question
+   * raised in sight that nobody can see any more becomes one raised with nobody looking - the ticks
+   * start at once, the hint is attached, and the bound becomes the closed-panel one counted from the
+   * raise. Idempotent; a panel coming into sight changes nothing.
+   */
+  panelPresenceChanged(): void;
 };
 
 export type AgentPromptDeps = {
@@ -233,7 +242,9 @@ export type AgentPromptDeps = {
   closedPanelTimeoutMs?: number;
   now?: () => number;
   /**
-   * Whether any side panel document is connected, asked once per question (011 R-163).
+   * Whether the owner can see a panel, asked once per question (011 R-163): since the fix of
+   * 2026-09-23 (panel in another window) that is a connected panel in the last-focused window, not
+   * any panel document anywhere - the runtime hands in the panel port's `isVisible`.
    *
    * Absent means "assume somebody is looking": the controllers composed by a test that says nothing
    * about panels keep the 25 s they have always had, and only the runtime - which knows about the
@@ -313,6 +324,11 @@ type PendingPrompt = {
    * fixed at raise like the bound is, and it travels only with the question's *own* expiry.
    */
   hint?: string;
+  /**
+   * What the ticks need, and what going out of sight mid-wait re-arms from (D-011-7): the raise's
+   * addressing, when it was raised, and the bound it is running under now.
+   */
+  clock?: { raise: { kind: PromptWaitingTick["kind"]; callId: string; sessionId: string }; raisedAtMs: number; boundMs: number };
   end: (ending: PromptEnding, hint?: string) => void;
   settleEffect?: (decision: PromptDecision) => void;
   settlePlan?: (decision: PlanDecision) => void;
@@ -359,40 +375,55 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     raise: { kind: PromptWaitingTick["kind"]; callId: string; sessionId: string },
     build: (timer: ReturnType<typeof setTimeout>) => PendingPrompt,
   ): void {
-    // Read once, here (R-163): the bound and the hint are facts about the moment the question was
-    // raised, and a panel that opens while it stands changes neither.
+    // Read here (R-163): the bound and the hint are facts about the moment the question was raised,
+    // and a panel that opens while it stands changes neither. Only a panel going out of sight
+    // revises them, and only upwards (`panelPresenceChanged`, D-011-7).
+    const raisedAtMs = Date.now();
     const panelConnected = deps.panelPresence?.() ?? true;
     const boundMs = panelConnected ? timeoutMs : closedPanelTimeoutMs;
     const timer = setTimeout(() => end("timed-out", true), boundMs);
     (timer as { unref?: () => void }).unref?.();
     const active = build(timer);
-    if (!panelConnected) active.hint = ATTENTION_SENTENCES.consent;
-    /**
-     * Only while nobody can see the card (011 FR-148, review M1).
-     *
-     * The tick is the notice for a person who has not opened the panel their question is in, and
-     * the keep-alive for the longer bound that situation buys. With a panel open neither applies:
-     * the card is in front of them, the bound is the ordinary one the host already allows for, and
-     * a tick would be one more frame on the link saying what the card on screen says.
-     */
-    if (deps.onWaiting && !panelConnected) {
-      let waitedMs = 0;
-      const ticker = setInterval(() => {
-        waitedMs += PROMPT_WAITING_TICK_MS;
-        deps.onWaiting?.({
-          kind: raise.kind,
-          callId: raise.callId,
-          sessionId: raise.sessionId,
-          waitedMs,
-          boundMs,
-          panelConnected,
-        });
-      }, PROMPT_WAITING_TICK_MS);
-      (ticker as { unref?: () => void }).unref?.();
-      active.ticker = ticker;
+    active.clock = { raise, raisedAtMs, boundMs };
+    if (!panelConnected) {
+      active.hint = ATTENTION_SENTENCES.consent;
+      startTicks(active, 0);
     }
     pending = active;
     deps.onChange?.();
+  }
+
+  /**
+   * Only while nobody can see the card (011 FR-148, review M1).
+   *
+   * The tick is the notice for a person who has not opened the panel their question is in, and
+   * the keep-alive for the longer bound that situation buys. With a panel open neither applies:
+   * the card is in front of them, the bound is the ordinary one the host already allows for, and
+   * a tick would be one more frame on the link saying what the card on screen says.
+   *
+   * `fromMs` is how long the question has already waited: zero at a raise, and the time since the
+   * raise when the panel went out of sight mid-wait - then the first tick goes at once (D-011-7),
+   * because the host's own open-panel bound may be about to pass.
+   */
+  function startTicks(active: PendingPrompt, fromMs: number): void {
+    const clock = active.clock;
+    if (!deps.onWaiting || !clock) return;
+    const say = (waitedMs: number): void => {
+      // A tick at the bound buys nothing; the question is over in that same instant.
+      if (waitedMs >= clock.boundMs) return;
+      // Read at each tick: a panel back in sight still ticks (the host's keep-alive for the bound
+      // already granted) but must not have the agent told to open it.
+      const panelConnected = deps.panelPresence?.() ?? false;
+      deps.onWaiting?.({ ...clock.raise, waitedMs, boundMs: clock.boundMs, panelConnected });
+    };
+    let waitedMs = fromMs;
+    if (fromMs > 0) say(fromMs);
+    const ticker = setInterval(() => {
+      waitedMs += PROMPT_WAITING_TICK_MS;
+      say(waitedMs);
+    }, PROMPT_WAITING_TICK_MS);
+    (ticker as { unref?: () => void }).unref?.();
+    active.ticker = ticker;
   }
 
   return {
@@ -495,6 +526,22 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     cancelSession(sessionId, ending = "timed-out") {
       if (pending?.sessionId !== sessionId) return;
       end(ending);
+    },
+    panelPresenceChanged() {
+      const active = pending;
+      const clock = active?.clock;
+      // Already a question nobody could see (the hint marks it), or none at all: nothing to revise.
+      if (!active || !clock || active.hint !== undefined) return;
+      // Coming into sight never shortens anything (R-163).
+      if (deps.panelPresence?.() ?? true) return;
+      const waitedMs = Math.max(0, Date.now() - clock.raisedAtMs);
+      // Only ever longer, and counted from the raise, as the host counts it.
+      clock.boundMs = Math.max(clock.boundMs, closedPanelTimeoutMs);
+      clearTimeout(active.timer);
+      active.timer = setTimeout(() => end("timed-out", true), Math.max(0, clock.boundMs - waitedMs));
+      (active.timer as { unref?: () => void }).unref?.();
+      active.hint = ATTENTION_SENTENCES.consent;
+      startTicks(active, waitedMs);
     },
   };
 }

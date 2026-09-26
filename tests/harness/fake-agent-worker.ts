@@ -89,10 +89,18 @@ export type FakeAgentWorker = {
   /** Every tool call the server sent, in order. */
   readonly requests: readonly AgentNativeRequest[];
   /** Every greeting the server sent, in order - one per attach, and one more per re-greeting (006). */
-  readonly hellos: Array<{ sessionId: string }>;
+  readonly hellos: Array<{ sessionId: string; agentId: string }>;
   /** Sends a frame the worker originates, e.g. an unpair arriving as `pair-result{accepted:false}`. */
   send(frame: unknown): void;
   waitForControlFrame(type: AgentControlFrame["type"], timeoutMs?: number): Promise<AgentControlFrame>;
+  /**
+   * Waits for the `count`-th greeting and returns it - the sign that a server's link is up.
+   *
+   * 004 FR-059a: a server raises no pairing request on connect any more, only a tool call does, so
+   * the greeting (which every attach sends) is what a test waits on to know it is attached. It also
+   * names the session and the agent, which is what a test needs to address a `pair-result` by.
+   */
+  waitForHello(count?: number, timeoutMs?: number): Promise<{ sessionId: string; agentId: string }>;
   close(): Promise<void>;
 };
 
@@ -117,7 +125,7 @@ function waitFor(predicate: () => boolean, timeoutMs: number, label: string): Pr
 export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {}): Promise<FakeAgentWorker> {
   const controlFrames: AgentControlFrame[] = [];
   const requests: AgentNativeRequest[] = [];
-  const hellos: Array<{ sessionId: string }> = [];
+  const hellos: Array<{ sessionId: string; agentId: string }> = [];
   const pairing = options.pairing ?? "accept";
   const published = randomBytes(32).toString("hex");
   const demanded = options.token ?? published;
@@ -136,7 +144,7 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
             return;
           }
           if (!attached.includes(channel)) attached.push(channel);
-          hellos.push({ sessionId: link.data.sessionId });
+          hellos.push({ sessionId: link.data.sessionId, agentId: link.data.agentId });
           channel.send({ type: "hello-ack", relayPid: process.pid });
           return;
         }
@@ -211,6 +219,14 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
       const found = controlFrames.find((frame) => frame.type === type);
       if (!found) {
         throw new Error(`control frame '${type}' vanished`);
+      }
+      return found;
+    },
+    async waitForHello(count = 1, timeoutMs = 5_000) {
+      await waitFor(() => hellos.length >= count, timeoutMs, `greeting ${count}`);
+      const found = hellos[count - 1];
+      if (!found) {
+        throw new Error(`greeting ${count} vanished`);
       }
       return found;
     },

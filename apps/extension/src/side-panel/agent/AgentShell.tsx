@@ -7,6 +7,7 @@ import {
 } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { reportTestDiagnostic } from "../../diagnostics.js";
+import { panelWindowMessage } from "../../panel-window.js";
 import { NotConnected } from "./NotConnected.js";
 import { NoticeCard, PromptCard } from "./PromptCard.js";
 import { SessionCard } from "./SessionCard.js";
@@ -90,6 +91,23 @@ function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
       }
       portRef.current = port;
       port.onMessage.addListener(onMessage);
+      /**
+       * Which window this panel is in, on every connection (fix 2026-09-23, panel in another
+       * window). The worker counts a panel as in front of the owner only when it is in the window
+       * they last focused - a panel open in another window left the badge off and a pairing card
+       * on the 45 s bound while the owner saw nothing - and the port itself does not say where the
+       * panel is. Every connection rather than the first: a worker that restarted remembers nothing.
+       *
+       * Until this arrives the worker counts the panel as not seen, which only means the badge may
+       * be on for the moment `getCurrent` takes. A failure leaves it that way and is said.
+       */
+      void Promise.resolve()
+        .then(() => chrome.windows?.getCurrent?.())
+        .then((window) => {
+          if (portRef.current !== port || typeof window?.id !== "number") return;
+          port.postMessage(panelWindowMessage(window.id));
+        })
+        .catch(() => reportTestDiagnostic("agent.panel.window-unknown"));
       port.onDisconnect.addListener(() => {
         // An MV3 service worker idles out, and an extension reload or a worker restart does the
         // same: each takes the port with it. Without this the panel keeps a dead handle - every

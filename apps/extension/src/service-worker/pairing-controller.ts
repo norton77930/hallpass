@@ -24,7 +24,8 @@ import { CLOSED_PANEL_TIMEOUT_MS, PROMPT_WAITING_TICK_MS } from "./agent-tools/p
  * The worker owns the *card's* side of the same bound (review 4b): the withdrawal is silent, so
  * without this the panel would keep an Accept button for a request nobody is holding and the icon
  * would keep its badge (FR-147). Whichever bound the card was raised under is the one it is kept
- * to, so the two sides end together.
+ * to, so the two sides end together - lengthened to the closed-panel bound, from the raise, if the
+ * panel goes out of sight while it waits (D-011-7), which the ticks then tell the server.
  */
 export const PAIRING_BOUND_MS = 45_000;
 
@@ -61,9 +62,10 @@ export type PairingEvent =
   | { type: "decide"; agentId: string; accepted: boolean; at: string }
   | { type: "unpair"; agentId: string }
   /**
-   * The owner's Ignore (006 FR-084): the prompt goes, and nothing is decided. Unlike a decline the
-   * agent is not answered, so the request expires at the host's own bound and is raised again by
-   * its next call - the owner was away for one question, not saying no to the agent.
+   * The prompt goes and nothing is stored - the owner's Ignore (006 FR-084) and the clock's expiry
+   * alike. Whether the waiting agent is answered is the controller's business, not the reducer's:
+   * Ignore answers it as a decline of this one request (FR-032a, amended 2026-09-24); expiry answers
+   * nothing, because the host has already withdrawn the request at the same bound.
    */
   | { type: "ignore"; agentId: string }
   /**
@@ -179,6 +181,17 @@ export function watchPairingState(onExternalChange: () => void): void {
   });
 }
 
+/**
+ * How one waiting pairing request was settled (003 FR-032a).
+ *
+ * Four words rather than a boolean, because three different things used to arrive as `false` and
+ * the host now has to act on them differently: the owner's Decline answers that request alone, an
+ * unpair ends the session's standing until it reconnects, and a request abandoned with its link is
+ * no answer of the owner's at all. The bridge marks the first, leaves the second unmarked (which is
+ * what an unmarked refusal has always meant) and sends nothing for the third.
+ */
+export type PairingAnswer = "accepted" | "declined" | "unpaired" | "abandoned";
+
 export type PairingControllerDeps = {
   read: () => Promise<PairingState>;
   write: (state: PairingState) => Promise<void>;
@@ -191,7 +204,9 @@ export type PairingControllerDeps = {
    */
   watch?: (onExternalChange: () => void) => void;
   /**
-   * Whether any side panel document is connected, read once when a card is raised (011 R-163).
+   * Whether the owner can see a panel, read when a card is raised (011 R-163) and again on
+   * `panelPresenceChanged` (D-011-7) - a connected
+   * panel in the last-focused window since the fix of 2026-09-23 (panel in another window).
    * Absent means "assume somebody is looking", which is what every pre-011 composition meant.
    */
   panelPresence?: () => boolean;
@@ -200,6 +215,12 @@ export type PairingControllerDeps = {
    * had open when it was raised (011 FR-148, review M1), once per session waiting on it (M2).
    */
   onWaiting?: (tick: PairingWaitingTick) => void;
+  /**
+   * Called when the number of sessions waiting on the card changes (item 2, 2026-09-24). A second
+   * session joining leaves the reducer's state as it was - nothing is written or announced through
+   * `onChange` - yet the card has to say that one more connection is now waiting on it.
+   */
+  onWaitersChange?: () => void;
 };
 
 export type PairingController = {
@@ -211,10 +232,18 @@ export type PairingController = {
    * it is taken beside the request rather than inside it - the pending card, and the durable record
    * the owner's accept writes, are about an *agent*, and a session id has no business in either.
    */
-  decidePairing: (request: PendingPairing & { sessionId?: string }) => Promise<boolean>;
+  decidePairing: (request: PendingPairing & { sessionId?: string; requestId?: string }) => Promise<PairingAnswer>;
+  /**
+   * The host stopped waiting for one session's answer - its bound expired or the session closed
+   * (015 FR-216, FR-217). The same quiet expiry the worker's own clock runs: that session leaves
+   * the waiting list, and the card goes only with the last one. A `requestId` naming an exchange
+   * other than the one the session is waiting on now is a withdrawal of an earlier question, and
+   * changes nothing (FR-218).
+   */
+  withdraw: (agentId: string, sessionId: string, requestId?: string) => void;
   /** The panel's answer to the prompt. */
   decide: (agentId: string, accepted: boolean) => Promise<void>;
-  /** The panel's Ignore (006 FR-084): the prompt goes and the waiting sessions are told nothing. */
+  /** The panel's Ignore (006 FR-084, amended 2026-09-24): the prompt goes and the waiting sessions are answered `declined` - this request only. */
   ignore: (agentId: string) => Promise<void>;
   unpair: (agentId: string) => Promise<void>;
   /**
@@ -232,6 +261,14 @@ export type PairingController = {
   state: () => Promise<PairingState>;
   /** Resolves once every state change asked for so far has been written. */
   ready: () => Promise<void>;
+  /** How many connections are waiting on this agent's card right now (item 2): what the card counts. */
+  waitingSessions: (agentId: string) => number;
+  /**
+   * The panel's visibility may have changed (011 D-011-7): re-reads `panelPresence`, and a card
+   * raised in sight that nobody can see any more is kept to the closed-panel bound from its raise,
+   * with ticks. Idempotent; a panel coming into sight changes nothing.
+   */
+  panelPresenceChanged: () => void;
 };
 
 export function createPairingController(deps: PairingControllerDeps): PairingController {
@@ -249,7 +286,9 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
      * the sessions still inside theirs are left holding.
      */
     sessionId?: string;
-    resolve: (accepted: boolean) => void;
+    /** The host's id for the exchange this session is waiting on (015 FR-218), when it sent one. */
+    requestId?: string;
+    resolve: (answer: PairingAnswer) => void;
   }[] = [];
   /**
    * Every mutation runs on one chain. Two frames arriving together must not each read the state,
@@ -305,8 +344,38 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
       ticker?: ReturnType<typeof setInterval>;
       /** When this session's wait runs out, which is when the server withdraws its request. */
       expiry: ReturnType<typeof setTimeout>;
+      /** When the card was raised for this session, and the bound it runs under (D-011-7). */
+      raisedAtMs: number;
+      boundMs: number;
+      /** The host's id for this session's exchange (015 FR-218), when it sent one. */
+      requestId?: string;
     }
   >();
+
+  /**
+   * Ticks for one session, from `fromMs` into its wait. A wait that went out of sight mid-way
+   * (D-011-7) says so at once: the server's own 45 s may be about to pass.
+   */
+  function startTicker(sessionId: string, fromMs: number, boundMs: number): ReturnType<typeof setInterval> {
+    const say = (waitedMs: number): void => {
+      // A tick at the bound itself buys nothing - the host re-arms on `boundMs - waitedMs`, which
+      // is zero by then - and the card is over in that same instant (review 4b). Said here rather
+      // than left to which of the two timers the runtime happens to run first.
+      if (waitedMs >= boundMs) return;
+      // Read at each tick: a panel back in sight still ticks (the host's keep-alive for the bound
+      // already granted) but must not have the agent told to open it.
+      const panelConnected = deps.panelPresence?.() ?? false;
+      deps.onWaiting?.({ kind: "pairing", sessionId, waitedMs, boundMs, panelConnected });
+    };
+    let waitedMs = fromMs;
+    if (fromMs > 0) say(fromMs);
+    const ticker = setInterval(() => {
+      waitedMs += PROMPT_WAITING_TICK_MS;
+      say(waitedMs);
+    }, PROMPT_WAITING_TICK_MS);
+    (ticker as { unref?: () => void }).unref?.();
+    return ticker;
+  }
 
   function stopWaiting(sessionId: string): void {
     const running = waitingOn.get(sessionId);
@@ -328,7 +397,7 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     }
   }
 
-  function startWaiting(agentId: string, sessionId: string | undefined): void {
+  function startWaiting(agentId: string, sessionId: string | undefined, requestId?: string): void {
     // Nothing to address the tick to.
     if (sessionId === undefined) return;
     /**
@@ -340,30 +409,47 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
      * rather than carried across, exactly as they are for a card nobody has raised before.
      */
     stopWaiting(sessionId);
+    const raisedAtMs = Date.now();
     const panelConnected = deps.panelPresence?.() ?? true;
     const boundMs = panelConnected ? PAIRING_BOUND_MS : CLOSED_PANEL_TIMEOUT_MS;
     // Only while nobody can see the card (011 FR-148, review M1). With a panel open the server's
     // own 45 s and its own progress ticker already cover the wait, and this worker knows nothing
     // about it the server does not - a tick would only say the same thing twice. The bound below
     // still applies: it is the card's, not the tick's.
-    let ticker: ReturnType<typeof setInterval> | undefined;
-    if (!panelConnected) {
-      let waitedMs = 0;
-      ticker = setInterval(() => {
-        waitedMs += PROMPT_WAITING_TICK_MS;
-        // A tick at the bound itself buys nothing - the host re-arms on `boundMs - waitedMs`, which
-        // is zero by then - and the card is over in that same instant (review 4b). Said here rather
-        // than left to which of the two timers the runtime happens to run first.
-        if (waitedMs >= boundMs) return;
-        deps.onWaiting?.({ kind: "pairing", sessionId, waitedMs, boundMs, panelConnected });
-      }, PROMPT_WAITING_TICK_MS);
-      (ticker as { unref?: () => void }).unref?.();
-    }
+    const ticker = panelConnected ? undefined : startTicker(sessionId, 0, boundMs);
     // Armed after the ticker, so the bound's own tick - the one the server read to get here - still
     // goes out before the wait is declared over.
     const expiry = setTimeout(() => expireWaiting(agentId, sessionId), boundMs);
     (expiry as { unref?: () => void }).unref?.();
-    waitingOn.set(sessionId, { agentId, ...(ticker === undefined ? {} : { ticker }), expiry });
+    waitingOn.set(sessionId, {
+      agentId,
+      ...(ticker === undefined ? {} : { ticker }),
+      expiry,
+      raisedAtMs,
+      boundMs,
+      ...(requestId === undefined ? {} : { requestId }),
+    });
+  }
+
+  /**
+   * The panel went out of sight while the card waits (011 D-011-7): every session still on the open
+   * panel's 45 s becomes one raised with nobody looking - ticks from now, and the card kept to the
+   * closed-panel bound counted from its raise, which is exactly what the ticks ask the server for.
+   * A panel coming into sight shortens nothing, so that direction has nothing to do here.
+   */
+  function panelPresenceChanged(): void {
+    if (deps.panelPresence?.() ?? true) return;
+    for (const [sessionId, running] of waitingOn) {
+      if (running.ticker !== undefined) continue;
+      const waitedMs = Math.max(0, Date.now() - running.raisedAtMs);
+      const boundMs = Math.max(running.boundMs, CLOSED_PANEL_TIMEOUT_MS);
+      clearTimeout(running.expiry);
+      running.boundMs = boundMs;
+      running.ticker = startTicker(sessionId, waitedMs, boundMs);
+      const agentId = running.agentId;
+      running.expiry = setTimeout(() => expireWaiting(agentId, sessionId), Math.max(0, boundMs - waitedMs));
+      (running.expiry as { unref?: () => void }).unref?.();
+    }
   }
 
   /**
@@ -384,7 +470,11 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     stopWaiting(sessionId);
     waiting = waiting.filter((waiter) => !(waiter.agentId === agentId && waiter.sessionId === sessionId));
     for (const running of waitingOn.values()) {
-      if (running.agentId === agentId) return;
+      if (running.agentId === agentId) {
+        // The card stays, one connection fewer: its count says so.
+        deps.onWaitersChange?.();
+        return;
+      }
     }
     // Nobody is being asked any more, so nothing may still be shown: `ignore` is the transition
     // that takes the card down without deciding anything, and the panel and the icon follow it.
@@ -392,6 +482,28 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     // Including a session that was never given a clock of its own (no session id): the card it was
     // waiting on is gone, and an unresolved waiter here would answer the *next* card's question.
     waiting = waiting.filter((waiter) => waiter.agentId !== agentId);
+  }
+
+  /**
+   * The host's withdrawal of one session's request (015 FR-216, FR-217), routed to `expireWaiting`
+   * rather than beside it: the host has already answered its agent, exactly as at the worker's own
+   * bound, so the card is taken down the same quiet way.
+   *
+   * Two withdrawals change nothing. One for a session that is not waiting on this agent, because
+   * `expireWaiting` would read "nobody else is waiting" as the card's end and take down a card
+   * raised for somebody else. And one naming an earlier exchange than the one the session is
+   * waiting on now (FR-218): that question is already over, and the newer one is still being asked.
+   */
+  function withdraw(agentId: string, sessionId: string, requestId?: string): void {
+    const running = waitingOn.get(sessionId);
+    const ticking = running?.agentId === agentId ? running : undefined;
+    const held = waiting.filter((waiter) => waiter.agentId === agentId && waiter.sessionId === sessionId);
+    if (ticking === undefined && held.length === 0) return;
+    if (requestId !== undefined) {
+      const current = [ticking?.requestId, ...held.map((waiter) => waiter.requestId)];
+      if (current.some((id) => id !== undefined && id !== requestId)) return;
+    }
+    expireWaiting(agentId, sessionId);
   }
 
   async function apply(event: PairingEvent): Promise<PairingState> {
@@ -403,19 +515,23 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
       // show the owner a fresh prompt for a question already on screen (T096b).
       return current;
     }
+    // Written before it is believed (003 FR-032a review F1): a failed write used to leave `loaded`
+    // holding a prompt the panel was never told about, and the host's re-request then matched it as
+    // "already on screen" - no card, and every call timed out. Now the failed transition is simply
+    // not taken, and the next request raises it afresh.
+    await deps.write(next);
     loaded = next;
     syncWaiting(next);
-    await deps.write(next);
     deps.onChange?.(next);
     return next;
   }
 
   /** One answer for one agent settles every session that was waiting on that agent's prompt. */
-  function settle(agentId: string, accepted: boolean): void {
+  function settle(agentId: string, answer: PairingAnswer): void {
     const answered = waiting.filter((waiter) => waiter.agentId === agentId);
     waiting = waiting.filter((waiter) => waiter.agentId !== agentId);
     for (const waiter of answered) {
-      waiter.resolve(accepted);
+      waiter.resolve(answer);
     }
   }
 
@@ -437,7 +553,7 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
       const paired = new Set(state.paired.map((agent) => agent.agentId));
       for (const agentId of new Set(waiting.map((waiter) => waiter.agentId))) {
         if (paired.has(agentId)) {
-          settle(agentId, true);
+          settle(agentId, "accepted");
         }
       }
       if (state.pending && paired.has(state.pending.agentId)) {
@@ -453,50 +569,74 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
   }
 
   return {
-    decidePairing({ sessionId, ...request }) {
+    decidePairing({ sessionId, requestId, ...request }) {
       // The state change is queued; the *wait* for the owner deliberately is not. Holding the queue
       // for the length of a human decision would stop the panel's own answer from ever being
       // applied - the deadlock this shape exists to avoid.
-      return enqueue(() => apply({ type: "connection", ...request })).then((state) => {
+      return enqueue(() => apply({ type: "connection", ...request })).then((state): PairingAnswer | Promise<PairingAnswer> => {
         if (!state.pending) {
-          return true;
+          return "accepted";
         }
         // Somebody is being asked something they may not be able to see (011 FR-148). Said every
         // five seconds from here until the card leaves the panel, whichever way it leaves.
-        startWaiting(state.pending.agentId, sessionId);
+        startWaiting(state.pending.agentId, sessionId, requestId);
         // Held, not refused: the owner is being asked right now, and the host is holding the
         // agent's first tool call on exactly this answer.
-        return new Promise<boolean>((resolve) => {
-          waiting.push({ agentId: request.agentId, ...(sessionId === undefined ? {} : { sessionId }), resolve });
+        return new Promise<PairingAnswer>((resolve) => {
+          /**
+           * One answer per session (live finding 2026-09-24). A session that asks again has already
+           * withdrawn its earlier request at the host's bound, so that request is let go as
+           * `abandoned` - which the bridge answers with nothing. Answered as well, one Ignore reached
+           * the host as two declines, and the second refused the session's *next* request before the
+           * owner had seen it.
+           */
+          if (sessionId !== undefined) {
+            for (const earlier of waiting.filter((waiter) => waiter.agentId === request.agentId && waiter.sessionId === sessionId)) {
+              earlier.resolve("abandoned");
+            }
+            waiting = waiting.filter((waiter) => !(waiter.agentId === request.agentId && waiter.sessionId === sessionId));
+          }
+          waiting.push({
+            agentId: request.agentId,
+            ...(sessionId === undefined ? {} : { sessionId }),
+            ...(requestId === undefined ? {} : { requestId }),
+            resolve,
+          });
+          // Told after the push, so the count read from here includes this session.
+          deps.onWaitersChange?.();
         });
       });
     },
     async decide(agentId, accepted) {
       await enqueue(() => apply({ type: "decide", agentId, accepted, at: deps.now() }));
       // Read after the queue drains: the connections that raised the prompt are ahead of this in
-      // the same queue, so their waiters exist by now.
-      settle(agentId, accepted);
+      // the same queue, so their waiters exist by now. A no here is the owner's Decline of this
+      // request (FR-032a), which the bridge marks so the host does not take it for an unpair.
+      settle(agentId, accepted ? "accepted" : "declined");
     },
     async ignore(agentId) {
       await enqueue(() => apply({ type: "ignore", agentId }));
-      // Dropped, not settled: an answer here would be a decision the owner did not make. The
-      // host's own bound withdraws the request, and the next one raises a fresh prompt with fresh
-      // waiters - an old waiter left here would answer that later prompt twice.
-      waiting = waiting.filter((waiter) => waiter.agentId !== agentId);
+      // Answered as a decline of this one request (006 FR-084 as amended 2026-09-24, 003 FR-032a):
+      // the agent hears at once instead of waiting out the host's bound, and nothing is stored, so
+      // its next call raises a fresh prompt. `settle` also empties the waiters, so none of them can
+      // answer that later prompt. (Silence was right only while every refusal was permanent.)
+      settle(agentId, "declined");
     },
     async unpair(agentId) {
       await enqueue(() => apply({ type: "unpair", agentId }));
-      settle(agentId, false);
+      settle(agentId, "unpaired");
     },
+    withdraw,
     sessionEnded(sessionId) {
       stopWaiting(sessionId);
     },
     async abandonPending() {
       await enqueue(() => apply({ type: "abandon" }));
       // Every waiting session's `decidePairing` promise must settle: an unresolved one would hold
-      // its connection handler for the life of the worker.
+      // its connection handler for the life of the worker. Settled as `abandoned`, not as a refusal:
+      // the owner decided nothing, and the bridge answers it with nothing (FR-032a).
       for (const waiter of waiting.splice(0)) {
-        waiter.resolve(false);
+        waiter.resolve("abandoned");
       }
     },
     async isPaired(agentId) {
@@ -509,5 +649,9 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     async ready() {
       await queue;
     },
+    waitingSessions(agentId) {
+      return waiting.filter((waiter) => waiter.agentId === agentId).length;
+    },
+    panelPresenceChanged,
   };
 }

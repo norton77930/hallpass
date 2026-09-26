@@ -118,10 +118,10 @@ describe("T287 prompt-waiting on the server", () => {
       },
     });
     worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore" });
-    const request = (await worker.waitForControlFrame("pair-request")) as { sessionId: string };
-
     const seen: Update[] = [];
     const pending = client.callTool("tabs_context", {}, { onProgress: (update) => seen.push(update) });
+    // The call raises the pairing request (004 FR-059a); the tick is about the card that raised.
+    const request = (await worker.waitForControlFrame("pair-request")) as { sessionId: string };
     // No `callId`: the pairing exchange belongs to the server, and the tick says only that the
     // pairing card is up and that nobody can see it.
     worker.send({
@@ -155,7 +155,7 @@ describe("T287 prompt-waiting on the server", () => {
       },
     });
     worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore" });
-    await worker.waitForControlFrame("pair-request");
+    await worker.waitForHello();
 
     const seen: Update[] = [];
     const unanswered = await client.callTool("tabs_context", {}, { onProgress: (update) => seen.push(update) });

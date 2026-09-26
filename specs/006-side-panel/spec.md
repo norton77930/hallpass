@@ -165,6 +165,12 @@ path, last disconnect reason from the 004 rings).
 - **FR-084 (PR-007 — MUST)**: A pairing request renders as a card on top of the panel: "{agent} wants to
   connect to this browser", accept / ignore. Accept pairs the agent (as today); ignore leaves the request
   to expire (as today).
+  **Amended 2026-09-24 (owner decision, with 003 FR-032a)**: ignore answers the waiting agent at once
+  as a decline of *this request* - the call ends `denied` with the do-not-retry-unless-asked hint and
+  the agent's next call raises a fresh card - instead of leaving the agent waiting out the 45 s /
+  2-minute bound. It still pairs nothing and remembers nothing. The original reason for silence (any
+  refusal used to be permanent for the session) no longer holds since FR-032a. Reference: Claude in
+  Chrome answers a dismissed pairing prompt immediately as dismissed.
 - **FR-085 (PR-005, PR-008 — MUST)**: An ask-mode consent renders as a card on top: "{agent} wants to
   {action} on {site}", with three answers — only this time (this effect proceeds), always on this site
   (this effect proceeds and the site's mode becomes `skip-checks`), refuse (the effect answers refused).

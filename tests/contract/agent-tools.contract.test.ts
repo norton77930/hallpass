@@ -224,7 +224,7 @@ describe("T005 agent tools contract", () => {
     expectAccepted(command, { type: "ui.agent.pair-decide", payload: { agentId: "agent-1", accepted: true } }, "an accept");
     expectAccepted(command, { type: "ui.agent.pair-decide", payload: { agentId: "agent-1", accepted: false } }, "a decline");
     expectAccepted(command, { type: "ui.agent.unpair", payload: { agentId: "agent-1" } }, "an unpair");
-    // 006 FR-084: ignore names the agent and nothing else - it is not a decision about it.
+    // 006 FR-084: ignore names the agent and nothing else - the worker turns it into a decline of this request (amended 2026-09-24).
     expectAccepted(command, { type: "ui.agent.pair-ignore", payload: { agentId: "agent-1" } }, "an ignore");
     expectRejected(command, { type: "ui.agent.pair-ignore", payload: { agentId: "agent-1", accepted: false } }, "an ignore carrying a decision");
     expectAccepted(command, { type: "ui.agent.connect", payload: {} }, "a connect");

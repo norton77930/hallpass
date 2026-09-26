@@ -1,4 +1,5 @@
 import { AGENT_PANEL_PORT_NAME, agentPanelCommandSchema } from "@hallpass/contracts";
+import { isPanelWindowType, parsePanelWindowMessage } from "../panel-window.js";
 import { isTrustedControlSender } from "./shared-port.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 
@@ -38,6 +39,16 @@ export type AgentPanelPortInput = {
   sidePanelUrl: string;
   runtime: AgentRuntime;
   reportDiagnostic?: (code: string) => void;
+  /**
+   * The browser's last-focused normal window: told once it is known and again on every move, and
+   * never told "no window" (fix 2026-09-23, panel in another window). The real one is
+   * `watchLastFocusedWindow` in `chrome-adapters/windows.ts`.
+   *
+   * Absent means this composition knows nothing about windows - the suites that build a panel port
+   * to test something else - and then any connected panel counts as seen, which is what they were
+   * written under. `agent-entry.ts` always passes it.
+   */
+  watchFocusedWindow?: (listener: (windowId: number) => void) => void;
 };
 
 export type AgentPanelPort = {
@@ -45,36 +56,79 @@ export type AgentPanelPort = {
   /** Re-reads the projection and pushes it to every connected panel, if there is any. */
   publish(): Promise<void>;
   /**
-   * Whether the owner has any panel open right now (011 R-163).
+   * Whether any panel document is connected at all, in any window (011 R-163).
    *
-   * The set has always been here; this is what makes it readable by the two parts of the worker
-   * that need it - the question's bound, chosen once when the question is raised, and the toolbar
-   * badge, which is on exactly while something is waiting where nobody can see it.
+   * Not what the badge or the bounds read any more - see `isVisible` - but still the fact that
+   * decides whether there is anybody to publish to, and a useful one to be able to ask.
    */
   isConnected(): boolean;
   /**
-   * Told on every connect and every disconnect, with the answer `isConnected` would give.
+   * Whether the owner can see a card right now: a connected panel in the window they last focused
+   * (fix 2026-09-23, panel in another window; 011 R-163 before it counted any panel).
    *
-   * Every event rather than only the transitions through zero: a listener that wants the
-   * transition can compare against what it last did, and one that wants each event back cannot
-   * recover an event it was never told about.
+   * This is what the two parts of the worker that care read - the question's bound, chosen once
+   * when the question is raised, and the toolbar badge, which is on exactly while something is
+   * waiting where nobody can see it. A panel in another window is a panel the owner is not looking
+   * at, so it counts for neither; the card still goes to it, because it is still the owner's panel
+   * and they may switch to it.
+   *
+   * Unknowns count as not seen - a panel that has not said which window it is in, a focused window
+   * not yet read - because the two ways to be wrong are not alike: a badge on while a card is in
+   * front of the owner costs a glance, a badge off while it is not costs the whole question.
    */
-  onPresenceChange(listener: (connected: boolean) => void): void;
+  isVisible(): boolean;
+  /**
+   * Told on every connect, disconnect, window report and focus move, with the answer `isVisible`
+   * would give.
+   *
+   * Every event rather than only the transitions: a listener that wants the transition can compare
+   * against what it last did, and one that wants each event back cannot recover an event it was
+   * never told about.
+   */
+  onPresenceChange(listener: (visible: boolean) => void): void;
 };
 
 export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort {
   const connected = new Set<AgentPanelPortLike>();
-  const presenceListeners: Array<(connected: boolean) => void> = [];
+  const presenceListeners: Array<(visible: boolean) => void> = [];
+  /**
+   * The window each panel said it is in (fix 2026-09-23). Kept beside the set rather than in it,
+   * because a panel is connected - and published to - from the moment it is accepted, and says
+   * where it is only a moment later, once `chrome.windows.getCurrent()` has answered in its document.
+   */
+  const panelWindows = new Map<AgentPanelPortLike, number>();
+  /** The last-focused normal window, once the adapter has read it. */
+  let focusedWindow: number | undefined;
+
+  function isVisible(): boolean {
+    // A composition with no window source: any panel counts, as it did before this fix.
+    if (input.watchFocusedWindow === undefined) return connected.size > 0;
+    if (focusedWindow === undefined) return false;
+    for (const port of connected) {
+      if (panelWindows.get(port) === focusedWindow) return true;
+    }
+    return false;
+  }
 
   function announcePresence(): void {
-    for (const listener of presenceListeners) listener(connected.size > 0);
+    const visible = isVisible();
+    for (const listener of presenceListeners) listener(visible);
   }
 
   /** The one place a port leaves the set, so no route out of it can forget to say so. */
   function drop(port: AgentPanelPortLike): void {
+    panelWindows.delete(port);
     if (!connected.delete(port)) return;
     announcePresence();
   }
+
+  // One subscription for the life of the worker, like the runtime's below. The owner moving between
+  // windows moves the card in or out of sight without any panel connecting or leaving, so the
+  // badge has to hear about it here or it would stay as the last connect left it.
+  input.watchFocusedWindow?.((windowId) => {
+    focusedWindow = windowId;
+    announcePresence();
+  });
   /**
    * Which `publish` is the newest. Two can overlap - a panel connecting while a change is being
    * projected, a burst of changes - and their projections resolve in any order; only the newest
@@ -147,6 +201,20 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
         if (!connected.has(port)) {
           return;
         }
+        // Where this panel is (fix 2026-09-23, panel in another window). Not a command - it names
+        // no decision and changes nothing but who counts as seeing a card - so it is read before
+        // the closed command union and never reaches the runtime. A malformed one is refused the
+        // way a malformed command is, and leaves the panel's window as it was.
+        if (isPanelWindowType(raw)) {
+          const windowId = parsePanelWindowMessage(raw);
+          if (windowId === undefined) {
+            input.reportDiagnostic?.("agent.panel.command-rejected");
+            return;
+          }
+          panelWindows.set(port, windowId);
+          announcePresence();
+          return;
+        }
         const parsed = agentPanelCommandSchema.safeParse(raw);
         if (!parsed.success) {
           // Refused, not answered: a panel that sent this is not the panel this repository ships.
@@ -159,8 +227,8 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
             void input.runtime.pairing.decide(command.payload.agentId, command.payload.accepted);
             return;
           case "ui.agent.pair-ignore":
-            // Not a decline (006 FR-084): the card goes and the host is told nothing, so its own
-            // bound expires the request and the next call raises it again.
+            // A decline of this request only (006 FR-084 as amended 2026-09-24, 003 FR-032a): the
+            // agent is answered at once and its next call raises a fresh card.
             void input.runtime.pairing.ignore(command.payload.agentId);
             return;
           case "ui.agent.unpair":
@@ -261,6 +329,7 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
     isConnected() {
       return connected.size > 0;
     },
+    isVisible,
     onPresenceChange(listener) {
       presenceListeners.push(listener);
     },

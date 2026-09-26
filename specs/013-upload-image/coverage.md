@@ -29,6 +29,16 @@ accordingly reads "as `file_upload`". A batch step that carried worker-shaped ar
 not a documented shape for an agent, and it is noted here only so the refusal is not mistaken for
 an unconditional one.
 
+**Closed by 015 (FR-210 – FR-215, T409 – T412).** The "listed as batchable while unusable" state
+above no longer holds. The host now walks a `browser_batch`'s steps: every `file_upload` /
+`upload_image` step goes through `prepareUpload` in `packages/agent-host/src/mcp-server.ts`, the
+same function a standalone call uses, before the batch crosses the link
+(`specs/015-honest-answers/contracts/batch-upload.md`). A step that carried worker-shaped arguments
+itself is refused there too: a `file_upload` step without `paths` resolves no file, and an
+`upload_image` step without `imageId` fails the request schema. The contract suite's "one resolver"
+test (`tests/contract/agent-tools-015.contract.test.ts`) fails if the batch path stops going through
+`prepareUpload`.
+
 ## Activity parity (S2 note)
 
 R-181's activity line resolves to "nothing to add": there is no activity kind for an upload today.

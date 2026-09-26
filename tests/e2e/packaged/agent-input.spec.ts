@@ -1,7 +1,7 @@
 import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
-import { acceptPairing } from "../fixtures/agent-pairing.js";
+import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -88,7 +88,7 @@ test.describe("agent input", () => {
       const live = client;
       const call = callerFor(() => client);
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(live, panel, { locale });
 
       // ================= 1. hover opens the CSS submenu, and a submenu item is then clickable =================
       const hoverCreated = (await call("tabs_create", { url: `${SITE}/hover-menu` })) as { tabId: number };
@@ -292,7 +292,7 @@ test.describe("agent input", () => {
       client = await startMcpClient({ clientName: "Claude Code" });
       const call = callerFor(() => client);
       await panel.clickIfPresent(ui("agent.retry"));
-      await acceptPairing(panel, { locale });
+      await pairWithFirstCall(client, panel, { locale });
 
       const created = (await call("tabs_create", { url: `${SITE}/frames-oopif` })) as { tabId: number };
       const tabId = created.tabId;

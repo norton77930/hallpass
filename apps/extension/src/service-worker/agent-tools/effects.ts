@@ -1,4 +1,5 @@
 import {
+  AGENT_015_REASON_OUTCOMES,
   agentToolArgSchemas,
   isAgentEffectTool,
   type AgentEffectObservation,
@@ -23,6 +24,7 @@ import {
   probeActiveTab,
   resolveHandleOnTab,
 } from "../content-broker.js";
+import type { DownloadObserver } from "../download-observer.js";
 import { verifyPageEffect } from "../effect-verification.js";
 import type { PageExecutionOutcome } from "../page-ports.js";
 import type { SiteModeStore } from "../site-mode-store.js";
@@ -32,6 +34,7 @@ import {
   createKeyboardInput,
   createPointerInput,
   inputUnavailable,
+  isInputDispatchDeadline,
   type AgentInputAttachments,
   type AgentKeyboardInput,
   type AgentPointerInput,
@@ -56,7 +59,7 @@ import {
   type PositionPoint,
   type Viewport,
 } from "./computer.js";
-import type { AgentPageBinding, AgentPageBindings } from "./page-binding.js";
+import { bindingFailureResponse, INPUT_NOT_ANSWERED_HINT, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { photographTab } from "./photograph.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { findOnTab, resolveRef, type AgentTarget } from "./refs.js";
@@ -210,6 +213,35 @@ export type AgentEffectDeps = {
   /** How long a navigation started by an effect is given to unload the old document. */
   settleMs?: number;
   reportDiagnostic?: (code: string) => void;
+  /**
+   * Tabs as the browser creates them (015/T406, FR-200). A press listens for the length of its
+   * settle wait and keeps only the tabs whose opener is the tab it pressed in. Defaults to
+   * `chrome.tabs.onCreated`; injected so a test can open a tab at the moment it chooses.
+   */
+  watchTabCreated?: (listener: (tab: CreatedTabEvent) => void) => () => void;
+  /**
+   * A tab's address as the browser has it now - committed, or pending while it has not committed
+   * (015/T406). `undefined` when the tab cannot be read; the observation then omits the address
+   * rather than guessing it. Defaults to `chrome.tabs.get`.
+   */
+  tabUrl?: (tabId: number) => Promise<string | undefined>;
+  /**
+   * The session's download records started since a moment (015/T405, T406). Absent means this
+   * runner cannot see downloads, and a press reports none - never "none happened" on its behalf:
+   * without it `observedForMs` would claim a silence nobody observed, so it is wired wherever the
+   * observer exists.
+   */
+  downloads?: Pick<DownloadObserver, "createdSince">;
+  /** The clock a press's window is measured by; injected with the rest of the browser. */
+  now?: () => number;
+};
+
+/** What `tabs.onCreated` says about a tab, as far as a press needs it (015/T406). */
+export type CreatedTabEvent = {
+  id?: number | undefined;
+  openerTabId?: number | undefined;
+  url?: string | undefined;
+  pendingUrl?: string | undefined;
 };
 
 export type AgentEffectRunner = {
@@ -301,6 +333,119 @@ function observationOf(
 }
 
 /**
+ * What one press left behind in its settle wait, before the verdict says whether the document moved
+ * (015/T406, contracts/press-outcomes.md, data-model "Press observation").
+ */
+type PressFacts = {
+  /** The pressed tab's address at the end of the wait, when it could be read and fits the bound. */
+  url?: string;
+  newTabs: Array<{ tabId: number; url: string; held: false }>;
+  downloads: Array<{ id: number; filename: string; url: string; state: string }>;
+  /** Whether downloads were watched at all; without the observer nothing may be called silent. */
+  downloadsObserved: boolean;
+  /** The wait actually spent, from just before the press to the end of the settle. */
+  spentMs: number;
+};
+
+/** The press's own window: armed just before the input leaves, ended when the settle wait ends. */
+type PressWatch = {
+  /**
+   * Ends the window and reads what the press left behind. Never throws; answers once. The window
+   * closes synchronously, inside the call - a tab created after it returns is not this press's.
+   */
+  settle(): Promise<PressFacts>;
+  /** Ends the window without reading - the call is answering some other way. Idempotent. */
+  stop(): void;
+};
+
+/** The contract's bounds on what an observation may carry (agentEffectObservationSchema). */
+const PRESS_LIST_MAX = 10;
+const PRESS_URL_MAX = 2048;
+/** The response's own bound on `hint`. */
+const HINT_MAX = 400;
+
+/**
+ * A link that was pressed and led nowhere within the window (015 FR-201, contracts rule 6).
+ *
+ * The window is stated in it because it is the only thing the answer actually knows: nothing
+ * happened *yet*. The page may have handled the press itself, or be about to navigate.
+ */
+function linkHint(windowMs: number): string {
+  return (
+    `The link was pressed, but nothing navigated, opened or downloaded within ${windowMs} ms. ` +
+    "The page may handle it itself — read the page or wait before assuming it did nothing."
+  );
+}
+
+/**
+ * The tabs a press opened, and the one move that makes them this session's (015 FR-200, contracts
+ * rule 7). Seeing a tab open does not hold it; `tabs_claim` does. One tab is named with its
+ * address, as the contract words it; an address too long for the hint, or several tabs, are named
+ * by id alone - the observation beside it carries every address in full.
+ */
+function newTabsHint(tabs: PressFacts["newTabs"]): string {
+  const [only] = tabs;
+  if (tabs.length === 1 && only) {
+    const named = `The press opened tab ${only.tabId} (${only.url}). It is not held by this session; use tabs_claim to act on it.`;
+    if (only.url !== "" && named.length <= HINT_MAX) return named;
+    return `The press opened tab ${only.tabId}. It is not held by this session; use tabs_claim to act on it.`;
+  }
+  const listed = `The press opened tabs ${tabs.map((tab) => tab.tabId).join(", ")}. They are not held by this session; use tabs_claim to act on them.`;
+  return listed.length <= HINT_MAX
+    ? listed
+    : `The press opened ${tabs.length} tabs. They are not held by this session; use tabs_claim to act on them.`;
+}
+
+/**
+ * The press's facts, turned into the observation's additive fields and the answer's hint, once the
+ * verdict has said whether the document moved (015 FR-200 – FR-202).
+ *
+ * `url` is only for a document that changed - an unchanged tab's address is not news. Every outcome
+ * that happened is reported, so a press that navigated *and* opened a tab says both. `observedForMs`
+ * is the opposite claim - that none of the three happened - so it is made only when all three were
+ * actually watched; a runner that cannot see downloads says nothing rather than "nothing".
+ */
+function pressOutcome(
+  facts: PressFacts,
+  documentChanged: boolean,
+  link: boolean,
+  windowMs: number,
+): { fields: Partial<AgentEffectObservation>; hint?: string } {
+  const newTabs = facts.newTabs.slice(0, PRESS_LIST_MAX);
+  const downloads = facts.downloads.slice(0, PRESS_LIST_MAX);
+  const nothing = !documentChanged && newTabs.length === 0 && downloads.length === 0 && facts.downloadsObserved;
+  const fields: Partial<AgentEffectObservation> = {
+    ...(documentChanged && facts.url !== undefined ? { url: facts.url } : {}),
+    ...(newTabs.length > 0 ? { newTabs } : {}),
+    ...(downloads.length > 0 ? { downloads } : {}),
+    ...(nothing ? { observedForMs: facts.spentMs } : {}),
+  };
+  if (facts.newTabs.length > 0) return { fields, hint: newTabsHint(facts.newTabs) };
+  if (nothing && link) return { fields, hint: linkHint(windowMs) };
+  return { fields };
+}
+
+/** An address the observation may carry: whole, or not at all (a cut address reads as another). */
+function boundedUrl(url: string | undefined): string | undefined {
+  return url !== undefined && url !== "" && url.length <= PRESS_URL_MAX ? url : undefined;
+}
+
+/** `chrome.tabs.onCreated`, when this worker has it; a no-op subscription when it does not. */
+function watchChromeTabCreated(listener: (tab: CreatedTabEvent) => void): () => void {
+  const events = typeof chrome !== "undefined" ? chrome.tabs?.onCreated : undefined;
+  if (!events) return () => {};
+  const handler = (tab: chrome.tabs.Tab): void => listener(tab);
+  events.addListener(handler);
+  return () => events.removeListener(handler);
+}
+
+/** A tab's committed address, or its pending one; `undefined` for a tab that cannot be read. */
+async function chromeTabUrl(tabId: number): Promise<string | undefined> {
+  const tab = await chrome.tabs.get(tabId);
+  return tab.url || tab.pendingUrl || undefined;
+}
+
+/**
  * Decision 8's mapping from a refused execution to a tool outcome. Each word means one thing:
  * `stale` is a handle or a document that has moved on, `not-actionable` is a page this extension
  * may not act on, `stopped` is the fence, and everything else is a `failed` carrying the runtime's
@@ -353,6 +498,13 @@ export type TargetRect = {
      */
     sessionId?: string;
   };
+  /**
+   * The element is a link with an address (015/T406, FR-201): the frame that claimed the ref gave it
+   * the role `link`, which the collection gives only to an anchor that has an `href` or to an element
+   * the page itself calls a link. Read for one thing only - a press on a link that caused nothing is
+   * the press whose silence needs explaining. Absent for everything else, and when not reported.
+   */
+  link?: true;
 };
 
 export type TargetLocator = (input: {
@@ -614,7 +766,9 @@ export type TargetLocatorDeps = {
  * or dead everywhere - the aggregation in `createTargetLocator` is what turns that per-frame split
  * into one page-level answer.
  */
-type FrameLocateResult = { rect: TargetRect; documentEpoch: string; canonicalOrigin: string } | { gone: true };
+type FrameLocateResult =
+  | { rect: TargetRect; documentEpoch: string; canonicalOrigin: string; link?: true }
+  | { gone: true };
 
 /** One frame's answer to "is this ref yours, and where is it in your viewport", and its own epoch. */
 async function locateInFrame(
@@ -653,9 +807,15 @@ async function locateInFrame(
     tab: input.binding.tabId,
   });
   for (const node of collected.semanticNodes ?? []) {
-    const entry = node as { targetHandle?: unknown; rect?: TargetRect };
+    const entry = node as { targetHandle?: unknown; rect?: TargetRect; role?: unknown };
     if (entry.targetHandle === input.ref && entry.rect) {
-      return { rect: entry.rect, documentEpoch: collected.documentEpoch, canonicalOrigin: collected.canonicalOrigin };
+      return {
+        rect: entry.rect,
+        documentEpoch: collected.documentEpoch,
+        canonicalOrigin: collected.canonicalOrigin,
+        // 015/T406: whether it is a link rides beside its box, for the press that needs to know.
+        ...(entry.role === "link" ? { link: true as const } : {}),
+      };
     }
   }
   // 004/T136: this frame's own registry told the collection it once bound this ref but the element
@@ -796,7 +956,8 @@ export function createTargetLocator(deps: TargetLocatorDeps): TargetLocatorSourc
               : undefined;
           }
           if (located === undefined) return undefined;
-          return "rect" in located ? located.rect : { stale: true };
+          if (!("rect" in located)) return { stale: true };
+          return located.link ? { ...located.rect, link: true } : located.rect;
         }
         const found = await Promise.all(
           frames.map(async (frame) => {
@@ -810,8 +971,15 @@ export function createTargetLocator(deps: TargetLocatorDeps): TargetLocatorSourc
           }),
         );
         const claimed = found.find(
-          (entry): entry is { frame: (typeof frames)[number]; rect: TargetRect; documentEpoch: string; canonicalOrigin: string } =>
-            entry !== undefined && "rect" in entry,
+          (
+            entry,
+          ): entry is {
+            frame: (typeof frames)[number];
+            rect: TargetRect;
+            documentEpoch: string;
+            canonicalOrigin: string;
+            link?: true;
+          } => entry !== undefined && "rect" in entry,
         );
         if (!claimed) {
           // 004/T136: a locate asks every frame - the frame that minted a now-dead ref answers
@@ -839,6 +1007,7 @@ export function createTargetLocator(deps: TargetLocatorDeps): TargetLocatorSourc
             y: claimed.rect.y,
             width: claimed.rect.width,
             height: claimed.rect.height,
+            ...(claimed.link ? { link: true as const } : {}),
             frame: {
               frameId: claimed.frame.frameId,
               rect: claimed.rect,
@@ -857,6 +1026,7 @@ export function createTargetLocator(deps: TargetLocatorDeps): TargetLocatorSourc
           y: claimed.rect.y + offset.y,
           width: claimed.rect.width,
           height: claimed.rect.height,
+          ...(claimed.link ? { link: true as const } : {}),
           // 004/T128 gap 2: the frame that claimed the ref, and its box in that frame's own
           // viewport - what a same-frame confirmation has to ask in, since the offset above turns
           // that box into the *page's* coordinates and a confirmer asking frame 0 with a page point
@@ -905,6 +1075,15 @@ const POINTER_CLICKS = {
 /** Which tools this slice delivers through the debugger rather than through the page. */
 function isPointerTool(tool: AgentToolName): boolean {
   return tool in POINTER_CLICKS || tool === "hover" || tool === "drag";
+}
+
+/**
+ * `computer`'s actions that press (015/T406, contracts/press-outcomes.md "Applies to"): the four
+ * clicks `deliverPosition` delivers. `middle_click` is named by the contract "where supported";
+ * this tool has none. `type` and `key` click only to place a caret, which is not the press asked for.
+ */
+function isPositionPress(action: string): boolean {
+  return action === "left_click" || action === "right_click" || action === "double_click" || action === "triple_click";
 }
 
 /** The two the keyboard delivers (004/T123): typing a string, and pressing one named key. */
@@ -959,6 +1138,85 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         const timer = setTimeout(resolve, ms);
         (timer as unknown as { unref?: () => void }).unref?.();
       }));
+  const now = deps.now ?? (() => Date.now());
+  const watchTabCreated = deps.watchTabCreated ?? watchChromeTabCreated;
+  const readTabUrl = deps.tabUrl ?? chromeTabUrl;
+
+  /** A tab's address for the observation; any failure to read it is "not known", never a throw. */
+  async function tabUrlOf(tabId: number): Promise<string | undefined> {
+    try {
+      return await readTabUrl(tabId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Arms one press's window (015/T406, FR-200, FR-202, R-198).
+   *
+   * Called just before the input leaves, so a tab the press opens cannot be created before anyone
+   * is listening, and so the downloads asked for later are exactly the ones started from this
+   * moment on. It waits for nothing: the window is the settle wait verification already spends, and
+   * `settle` is called when that wait ends, with the reads running beside the re-probe.
+   */
+  function armPress(tabId: number, sessionId: string): PressWatch {
+    const since = now();
+    const opened: Array<{ tabId: number; eventUrl: string | undefined }> = [];
+    let unsubscribe: (() => void) | undefined = watchTabCreated((tab) => {
+      // Only this press's: a tab the pressed tab opened. `openerTabId` is the browser's own link.
+      if (tab.openerTabId !== tabId || tab.id === undefined) return;
+      opened.push({ tabId: tab.id, eventUrl: tab.pendingUrl || tab.url || undefined });
+    });
+    const stop = (): void => {
+      unsubscribe?.();
+      unsubscribe = undefined;
+    };
+    let facts: Promise<PressFacts> | undefined;
+    return {
+      stop,
+      settle() {
+        facts ??= (async (): Promise<PressFacts> => {
+          stop();
+          const spentMs = Math.max(0, now() - since);
+          const seen = opened.slice();
+          const [url, newTabs, downloads] = await Promise.all([
+            tabUrlOf(tabId),
+            Promise.all(
+              seen.map(async (tab) => ({
+                tabId: tab.tabId,
+                // The address now, which a tab opened a moment ago may only have as pending; the
+                // event's own as the fallback. Empty rather than cut when neither fits.
+                url: boundedUrl((await tabUrlOf(tab.tabId)) ?? tab.eventUrl) ?? boundedUrl(tab.eventUrl) ?? "",
+                held: false as const,
+              })),
+            ),
+            (async () => {
+              if (!deps.downloads) return [];
+              try {
+                return await deps.downloads.createdSince(sessionId, since);
+              } catch {
+                return [];
+              }
+            })(),
+          ]);
+          const bounded = boundedUrl(url);
+          return {
+            ...(bounded === undefined ? {} : { url: bounded }),
+            newTabs,
+            downloads: downloads.map((record) => ({
+              id: record.id,
+              filename: record.filename,
+              url: record.url,
+              state: record.state,
+            })),
+            downloadsObserved: deps.downloads !== undefined,
+            spentMs,
+          };
+        })();
+        return facts;
+      },
+    };
+  }
 
   /**
    * 004/T128 follow-up (B66): whether a key press's target kept focus, checked more than once
@@ -1153,10 +1411,18 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     context: AgentToolContext,
     /** The click family's own check on its own arithmetic (004/T128, T129); absent for everything else. */
     pointConfirmation?: TargetConfirmResult,
+    /**
+     * A press's window and whether its target was a link (015/T406); absent for every effect that
+     * is not a press. The caller armed it before the input left and stops it when this returns.
+     */
+    press?: { watch: PressWatch; link: boolean },
   ): Promise<AgentNativeResponse> {
     // What was open before this effect, so a dialog found afterwards can be told from one that was
     // already there (008/T226): only a *new* one is this call's own doing.
     const dialogBefore = deps.currentDialog?.(binding.tabId);
+    // 015/T406: the press's window ends the moment the settle wait does - synchronously, before the
+    // re-probe is sent - and what it saw is read then, beside the probe rather than after it.
+    let collecting: Promise<PressFacts> | undefined;
     const verifying = verifyPageEffect({
       executed: evidence,
       effect: { documentChanged: false },
@@ -1172,6 +1438,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       probe,
       tab: binding.tabId,
       ...(pointConfirmation === undefined ? {} : { pointConfirmation: pointConfirmation.outcome }),
+      ...(press === undefined
+        ? {}
+        : {
+            onSettled: () => {
+              collecting = press.watch.settle();
+            },
+          }),
     });
     /**
      * The dialog this effect raised, raced against the verification (008/FR-111, US3 scenario 1).
@@ -1208,10 +1481,19 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
             ...(pointConfirmation.label ? { label: pointConfirmation.label } : {}),
           }
         : {};
+    // 015/T406: what the press caused, now that the verdict says whether the document moved.
+    // A verification that ended without its settle wait still closes the window here.
+    const outcomes = press
+      ? pressOutcome(await (collecting ?? press.watch.settle()), observed.documentChanged, press.link, settleMs)
+      : undefined;
     return {
       callId,
       outcome: "ok",
-      result: { observed: { ...observed, ...described }, ...(raised === undefined ? {} : { dialog: raised }) },
+      result: {
+        observed: { ...observed, ...described, ...outcomes?.fields },
+        ...(raised === undefined ? {} : { dialog: raised }),
+      },
+      ...(outcomes?.hint === undefined ? {} : { hint: outcomes.hint }),
     };
   }
 
@@ -1455,22 +1737,32 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * the dialog and the click are the same turn.
      */
     const before = deps.currentDialog?.(binding.tabId);
-    const delivery = await racingDialog(
-      binding.tabId,
-      before,
-      pointer.click(binding.tabId, point, {
-        button: gesture.button,
-        clickCount: gesture.clickCount,
-        ...(target.rect.frame?.sessionId === undefined ? {} : { sessionId: target.rect.frame.sessionId }),
-      }),
-    );
-    if ("dialog" in delivery) {
-      const unverified = observationOf(evidence, "target-unconfirmed");
-      return unverified === undefined
-        ? answer(callId, "failed", "unreadable-evidence")
-        : { callId, outcome: "ok", result: { observed: unverified, dialog: delivery.dialog } };
+    // 015/T406: armed just before the press leaves, so nothing it opens is created unheard; stopped
+    // however this call answers.
+    const watch = armPress(binding.tabId, context.sessionId);
+    try {
+      const delivery = await racingDialog(
+        binding.tabId,
+        before,
+        pointer.click(binding.tabId, point, {
+          button: gesture.button,
+          clickCount: gesture.clickCount,
+          ...(target.rect.frame?.sessionId === undefined ? {} : { sessionId: target.rect.frame.sessionId }),
+        }),
+      );
+      if ("dialog" in delivery) {
+        const unverified = observationOf(evidence, "target-unconfirmed");
+        return unverified === undefined
+          ? answer(callId, "failed", "unreadable-evidence")
+          : { callId, outcome: "ok", result: { observed: unverified, dialog: delivery.dialog } };
+      }
+      return await verifyDelivered(callId, gesture.capability, evidence, binding, context, pointConfirmation, {
+        watch,
+        link: target.rect.link === true,
+      });
+    } finally {
+      watch.stop();
     }
-    return verifyDelivered(callId, gesture.capability, evidence, binding, context, pointConfirmation);
   }
 
   /**
@@ -1750,21 +2042,31 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      */
     deps.onDelivered?.(callId, {});
 
-    const effect = await deliverPosition({
-      tabId: binding.tabId,
-      action,
-      args,
-      point,
-      pointer,
-      keyboard,
-    });
-    return verifyDelivered(
-      callId,
-      effect.capability,
-      { ok: true, ...effect.evidence } as Extract<PageExecutionOutcome, { ok: true }>,
-      binding,
-      context,
-    );
+    // 015/T406: the four position clicks are presses like any other and report what they caused.
+    // Nothing located the point's element, so there is no role to call it a link by: a position
+    // press that caused nothing states its window and carries no link hint.
+    const watch = isPositionPress(action) ? armPress(binding.tabId, context.sessionId) : undefined;
+    try {
+      const effect = await deliverPosition({
+        tabId: binding.tabId,
+        action,
+        args,
+        point,
+        pointer,
+        keyboard,
+      });
+      return await verifyDelivered(
+        callId,
+        effect.capability,
+        { ok: true, ...effect.evidence } as Extract<PageExecutionOutcome, { ok: true }>,
+        binding,
+        context,
+        undefined,
+        watch === undefined ? undefined : { watch, link: false },
+      );
+    } finally {
+      watch?.stop();
+    }
   }
 
   /**
@@ -1803,7 +2105,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     const bound = await deps.bindings.bind(tabId, context);
     if (!bound.ok) {
-      return answer(callId, bound.reason === "not-actionable" ? "not-actionable" : "stale", bound.reason);
+      // 015/T401 (FR-206): a page that is still open and did not answer in time is `failed`, with
+      // the reason and what may help, never the `stale` that sends the agent to re-read a page
+      // that never went anywhere.
+      return bindingFailureResponse(callId, bound, "not-actionable");
     }
     const binding = bound.binding;
 
@@ -1893,7 +2198,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
 
     if (tool === "computer") {
-      const delivered = await runPosition(args, position.point, context, binding, callId);
+      const delivered = await answeringInputDeadline(
+        callId,
+        runPosition(args, position.point, context, binding, callId),
+      );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
     }
@@ -1902,9 +2210,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // Browser-level from here (004/T121, T123). The gate has already decided, and the refs are
       // resolved inside, so the order every effect keeps - own, bind, gate, resolve, act, verify -
       // is the same one whichever way the input is delivered.
-      const delivered = isPointerTool(tool)
-        ? await deliverPointer(tool, args, context, binding, callId)
-        : await deliverKeyboard(tool, args, context, binding, callId);
+      const delivered = await answeringInputDeadline(
+        callId,
+        isPointerTool(tool)
+          ? deliverPointer(tool, args, context, binding, callId)
+          : deliverKeyboard(tool, args, context, binding, callId),
+      );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
     }
@@ -1997,6 +2308,29 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     if (!observed) return answer(callId, "failed", "unreadable-evidence");
     deps.onEffect?.(request.sessionId, binding.tabId);
     return { callId, outcome: "ok", result: { observed, ...(raised === undefined ? {} : { dialog: raised }) } };
+  }
+
+  /**
+   * An input dispatch the page did not answer (015/T402, FR-206, R-197): the same outcome and reason
+   * as a binding that hit the deadline, but not its "retry" - the input was delivered and may have
+   * taken effect (review F1), so the hint sends the agent to look first. Anything else a delivery
+   * throws goes on exactly as before.
+   */
+  async function answeringInputDeadline(
+    callId: string,
+    delivery: Promise<AgentNativeResponse>,
+  ): Promise<AgentNativeResponse> {
+    try {
+      return await delivery;
+    } catch (error) {
+      if (!isInputDispatchDeadline(error)) throw error;
+      return {
+        callId,
+        outcome: AGENT_015_REASON_OUTCOMES["page-not-responding"],
+        reason: "page-not-responding",
+        hint: INPUT_NOT_ANSWERED_HINT,
+      };
+    }
   }
 
   return {

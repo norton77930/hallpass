@@ -109,6 +109,11 @@ next call fail with a clear "not paired" answer.
    usable for everything else.
 5. **Given** a second, different agent connects while one is paired, **When** it asks to pair, **Then** the
    owner is asked again for that agent; acceptance of one never implies acceptance of another.
+6. *(amendment 2026-09-24, FR-032a)* **Given** the owner declined an agent's pairing request, **When** the
+   same session calls a tool again, **Then** a fresh pairing request is shown and accepting it makes that
+   call succeed; the declined call itself ended `denied` with a reason telling the agent not to retry
+   unless asked. After an **unpair**, by contrast, the session's calls keep answering `denied` without a
+   prompt and the reason names reconnecting as the way back.
 
 ---
 
@@ -328,6 +333,24 @@ the file's name and size.
   (local bridge messaging) MUST be declared and MUST NOT be requested for any other purpose.
 - **FR-032 (PR-020 — MUST)**: The owner MUST be able to see the paired agents and unpair any of them from
   the extension; unpairing MUST take effect on open sessions immediately.
+- **FR-032a (PR-020 — MUST, amendment 2026-09-24)**: Declining a pairing request and unpairing an agent
+  are different answers and MUST reach the agent as different answers.
+  - **Decline** — in the panel this is the pairing card's **Ignore** button (006 FR-084 as amended
+    2026-09-24; the panel has no separate Decline) — answers only the request it was raised for: that call ends `denied` with a reason saying
+    the owner declined this request and that the agent must not ask again unless the person asks it to.
+    The decline is not remembered by the browser or by the open session: the session's next tool call
+    raises a fresh pairing request. No cool-down timer applies.
+  - **Unpair** keeps FR-032 as written: every open session of that agent answers `denied` to every later
+    call, without raising a prompt, until the session reconnects; the reason says the owner unpaired the
+    agent and that the session must reconnect (for Claude Code: `/mcp`, reconnect the server) before it
+    can ask again.
+  - An answer that does not say which of the two it is (an extension older than this amendment) MUST be
+    treated as unpair.
+  Origin: owner demo 2026-09-23 — one refusal (by the panel's behaviour, an unpair: the panel has no
+  Decline button) left nine open sessions refusing every call with an unexplained `not-paired`. Reference reading 2026-09-24: Claude in Chrome treats a dismissed pairing
+  prompt as an answer to that request only and raises a fresh prompt on the next request, with no
+  cool-down; Codex reports "the user declined this action" (not retryable by the agent) separately from
+  a persisted denial and from revoking a paired client.
 - **FR-033 (PR-020 — MUST)**: An agent that is not paired, or whose bridge is unavailable, MUST receive an
   explicit answer naming the cause; the extension MUST remain fully usable without the bridge.
 - **FR-034 (PR-020 — MUST)**: Every tool answer MUST identify the tab it concerns; an agent MUST NOT be

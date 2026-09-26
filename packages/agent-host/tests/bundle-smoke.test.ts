@@ -46,13 +46,13 @@ describe.skipIf(!bundlePresent)("T203 bundled mcp-server", () => {
       },
     });
 
-    const pairRequest = await worker.waitForControlFrame("pair-request");
-    expect(pairRequest).toMatchObject({ type: "pair-request", displayName: "QA Client", origin: "stdio:local" });
-
     const names = await client.listToolNames();
     expect(names).toContain("tabs_context");
 
+    // 004 FR-059a: the call is what raises the pairing request, not the connect.
     const result = await client.callTool("tabs_context");
+    const pairRequest = await worker.waitForControlFrame("pair-request");
+    expect(pairRequest).toMatchObject({ type: "pair-request", displayName: "QA Client", origin: "stdio:local" });
     expect(result.isError).toBe(false);
     expect(result.json).toEqual([{ tabId: 12, url: "https://example.test/" }]);
     expect(worker.requests.map((request) => request.tool)).toEqual(["tabs_context"]);

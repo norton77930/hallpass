@@ -933,6 +933,9 @@ describe("T028 agent effect tools", () => {
           documentChanged: true,
           verified: false,
           verdict: "document-changed",
+          // 015/T406 (FR-200): a press that replaced the document says where the tab is now - here
+          // the fake tab's own address, read at the end of the settle wait.
+          url: `${SITE}/ordinary`,
         },
       },
     });

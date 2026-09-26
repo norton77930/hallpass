@@ -1,5 +1,6 @@
 import type { AgentNativeResponse, AgentRefusal } from "@hallpass/contracts";
 import { createChromeDebuggerAdapter, type DebuggerAdapter } from "../../chrome-adapters/debugger.js";
+import { CONTENT_OPERATION_DEADLINE_MS } from "../content-broker.js";
 
 /**
  * The debugger attachment two things share, and one consent that is not shared (004/T119, T125b,
@@ -511,6 +512,61 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
   };
 }
 
+/**
+ * An input dispatch the page did not answer within the content deadline (015/T402, FR-206, R-197).
+ *
+ * Raised by `dispatchInput` alone; the effect runner answers it as `page-not-responding`, the same
+ * words a binding that hit the deadline gets.
+ */
+export class InputDispatchDeadline extends Error {
+  constructor(readonly method: string) {
+    super("page-not-responding");
+    this.name = "InputDispatchDeadline";
+  }
+}
+
+export function isInputDispatchDeadline(error: unknown): error is InputDispatchDeadline {
+  return error instanceof InputDispatchDeadline;
+}
+
+/**
+ * Every `Input.*` command the agent's pointer and keyboard send goes through here (015/T402).
+ *
+ * `Input.dispatchMouseEvent` and `Input.dispatchKeyEvent` return only once the renderer has handled
+ * the event. A page whose handler holds its main thread - or Chromium itself, measured blocking the
+ * first opener-keeping `window.open` pressed after a cross-origin round trip (R-197) - never lets it
+ * return, and an unbounded await left the call to the host's own give-up, `timed-out / no-answer`.
+ * So the dispatch is raced against the content deadline, the one bound every page-facing round
+ * trip already carries; nothing else sent over the attachment is bounded here.
+ *
+ * The command itself cannot be taken back. Its late answer settles a promise nobody reads any more:
+ * both of its outcomes are handled below, so a late failure is never an unhandled rejection, and
+ * the caller has already stopped - nothing after the timed-out event is sent.
+ */
+function dispatchInput(
+  attachments: AgentInputAttachments,
+  tabId: number,
+  method: `Input.${string}`,
+  params: Record<string, unknown>,
+  sessionId?: string,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    // Sent before the clock starts, so a send that throws at once leaves no timer behind.
+    const sent = attachments.send(tabId, method, params, sessionId);
+    const timer = setTimeout(() => reject(new InputDispatchDeadline(method)), CONTENT_OPERATION_DEADLINE_MS);
+    sent.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 /** A point in the top document's viewport - the only coordinates the debugger accepts. */
 export type PointerPoint = { x: number; y: number };
 
@@ -621,7 +677,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
   const cursor = deps.cursor ?? sendCursorMessage;
 
   async function mouse(tabId: number, params: Record<string, unknown>, sessionId?: string): Promise<void> {
-    await deps.attachments.send(tabId, "Input.dispatchMouseEvent", params, sessionId);
+    await dispatchInput(deps.attachments, tabId, "Input.dispatchMouseEvent", params, sessionId);
   }
 
   async function move(
@@ -874,7 +930,8 @@ export function createKeyboardInput(deps: AgentKeyboardInputDeps): AgentKeyboard
     const key = layout.key ?? name;
     const modifiers = options.modifiers ?? 0;
     const base = { key, code: layout.code, windowsVirtualKeyCode: layout.keyCode, nativeVirtualKeyCode: layout.keyCode, modifiers };
-    await deps.attachments.send(
+    await dispatchInput(
+      deps.attachments,
       tabId,
       "Input.dispatchKeyEvent",
       {
@@ -888,7 +945,7 @@ export function createKeyboardInput(deps: AgentKeyboardInputDeps): AgentKeyboard
       },
       options.sessionId,
     );
-    await deps.attachments.send(tabId, "Input.dispatchKeyEvent", { ...base, type: "keyUp" }, options.sessionId);
+    await dispatchInput(deps.attachments, tabId, "Input.dispatchKeyEvent", { ...base, type: "keyUp" }, options.sessionId);
   }
 
   return {
@@ -908,7 +965,7 @@ export function createKeyboardInput(deps: AgentKeyboardInputDeps): AgentKeyboard
       for (const character of [...text]) {
         const layout = US_LAYOUT.get(character);
         if (layout === undefined) {
-          await deps.attachments.send(tabId, "Input.insertText", { text: character }, sessionId);
+          await dispatchInput(deps.attachments, tabId, "Input.insertText", { text: character }, sessionId);
           continue;
         }
         await stroke(tabId, character, layout, {

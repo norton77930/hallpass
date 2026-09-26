@@ -21,7 +21,7 @@ import {
  * the id. Nothing here acts on a download - the adapter cannot even express it.
  *
  * Where it lives (FR-080): `chrome.storage.session`, one key, a ring per session - newest first,
- * bounded - beside the watermark the `download-complete` wait reads (R-124). Session storage because
+ * bounded - beside the ids the `download-complete` wait has answered (R-124, 015/R-199). Session storage because
  * the records die with the browser like the sessions do, and because a worker evicted mid-download
  * has to find what its predecessor wrote when the browser wakes it for the change. Writes go
  * through one settled chain, the same shape as the bridge rings: two events in quick succession
@@ -31,12 +31,19 @@ import {
 export const AGENT_DOWNLOADS_KEY = "agentDownloads";
 
 /**
- * One session's records and its wait watermark: the moment the session's last `download-complete`
- * wait was answered, `0` until one has been. A completion is "the next one" when it ended after
- * this, which is what lets a small file that finished before the wait began still be answered -
- * once - and never twice (FR-078).
+ * One session's records and the ids its `download-complete` waits have already answered (015/R-199,
+ * FR-207..FR-209). Every terminal record not in `answered` is pending, so a small file that finished
+ * before the wait began is still answered - once - and two downloads that finish out of creation
+ * order are both answered, earliest end first. `answered` only names ids still in `items`: an id
+ * that falls off the ring leaves the list with it.
  */
-export type DownloadRing = { items: AgentDownloadRecord[]; waitWatermark: number };
+export type DownloadRing = { items: AgentDownloadRecord[]; answered: number[] };
+
+/**
+ * A ring as it may be found in storage: written by this build, or by one before 015 that kept a
+ * single watermark (the moment of the last answer) instead of `answered`.
+ */
+type StoredRing = { items: AgentDownloadRecord[]; answered?: number[]; waitWatermark?: number };
 
 type StoredRings = Record<string, DownloadRing>;
 
@@ -63,10 +70,16 @@ export type DownloadObserver = {
   /** The session's records, newest first (`downloads_context`). */
   list(sessionId: string): Promise<AgentDownloadRecord[]>;
   /**
-   * The newest record if it is over and ended after the watermark, moving the watermark to now;
-   * `undefined` when nothing is there to answer. One poll of a `download-complete` wait.
+   * Among the session's terminal records not yet answered to it, the one that ended first (ties:
+   * the smaller id), recorded as answered; `undefined` when nothing is there to answer. One poll of
+   * a `download-complete` wait.
    */
   takeCompletion(sessionId: string): Promise<AgentWaitDownload | undefined>;
+  /**
+   * The session's records whose `startedAt` is at or after `sinceMs`, newest first. Read-only: it
+   * answers nothing a `download-complete` wait would (015/T405, the press path).
+   */
+  createdSince(sessionId: string, sinceMs: number): Promise<AgentDownloadRecord[]>;
   /** The session ended: its ring goes with it and nobody else's (FR-080). */
   discard(sessionId: string): Promise<void>;
   /** Every queued write so far has settled; for tests, which raise events synchronously. */
@@ -79,6 +92,23 @@ function sessionArea(): StorageAreaLike | undefined {
 
 function isTerminal(state: AgentDownloadRecord["state"]): state is AgentWaitDownload["state"] {
   return (AGENT_DOWNLOAD_TERMINAL_STATES as readonly string[]).includes(state);
+}
+
+/**
+ * The ring in this build's shape. A ring from before 015 carries a watermark instead of `answered`:
+ * every terminal record that ended at or before it was answered by the old rule, so it counts as
+ * answered now; the watermark itself is dropped and never written again.
+ */
+function migrate(ring: StoredRing): DownloadRing {
+  const items = Array.isArray(ring.items) ? ring.items : [];
+  if (Array.isArray(ring.answered)) return { items, answered: ring.answered };
+  const watermark = typeof ring.waitWatermark === "number" ? ring.waitWatermark : 0;
+  const answered = items
+    .filter(
+      (record) => isTerminal(record.state) && record.endedAt !== undefined && Date.parse(record.endedAt) <= watermark,
+    )
+    .map((record) => record.id);
+  return { items, answered };
 }
 
 export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObserver {
@@ -103,7 +133,12 @@ export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObse
     if (!area) return undefined;
     const raw = await area.get([AGENT_DOWNLOADS_KEY]);
     const stored = raw[AGENT_DOWNLOADS_KEY];
-    const rings = stored && typeof stored === "object" ? ({ ...(stored as StoredRings) }) : {};
+    const rings: StoredRings = {};
+    if (stored && typeof stored === "object") {
+      for (const [sessionId, ring] of Object.entries(stored as Record<string, StoredRing>)) {
+        rings[sessionId] = migrate(ring);
+      }
+    }
     return { area, rings };
   }
 
@@ -121,7 +156,7 @@ export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObse
       if (!found) return;
       const { area, rings } = found;
       for (const sessionId of holders) {
-        const ring = rings[sessionId] ?? { items: [], waitWatermark: 0 };
+        const ring = rings[sessionId] ?? { items: [], answered: [] };
         const record: AgentDownloadRecord = { ...item, attribution };
         rings[sessionId] = {
           ...ring,
@@ -182,15 +217,34 @@ export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObse
       return queue(async () => {
         const found = await read();
         const ring = found?.rings[sessionId];
-        const newest = ring?.items[0];
-        if (!found || !ring || !newest || !isTerminal(newest.state) || newest.endedAt === undefined) return undefined;
-        const endedAt = Date.parse(newest.endedAt);
-        if (!(endedAt > ring.waitWatermark)) return undefined;
-        // Moved to now - or to the record's own end if the clock says that is later - so this
-        // record can never satisfy a second wait and the next completion still can.
-        found.rings[sessionId] = { ...ring, waitWatermark: Math.max(now(), endedAt) };
+        if (!found || !ring) return undefined;
+        const answered = new Set(ring.answered);
+        let next: (AgentDownloadRecord & { state: AgentWaitDownload["state"] }) | undefined;
+        let nextEnd = 0;
+        for (const record of ring.items) {
+          if (!isTerminal(record.state) || record.endedAt === undefined || answered.has(record.id)) continue;
+          const endedAt = Date.parse(record.endedAt);
+          if (next === undefined || endedAt < nextEnd || (endedAt === nextEnd && record.id < next.id)) {
+            next = record as AgentDownloadRecord & { state: AgentWaitDownload["state"] };
+            nextEnd = endedAt;
+          }
+        }
+        if (!next) return undefined;
+        // Recorded as answered so it can never satisfy a second wait; the list only keeps ids still
+        // in the ring, so it stays as bounded as the ring is.
+        const held = new Set(ring.items.map((record) => record.id));
+        found.rings[sessionId] = {
+          items: ring.items,
+          answered: [...ring.answered, next.id].filter((id) => held.has(id)),
+        };
         await found.area.set({ [AGENT_DOWNLOADS_KEY]: found.rings });
-        return { id: newest.id, filename: newest.filename, url: newest.url, state: newest.state };
+        return { id: next.id, filename: next.filename, url: next.url, state: next.state };
+      });
+    },
+    createdSince(sessionId, sinceMs) {
+      return queue(async () => {
+        const items = (await read())?.rings[sessionId]?.items ?? [];
+        return items.filter((record) => Date.parse(record.startedAt) >= sinceMs);
       });
     },
     discard(sessionId) {
