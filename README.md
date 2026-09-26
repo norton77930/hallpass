@@ -167,8 +167,11 @@ them), or nothing happened. When a link was pressed and nothing followed, the an
 suggests reading the page or waiting before assuming the press did nothing.
 
 **A page that does not answer is not called stale.** When a page does not answer for 10 seconds,
-the call now ends as `page-not-responding` with a hint that the page is still open and the call can
-be retried. `stale` is left for a page that was replaced and a tab that is gone.
+the call now ends as `page-not-responding` with a hint that the page is still open. If the page
+stopped answering before anything was sent, the call can simply be retried; if it stopped answering
+a click or keystroke that had already reached it, the hint says the input may have taken effect and
+to look at the page before sending it again. `stale` is left for a page that was replaced and a tab
+that is gone.
 
 **Every finished download, once.** `wait` for a finished download answers each finished, failed or
 cancelled download of the session exactly once, earliest-finished first — including ones that
