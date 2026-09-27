@@ -16,7 +16,7 @@ Hallpass 是一個 Chrome 擴充功能加一個本機 MCP server。Claude Code�
 
 ## 文件
 
-- 英文 [README.md](README.md):安裝、第一次使用、同意模型、工具表、與 chrome-devtools-mcp / playwright-mcp / BrowserMCP 的比較。
+- 英文 [README.md](README.md):安裝、第一次使用、同意模型、工具表、與 Claude in Chrome / chrome-devtools-mcp / playwright-mcp / BrowserMCP 的比較。
 - [docs/zh-TW/operations-guide.md](docs/zh-TW/operations-guide.md):中文維護者手冊(從原始碼安裝、側欄、授權、疑難排解、跑驗收)。
 - [docs/zh-TW/qa-guide.html](docs/zh-TW/qa-guide.html):中文 QA 試用指南(安裝包、CodeBuddy / Cursor 設定、含截圖)。
 - [docs/design-notes.md](docs/design-notes.md):設計說明(英文):比較過哪些產品、對齊了哪些行為、為什麼。

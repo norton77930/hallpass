@@ -39,21 +39,27 @@ to open wikipedia.org and tell me the page title"*.
 
 ## How it differs
 
-| | **Hallpass** | chrome-devtools-mcp | playwright-mcp | BrowserMCP |
-| --- | --- | --- | --- | --- |
-| Runs in your everyday Chrome | yes (extension) | no — a Chrome started in developer mode, separate profile | no — its own browser | yes (extension) |
-| Keeps your logins | yes | no | no | yes |
-| Consent per site and per action | yes — three modes, side-panel cards | no | no | not stated |
-| Stop from the browser, take tabs back | yes | no | no | not stated |
-| Several agents on one browser | yes — one tab group each | not stated | not stated | not stated |
-| Records the run as a GIF | yes — one frame per action, labelled | no | no | no |
-| Answers native dialogs | yes — accept is gated | not stated | yes | not stated |
-| Platform | Windows | Windows, macOS, Linux | Windows, macOS, Linux | Windows, macOS, Linux |
-| Licence | Apache-2.0 | Apache-2.0 | Apache-2.0 | MIT |
+| | **Hallpass** | Claude in Chrome | chrome-devtools-mcp | playwright-mcp | BrowserMCP |
+| --- | --- | --- | --- | --- | --- |
+| Runs in your everyday Chrome | yes (extension) | yes (extension) | no — a Chrome started in developer mode, separate profile | no — its own browser | yes (extension) |
+| Keeps your logins | yes | yes | no | no | yes |
+| Coding agents it serves | any stdio MCP client | Claude Code (CLI and VS Code) | any MCP client | any MCP client | any MCP client |
+| Account or plan needed | no | a paid Claude plan (Pro, Max, Team, Enterprise); not with an API key or a third-party provider | no | no | not stated |
+| Consent per site and per action | yes — three modes, side-panel cards | yes — site permissions; by default approves on its own and pauses when an action needs you | no | no | not stated |
+| Stop from the browser, take tabs back | yes | not stated | no | no | not stated |
+| Several agents on one browser | yes — one tab group each | a tab group per session | not stated | not stated | not stated |
+| Records the run as a GIF | yes — one frame per action, labelled | yes | no | no | no |
+| Answers native dialogs | yes — accept is gated | no — a dialog blocks it until you dismiss it | not stated | yes | not stated |
+| Platform | Windows | Windows, macOS, Linux (not WSL) | Windows, macOS, Linux | Windows, macOS, Linux | Windows, macOS, Linux |
+| Licence | Apache-2.0 | proprietary | Apache-2.0 | Apache-2.0 | MIT |
 
-The official MCP servers give an agent *a* browser. The extension-based ones give it *your*
-browser, whole. Hallpass gives it your browser with you in the loop. The design behind that is in
-[docs/design-notes.md](docs/design-notes.md).
+The official MCP servers give an agent *a* browser. BrowserMCP gives it *your* browser, whole.
+Claude in Chrome gives your browser to Claude, under Anthropic's permission model and a paid
+plan. Hallpass gives your browser to any coding agent, with you deciding per site and per action.
+The design behind that is in [docs/design-notes.md](docs/design-notes.md).
+
+<sub>Compared from each product's public documentation, September 2026. Corrections are welcome
+as an issue.</sub>
 
 ## Install
 
