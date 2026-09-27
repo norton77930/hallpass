@@ -2,6 +2,13 @@
 
 **Let coding agents drive your own Chrome, one permission at a time.**
 
+[![CI](https://github.com/norton77930/hallpass/actions/workflows/ci.yml/badge.svg)](https://github.com/norton77930/hallpass/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/norton77930/hallpass)](https://github.com/norton77930/hallpass/releases/latest)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)
+
+English · [繁體中文](README.zh-TW.md)
+
 Hallpass is a Chrome extension plus a local MCP server. Claude Code, Codex CLI, Cursor, Claude
 Desktop or any stdio MCP client gets 33 browser tools that work in the Chrome you already use, with
 your logins. Every site the agent touches, and every action that changes a page, is gated by a
@@ -15,6 +22,20 @@ stop the agent at any moment and take your tabs back.
 > **Licence**: Apache-2.0.
 
 ![A coding agent searches Wikipedia in the user's Chrome; every frame carries the action label, the step counter and the Hallpass watermark](docs/media/demo.gif)
+
+- **Your browser, your logins.** No separate profile, no browser started in debugging mode, no
+  cookies copied anywhere.
+- **You stay in the loop.** Reads are free; the first click, keystroke or navigation on a site asks
+  you, and you choose how much to trust that site from then on.
+- **You can take it back.** Stop a session, interrupt one step, or pull your tabs out of the agent's
+  group at any moment from the side panel.
+- **Local only.** The agent, the MCP server, the relay and the extension talk over stdio, loopback
+  and Chrome native messaging. Hallpass has no server and no telemetry.
+
+**Quick start** (details under [Install](#install)): download the
+[latest release](../../releases/latest), run `install.ps1`, load the `extension\` folder at
+`chrome://extensions`, and add the printed MCP server to your agent. Then ask it to *"use hallpass
+to open wikipedia.org and tell me the page title"*.
 
 ## How it differs
 
@@ -86,8 +107,12 @@ the host needs no reinstall.
 3. The first action that **changes a page** (a click, typing, navigation) shows a **consent card**:
    "Claude Code wants to click on wikipedia.org". Choose *only this time*, *always on this site*, or
    *refuse*.
-4. Tabs the agent drives sit in a tab group named **Agent**, with a glow at the page edge. The
-   session appears as a card in the panel with **Stop** and **Release tabs**.
+4. Tabs the agent drives sit in a tab group named **Hallpass** in the session's own colour — `⌛`
+   while it works, `🔔` while it waits for you — with a glow at the page edge. The session appears
+   as a card in the panel, titled with the agent and its project folder, with **End session**,
+   **Interrupt this step** and **Take back tabs**.
+
+![The side panel: a question card, the status row "Connected · 2 sessions", and two session cards named by project folder, one waiting for you and one idle, each with its colour stripe](docs/media/016-panel-en-US-light.png)
 
 ## The consent model
 
@@ -111,12 +136,32 @@ the host needs no reinstall.
   which are reported as redacted.
 - **Dialogs**: cancelling and acknowledging an alert never ask; pressing OK is gated like a click,
   except when it follows an action you just approved. Dialog text is logged on the session card.
-- **Stop** ends the session and tells the agent you stopped it. **Interrupt** ends only the step
-  that is running and keeps the session. **Release tabs** hands every tab back to you while the
-  session continues.
+- **End session** ends the session and tells the agent you stopped it. **Interrupt this step** ends
+  only the step that is running and keeps the session. **Take back tabs** hands every tab back to
+  you while the session continues.
 
 Sensitive sites — banking, health, anything you would not hand to a stranger — do not belong in
 `skip-checks`. The agent uses your profile and sees what you see.
+
+## Security and privacy
+
+**What stays on your machine.** Hallpass has no server, no account and no telemetry. The MCP server
+talks to its relay over loopback TCP, the relay to the extension over Chrome native messaging, and
+the extension makes no network requests of its own. The relay log
+(`%LOCALAPPDATA%\hallpass\relay.log`) records stable codes, never page content.
+
+**What leaves it.** Whatever a tool answers — page text, form values, screenshots — goes to your
+coding agent, and from there to the model provider that agent uses, exactly as a file the agent
+reads would. Hallpass redacts password, hidden, one-time-code and payment-card fields; everything
+else the agent reads, its provider sees.
+
+**Prompt injection.** A web page is untrusted input: its text can try to instruct the agent that
+reads it. Hallpass does not detect that and does not claim to. What it gives you is a decision
+point: under **ask**, every page-changing action on a site waits for you, and a move to a site you
+have not decided about is asked at the next call. Read the card before you allow it, keep sites with
+an account on **ask**, and use **End session** if the agent does something you did not expect.
+
+Found a vulnerability? Report it privately as [SECURITY.md](SECURITY.md) describes.
 
 ## Tools
 
@@ -157,155 +202,12 @@ release: the packaged gate (`tests/e2e/packaged/agent-*.spec.ts`, attaching to a
 with `--remote-debugging-port=9222`) and the acceptance probes, which drive the bridge with a real
 coding-agent session. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run both.
 
-## What 0.9.0 adds
+## Changelog and upgrading
 
-![The 0.9.0 side panel: a question card, the status row "Connected · 2 sessions", and two session cards named by project folder, one waiting for you and one idle, each with its colour stripe](docs/media/016-panel-en-US-light.png)
-
-**The panel reads once.** The status row says the connection is up and how many sessions use it
-("Connected · 2 sessions"); it no longer names an agent. The paired agents are listed under
-**More options**, each with its own **Unpair**. The product name is no longer repeated as a heading
-inside the panel.
-
-**A session card says which project it is.** Each card is titled with the agent and the session's
-project folder (`Claude Code · shop-frontend`), and its second line gives the start time and the
-tabs it holds (without a folder the title carries the start time, and the second line does not
-repeat it). The internal session id moved into **Technical details**. A card is in one of three
-states: **Working** (a call is in flight), **Waiting for you** (a question from it is waiting on
-you; the card is marked), or **Idle** with the time of its last action ("Idle · last action 12 min
-ago"). It shows only the buttons that can act: **End session** always, at the same place;
-**Interrupt this step** only while it is working; **Take back tabs (N)** only while it holds tabs.
-
-**A site row is read once.** The permissive mode ("act without asking") is marked by a warning
-border on its select, not by a second label; the diagnostics checkbox says what it allows —
-"Allow reading console and network logs"; the revoke button reads just **Revoke** (screen readers
-still hear the site). **Allowed upload directories** says what the list is for, says so when it is
-empty and how a directory gets onto it, and shows the list file as a quiet last line.
-
-**The tab strip tells sessions apart.** Each session's tab group is titled `Hallpass`, with `⌛`
-in front while it works and `🔔` while it waits for you, in the session's own colour — the same
-colour as the stripe on its panel card. Groups left over from a restart (titled `Agent` by 0.8.0
-and earlier, or `Hallpass` with or without a prefix) are cleared when the extension starts.
-
-**A keystroke that opens a dialog is answered with the dialog**, as a click that opens one is,
-instead of ending as `page-not-responding`.
-
-**Upgrading from 0.8.0:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from
-the zip) and reload the extension, in either order. The project name comes from the new host: with
-a 0.8.0 host, a card shows the session's start time instead of the project name
-(`Claude Code · started 14:02`); a 0.9.0 host with a 0.8.0 extension works as 0.8.0 did.
-
-## What 0.8.0 adds
-
-**A press says what it did.** The answer to a click (and every other press, standalone or as a
-batch step) now reports what followed it within the observation window: the tab went to a new
-page (with the new address), it opened new tabs (each with its id and address — not held by the
-session; take one with `tabs_claim`), it started downloads (named as `downloads_context` names
-them), or nothing happened. When a link was pressed and nothing followed, the answer says so and
-suggests reading the page or waiting before assuming the press did nothing.
-
-**A page that does not answer is not called stale.** When a page does not answer for 10 seconds,
-the call now ends as `page-not-responding` with a hint that the page is still open. If the page
-stopped answering before anything was sent, the call can simply be retried; if it stopped answering
-a click or keystroke that had already reached it, the hint says the input may have taken effect and
-to look at the page before sending it again. `stale` is left for a page that was replaced and a tab
-that is gone.
-
-**Every finished download, once.** `wait` for a finished download answers each finished, failed or
-cancelled download of the session exactly once, earliest-finished first — including ones that
-finished before the wait began.
-
-**Uploads inside a batch.** `file_upload` and `upload_image` work as `browser_batch` steps, under
-the very same checks as a standalone call. Any folder question is asked before the batch runs, one
-at a time in step order, and a "no" runs nothing at all. A screenshot taken inside the same batch
-cannot be uploaded by that batch; upload it in a later call.
-
-**A pairing card leaves when nobody is waiting.** When the agent behind a pairing card stops
-waiting (its wait ran out, or it disconnected), the card disappears from the panel and the "!"
-badge clears.
-
-**Upgrading:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from the zip) and
-reload the extension, in either order. During the upgrade the host and the extension may be on
-different versions: a new host names each pairing request only once the extension says it
-understands that, so a 0.8.0 host with a 0.7.0 extension (or the other way round) keeps working as
-0.7.0 did.
-
-## What 0.7.0 adds
-
-**Pairing asks only when the agent acts.** Connecting an agent no longer puts a card in the panel;
-the first tool call does. When several connections of the same agent wait, the card says how many,
-and marks a new one joining.
-
-**Ignore answers at once.** Ignoring a pairing card now ends the waiting call straight away as a
-refusal of that one request — the agent is told not to retry, and its next call simply asks again.
-Unpairing still refuses every later call of the session, and the answer now tells the agent to
-reconnect with `/mcp`.
-
-**The panel you can see decides.** The "!" badge and the two-minute wait follow the window you are
-in: a panel open in another window no longer hides a card from you or shortens the wait.
-
-**The red edge shows where it should.** A held tab that loads or navigates (F5 included) keeps its
-red edge, and so does a tab that was already open before the extension was reloaded.
-
-**Upgrading:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from the zip) —
-the silent connect and the one-request Ignore live in the host. An installed 0.6.0 host keeps
-refusing every later call of the session after an Ignore, as it always did.
-
-## What 0.6.0 adds
-
-**Interrupt** sits beside Stop on the session card. It ends the step that is running — within a
-second, whatever that step was waiting for — and keeps everything else: the pairing, the tabs and
-their group, the site modes, an open recording, an emulated viewport. The agent is told you ended
-the step, and whether anything had already reached the page, so it can decide for itself whether
-to try it again. Stop is unchanged: it ends the session.
-
-**A move to another site is a question.** When a tab the agent is driving leaves the site it was on
-for one you have never decided about — a redirect after a click, a login provider, a shortened link
-— the call that caused it says so in its answer, and the *next* call on that tab shows a card
-naming both sites: **continue** (this session), **always allow** (this pair, remembered), or
-**decline** (this call only; the session keeps going and the question waits for the next call).
-Calls that leave are never held: a navigation elsewhere, closing the tab or handing it back go
-through. Remembered pairs are listed in the panel with when each was last used, and a **Revoke**
-beside each.
-
-**A file outside your upload directories is a question too.** `file_upload` used to refuse it
-outright, which meant editing `config.json` by hand before the agent could be useful. Now the local
-host holds the call and the panel asks, naming every file in full and the directory each one sits
-in: **this file once**, **this directory from now on** (added to your list), or **decline**. A
-drive or a share root is never added to the list — those files go through as a one-call yes, and
-the answer says why. The allowed directories are listed in the panel, each with a **Revoke**, and
-the list is still writable only from there and from the file itself: nothing an agent can call
-reads it or widens it.
-
-And the three tails 013 left: a successful `file_upload` leaves a line on the session card the way
-`upload_image` does; the `upload_image` card says which of the two deliveries you are being asked
-about (a file field, or a point on the page); and `viewport` now adds a frame to a recording, so a
-page that suddenly narrows on the GIF says why.
-
-**Upgrading:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from the zip) —
-a 0.5.0 host refuses files outside the allowed directories with `upload-not-allowed` instead of
-asking. The extension asks the host what it can do, so a 0.6.0 extension with an old host behind it
-simply behaves as 0.5.0 did.
-
-## What 0.5.0 adds
-
-`upload_image` puts a screenshot the session just took into the page it is working on — no file on
-your disk, and no writing one. Every screenshot answer now carries an `imageId`, and the agent
-quotes it: to a file input by `ref` (a hidden one behind the page's own button works too), or to a
-drop `coordinate` for a page that takes dragged files, one level into a same-origin frame. The
-picture is held for five minutes, in the local MCP server's own memory and nowhere else, and the
-upload is a page change like any other — the site's mode decides, the card says what is about to
-happen, and the panel keeps one line about it afterwards. Files of your own still go through
-`file_upload` and its allowed roots.
-
-## What 0.4.0 adds
-
-`viewport` gives one tab an emulated size — a phone, a tablet, a wide desktop — so the agent can
-check a layout without touching your window; your window stays exactly where you left it, and the
-two tools are independent of each other. A screenshot of an emulated tab is a picture of that
-viewport, and `screenshot` takes a `scale` (0.1 to 1) for a smaller picture and crops a `region` at
-the picture's own density, so the rectangle you ask for in CSS pixels is the rectangle you get. The
-emulation is cleared whenever the session lets the tab go — reset, release, your take-back from the
-panel, or the session ending — so no agent can leave your tab at a phone width.
+What each release added is in [CHANGELOG.md](CHANGELOG.md). Upgrading between releases is the same
+every time unless the changelog says otherwise: reinstall the host (`install.ps1` from the zip, or
+`npm run agent-host:install` from source) and reload the extension at `chrome://extensions`, in
+either order.
 
 ## Upgrading from 0.2.0
 
