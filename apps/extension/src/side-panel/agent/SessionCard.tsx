@@ -10,6 +10,12 @@ import { ACTIVITY_OUTCOME_KEYS, WINDOW_STATE_KEYS } from "../agent-panel-keys.js
  * "Where" is the sites it holds tabs on, by host name, and never a title or a url: a title is the
  * page's word, and this panel shows nothing a page authored. Stop ends the session; Release tabs
  * hands every tab back and lets the session go on. Neither is per tab (D-006-5).
+ *
+ * 016 (FR-225 – FR-234) makes it readable: a stripe in the session's tab-group colour, a title of
+ * the agent and the folder it was started in, a subtitle of when and what it holds, a state line
+ * that can say idle, the id folded under technical details, and only the controls that would do
+ * something - "End session" always, "Interrupt this step" while working, "Take back tabs" while it
+ * holds any.
  */
 export type SessionView = AgentPanelState["sessions"][number];
 
@@ -55,9 +61,79 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
     .replace("{message}", () => item.message ?? "");
 }
 
-/** A short label for the session, from its host-minted id: the last few characters tell two apart. */
-export function sessionLabel(sessionId: string): string {
-  return sessionId.length <= 8 ? sessionId : sessionId.slice(-8);
+/**
+ * How many characters of the folder the title shows before it cuts (016 FR-227).
+ *
+ * The label is remote input of up to 64 characters and the panel is 360 px wide; past this the
+ * title would wrap under the agent's name, so it is cut with an ellipsis and the whole text rides in
+ * the `title` attribute for the owner who hovers.
+ */
+export const LABEL_VISIBLE_CHARS = 24;
+
+/** The label as the title shows it: whole, or its first characters and an ellipsis (FR-227). */
+export function visibleLabel(label: string): string {
+  const characters = [...label];
+  return characters.length <= LABEL_VISIBLE_CHARS ? label : `${characters.slice(0, LABEL_VISIBLE_CHARS).join("")}…`;
+}
+
+/**
+ * A worker timestamp as the owner's own wall clock, `HH:mm` (016 FR-228), or nothing when it does
+ * not parse - a card that said "started NaN:NaN" would be a fact about nothing.
+ */
+export function clockTime(iso: string | undefined): string | undefined {
+  if (iso === undefined) return undefined;
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return undefined;
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * How long ago the last action was (016 FR-230): just now under a minute, minutes under an hour,
+ * then hours and minutes. `now` is the shell's minute clock, so the words move on without a
+ * projection; a timestamp from the future (a clock skew) reads as just now rather than negative.
+ */
+export function lastActionText(iso: string, now: number, t: (key: string) => string): string | undefined {
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at)) return undefined;
+  const minutes = Math.floor(Math.max(0, now - at) / 60_000);
+  if (minutes < 1) return t("agent.session.justNow");
+  if (minutes < 60) return t("agent.session.minutesAgo").replace("{m}", String(minutes));
+  return t("agent.session.hoursAgo")
+    .replace("{h}", String(Math.floor(minutes / 60)))
+    .replace("{m}", String(minutes % 60));
+}
+
+/**
+ * The card's state line (016 FR-230): working, waiting for you, or idle with the last action. A
+ * projection from before 016 carries no state and reads as working, as it always did.
+ */
+function stateText(session: SessionView, now: number, t: (key: string) => string): string {
+  const state = session.state ?? "working";
+  if (state === "waiting") return t("agent.session.waiting");
+  if (state === "working") return t("agent.session.working");
+  const ago = session.lastActivityAt === undefined ? undefined : lastActionText(session.lastActivityAt, now, t);
+  return ago === undefined ? t("agent.session.idleUnknown") : t("agent.session.idle").replace("{ago}", () => ago);
+}
+
+/**
+ * The subtitle (016 FR-229): when the session started, and how many tabs it holds on which sites -
+ * or that it holds none. Sites by host name only, never a title (006 R-127).
+ */
+function subtitleText(session: SessionView, t: (key: string) => string): string {
+  const count = session.tabs.length;
+  const sites = (session.sites ?? []).join(t("agent.session.siteSeparator"));
+  const holds =
+    count === 0
+      ? t("agent.session.noSites")
+      : (count === 1 ? t("agent.session.holdsOne") : t("agent.session.holds").replace("{n}", String(count))).replace(
+          "{sites}",
+          () => sites,
+        );
+  const started = clockTime(session.startedAt);
+  // Without a folder the title already ends in the start time; saying it twice reads as a mistake.
+  return started === undefined || session.label === undefined
+    ? holds
+    : `${t("agent.session.started").replace("{time}", started)} · ${holds}`;
 }
 
 /**
@@ -88,6 +164,8 @@ export function SessionCard(props: {
   session: SessionView;
   agentName: string;
   locale: string;
+  /** The shell's minute clock (016 FR-230): "last action" is measured against it, not re-fetched. */
+  now: number;
   onStop: () => void;
   onRelease: () => void;
   onInterrupt: () => void;
@@ -109,10 +187,11 @@ export function SessionCard(props: {
     const timer = setTimeout(() => setSaidNothing(false), NOTHING_TO_INTERRUPT_MS);
     return () => clearTimeout(timer);
   }, [saidNothing]);
-  const sites = session.sites ?? [];
   // Newest first, as the worker keeps it; the panel never re-orders what it is told (FR-113).
   const activity = session.activity ?? [];
   const titleId = `agent-session-${session.sessionId}`;
+  const held = session.tabs.length;
+  const started = clockTime(session.startedAt);
 
   return (
     <section
@@ -121,85 +200,119 @@ export function SessionCard(props: {
       data-session-state={state}
       aria-labelledby={titleId}
     >
-      <h2 id={titleId}>
-        {/* The name this session's greeting carried, as inert text - it is remote input. The paired
-            record's name is only a fallback: one agent id is shared by every MCP client on the machine. */}
-        {session.agentName ?? props.agentName} · {t("agent.session.label").replace("{id}", sessionLabel(session.sessionId))}
-      </h2>
-      <p className="agent-session-sites">
-        {sites.length === 0
-          ? t("agent.session.noSites")
-          : t("agent.session.sites").replace("{sites}", () => sites.join(", "))}
-      </p>
-      <p className="agent-session-state">{t(state === "waiting" ? "agent.session.waiting" : "agent.session.working")}</p>
-      {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
-          recording and none has been exported - a card that said "no recording" would be a fact
-          about nothing on every card the owner ever sees. */}
-      {recordingLine(session.recording, t) === undefined ? null : (
-        <p className="agent-session-recording">{recordingLine(session.recording, t)}</p>
+      {/* 016 FR-225: the same colour as the session's tab group, so a card and its tabs are found
+          together. Decoration only - the title already says which session - and absent when the
+          worker gave the session no colour, rather than a colour the panel made up. */}
+      {session.colour === undefined ? null : (
+        <div className="agent-session-stripe" data-colour={session.colour} aria-hidden="true" />
       )}
-      {/*
-        008 FR-113: what happened on this session's tabs while the owner may have been looking
-        elsewhere. Every dialog is here whatever the mode decided, because an accept in `skip-checks`
-        is over in a moment and this is the only trace of it. The page's words are rendered as the
-        page wrote them - inert text, never markup - and the sentence around them is the panel's own.
-        Absent entirely when nothing has happened: an empty list is a fact about nothing.
-      */}
-      {activity.length === 0 ? null : (
-        <ul className="agent-session-activity" aria-label={t("agent.activity.title")}>
-          {/*
-            The position is part of the identity: two dialogs can be answered inside one
-            millisecond and end the same way, and a key of the timestamp and the outcome alone
-            would make them one item as far as React is concerned.
-          */}
-          {activity.map((item, index) => (
-            <li key={`${item.at}-${item.outcome}-${index}`}>
-              <span className="agent-activity-text">{activityText(item, t)}</span>{" "}
-              <span className="agent-activity-outcome">{t(ACTIVITY_OUTCOME_KEYS[item.outcome])}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {/*
-        014 FR-178: what the owner is told when they interrupt a session that was not doing
-        anything. A line rather than a card, announced rather than focused: nothing was decided and
-        nothing is being asked, so it must not take the place their next action is heading for.
-      */}
-      {saidNothing ? (
-        <p className="agent-session-nothing" role="status">
-          {t("agent.session.nothingToInterrupt")}
-        </p>
-      ) : null}
-      <div className="agent-session-actions">
-        <button type="button" className="agent-danger" onClick={props.onStop}>
-          {t("agent.session.stop")}
-        </button>
+      <div className="agent-session-body">
+        <h2 id={titleId}>
+          {/* The name this session's greeting carried, as inert text - it is remote input. The paired
+              record's name is only a fallback: one agent id is shared by every MCP client on the machine. */}
+          {session.agentName ?? props.agentName}
+          {/* 016 FR-226 – FR-228: the folder its host reported, as inert text (remote input), cut past
+              a couple of dozen characters with the whole of it in `title`; else when it started. */}
+          {session.label !== undefined ? (
+            <>
+              {" · "}
+              <span className="agent-session-label" title={session.label}>
+                {visibleLabel(session.label)}
+              </span>
+            </>
+          ) : started !== undefined ? (
+            ` · ${t("agent.session.started").replace("{time}", started)}`
+          ) : null}
+        </h2>
+        <p className="agent-session-sites">{subtitleText(session, t)}</p>
+        <p className="agent-session-state">{stateText(session, props.now, t)}</p>
+        {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
+            recording and none has been exported - a card that said "no recording" would be a fact
+            about nothing on every card the owner ever sees. */}
+        {recordingLine(session.recording, t) === undefined ? null : (
+          <p className="agent-session-recording">{recordingLine(session.recording, t)}</p>
+        )}
         {/*
-          014 FR-178: 中斷 beside 停止, and deliberately not `disabled` when there is nothing to
-          interrupt. The count it reads is a picture that can be a moment old - the call it named
-          may have answered while the owner was reaching for the mouse - and a control that simply
-          did nothing in that moment would look broken. So it is marked unavailable for assistive
-          technology and for the eye, and pressing it anyway says what happened instead (US1
-          scenario 5). With a call in flight it is the plain control it looks like.
+          008 FR-113: what happened on this session's tabs while the owner may have been looking
+          elsewhere. Every dialog is here whatever the mode decided, because an accept in `skip-checks`
+          is over in a moment and this is the only trace of it. The page's words are rendered as the
+          page wrote them - inert text, never markup - and the sentence around them is the panel's own.
+          Absent entirely when nothing has happened: an empty list is a fact about nothing.
         */}
-        <button
-          type="button"
-          className="agent-interrupt"
-          aria-disabled={inFlight === 0}
-          onClick={() => {
-            if (inFlight === 0) {
-              setSaidNothing(true);
-              return;
-            }
-            setSaidNothing(false);
-            props.onInterrupt();
-          }}
-        >
-          {t("agent.session.interrupt")}
-        </button>
-        <button type="button" onClick={props.onRelease}>
-          {t("agent.session.release")}
-        </button>
+        {activity.length === 0 ? null : (
+          <ul className="agent-session-activity" aria-label={t("agent.activity.title")}>
+            {/*
+              The position is part of the identity: two dialogs can be answered inside one
+              millisecond and end the same way, and a key of the timestamp and the outcome alone
+              would make them one item as far as React is concerned.
+            */}
+            {activity.map((item, index) => (
+              <li key={`${item.at}-${item.outcome}-${index}`}>
+                <span className="agent-activity-text">{activityText(item, t)}</span>{" "}
+                <span className="agent-activity-outcome">{t(ACTIVITY_OUTCOME_KEYS[item.outcome])}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {/*
+          014 FR-178: what the owner is told when they interrupt a session that was not doing
+          anything. A line rather than a card, announced rather than focused: nothing was decided and
+          nothing is being asked, so it must not take the place their next action is heading for.
+        */}
+        {saidNothing ? (
+          <p className="agent-session-nothing" role="status">
+            {t("agent.session.nothingToInterrupt")}
+          </p>
+        ) : null}
+        {/*
+          016 FR-232 – FR-234: "End session" always, first and on its own; the rest only when they
+          would do something, after a spacer that keeps them away from it.
+        */}
+        <div className="agent-session-actions">
+          <button type="button" className="agent-danger" onClick={props.onStop}>
+            {t("agent.session.stop")}
+          </button>
+          <span className="agent-session-spacer" aria-hidden="true" />
+          {/*
+            014 FR-178, 016 FR-233: shown only while the session is working. Still deliberately not
+            `disabled` when the count says nothing is in flight: the picture can be a moment old - the
+            call it named may have answered while the owner was reaching for the mouse - and a control
+            that simply did nothing in that moment would look broken. So it is marked unavailable for
+            assistive technology and for the eye, and pressing it anyway says what happened instead
+            (014 US1 scenario 5). With a call in flight it is the plain control it looks like.
+          */}
+          {state === "working" ? (
+            <button
+              type="button"
+              className="agent-interrupt"
+              aria-disabled={inFlight === 0}
+              onClick={() => {
+                if (inFlight === 0) {
+                  setSaidNothing(true);
+                  return;
+                }
+                setSaidNothing(false);
+                props.onInterrupt();
+              }}
+            >
+              {t("agent.session.interrupt")}
+            </button>
+          ) : null}
+          {/* 016 FR-234: today's release, counted, and only while there is something to take back. */}
+          {held >= 1 ? (
+            <button type="button" onClick={props.onRelease}>
+              {t("agent.session.takeBack").replace("{n}", String(held))}
+            </button>
+          ) : null}
+        </div>
+        {/*
+          016 FR-231: the host-minted id, for the owner who is asked for it and for nobody else - so it
+          is here, folded, and nowhere else on the card. The `<details>` idiom is NotConnected's.
+        */}
+        <details className="agent-details">
+          <summary>{t("agent.details.title")}</summary>
+          <p>{t("agent.session.id").replace("{id}", () => session.sessionId)}</p>
+        </details>
       </div>
     </section>
   );

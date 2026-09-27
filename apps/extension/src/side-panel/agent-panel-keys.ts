@@ -94,7 +94,7 @@ export const WINDOW_STATE_KEYS: Record<"maximized" | "fullscreen", string> = {
  * sets, so a mode or a tool added there arrives here without anybody remembering to add it.
  */
 export const AGENT_PANEL_KEYS: readonly string[] = [
-  "agent.appTitle",
+  // 016 FR-224: no `agent.appTitle` - the browser's side-panel header already names the product.
   // The not-connected page (FR-082).
   "agent.notPaired.title",
   "agent.notPaired.body",
@@ -109,6 +109,11 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.details.none",
   // The status row (FR-083).
   "agent.status.connected",
+  // The session count and the per-agent unpair (016 FR-223).
+  "agent.status.sessions",
+  "agent.status.sessionsOne",
+  "agent.status.sessionsNone",
+  "agent.status.unpairAgent",
   "agent.status.menu",
   "agent.unpair",
   // The site list (FR-086).
@@ -116,9 +121,11 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.sitesNone",
   "agent.siteModeLabel",
   "agent.siteRevoke",
-  "agent.sitePermissive",
+  // 016 FR-235 – FR-237: no permissive badge and no "granted" line; the visible texts of the
+  // checkbox and the revoke, whose accessible names carry the site.
+  "agent.siteRevokeText",
   "agent.diagnosticsLabel",
-  "agent.diagnosticsGranted",
+  "agent.diagnosticsText",
   // The moves the owner remembered, listed in the same place and revoked the same way (014 FR-191).
   "agent.transitionsTitle",
   "agent.transitionRow",
@@ -127,6 +134,8 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.transitionRevoke",
   // The directories the local host may read uploads from, and their revoke (014 FR-191, FR-192).
   "agent.uploadRootsTitle",
+  "agent.uploadRootsIntro",
+  "agent.uploadRootsEmpty",
   "agent.uploadRootsPath",
   "agent.uploadRootsMalformed",
   "agent.uploadRootsPreserved",
@@ -134,13 +143,23 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.uploadRootRevoke",
   "agent.uploadRootPending",
   // The session cards (FR-087).
-  "agent.session.label",
-  "agent.session.sites",
+  // 016 FR-228 – FR-234: title, subtitle, the three states, the last action, the id under technical
+  // details, and the controls that are shown only when they would do something.
+  "agent.session.started",
+  "agent.session.holds",
+  "agent.session.holdsOne",
   "agent.session.noSites",
+  "agent.session.siteSeparator",
   "agent.session.working",
   "agent.session.waiting",
+  "agent.session.idle",
+  "agent.session.idleUnknown",
+  "agent.session.justNow",
+  "agent.session.minutesAgo",
+  "agent.session.hoursAgo",
+  "agent.session.id",
   "agent.session.stop",
-  "agent.session.release",
+  "agent.session.takeBack",
   // The second control beside Stop, and what it says when nothing was running (014 FR-178).
   "agent.session.interrupt",
   "agent.session.nothingToInterrupt",

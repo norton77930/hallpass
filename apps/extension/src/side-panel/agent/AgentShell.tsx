@@ -5,7 +5,6 @@ import {
   type AgentPanelCommand,
   type AgentPanelState,
 } from "@hallpass/contracts";
-import { lookup } from "../../locales/catalog.js";
 import { reportTestDiagnostic } from "../../diagnostics.js";
 import { panelWindowMessage } from "../../panel-window.js";
 import { NotConnected } from "./NotConnected.js";
@@ -188,8 +187,28 @@ function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
   return { state, send };
 }
 
+/** How often the cards' "last action" words are measured again (016 FR-230). */
+export const LAST_ACTION_TICK_MS = 60_000;
+
+/**
+ * The panel's own minute clock (016 FR-230, R-206).
+ *
+ * "Idle · last action 12 min ago" goes stale while the worker has nothing new to say, and asking
+ * it for a projection once a minute would be traffic for the sake of a word. So the shell ticks
+ * once a minute and the cards measure against the tick; nothing leaves the panel.
+ */
+function useMinuteClock(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), LAST_ACTION_TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
+
 export function AgentShell(props: { locale: string }): ReactElement {
   const { state, send } = useAgentPort();
+  const now = useMinuteClock();
   const composition = deriveComposition(state);
 
   /**
@@ -219,7 +238,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
 
   return (
     <div className="agent-shell" data-agent-state={composition}>
-      <h1 className="agent-title">{lookup("agent.appTitle", props.locale)}</h1>
+      {/* 016 FR-224: no in-panel heading - the browser's side-panel header already names the product. */}
       <PromptCard state={state} locale={props.locale} promptAgent={promptAgent} send={send} />
       {/*
         008 FR-114: under the question area, never in it. A notice is not an answerable question,
@@ -239,14 +258,12 @@ export function AgentShell(props: { locale: string }): ReactElement {
       ) : (
         <>
           <StatusRow
-            agentName={state.agentName ?? agentName(state.paired[0]?.agentId ?? "")}
+            sessionCount={state.sessions.length}
+            paired={state.paired}
             locale={props.locale}
-            onUnpair={() => {
-              // One paired agent per browser is the shape 004 settled on; the row unpairs it. Any
-              // further paired entries are unpaired the same way, one command each.
-              for (const agent of state.paired) {
-                send({ type: "ui.agent.unpair", payload: { agentId: agent.agentId } });
-              }
+            onUnpair={(agentId) => {
+              // 016 FR-223: the agent the owner chose, and no other - the menu names each one.
+              send({ type: "ui.agent.unpair", payload: { agentId } });
             }}
           />
           {sessions.map((session) => (
@@ -255,6 +272,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
               session={session}
               agentName={agentName(session.agentId)}
               locale={props.locale}
+              now={now}
               onStop={() => {
                 send({ type: "ui.agent.session-stop", payload: { sessionId: session.sessionId } });
               }}

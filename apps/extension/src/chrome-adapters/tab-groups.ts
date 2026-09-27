@@ -7,11 +7,40 @@
  * browser furniture the owner already understands, and it cannot be forged by a page.
  */
 
-/** What the owner reads on the group. Deliberately one plain word, in no locale's voice. */
-export const AGENT_GROUP_TITLE = "Agent";
+import type { AgentSessionColour } from "@hallpass/contracts";
 
-/** One colour, so an agent group is recognisable at a glance and never blends into the owner's. */
-export const AGENT_GROUP_COLOR = "blue";
+/**
+ * What the owner reads on an idle session's group (016 FR-238, R-207): the product's name, in no
+ * locale's voice. Not localised - a name plus, below, two symbols.
+ */
+export const AGENT_GROUP_TITLE = "Hallpass";
+
+/** The group of a session with a call in flight, or within a second of its last one (FR-239). */
+export const WORKING_GROUP_TITLE = "⌛ Hallpass";
+
+/** The group of a session whose question waits on the owner; it wins over working (FR-238). */
+export const WAITING_GROUP_TITLE = "🔔 Hallpass";
+
+/** What 0.8.0 and earlier titled every agent group; still recognised as stale (FR-241). */
+export const LEGACY_AGENT_GROUP_TITLE = "Agent";
+
+/**
+ * Every title an agent group of ours has carried (016 FR-241, R-207), the one set the stale sweep
+ * matches against. A group titled anything else is the owner's, whatever colour it is.
+ */
+export const STALE_AGENT_GROUP_TITLES: ReadonlySet<string> = new Set([
+  LEGACY_AGENT_GROUP_TITLE,
+  AGENT_GROUP_TITLE,
+  WORKING_GROUP_TITLE,
+  WAITING_GROUP_TITLE,
+]);
+
+/**
+ * A session's group colour: the session's own colour from the rotation (016 FR-240, R-205), which
+ * are all `chrome.tabGroups` colour names. Replaces 0.8.0's one fixed blue, so two sessions' groups
+ * can be told apart and each matches its panel card.
+ */
+export type AgentGroupColour = AgentSessionColour;
 
 /** Chrome's value for "this tab is in no group". */
 export const UNGROUPED_TAB_GROUP_ID = -1;
@@ -30,7 +59,7 @@ export async function groupTabs(tabIds: number[], groupId?: number): Promise<num
  * Takes tabs out of whatever group they are in (004/T103).
  *
  * Releasing a lease has to withdraw the *visible* claim as well as the recorded one: a tab left in
- * the "Agent" group after the session let go of it tells the owner an agent is still driving a tab
+ * the agent's group after the session let go of it tells the owner an agent is still driving a tab
  * no session may touch. Chrome discards the group when its last tab leaves, which is the end state
  * a released session's group should reach anyway.
  */
@@ -38,9 +67,15 @@ export async function ungroupTabs(tabIds: number[]): Promise<void> {
   await chrome.tabs.ungroup(tabIds as [number, ...number[]]);
 }
 
-/** Titles and colours a group so it reads as the agent's. */
-export async function markAgentGroup(groupId: number): Promise<void> {
-  await chrome.tabGroups.update(groupId, { title: AGENT_GROUP_TITLE, color: AGENT_GROUP_COLOR });
+/**
+ * Writes an agent group's title, and its colour when one is given (016 R-207). The group presenter
+ * is the one caller: it decides the title from the session's state and writes only a change.
+ */
+export async function presentAgentGroup(
+  groupId: number,
+  properties: { title: string; color?: AgentGroupColour },
+): Promise<void> {
+  await chrome.tabGroups.update(groupId, properties);
 }
 
 /**
@@ -65,8 +100,12 @@ export const RELEASED_GROUP_COLOR = "grey";
  * this compares against the session records rather than trusting the title alone.
  */
 export async function queryAgentGroupIds(): Promise<number[]> {
-  const groups = await chrome.tabGroups?.query({ title: AGENT_GROUP_TITLE });
-  return (groups ?? []).map((group) => group.id);
+  // Every group, filtered here (016 FR-241): `query` matches one exact title, and a group of ours
+  // may carry any of four.
+  const groups = await chrome.tabGroups?.query({});
+  return (groups ?? [])
+    .filter((group) => group.title !== undefined && STALE_AGENT_GROUP_TITLES.has(group.title))
+    .map((group) => group.id);
 }
 
 /**

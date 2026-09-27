@@ -39,9 +39,11 @@ describe("side-panel App composition", () => {
     // one-second default in this environment, and a timeout here would be about the bundler rather
     // than about what is rendered.
     expect(
-      await view.findByRole("heading", { level: 1, name: "Hallpass" }, { timeout: 10_000 }),
+      await view.findByRole("heading", { name: "No agent is connected to this browser" }, { timeout: 10_000 }),
     ).toBeTruthy();
     expect(document.querySelector("[data-agent-state]")).toBeTruthy();
+    // 016 FR-224: the browser's side-panel header names the product; the panel does not repeat it.
+    expect(view.queryByRole("heading", { level: 1 })).toBeNull();
     expect(view.queryByRole("status")).toBeNull();
     expect(view.queryByRole("button", { name: "Sign in" })).toBeNull();
     expect(view.queryByText(/Assistant service/)).toBeNull();

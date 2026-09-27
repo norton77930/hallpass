@@ -108,6 +108,14 @@ export type AgentStopSignals = {
   interruptSession(sessionId: string): { interrupted: number };
   /** How many of one session's calls are registered right now; the 中斷 control is enabled by it. */
   inFlight(sessionId: string): number;
+  /**
+   * Tells `listener` the session whose `inFlight` count just moved (016 FR-238, FR-239, R-207).
+   *
+   * Only a move is told: a runner's second registration of a call, or a batch step running under
+   * the batch's id, leaves the count where it was and is not announced. Called synchronously, after
+   * the registration changed, so the listener reads the new count. Answers the unsubscribe.
+   */
+  onChange(listener: (sessionId: string) => void): () => void;
 };
 
 export function createAgentStopSignals(): AgentStopSignals {
@@ -129,6 +137,27 @@ export function createAgentStopSignals(): AgentStopSignals {
     interruption?: { promise: Promise<void>; resolve: () => void };
   };
   const live = new Set<Registration>();
+  const listeners = new Set<(sessionId: string) => void>();
+
+  function countOf(sessionId: string): number {
+    const calls = new Set<string>();
+    for (const entry of live) if (entry.sessionId === sessionId) calls.add(callOf(entry.callId));
+    return calls.size;
+  }
+
+  /** Runs `change` and tells the listeners if it moved the session's count (016 R-207). */
+  function counted(sessionId: string, change: () => void): void {
+    const before = listeners.size === 0 ? 0 : countOf(sessionId);
+    change();
+    if (listeners.size === 0 || countOf(sessionId) === before) return;
+    for (const listener of [...listeners]) {
+      try {
+        listener(sessionId);
+      } catch {
+        // A listener is presentation (the group title); a call must begin and end whatever it does.
+      }
+    }
+  }
 
   /**
    * The call an id belongs to, as anything outside this worker knows it.
@@ -154,7 +183,7 @@ export function createAgentStopSignals(): AgentStopSignals {
   return {
     begin(callId, sessionId) {
       const entry: Registration = { callId, sessionId, stopped: false };
-      live.add(entry);
+      counted(sessionId, () => live.add(entry));
       return {
         stopped: () => entry.stopped,
         reason: () => entry.reason,
@@ -172,7 +201,7 @@ export function createAgentStopSignals(): AgentStopSignals {
           return entry.interruption.promise;
         },
         end: () => {
-          live.delete(entry);
+          counted(sessionId, () => live.delete(entry));
         },
       };
     },
@@ -202,9 +231,13 @@ export function createAgentStopSignals(): AgentStopSignals {
       return { interrupted: interrupted.size };
     },
     inFlight(sessionId) {
-      const calls = new Set<string>();
-      for (const entry of live) if (entry.sessionId === sessionId) calls.add(callOf(entry.callId));
-      return calls.size;
+      return countOf(sessionId);
+    },
+    onChange(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
   };
 }

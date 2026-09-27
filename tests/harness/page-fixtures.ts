@@ -105,6 +105,11 @@ const FIXTURES = [
    * hold both at once.
    */
   "batch-upload",
+  /**
+   * 016/T451: a field whose keydown handler opens `alert` (FR-242, R-208) - the keystroke and the
+   * dialog are the same renderer turn, so the key dispatch does not return while the box is up.
+   */
+  "keydown-alert",
 ] as const;
 
 /** 015/T417: how long the slow file of `/two-downloads` holds back the rest of its body. */
@@ -764,6 +769,28 @@ ${filler(4)}`,
 <p id="attachment-report">no file chosen</p>
 <p id="picture-report">no file chosen</p>
 <p id="received">nothing submitted yet</p>
+${filler(4)}`,
+      );
+
+    case "keydown-alert":
+      // 016/T451: the alert is raised inside the keydown handler itself, not a moment later, so a
+      // key call that waits for its own dispatch would wait for as long as the box stays up.
+      return html(
+        "Keydown alert",
+        `<h1>Keydown alert</h1>
+<p>Any key pressed in the field below opens an alert from the field's own keydown handler.</p>
+<label>Alerting field <input type="text" name="alerting" id="alerting" aria-label="Alerting field"></label>
+<p id="result">no key yet</p>
+<script>
+  (function () {
+    var field = document.getElementById('alerting');
+    var result = document.getElementById('result');
+    field.addEventListener('keydown', function (event) {
+      window.alert('Key ' + event.key + ' pressed.');
+      result.textContent = 'alert-closed';
+    });
+  })();
+</script>
 ${filler(4)}`,
       );
 

@@ -2,7 +2,7 @@ import type { BrowserContext, Dialog as PlaywrightDialog, Page } from "@playwrig
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -170,6 +170,12 @@ test.describe("agent dialogs", () => {
 
       const chainedAnswer = (await call("dialog", { tabId, action: "accept" })) as { ok: boolean };
       expect(chainedAnswer.ok).toBe(true);
+      // The notice arrives with the next projection push, which is asynchronous to the answer: read
+      // until it is there (one read raced the push in a full-suite run), and record how long it took.
+      const acceptedAt = Date.now();
+      await expect.poll(() => panel.panelText(), { timeout: 5_000 }).toContain(ui("agent.notice.dialogAccepted"));
+      // eslint-disable-next-line no-console -- the answer-to-notice latency, watched since 016.
+      console.log(`[T229] chained-accept notice on the panel ${Date.now() - acceptedAt} ms after the answer`);
       const afterChained = await panel.panelText();
       // Told, not asked (FR-114): the notice is up and no question was raised.
       expect(afterChained).toContain(ui("agent.notice.dialogAccepted"));
@@ -414,7 +420,7 @@ async function pairedSession(fixtures: {
   });
 
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-  await panel.waitForText(ui("agent.appTitle"));
+  await waitForAgentPanel(panel);
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));

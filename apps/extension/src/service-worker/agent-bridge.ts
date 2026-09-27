@@ -153,6 +153,13 @@ export type AgentBridgeDeps = {
    */
   onSessionEnded?: (sessionId: string) => void;
   /**
+   * A session's host reported the folder it works in (016 FR-226, R-204).
+   *
+   * Passed on as parsed; whether the session is one the worker knows is the runtime's question. The
+   * label is remote input naming a folder on the agent's machine, so no diagnostic carries it.
+   */
+  onSessionLabel?: (label: { sessionId: string; label: string }) => void;
+  /**
    * The host stopped waiting for one session's pairing answer - its bound expired or the session
    * closed (015 FR-216, FR-217). The card is the runtime's, so the bridge only passes it on; it
    * answers nothing, because the host has already answered its agent.
@@ -326,6 +333,12 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         case "session-ended":
           deps.reportDiagnostic?.("agent.bridge.session-ended");
           deps.onSessionEnded?.(link.data.sessionId);
+          return;
+        case "session-label":
+          // 016 FR-226: the host's folder name for its session, sent after every greeting. The code
+          // is logged, the label never is.
+          deps.reportDiagnostic?.("agent.bridge.session-label");
+          deps.onSessionLabel?.({ sessionId: link.data.sessionId, label: link.data.label });
           return;
         case "relay-started":
           deps.reportDiagnostic?.("agent.bridge.relay-started");

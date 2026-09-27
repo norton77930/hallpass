@@ -101,7 +101,7 @@ describe("T191 the shell derives its composition from the projection", () => {
 
     expect(shellState()).toBe("idle");
     const row = screen.getByText(ui("agent.status.connected")).closest("[data-status-row]");
-    expect(row?.textContent).toContain("Claude Code");
+    expect(row).toBeTruthy();
     expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
     expect(screen.queryByText(ui("agent.notPaired.title"))).toBeNull();
     expect(screen.queryByRole("button", { name: ui("agent.session.stop") })).toBeNull();
@@ -112,9 +112,10 @@ describe("T191 the shell derives its composition from the projection", () => {
     renderShell();
     project(port, IDLE);
 
-    expect(screen.queryByRole("menuitem", { name: ui("agent.unpair") })).toBeNull();
+    const unpair = ui("agent.status.unpairAgent").replace("{agent}", PAIRED.displayName);
+    expect(screen.queryByRole("menuitem", { name: unpair })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
-    fireEvent.click(screen.getByRole("menuitem", { name: ui("agent.unpair") }));
+    fireEvent.click(screen.getByRole("menuitem", { name: unpair }));
 
     expect(port.sent).toEqual([{ type: "ui.agent.unpair", payload: { agentId: PAIRED.agentId } }]);
   });
@@ -138,11 +139,72 @@ describe("T191 the shell derives its composition from the projection", () => {
     expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
   });
 
-  it("carries the app title, in the owner's locale", () => {
+  /**
+   * 016/T439 — the status row says how much is going on, and whom the owner can unpair
+   * (US1, FR-223 – FR-224, contracts/panel.md).
+   *
+   * The browser's own side-panel header already names the product, so the panel does not say it a
+   * second time. The row used to name `paired[0]` - one agent's name for a browser that may be
+   * serving several - and its one unpair unpaired every one of them. Now it counts the sessions and
+   * never names an agent, and the menu is where each paired agent is named, with its own unpair.
+   */
+  it("carries no in-panel heading, in either locale (FR-224)", () => {
+    renderShell("zh-TW");
+    project(port, IDLE);
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+    expect(document.body.textContent).not.toContain(ui("agent.appTitle"));
+    cleanup();
+
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ sessionId: "s-1", agentId: "agent-1", tabs: [], state: "idle" }] });
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+  });
+
+  const session = (sessionId: string) => ({ sessionId, agentId: "agent-1", agentName: "Cursor", tabs: [], state: "working" as const });
+  const statusText = (): string => document.querySelector("[data-status-row] .agent-status-text")?.textContent ?? "";
+
+  it.each([
+    ["en-US", 0, "Connected · no sessions"],
+    ["en-US", 1, "Connected · 1 session"],
+    ["en-US", 3, "Connected · 3 sessions"],
+    ["zh-TW", 0, "已連線 · 沒有工作階段"],
+    ["zh-TW", 1, "已連線 · 1 個工作階段"],
+    ["zh-TW", 3, "已連線 · 3 個工作階段"],
+  ] as const)("the %s status row reads the session count %i as %s, and never an agent name", (locale, count, text) => {
+    renderShell(locale);
+    project(port, { ...IDLE, sessions: Array.from({ length: count }, (_, index) => session(`s-${index}`)) });
+
+    expect(statusText()).toBe(text);
+    const row = document.querySelector("[data-status-row]")?.textContent ?? "";
+    expect(row).not.toContain("Claude Code");
+    expect(row).not.toContain("Cursor");
+  });
+
+  it("lists every paired agent in the menu, each with its own unpair that sends one command", () => {
+    const second = { agentId: "agent-2", displayName: "Second Agent", origin: "stdio:local", acceptedAt: "2026-09-13T00:00:00.000Z" };
+    renderShell();
+    project(port, { ...IDLE, paired: [PAIRED, second] });
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
+    const items = screen.getAllByRole("menuitem");
+    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["Unpair Claude Code", "Unpair Second Agent"]);
+    expect(screen.getByRole("menu").textContent).toContain("Claude Code");
+    expect(screen.getByRole("menu").textContent).toContain("Second Agent");
+    expect(items.map((item) => item.textContent)).toEqual(["Unpair", "Unpair"]);
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Unpair Second Agent" }));
+
+    expect(port.sent).toEqual([{ type: "ui.agent.unpair", payload: { agentId: "agent-2" } }]);
+    expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("names the menu's unpair in zh-TW", () => {
     renderShell("zh-TW");
     project(port, IDLE);
 
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Hallpass 瀏覽器代理橋接");
+    fireEvent.click(screen.getByRole("button", { name: "更多選項" }));
+    const item = screen.getByRole("menuitem", { name: "解除與 Claude Code 的配對" });
+    expect(item.textContent).toBe("解除配對");
   });
 
   it("keeps the last projection it could trust when one does not parse", () => {

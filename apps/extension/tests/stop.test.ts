@@ -146,3 +146,52 @@ describe("T352 the reason a call was ended", () => {
     await expect(handle.interrupted()).resolves.toBeUndefined();
   });
 });
+
+/**
+ * 016/T441 - the count is told, not only asked (FR-238, FR-239, R-207).
+ *
+ * The tab-group title says whether a session is working, and nothing else in the worker hears a
+ * call begin or end: `notify()` follows prompts and sessions. So the registry that already counts
+ * in-flight calls says when a session's count moves - and only then, counted the way `inFlight`
+ * counts, so a batch's steps and a runner's second registration are not a flicker of changes.
+ */
+describe("T441 in-flight changes are announced", () => {
+  it("names the session when its count moves, and stays quiet when it does not", () => {
+    const stops = createAgentStopSignals();
+    const heard: string[] = [];
+    stops.onChange((sessionId) => heard.push(sessionId));
+
+    const call = stops.begin("call-1", "session-a");
+    expect(heard).toEqual(["session-a"]);
+
+    // The runner's own registration and a batch step of the same call: still one call in flight.
+    const runner = stops.begin("call-1", "session-a");
+    const step = stops.begin(batchStepCallId("call-1", 0), "session-a");
+    expect(heard).toEqual(["session-a"]);
+
+    const other = stops.begin("call-2", "session-b");
+    expect(heard).toEqual(["session-a", "session-b"]);
+
+    step.end();
+    runner.end();
+    expect(heard).toEqual(["session-a", "session-b"]);
+
+    call.end();
+    expect(heard).toEqual(["session-a", "session-b", "session-a"]);
+    // A second `end` of a registration already gone changes nothing and is not announced.
+    call.end();
+    other.end();
+    expect(heard).toEqual(["session-a", "session-b", "session-a", "session-b"]);
+  });
+
+  it("stops telling a listener that unsubscribed", () => {
+    const stops = createAgentStopSignals();
+    const heard: string[] = [];
+    const unsubscribe = stops.onChange((sessionId) => heard.push(sessionId));
+    unsubscribe();
+
+    stops.begin("call-1", "session-a").end();
+
+    expect(heard).toEqual([]);
+  });
+});

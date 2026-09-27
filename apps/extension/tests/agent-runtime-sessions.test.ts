@@ -616,7 +616,8 @@ describe("T189 owner controls from the panel and the projection they read", () =
 
     await expect(asked).resolves.toEqual({ decision: "released" });
     expect(runtime.prompts.current()).toBeUndefined();
-    expect((await runtime.projection()).sessions.find((session) => session.sessionId === "session-b")?.state).toBe("working");
+    // 016 FR-230: nothing in flight and nothing waiting is idle, not working.
+    expect((await runtime.projection()).sessions.find((session) => session.sessionId === "session-b")?.state).toBe("idle");
   });
 
   /** S1 review should-fix 3 (FR-087): a call parked on a prompt or a plan answers `owner-stopped`. */
@@ -783,7 +784,8 @@ describe("T189 owner controls from the panel and the projection they read", () =
     await runtime.tabs.adopt("session-a", 11);
     expect((await runtime.projection()).sessions.find((session) => session.sessionId === "session-a")?.sites).toEqual(["agent.test", "shop.test"]);
     expect(a?.sites).toEqual(["agent.test", "shop.test"]);
-    expect(a?.state).toBe("working");
+    // 016 FR-230: session-a has no call in flight, so it is idle rather than working.
+    expect(a?.state).toBe("idle");
     expect(b?.sites).toEqual(["agent.test"]);
     expect(b?.state).toBe("waiting");
     expect(typeof a?.lastActivityAt).toBe("string");
@@ -845,5 +847,133 @@ describe("T189 owner controls from the panel and the projection they read", () =
     // A fresh instance has no memory of the greeting, but the ring in the session area still does.
     const successor = composeAgentRuntime({ connectNative: () => fakePort() });
     expect((await successor.projection()).diagnostics).toEqual({ relayPid: 5150, recordPath: path });
+  });
+});
+
+/**
+ * 016/T435 — what a session card needs to say which project it is and what it is doing (FR-226 -
+ * FR-231, R-205, data-model "Session record").
+ *
+ * The start time and the colour are written once, on the session's first greeting, into the
+ * persisted record - never the in-memory one, and never `lastHelloAt`, which every re-greeting
+ * overwrites - so a card keeps its time and its stripe across a relay restart and a worker restart.
+ */
+describe("016 session identity and state", () => {
+  type Stored016 = { tabIds: number[]; lastHelloAt?: string; firstSeenAt?: string; colourIndex?: number; label?: string };
+  let fake: Harness;
+
+  beforeEach(() => {
+    fake = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const stored = (sessionId: string): Stored016 | undefined =>
+    (fake.session.agentSessions as Record<string, Stored016> | undefined)?.[sessionId];
+
+  const card = async (runtime: ReturnType<typeof composeAgentRuntime>, sessionId: string) =>
+    (await runtime.projection()).sessions.find((session) => session.sessionId === sessionId);
+
+  it("writes firstSeenAt and a colour index once, from the persisted counter, and keeps them on a re-greeting", async () => {
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+    port.emit(announce("session-b"));
+    await vi.waitFor(() => expect(stored("session-b")?.colourIndex).toBe(1));
+
+    const first = stored("session-a");
+    expect(first?.firstSeenAt).toEqual(expect.any(String));
+    expect(first?.colourIndex).toBe(0);
+    expect(fake.session.agentSessionColourNext).toBe(2);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    port.emit(announce("session-a"));
+    await vi.waitFor(() => expect(stored("session-a")?.lastHelloAt).not.toBe(first?.lastHelloAt));
+
+    expect(stored("session-a")?.firstSeenAt).toBe(first?.firstSeenAt);
+    expect(stored("session-a")?.colourIndex).toBe(0);
+    expect(fake.session.agentSessionColourNext).toBe(2);
+
+    const projected = await card(runtime, "session-a");
+    expect(projected?.startedAt).toBe(first?.firstSeenAt);
+    expect(projected?.colour).toBe("cyan");
+    expect((await card(runtime, "session-b"))?.colour).toBe("green");
+  });
+
+  it("continues the colour rotation from the persisted counter, wrapping after seven", async () => {
+    fake.session.agentSessionColourNext = 13;
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+
+    expect(stored("session-a")?.colourIndex).toBe(13);
+    expect((await card(runtime, "session-a"))?.colour).toBe("blue");
+  });
+
+  it("stores the label a session-label frame carries and projects it; an unknown session is ignored", async () => {
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+    expect((await card(runtime, "session-a"))?.label).toBeUndefined();
+
+    port.emit({ type: "session-label", sessionId: "session-a", label: "shop-frontend" });
+    await vi.waitFor(() => expect(stored("session-a")?.label).toBe("shop-frontend"));
+    expect((await card(runtime, "session-a"))?.label).toBe("shop-frontend");
+
+    port.emit({ type: "session-label", sessionId: "session-nobody", label: "elsewhere" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stored("session-nobody")).toBeUndefined();
+    expect((await runtime.projection()).sessions.map((session) => session.sessionId)).toEqual(["session-a"]);
+  });
+
+  it("fills a 0.8.0 record on read: firstSeenAt from its lastHelloAt, a fresh colour, no label", async () => {
+    const helloAt = "2026-09-27T01:00:00.000Z";
+    fake.session.agentSessions = { "session-old": { tabIds: [], lastHelloAt: helloAt } };
+    fake.session.agentSessionColourNext = 4;
+    const port = fakePort();
+    const runtime = composeAgentRuntime({ connectNative: () => port });
+
+    const identity = await runtime.tabs.identity("session-old");
+
+    expect(identity).toEqual({ firstSeenAt: helloAt, colourIndex: 4 });
+    expect(stored("session-old")).toMatchObject({ firstSeenAt: helloAt, colourIndex: 4 });
+    expect(fake.session.agentSessionColourNext).toBe(5);
+    // Read again, it is the same: the fill is written, not recomputed.
+    expect(await runtime.tabs.identity("session-old")).toEqual(identity);
+    expect(await runtime.tabs.identity("session-none")).toBeUndefined();
+  });
+
+  it("keeps a 0.8.0 session's start time when it greets a 0.9.0 worker again", async () => {
+    const helloAt = "2026-09-27T01:00:00.000Z";
+    fake.session.agentSessions = { "session-a": { tabIds: [], lastHelloAt: helloAt } };
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+
+    expect(stored("session-a")?.firstSeenAt).toBe(helloAt);
+    expect((await card(runtime, "session-a"))?.startedAt).toBe(helloAt);
+  });
+
+  it("says waiting over working, working while a call is in flight, and idle otherwise", async () => {
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+    await runtime.tabs.adopt("session-a", 7);
+    expect((await card(runtime, "session-a"))?.state).toBe("idle");
+
+    port.emit({ callId: "wait-a", sessionId: "session-a", tool: "wait", args: { tabId: 7, forMs: 10_000 } });
+    await vi.waitFor(async () => expect((await card(runtime, "session-a"))?.inFlight).toBe(1));
+    expect((await card(runtime, "session-a"))?.state).toBe("working");
+
+    const asked = runtime.prompts.ask({
+      callId: "call-a",
+      sessionId: "session-a",
+      site: "https://agent.test",
+      tool: "click",
+      argsSummary: "click a page element",
+    });
+    await vi.waitFor(() => expect(runtime.prompts.current()).toBeDefined());
+    expect((await card(runtime, "session-a"))?.state).toBe("waiting");
+
+    runtime.prompts.cancel();
+    await expect(asked).resolves.toMatchObject({ decision: "timed-out" });
+    await runtime.stopSessionFromOwner("session-a");
   });
 });

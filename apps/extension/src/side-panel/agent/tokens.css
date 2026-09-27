@@ -23,6 +23,18 @@
   --danger: #b3261e;
   --focus: #1f6f78;
 
+  /*
+   * 016 FR-225, R-206: the session colours, Chrome's own tab-group palette, so a card's stripe and
+   * the session's tab group are the same colour. Decoration only - never text, never a surface.
+   */
+  --group-cyan: #007b83;
+  --group-green: #188038;
+  --group-purple: #a142f4;
+  --group-pink: #d01884;
+  --group-orange: #fa903e;
+  --group-grey: #5f6368;
+  --group-blue: #1a73e8;
+
   --fs-1: 12px;
   --fs-2: 13px;
   --fs-3: 14px;
@@ -51,5 +63,13 @@
     --warn: #e3a94b;
     --danger: #f08a82;
     --focus: #7fd0d8;
+
+    --group-cyan: #78d9ec;
+    --group-green: #81c995;
+    --group-purple: #d7aefb;
+    --group-pink: #ff8bcb;
+    --group-orange: #fcad70;
+    --group-grey: #dadce0;
+    --group-blue: #8ab4f8;
   }
 }

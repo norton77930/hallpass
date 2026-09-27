@@ -7,7 +7,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { UPLOAD_CONFIG_TEMPLATE } from "../../../packages/agent-host/src/upload-policy.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -110,7 +110,7 @@ test.describe("agent upload directory", () => {
       tabId: ownerTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let client: McpHarnessClient | undefined;
     let impatient: McpHarnessClient | undefined;
@@ -166,6 +166,10 @@ test.describe("agent upload directory", () => {
       await closeTab(extensionWorker, hurriedTab);
       await hurried.close();
       impatient = undefined;
+      // The next card names the same file, so a card still on its way out would be taken for it
+      // (seen in full-suite runs since 016: the session's end settles later in the tab manager's
+      // longer queue). Step (3) starts from an empty panel.
+      await expect.poll(() => directoryCardUp(panel), { timeout: 15_000 }).toBe(false);
 
       // ============ (3) 不准 refuses the call in the owner's own word ============
       const declined = live.callTool("file_upload", { tabId, ref, paths: [privateFile] });

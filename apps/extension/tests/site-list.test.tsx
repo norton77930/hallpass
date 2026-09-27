@@ -1,6 +1,10 @@
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentPanelCommandSchema } from "@hallpass/contracts";
+import { lookup } from "../src/locales/catalog.js";
 import {
   IDLE,
   installAgentPort,
@@ -55,16 +59,56 @@ describe("T191 site list", () => {
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 
-  it("marks a skip-checks row as permissive and no other", () => {
+  /**
+   * 016/T445 — a site row that reads once (US3, FR-235 – FR-237, contracts/panel.md).
+   *
+   * The 0.8.0 row said "acts without asking" twice - a badge beside the switch that already said
+   * it - repeated the site in the revoke's visible text, and added a line saying diagnostics were
+   * granted under the checkbox that already showed it. The permissive mode is now marked on the
+   * switch itself, the checkbox says what it allows, and the site is in the accessible names only.
+   */
+  it("marks the skip-checks switch and no other, with no badge (FR-235)", () => {
     renderShell();
     project(port, { ...IDLE, sites: [ask, open] });
 
-    const rows = [...document.querySelectorAll("[data-site]")];
+    const rows = [...document.querySelectorAll<HTMLElement>("[data-site]")];
     expect(rows.map((row) => row.getAttribute("data-site"))).toEqual([ask.site, open.site]);
-    expect(rows[0]?.classList.contains("permissive")).toBe(false);
-    expect(rows[1]?.classList.contains("permissive")).toBe(true);
-    expect(rows[1]?.textContent).toContain(ui("agent.sitePermissive"));
-    expect(rows[0]?.textContent).not.toContain(ui("agent.sitePermissive"));
+    expect(rows[0]?.querySelector("select")?.getAttribute("data-permissive")).toBeNull();
+    expect(rows[1]?.querySelector("select")?.getAttribute("data-permissive")).toBe("true");
+    expect(document.querySelector(".agent-site-flag")).toBeNull();
+    // The mode's own option still says it; nothing else on the row does.
+    const permissive = ui("agent.modeSkipChecks");
+    const optionText = [...(rows[1]?.querySelectorAll("option") ?? [])].map((option) => option.textContent).join("");
+    expect((rows[1]?.textContent ?? "").replace(optionText, "")).not.toContain(permissive);
+  });
+
+  it("draws the permissive switch's border from the warning token (FR-235)", () => {
+    const css = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../src/side-panel/agent/agent.css"),
+      "utf8",
+    );
+    expect(css).toMatch(/select\[data-permissive="true"\]\s*\{[^}]*border:\s*2px solid var\(--warn\)/);
+  });
+
+  it.each([
+    ["en-US", "Allow reading console and network logs", "Revoke"],
+    ["zh-TW", "允許讀取 console 與網路紀錄", "撤銷"],
+  ] as const)("in %s the checkbox and the revoke say what they do, and name the site only to assistive technology (FR-236, FR-237)", (locale, allow, revoke) => {
+    renderShell(locale);
+    project(port, { ...IDLE, sites: [{ ...ask, diagnosticsGranted: true }] });
+    const row = document.querySelector<HTMLElement>("[data-site]") as HTMLElement;
+    const t = (key: string): string => lookup(key, locale);
+
+    const checkbox = within(row).getByRole("checkbox", { name: t("agent.diagnosticsLabel").replace("{site}", ask.site) });
+    expect(checkbox.getAttribute("aria-label")).toContain(ask.site);
+    expect(checkbox.closest("label")?.textContent).toBe(allow);
+
+    const button = within(row).getByRole("button", { name: t("agent.siteRevoke").replace("{site}", ask.site) });
+    expect(button.textContent).toBe(revoke);
+    expect(button.getAttribute("aria-label")).toBe(locale === "en-US" ? `Revoke ${ask.site}` : `撤銷 ${ask.site}`);
+
+    // No "granted" line under a checkbox that already shows it.
+    expect(row.querySelector("p")).toBeNull();
   });
 
   it("keeps the diagnostics grant as its own control on the row (004 US6)", () => {
@@ -161,6 +205,39 @@ describe("T191 site list", () => {
     expect([...document.querySelectorAll("[data-upload-root]")].map((row) => row.getAttribute("data-upload-root"))).toEqual([
       "D:\\photos",
     ]);
+  });
+
+  /**
+   * 0.9.0 owner check — the section has to say what it is for.
+   *
+   * With an empty list the owner saw a title and a file path and nothing else, and could not tell
+   * what the section was or that nothing was allowed. It says what the list governs, says so when it
+   * is empty and how a directory gets onto it, and keeps the file path as the last, quiet line.
+   */
+  it("says what the list is for and that it is empty, in both locales", () => {
+    renderShell();
+    project(port, { ...IDLE, uploadRoots: { roots: [], path: CONFIG } });
+    const section = (): Element | null => document.querySelector(".agent-upload-roots");
+    expect(section()?.textContent).toContain(ui("agent.uploadRootsIntro"));
+    expect(section()?.textContent).toContain(
+      'None yet. When the agent needs a file from anywhere else it asks you first; a directory you answer "These directories from now on" for is listed here.',
+    );
+    expect(section()?.lastElementChild?.textContent).toBe(`List file: ${CONFIG}`);
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, uploadRoots: { roots: [], path: CONFIG } });
+    expect(section()?.textContent).toContain("agent 只能從這些資料夾，把你電腦上的檔案放進網頁。");
+    expect(section()?.textContent).toContain(
+      "目前沒有。agent 需要其他地方的檔案時會先問你；你回答「這些資料夾以後都可以」的資料夾會列在這裡。",
+    );
+    expect(section()?.lastElementChild?.textContent).toBe(`清單檔案：${CONFIG}`);
+    cleanup();
+
+    renderShell();
+    project(port, { ...IDLE, uploadRoots: { roots: ["D:\\photos"], path: CONFIG } });
+    expect(section()?.textContent).toContain(ui("agent.uploadRootsIntro"));
+    expect(section()?.textContent).not.toContain(ui("agent.uploadRootsEmpty"));
   });
 
   /**

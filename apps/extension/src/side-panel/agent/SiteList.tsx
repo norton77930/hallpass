@@ -8,10 +8,15 @@ import type { SendCommand } from "./AgentShell.js";
  * The site list (006 FR-086, D-006-7): one row per site the owner has decided about, its mode as a
  * switch among the three, and a revoke that forgets the decision.
  *
- * The permissive mode is marked on the row (`permissive`) rather than only named in the switch,
- * because "acts without asking" is the one setting the owner should find without reading. The
- * diagnostics grant stays a control of its own on the row (004 US6, FR-049): it is a different
- * consent from the mode, and revoking it is what takes Chrome's debugging bar off the screen.
+ * The permissive mode is marked on the switch itself (016 FR-235: `data-permissive`, a border in
+ * the warning colour) rather than by a badge beside a switch that already names it, because "acts
+ * without asking" is the one setting the owner should find without reading. The diagnostics grant
+ * stays a control of its own on the row (004 US6, FR-049): it is a different consent from the mode,
+ * and revoking it is what takes Chrome's debugging bar off the screen.
+ *
+ * 016 FR-236, FR-237: the site is written once, as the row's name. The checkbox and the revoke say
+ * what they do on screen and carry the site in their accessible names only, and there is no
+ * "granted" line under a checkbox that already shows whether it is granted.
  */
 
 const MODE_ORDER: readonly SiteMode[] = ["ask", "follow-a-plan", "skip-checks"];
@@ -63,16 +68,9 @@ export function SiteList(props: {
       ) : (
         <ul>
           {props.sites.map((record) => (
-            <li
-              key={record.site}
-              data-site={record.site}
-              className={record.mode === "skip-checks" ? "agent-site permissive" : "agent-site"}
-            >
+            <li key={record.site} data-site={record.site} className="agent-site">
               <div className="agent-site-head">
                 <span className="agent-site-name">{record.site}</span>
-                {record.mode === "skip-checks" ? (
-                  <span className="agent-site-flag">{t("agent.sitePermissive")}</span>
-                ) : null}
               </div>
               {/* The label names the control for assistive technology; on screen the site name
                   above it already says which site, so the text is visually hidden. */}
@@ -80,6 +78,7 @@ export function SiteList(props: {
                 <span className="agent-sr-only">{t("agent.siteModeLabel").replace("{site}", record.site)}</span>
                 <select
                   value={record.mode}
+                  data-permissive={record.mode === "skip-checks" ? "true" : undefined}
                   onChange={(event) => {
                     props.send({
                       type: "ui.agent.site-mode",
@@ -95,30 +94,31 @@ export function SiteList(props: {
                 </select>
               </label>
               <div className="agent-site-tools">
-              <label className="agent-site-diagnostics">
-                <input
-                  type="checkbox"
-                  checked={record.diagnosticsGranted}
-                  onChange={(event) => {
-                    props.send({
-                      type: "ui.agent.set-diagnostics",
-                      payload: { site: record.site, granted: event.target.checked },
-                    });
+                <label className="agent-site-diagnostics">
+                  <input
+                    type="checkbox"
+                    aria-label={t("agent.diagnosticsLabel").replace("{site}", () => record.site)}
+                    checked={record.diagnosticsGranted}
+                    onChange={(event) => {
+                      props.send({
+                        type: "ui.agent.set-diagnostics",
+                        payload: { site: record.site, granted: event.target.checked },
+                      });
+                    }}
+                  />
+                  {t("agent.diagnosticsText")}
+                </label>
+                <button
+                  type="button"
+                  className="agent-quiet"
+                  aria-label={t("agent.siteRevoke").replace("{site}", () => record.site)}
+                  onClick={() => {
+                    props.send({ type: "ui.agent.site-clear", payload: { site: record.site } });
                   }}
-                />
-                {t("agent.diagnosticsLabel").replace("{site}", record.site)}
-              </label>
-              <button
-                type="button"
-                className="agent-quiet"
-                onClick={() => {
-                  props.send({ type: "ui.agent.site-clear", payload: { site: record.site } });
-                }}
-              >
-                {t("agent.siteRevoke").replace("{site}", record.site)}
-              </button>
+                >
+                  {t("agent.siteRevokeText")}
+                </button>
               </div>
-              {record.diagnosticsGranted ? <p>{t("agent.diagnosticsGranted")}</p> : null}
             </li>
           ))}
         </ul>
@@ -177,7 +177,10 @@ export function SiteList(props: {
       {roots === undefined ? null : (
         <section className="agent-upload-roots" aria-labelledby="agent-upload-roots-title">
           <h3 id="agent-upload-roots-title">{t("agent.uploadRootsTitle")}</h3>
-          <p className="agent-upload-roots-path">{t("agent.uploadRootsPath").replace("{path}", () => roots.path)}</p>
+          {/* 0.9.0 owner check: what the list governs, and - when it is empty - that nothing is
+              allowed and how a directory gets here. A bare title over a file path said neither. */}
+          <p className="agent-upload-roots-intro">{t("agent.uploadRootsIntro")}</p>
+          {roots.roots.length === 0 ? <p className="agent-upload-roots-empty">{t("agent.uploadRootsEmpty")}</p> : null}
           {/*
             S3 review F4: where the document nobody could read went. It takes the place of the
             older sentence rather than standing beside it - that one says no directory is allowed,
@@ -219,6 +222,7 @@ export function SiteList(props: {
               </li>
             ))}
           </ul>
+          <p className="agent-upload-roots-path">{t("agent.uploadRootsPath").replace("{path}", () => roots.path)}</p>
         </section>
       )}
     </section>
