@@ -1,6 +1,6 @@
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir, userInfo } from "node:os";
+import { dirname, join, sep } from "node:path";
 import type { BrowserContext } from "@playwright/test";
 import { lookup, type AppLocale } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
@@ -141,7 +141,15 @@ test.describe("agent panel screenshots", () => {
         const lowerName = `016-panel-${locale}-sites.png`;
         const lowerSaved = test.info().outputPath(lowerName);
         writeFileSync(lowerSaved, Buffer.from(lowerData ?? "", "base64"));
-        copyFileSync(lowerSaved, join(MEDIA, lowerName));
+        // The last line of the upload list is the host's config path, which follows the LOCALAPPDATA the
+        // *browser* was launched with. docs/media ships in the public repo and the snapshot check reads
+        // text, not pixels, so a path naming the maintainer's account never reaches docs/media.
+        const listPath = await panel.evaluatePanel("document.querySelector('.agent-upload-roots-path')?.textContent ?? ''");
+        const leak = namesThisAccount(typeof listPath === "string" ? listPath : "");
+        expect
+          .soft(leak, `${lowerName} shows ${JSON.stringify(listPath)}; launch the browser with a neutral LOCALAPPDATA (e.g. C:\\hallpass-demo) and retake. Kept only at ${lowerSaved}`)
+          .toBe(false);
+        if (!leak) copyFileSync(lowerSaved, join(MEDIA, lowerName));
         await panel.evaluatePanel("window.scrollTo(0, 0), document.scrollingElement?.scrollTo(0, 0), true");
 
         await panel.clickButton(ui("agent.refuse"));
@@ -169,6 +177,18 @@ test.describe("agent panel screenshots", () => {
     }
   });
 });
+
+/**
+ * True when `text` names this account: its name, or any path under the folder that holds the home
+ * directories (`C:\Users\` - which also catches an 8.3 short form such as `JANEDO~1`).
+ * Case-insensitive. A neutral LOCALAPPDATA lives outside that folder.
+ */
+function namesThisAccount(text: string): boolean {
+  const haystack = text.toLowerCase();
+  return [`${dirname(homedir())}${sep}`, userInfo().username]
+    .map((needle) => needle.trim().toLowerCase())
+    .some((needle) => needle.length > 1 && haystack.includes(needle));
+}
 
 async function ownerPanel(fixtures: {
   extensionContext: BrowserContext;

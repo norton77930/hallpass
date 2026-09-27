@@ -67,6 +67,7 @@ Numbers per slice and the final verification are added as they land.
 | --- | --- |
 | every `agent-*` gate on branded Chrome 154.0.8037.57 (attach) | **62 passed, 2 skipped (by design), 0 failed** - 52 in the first run, which hit the 20-min global bound; the 10 not reached (`agent-upload-image` last test, `agent-upload`, `agent-viewport`, `agent-window-restore`) re-run separately, 10/10 |
 | panel screenshots zh-TW / en-US, light / dark, plus the lower half (`016-panel-*-sites.png`) | captured on Chrome 154, owner approved |
+| lower-half screenshots after release (2026-09-28) | the last lines of the upload list showed the config path under the maintainer's account folder (the browser ran with a LOCALAPPDATA inside it); both `016-panel-*-sites.png` cropped from 450x823 to 450x728 to drop those lines, nothing repainted, owner approved the crops. `agent-panel-shots.spec.ts` now keeps a lower-half shot out of `docs/media` (soft failure, kept in the run output) when that line names the account or sits under the home-directory parent; retakes need the browser launched with a neutral LOCALAPPDATA such as `C:\hallpass-demo` |
 | unit / contract / snapshot after the owner-check fixes | 1587 passed + 1 skipped / 256 / 656 files 0/0 |
 
 Harness note: a debug Chrome started from the owner's own PowerShell window could not start the
