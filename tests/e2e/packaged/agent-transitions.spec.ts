@@ -2,7 +2,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { transitionNoticeText } from "@hallpass/contracts";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { acceptPairing, pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, clickLabelled, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, setTransitionTestSwitch, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -72,7 +72,7 @@ test.describe("agent transitions", () => {
       tabId: ownerTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let alpha: McpHarnessClient | undefined;
     let beta: McpHarnessClient | undefined;
@@ -419,7 +419,7 @@ async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): 
 
 /** The site list's own revoke, so the next run of this gate starts from an undecided site. */
 async function clearSiteMode(panel: SidePanelDriver, site: string): Promise<void> {
-  await panel.clickButton(ui("agent.siteRevoke").replace("{site}", site));
+  await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", site));
 }
 
 /**

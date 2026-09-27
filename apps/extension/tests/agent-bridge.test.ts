@@ -748,3 +748,38 @@ describe("T099h the host has answered only when it says so", () => {
     expect(clock.delays()).toEqual([AGENT_RECONNECT_BASE_MS]);
   });
 });
+
+/**
+ * 016/T435 — the host's `session-label` frame (FR-226, R-204).
+ *
+ * The bridge only decodes it and passes it on; whether the session is one the worker knows is the
+ * runtime's question. A malformed label is dropped as any unknown frame is, and nothing about the
+ * label reaches a diagnostic line - it is remote input and names a folder on the agent's machine.
+ */
+describe("016 session-label frame", () => {
+  it("passes a session-label frame to onSessionLabel", () => {
+    const onSessionLabel = vi.fn();
+    const diagnostics: string[] = [];
+    const { bridge, port } = bridgeWith({ onSessionLabel, reportDiagnostic: (code) => diagnostics.push(code) });
+    bridge.connect();
+
+    port.emit({ type: "session-label", sessionId: "session-1", label: "shop-frontend" });
+
+    expect(onSessionLabel).toHaveBeenCalledWith({ sessionId: "session-1", label: "shop-frontend" });
+    expect(diagnostics.join(" ")).not.toContain("shop-frontend");
+    expect(port.sent).toEqual([]);
+  });
+
+  it("drops a session-label frame that does not parse", () => {
+    const onSessionLabel = vi.fn();
+    const diagnostics: string[] = [];
+    const { bridge, port } = bridgeWith({ onSessionLabel, reportDiagnostic: (code) => diagnostics.push(code) });
+    bridge.connect();
+
+    port.emit({ type: "session-label", sessionId: "session-1", label: "x".repeat(65) });
+    port.emit({ type: "session-label", sessionId: "session-1", label: "a", path: "C:\a" });
+
+    expect(onSessionLabel).not.toHaveBeenCalled();
+    expect(diagnostics).toEqual(["agent.bridge.frame-rejected", "agent.bridge.frame-rejected"]);
+  });
+});

@@ -61,8 +61,9 @@ describe("T188 side panel projection and owner commands (006)", () => {
     expectAccepted(projection, STATE, "the projection as 004 sent it");
     expectRejected(
       projection,
-      { ...STATE, sessions: [{ sessionId: "session-1", agentId: "agent-0", tabs: [], state: "idle" }] },
-      "a session state outside working / waiting",
+      // 016 FR-230 made `idle` a state; the enum is still closed.
+      { ...STATE, sessions: [{ sessionId: "session-1", agentId: "agent-0", tabs: [], state: "sleeping" }] },
+      "a session state outside working / waiting / idle",
     );
     expectRejected(
       projection,

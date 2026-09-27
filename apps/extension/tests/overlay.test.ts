@@ -100,7 +100,7 @@ function recordingContext(): RecordingContext {
 
 const FRAME: OverlayFrame = { width: 1_200, height: 800, viewportWidth: 600 };
 const SCALE = 2; // 1200 ÷ 600 — twice the page coordinates, and nothing to do with any DPR
-const WATERMARK = "Hallpass 0.8.0";
+const WATERMARK = "Hallpass 0.9.0";
 
 const CLICK: RecordedAction = {
   index: 3,

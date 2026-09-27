@@ -220,3 +220,38 @@ export async function openSidePanel(input: {
     allowPageRead,
   };
 }
+
+/**
+ * The agent panel is on screen and ready to be read (016 T453).
+ *
+ * 0.8.0 journeys waited for the in-panel heading, which 016 FR-224 removed (the browser's own
+ * side-panel header names the product). The shell's root carries `data-agent-state` in every
+ * composition - not-connected, idle and sessions - from its first render, so its presence is the
+ * same moment the heading used to mark and does not depend on pairing or on any copy.
+ */
+export async function waitForAgentPanel(
+  panel: Pick<SidePanelDriver, "evaluatePanel">,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await panel.evaluatePanel("document.querySelector('.agent-shell[data-agent-state]') !== null")) === true) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("side-panel-agent-shell-timeout");
+}
+
+/**
+ * Clicks the button whose accessible name (`aria-label`) is `label` (016 FR-237): a control whose
+ * visible text is shared by every row - the site list's "Revoke" - is told apart only by the name
+ * that carries its site.
+ */
+export async function clickLabelled(panel: Pick<SidePanelDriver, "evaluatePanel">, label: string): Promise<void> {
+  const clicked = await panel.evaluatePanel(
+    `(()=>{const b=[...document.querySelectorAll('button')].find((x)=>x.getAttribute('aria-label')===${JSON.stringify(label)});if(!b)return false;b.click();return true})()`,
+    true,
+  );
+  expect(clicked, `no button labelled ${label}`).toBe(true);
+}

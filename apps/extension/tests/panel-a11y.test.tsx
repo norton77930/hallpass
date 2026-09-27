@@ -41,8 +41,18 @@ const TWO_SESSIONS: AgentPanelState = {
   ...IDLE,
   paired: [PAIRED, { agentId: "agent-2", displayName: "Second Agent", origin: "stdio:local", acceptedAt: "2026-09-13T00:00:00.000Z" }],
   sessions: [
-    { sessionId: "sess-aaaa1111", agentId: "agent-1", tabs: [], sites: ["shop.test"], state: "waiting", lastActivityAt: "2026-09-13T00:00:02.000Z" },
-    { sessionId: "sess-bbbb2222", agentId: "agent-2", tabs: [], sites: [], state: "working", lastActivityAt: "2026-09-13T00:00:01.000Z" },
+    {
+      sessionId: "sess-aaaa1111",
+      agentId: "agent-1",
+      tabs: [{ tabId: 3, url: "https://shop.test/", title: "Shop", active: true, holder: "this" }],
+      sites: ["shop.test"],
+      state: "waiting",
+      label: "shop-frontend",
+      colour: "cyan",
+      startedAt: "2026-09-13T00:00:00.000Z",
+      lastActivityAt: "2026-09-13T00:00:02.000Z",
+    },
+    { sessionId: "sess-bbbb2222", agentId: "agent-2", tabs: [], sites: [], state: "working", inFlight: 1, lastActivityAt: "2026-09-13T00:00:01.000Z" },
   ],
   sites: TWO_SITES,
 };
@@ -115,23 +125,30 @@ describe("T198 every control has a name and a place in the tab order", () => {
     renderShell();
     project(port, { ...IDLE, sites: TWO_SITES });
     fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
-    expect(screen.getByRole("menuitem", { name: ui("agent.unpair") })).toBeTruthy();
+    // 016 FR-223: each paired agent's unpair carries that agent's name.
+    expect(screen.getByRole("menuitem", { name: ui("agent.status.unpairAgent").replace("{agent}", PAIRED.displayName) })).toBeTruthy();
     expectNamedAndReachable();
     // The three-way switch and the diagnostics grant are labelled with the site they are about.
     expect(screen.getByRole("combobox", { name: ui("agent.siteModeLabel").replace("{site}", SHOP) })).toBeTruthy();
     expect(screen.getByRole("checkbox", { name: ui("agent.diagnosticsLabel").replace("{site}", LONG_SITE) })).toBeTruthy();
   });
 
-  it("two session cards, each a labelled section with its own two actions", () => {
+  it("two session cards, each a labelled section with only the controls that apply (016 FR-232 – FR-234)", () => {
     renderShell();
     project(port, TWO_SESSIONS);
     expectNamedAndReachable();
+    const card = (id: string): HTMLElement => document.querySelector<HTMLElement>(`[data-session-id="${id}"]`) as HTMLElement;
     for (const id of ["sess-aaaa1111", "sess-bbbb2222"]) {
-      const card = document.querySelector<HTMLElement>(`[data-session-id="${id}"]`);
-      expect(card?.getAttribute("aria-labelledby")).toBeTruthy();
-      expect(within(card as HTMLElement).getByRole("button", { name: ui("agent.session.stop") })).toBeTruthy();
-      expect(within(card as HTMLElement).getByRole("button", { name: ui("agent.session.release") })).toBeTruthy();
+      expect(card(id).getAttribute("aria-labelledby")).toBeTruthy();
+      expect(within(card(id)).getByRole("button", { name: ui("agent.session.stop") })).toBeTruthy();
     }
+    // Waiting and holding one tab: take back, no interrupt. Working and holding none: the reverse.
+    expect(within(card("sess-aaaa1111")).getByRole("button", { name: ui("agent.session.takeBack").replace("{n}", "1") })).toBeTruthy();
+    expect(within(card("sess-aaaa1111")).queryByRole("button", { name: ui("agent.session.interrupt") })).toBeNull();
+    expect(within(card("sess-bbbb2222")).getByRole("button", { name: ui("agent.session.interrupt") })).toBeTruthy();
+    expect(within(card("sess-bbbb2222")).queryByRole("button", { name: /Take back/ })).toBeNull();
+    // The stripe is decoration, out of the accessibility tree.
+    expect(card("sess-aaaa1111").querySelector(".agent-session-stripe")?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it.each([
@@ -191,7 +208,7 @@ const TEXT_ON_SURFACE: ReadonlyArray<[text: string, surface: string, where: stri
   ["text-2", "surface-2", "secondary copy on a nested surface"],
   ["accent-text", "accent", "label of a filled (primary) button"],
   ["accent", "surface", "accent used as text on a card (outlined button, link)"],
-  ["warn", "surface-2", "the permissive mode pill's text on its pill background"],
+  ["warn", "surface", "a waiting card's state line (016 FR-230)"],
   ["danger", "surface", "the outlined Stop button on a card"],
   ["ok", "surface", "the connected state on a card"],
   ["ok", "bg", "the connected state on the panel ground"],
@@ -199,6 +216,8 @@ const TEXT_ON_SURFACE: ReadonlyArray<[text: string, surface: string, where: stri
 
 const REQUIRED_TOKENS = [
   "bg", "surface", "surface-2", "text", "text-2", "line", "accent", "accent-text", "ok", "warn", "danger", "focus",
+  // 016 FR-225: the session stripes, Chrome's tab-group palette in each theme (decoration, not text).
+  "group-cyan", "group-green", "group-purple", "group-pink", "group-orange", "group-grey", "group-blue",
 ];
 
 describe("T198 contrast of every text/surface token pair, both themes", () => {

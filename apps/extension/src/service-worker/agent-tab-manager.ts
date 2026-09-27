@@ -1,12 +1,13 @@
+import { AGENT_SESSION_COLOURS } from "@hallpass/contracts";
 import {
-  AGENT_GROUP_COLOR,
   AGENT_GROUP_TITLE,
   clearAgentGroupMarking,
   groupTabs,
-  markAgentGroup,
+  presentAgentGroup,
   queryAgentGroupIds,
   ungroupTabs,
   UNGROUPED_TAB_GROUP_ID,
+  type AgentGroupColour,
 } from "../chrome-adapters/tab-groups.js";
 import { getTabSnapshot, queryTabSnapshots } from "../chrome-adapters/tabs.js";
 
@@ -84,9 +85,27 @@ type SessionRecord = {
   lastHelloAt?: string;
   /** The tab most recently created, claimed or acted on; the indicator's control targets it. */
   mainTabId?: number;
+  /**
+   * When this worker first saw the session (016 FR-228, R-205). Written once and never by a
+   * re-greeting, which is why `lastHelloAt` could not serve: every greeting overwrites it.
+   */
+  firstSeenAt?: string;
+  /** The session's place in the colour rotation, handed out once from `COLOUR_NEXT_KEY` (R-205). */
+  colourIndex?: number;
+  /** The folder the session's host reported (016 FR-226). Remote input: stored, shown, never logged. */
+  label?: string;
 };
 
+/** What a card needs to say which session it is (016 data-model "Session record"). */
+export type AgentSessionIdentity = { firstSeenAt: string; colourIndex: number; label?: string };
+
 const STORAGE_KEY = "agentSessions";
+
+/**
+ * The next colour index to hand out (016 R-205). Kept beside the records, in the session area, so a
+ * worker restart continues the rotation instead of giving the next session the first one's colour.
+ */
+const COLOUR_NEXT_KEY = "agentSessionColourNext";
 
 /** The lease table, keyed by tab id as a string because that is what a storage record is keyed by. */
 const LEASES_KEY = "agentTabLeases";
@@ -123,6 +142,44 @@ async function writeSessions(sessions: Record<string, SessionRecord>): Promise<v
     return;
   }
   await area.set({ [STORAGE_KEY]: sessions });
+}
+
+/** Takes the next colour index and moves the persisted counter on (016 R-205). */
+async function takeColourIndex(): Promise<number> {
+  const area = typeof chrome !== "undefined" ? chrome.storage?.session : undefined;
+  if (!area) {
+    return 0;
+  }
+  const raw = (await area.get([COLOUR_NEXT_KEY])) as Record<string, unknown>;
+  const stored = raw[COLOUR_NEXT_KEY];
+  const next = typeof stored === "number" && Number.isInteger(stored) && stored >= 0 ? stored : 0;
+  await area.set({ [COLOUR_NEXT_KEY]: next + 1 });
+  return next;
+}
+
+/**
+ * Gives a record the identity fields it lacks, in place, and says whether it changed anything.
+ *
+ * A record written by 0.8.0 has neither: its start is taken to be its last greeting - the earliest
+ * moment this worker can vouch for - and it gets the next colour. `fallbackAt` is for a record with
+ * no greeting at all (one `adopt` created), which is then first seen now.
+ */
+async function fillIdentity(record: SessionRecord, fallbackAt: string): Promise<boolean> {
+  let changed = false;
+  if (record.firstSeenAt === undefined) {
+    record.firstSeenAt = record.lastHelloAt ?? fallbackAt;
+    changed = true;
+  }
+  if (record.colourIndex === undefined) {
+    record.colourIndex = await takeColourIndex();
+    changed = true;
+  }
+  return changed;
+}
+
+/** The session's colour from its place in the rotation (016 FR-240, R-205). */
+function colourOf(record: SessionRecord): AgentGroupColour {
+  return AGENT_SESSION_COLOURS[(record.colourIndex ?? 0) % AGENT_SESSION_COLOURS.length] as AgentGroupColour;
 }
 
 type StoredLeases = Record<string, { sessionId: string; kind: TabLease["kind"]; since: string }>;
@@ -213,16 +270,38 @@ export type AgentTabManager = {
    */
   announce: (sessionId: string, at: string) => Promise<void>;
   /**
+   * The folder a session's host reported (016 FR-226). Stored only on a record that exists - a
+   * label for a session this worker has no record of is dropped - and the answer says which.
+   */
+  setLabel: (sessionId: string, label: string) => Promise<boolean>;
+  /**
+   * The session's start, colour and label as its record holds them (016 FR-227, FR-228, R-205).
+   *
+   * A 0.8.0 record is filled here, and the fill is written, so the colour a card shows does not
+   * change between two reads. `undefined` for a session with no record.
+   */
+  identity: (sessionId: string) => Promise<AgentSessionIdentity | undefined>;
+  /**
    * Un-marks every agent-titled group no session record accounts for, and names them (004/T099l).
    *
    * `endSession` can only run while the worker that holds the session is alive, so it never sees
    * the two endings that matter most to the owner's tab strip: a browser restart that restores the
    * titled group without the session records (they live in `chrome.storage.session`), and an
-   * extension reload. Both leave a group saying "Agent" with no agent behind it, which is exactly
+   * extension reload. Both leave a group titled as ours (016 FR-241: 0.8.0's "Agent", or "Hallpass"
+   * with or without its prefix) with no agent behind it, which is exactly
    * the claim the marking exists to make honestly. The worker sweeps at start because that is the
    * first moment after either ending at which anything of ours runs.
    */
   sweepOrphanedGroups: () => Promise<number[]>;
+  /**
+   * Presents every group a live session record holds again (016 R-207), at worker start.
+   *
+   * The presenter keeps what it wrote in memory, so a worker that restarted knows no group: without
+   * this, a session that goes on working in the tabs it already has would never show the hourglass
+   * again. It is also what gives a group opened by 0.8.0 its session's colour. A group that is gone
+   * is skipped.
+   */
+  presentHeldGroups: () => Promise<void>;
   /** The relay started at `at`; every session must announce itself again before the bound. */
   beginReconciliation: (at: string) => Promise<void>;
   /**
@@ -255,9 +334,66 @@ export type AgentTabHooks = {
    * kept per session and has to go with it - the download ring is the one such thing today.
    */
   onSessionEnded?: (sessionId: string) => void;
+  /**
+   * Titles and colours a session's group (016 FR-238, FR-240, R-207) - the group presenter, which
+   * decides the title from the session's state. Unlike the hooks above it is *awaited*: it is the
+   * marking itself, and a tab must not be reported adopted into a group nobody has marked yet.
+   * Without one, the group gets the idle title and the session's colour.
+   */
+  presentGroup?: (sessionId: string, groupId: number, colour: AgentGroupColour) => Promise<void>;
+  /**
+   * The session holds no tab of its group any more (016 R-207, T444): it released the last one, or
+   * the owner dragged them all out or closed them all. The group is no longer its to title: Chrome
+   * discards an empty group, and one the owner kept alive with a tab of theirs is theirs, so its
+   * marking is withdrawn right after this returns. The session itself goes on; `onSessionEnded` is
+   * its end.
+   */
+  onGroupLeft?: (sessionId: string) => void;
 };
 
 export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManager {
+  const presentGroup =
+    hooks.presentGroup ??
+    ((_sessionId: string, groupId: number, color: AgentGroupColour) =>
+      presentAgentGroup(groupId, { title: AGENT_GROUP_TITLE, color }));
+
+  /**
+   * Marks a group the session has just come to hold (016 R-207): opened now, or joined again from
+   * holding no tab - the presenter forgot it when the session's last tab left. The record is given
+   * its identity first, so a record `adopt` creates still has a colour to show (FR-240). The caller
+   * holds the queue and writes `sessions`.
+   */
+  async function markGroup(
+    sessions: Record<string, SessionRecord>,
+    sessionId: string,
+    groupId: number,
+  ): Promise<void> {
+    const record: SessionRecord = { ...(sessions[sessionId] ?? { tabIds: [] }) };
+    await fillIdentity(record, new Date().toISOString());
+    sessions[sessionId] = record;
+    await presentGroup(sessionId, groupId, colourOf(record));
+  }
+
+  /**
+   * The session holds no tab of its group any more (016 FR-238, R-207, T444 review F1/F2): it
+   * released the last one, or the owner dragged them all out or closed them all. The marking is
+   * withdrawn exactly as the session's end withdraws it, because a group the owner kept alive with
+   * a tab of theirs is theirs now, and a title frozen on `⌛ Hallpass` would claim an agent drives it.
+   *
+   * The presenter is told first, and synchronously, so nothing it still had pending is written over
+   * the withdrawal. The caller holds the queue and has already written the record without `groupId`:
+   * the session's next tab opens a group of its own rather than joining - and re-marking - the
+   * owner's, and the session's end never writes to a group that is no longer its.
+   */
+  async function leaveGroup(sessionId: string, groupId: number): Promise<void> {
+    hooks.onGroupLeft?.(sessionId);
+    try {
+      await clearAgentGroupMarking(groupId);
+    } catch {
+      // "No group with id": Chrome discarded the group with its last tab, which is the end state.
+    }
+  }
+
   /**
    * One chain for every read-modify-write. Two tool calls arriving together would otherwise each
    * read the session record, add their own tab and write it back, losing one of the two.
@@ -288,7 +424,7 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
   ): Promise<number> {
     const record = sessions[sessionId];
     let groupId: number;
-    let opened = record?.groupId === undefined;
+    let opened = record?.groupId === undefined || record.tabIds.length === 0;
     try {
       groupId = await groupTabs([tabId], record?.groupId);
     } catch {
@@ -296,7 +432,7 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
       opened = true;
     }
     if (opened) {
-      await markAgentGroup(groupId);
+      await markGroup(sessions, sessionId, groupId);
     }
     return groupId;
   }
@@ -323,8 +459,12 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
       kept.push(tabId);
       tabs.push({ tabId: tab.id, url: tab.url, title: tab.title, active: tab.active });
     }
+    // None of its tabs is in its group any more (T444 F1/F2): the group is withdrawn below.
+    const leftGroup = gone.length > 0 && kept.length === 0;
     if (gone.length > 0) {
-      sessions[sessionId] = { ...record, groupId: record.groupId, tabIds: kept };
+      const pruned: SessionRecord = { ...record, tabIds: kept };
+      if (leftGroup) delete pruned.groupId;
+      sessions[sessionId] = pruned;
       await writeSessions(sessions);
       // A tab the owner closed takes its lease with it (data-model TabLease): the lease names a tab
       // that no longer exists, and leaving it behind would refuse the *next* tab Chrome gives that
@@ -339,6 +479,7 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
       }
       if (dropped) await writeLeases(leases);
     }
+    if (leftGroup) await leaveGroup(sessionId, record.groupId);
     return { tabs, gone };
   }
 
@@ -449,17 +590,17 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
             throw new Error("tab-owned-by-another-session");
           }
         }
-        const record = sessions[sessionId] ?? { tabIds: [] };
         /**
          * Chrome discards a group the moment its last tab leaves it, so a session that closed all
          * its tabs is holding an id that names nothing and adding to it throws. That is not a
          * failure of the adoption - the session is still the session - so a fresh group is opened
          * and marked, exactly as the first one was.
          */
+        const previous = sessions[sessionId];
         let groupId: number;
-        let opened = record.groupId === undefined;
+        let opened = previous?.groupId === undefined || previous.tabIds.length === 0;
         try {
-          groupId = await groupTabs([tabId], record.groupId);
+          groupId = await groupTabs([tabId], previous?.groupId);
         } catch {
           groupId = await groupTabs([tabId]);
           opened = true;
@@ -467,8 +608,9 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
         if (opened) {
           // The group exists only from its first tab, so the marking happens here rather than when
           // the session started - Chrome has no empty group to title.
-          await markAgentGroup(groupId);
+          await markGroup(sessions, sessionId, groupId);
         }
+        const record = sessions[sessionId] ?? { tabIds: [] };
         // The tab the session opened is the agent's own furniture, and it is the tab the session
         // is working on now (data-model AgentSession.mainTabId).
         leases[String(tabId)] = held ?? { sessionId, kind: "agent", since: new Date().toISOString() };
@@ -545,12 +687,63 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
         return orphaned;
       });
     },
+    presentHeldGroups() {
+      return enqueue(async () => {
+        const sessions = await readSessions();
+        let filled = false;
+        for (const [sessionId, record] of Object.entries(sessions)) {
+          if (record.groupId === undefined || record.tabIds.length === 0) continue;
+          filled = (await fillIdentity(record, new Date().toISOString())) || filled;
+          try {
+            await presentGroup(sessionId, record.groupId, colourOf(record));
+          } catch {
+            // The group went while the worker was away - the owner closed its tabs. The next tab
+            // the session opens opens a fresh group, marked then.
+          }
+        }
+        if (filled) await writeSessions(sessions);
+      });
+    },
     announce(sessionId, at) {
       return enqueue(async () => {
         const sessions = await readSessions();
-        const record = sessions[sessionId] ?? { tabIds: [] };
+        const record: SessionRecord = { ...(sessions[sessionId] ?? { tabIds: [] }) };
+        // 016 R-205: identity first, from the record as it was - a 0.8.0 record's previous greeting
+        // is its start - and only then the greeting that overwrites `lastHelloAt`.
+        await fillIdentity(record, at);
         sessions[sessionId] = { ...record, lastHelloAt: at };
         await writeSessions(sessions);
+      });
+    },
+    setLabel(sessionId, label) {
+      return enqueue(async () => {
+        const sessions = await readSessions();
+        const record = sessions[sessionId];
+        if (!record) {
+          return false;
+        }
+        sessions[sessionId] = { ...record, label };
+        await writeSessions(sessions);
+        return true;
+      });
+    },
+    identity(sessionId) {
+      return enqueue(async () => {
+        const sessions = await readSessions();
+        const stored = sessions[sessionId];
+        if (!stored) {
+          return undefined;
+        }
+        const record: SessionRecord = { ...stored };
+        if (await fillIdentity(record, new Date().toISOString())) {
+          sessions[sessionId] = record;
+          await writeSessions(sessions);
+        }
+        return {
+          firstSeenAt: record.firstSeenAt as string,
+          colourIndex: record.colourIndex as number,
+          ...(record.label === undefined ? {} : { label: record.label }),
+        };
       });
     },
     beginReconciliation(at) {
@@ -582,7 +775,7 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
           await writeLeases(leases);
           hooks.onTabLeft?.(sessionId, tabId);
           try {
-            // The visible marking goes with the recorded one: a tab left in the "Agent" group after
+            // The visible marking goes with the recorded one: a tab left in the agent's group after
             // the session let go of it tells the owner an agent is driving a tab no session holds.
             await ungroupTabs([tabId]);
           } catch {
@@ -601,11 +794,15 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
         // The main tab was the one just released: the indicator's control has nowhere to go until
         // the session claims, creates or acts on another (data-model AgentSession).
         if (record.mainTabId === tabId) delete kept.mainTabId;
+        // Its last tab: the group is no longer the session's to title, and is withdrawn (016 R-207, T444 F1).
+        const leftGroup = record.groupId !== undefined && record.tabIds.length > 0 && kept.tabIds.length === 0;
+        if (leftGroup) delete kept.groupId;
         sessions[sessionId] = kept;
         await writeSessions(sessions);
+        if (leftGroup) await leaveGroup(sessionId, record.groupId as number);
       });
     },
   };
 }
 
-export { AGENT_GROUP_COLOR, AGENT_GROUP_TITLE, UNGROUPED_TAB_GROUP_ID };
+export { AGENT_GROUP_TITLE, UNGROUPED_TAB_GROUP_ID };

@@ -235,6 +235,44 @@ withdrawal is an optional message on the unchanged link protocol, and the host n
 exchange only after the extension says it understands that, so a host and an extension one version
 apart keep working during an upgrade.
 
+## §10 A readable panel (0.9.0)
+
+**Designed here.** With two sessions live, the 0.8.0 panel was accurate and unreadable: the status
+row named the first agent ever paired, cards were titled with eight hex characters, every session
+not asking a question read "running", three buttons were always shown, and every site row said its
+state twice. 0.9.0 changes what the panel and the tab strip say, not what any control does.
+
+The status row states the connection and the number of live sessions; the paired agents, each with
+its own unpair, move into the overflow menu, because unpair is the one control there that undoes
+something. A session is named by its project: the host reports once per session the last segment of
+the client's first file root (or, without roots, of its own working directory), at most 64
+characters, on a link frame of its own — an older worker drops the unknown frame, so the link
+protocol stays at 2. The full path is never sent or logged; a drive root or the home directory
+gives no name, and the card falls back to the start time, as it does with an older host. The label
+is rendered as inert text and cut with an ellipsis; the internal id moves into the technical
+details.
+
+A card has exactly one of three states — working (a call in flight, the same count the interrupt
+control uses), waiting for you (the question on screen is this session's; it takes precedence), or
+idle with the time of the last action — and shows only the buttons that can act: end session
+always, in a fixed place; interrupt this step while working; take back tabs (N) while it holds any.
+A waiting card has no interrupt: the question card on screen is the thing to answer. Site rows mark
+the permissive mode on its select instead of with a second label, name what the diagnostics grant
+reads, and keep the site in the revoke control's accessible name rather than its text.
+
+In the tab strip, each session's group is titled `Hallpass`, prefixed with an hourglass while
+working and a bell while waiting (the bell wins), in a colour assigned once per session from a
+rotation without red or yellow; the card carries the same colour as a stripe, so a group and its
+card can be matched at a glance. The hourglass stays until no call has been in flight for about a
+second, so consecutive calls do not flicker the title, and a title is written only when it changes.
+Groups left behind by a restart — the old `Agent` title or `Hallpass` with or without a prefix — are
+cleared when the extension starts; the cost is that a group a person names exactly `Hallpass`
+themselves is cleared too. A session that no longer holds any tab of its group withdraws the marking,
+as ending does.
+
+A keystroke whose handler opens a JavaScript dialog is now answered with the dialog, as a click that
+opens one already was, instead of timing out as a page that does not respond.
+
 ## Permissions
 
 Every permission the extension declares traces to a capability above and to an acceptance

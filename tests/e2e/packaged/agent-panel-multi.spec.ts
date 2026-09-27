@@ -2,7 +2,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -49,7 +49,7 @@ test.describe("agent panel: two panel documents at once", () => {
 
     // Panel A: the first (older) document, in the first window.
     const panelA = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-    await panelA.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panelA);
     // Every panel target that exists now - A's included - is not the one the second window opens.
     const before = await panelTargetIds(extensionContext, ownerPage, extensionId);
     expect(before.size, "panel A's own target is on record").toBeGreaterThanOrEqual(1);
@@ -74,12 +74,12 @@ test.describe("agent panel: two panel documents at once", () => {
         return created.id;
       }, `${SITE}/ordinary`);
       const panelB = await openPanelInWindow(extensionContext, ownerPage, extensionId, secondWindowId, before);
-      await panelB.waitForText(ui("agent.appTitle"));
+      await waitForAgentPanel(panelB);
       await panelB.waitForText(ui("agent.status.connected"));
 
       // A session's tab appears on BOTH panels - the older one included.
       const tabA = ((await callOn("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
-      const siteLine = ui("agent.session.sites").replace("{sites}", "127.0.0.1");
+      const siteLine = ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1");
       await panelB.waitForText(siteLine);
       await panelA.waitForText(siteLine, 15_000);
 
@@ -144,7 +144,7 @@ test.describe("overnight fixes of 2026-09-16, live", () => {
       return tab.id;
     });
     const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let alpha: McpHarnessClient | undefined;
     try {
@@ -257,7 +257,7 @@ test.describe("overnight fixes of 2026-09-16, live", () => {
       // The panel reconnects on its own; the fresh worker publishes the whole picture on accept,
       // and a new session tab shows up on the very same panel document, never reopened.
       const tabB = ((await callOn("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await panel.waitForText(ui("agent.session.sites").replace("{sites}", "127.0.0.1"), 30_000);
+      await panel.waitForText(ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1"), 30_000);
       // Through the agent, not the worker handle: that handle was bound to the worker just killed.
       await callOn("tabs_close", { tabId: tabB });
       await callOn("tabs_claim", { tabId: tabA });

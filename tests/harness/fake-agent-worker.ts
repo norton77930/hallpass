@@ -10,6 +10,7 @@ import {
   agentLinkFrameSchema,
   agentNativeRequestSchema,
   type AgentControlFrame,
+  type AgentLinkFrame,
   type AgentNativeRequest,
   type AgentNativeResponse,
 } from "@hallpass/contracts";
@@ -90,6 +91,12 @@ export type FakeAgentWorker = {
   readonly requests: readonly AgentNativeRequest[];
   /** Every greeting the server sent, in order - one per attach, and one more per re-greeting (006). */
   readonly hellos: Array<{ sessionId: string; agentId: string }>;
+  /**
+   * Every link frame the server sent other than its greeting, in order (016 R-204) - the
+   * `session-label` a host sends after each `hello-ack`. Recorded only; the worker's answers to
+   * everything else are exactly what they were before.
+   */
+  readonly linkFrames: ReadonlyArray<Exclude<AgentLinkFrame, { type: "hello" }>>;
   /** Sends a frame the worker originates, e.g. an unpair arriving as `pair-result{accepted:false}`. */
   send(frame: unknown): void;
   waitForControlFrame(type: AgentControlFrame["type"], timeoutMs?: number): Promise<AgentControlFrame>;
@@ -101,6 +108,8 @@ export type FakeAgentWorker = {
    * names the session and the agent, which is what a test needs to address a `pair-result` by.
    */
   waitForHello(count?: number, timeoutMs?: number): Promise<{ sessionId: string; agentId: string }>;
+  /** Waits for the first recorded link frame of `type` (016 R-204) and returns it. */
+  waitForLinkFrame(type: AgentLinkFrame["type"], timeoutMs?: number): Promise<AgentLinkFrame>;
   close(): Promise<void>;
 };
 
@@ -126,6 +135,7 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
   const controlFrames: AgentControlFrame[] = [];
   const requests: AgentNativeRequest[] = [];
   const hellos: Array<{ sessionId: string; agentId: string }> = [];
+  const linkFrames: Array<Exclude<AgentLinkFrame, { type: "hello" }>> = [];
   const pairing = options.pairing ?? "accept";
   const published = randomBytes(32).toString("hex");
   const demanded = options.token ?? published;
@@ -147,6 +157,9 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
           hellos.push({ sessionId: link.data.sessionId, agentId: link.data.agentId });
           channel.send({ type: "hello-ack", relayPid: process.pid });
           return;
+        }
+        if (link.success && link.data.type !== "hello") {
+          linkFrames.push(link.data);
         }
         const request = agentNativeRequestSchema.safeParse(value);
         if (request.success) {
@@ -211,6 +224,7 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
     controlFrames,
     requests,
     hellos,
+    linkFrames,
     send(frame) {
       attached.at(-1)?.send(frame);
     },
@@ -227,6 +241,14 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
       const found = hellos[count - 1];
       if (!found) {
         throw new Error(`greeting ${count} vanished`);
+      }
+      return found;
+    },
+    async waitForLinkFrame(type, timeoutMs = 5_000) {
+      await waitFor(() => linkFrames.some((frame) => frame.type === type), timeoutMs, `link frame '${type}'`);
+      const found = linkFrames.find((frame) => frame.type === type);
+      if (!found) {
+        throw new Error(`link frame '${type}' vanished`);
       }
       return found;
     },

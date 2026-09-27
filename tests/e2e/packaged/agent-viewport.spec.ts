@@ -3,7 +3,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -414,14 +414,18 @@ async function windowNow(
  * through what the owner is actually shown.
  */
 async function releaseTabsViaPanel(panel: SidePanelDriver): Promise<void> {
-  const label = ui("agent.session.release");
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const card=document.querySelector('[data-session-id]');` +
-      `const b=card&&[...card.querySelectorAll('button')].find((x)=>x.textContent?.trim()===${JSON.stringify(label)});` +
-      `if(!b)return false;b.click();return true})()`,
-    true,
-  );
-  expect(clicked, `no ${label} on the session card`).toBe(true);
+  // 016 FR-234: "Take back tabs (N)", shown only once the card's projection holds a tab - so it is
+  // matched on the template around the count and waited for rather than read once.
+  const [before, after] = ui("agent.session.takeBack").split("{n}") as [string, string];
+  const press = (): Promise<unknown> =>
+    panel.evaluatePanel(
+      `(()=>{const card=document.querySelector('[data-session-id]');` +
+        `const b=card&&[...card.querySelectorAll('button')].find((x)=>{const t=x.textContent?.trim()??'';` +
+        `return t.startsWith(${JSON.stringify(before)})&&t.endsWith(${JSON.stringify(after)})});` +
+        `if(!b)return false;b.click();return true})()`,
+      true,
+    );
+  await expect.poll(press, { timeout: 15_000, message: "no take-back control on the session card" }).toBe(true);
 }
 
 /** One site's mode through the panel's own control (the helper the sibling journeys carry). */
@@ -468,7 +472,7 @@ async function pairedSession(fixtures: {
   });
 
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-  await panel.waitForText(ui("agent.appTitle"));
+  await waitForAgentPanel(panel);
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));

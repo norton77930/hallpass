@@ -867,3 +867,64 @@ describe("D-011-7 a question whose panel goes out of sight mid-wait", () => {
     expect(ticks.at(-1)?.boundMs).toBe(CLOSED_PANEL_TIMEOUT_MS);
   });
 });
+
+/**
+ * 016/T450 — the pairing wait extension, measured (FR-244, R-210, B5).
+ *
+ * The open item recorded on 2026-09-23 said a pairing card raised with the panel seen kept its short
+ * wait when the owner's focus left the panel's window. This pins the measurement the spec asks for:
+ * raised with the panel seen, presence lost at 30 s, the bound becomes two minutes counted from the
+ * raise and the ticks start at once. Green here means covered by D-011-7.
+ */
+describe("016/T450 pairing wait extension", () => {
+  const CLAUDE = { agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local" };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("raised with the panel seen, presence lost at 30 s: bound 120 s from the raise, ticks start", async () => {
+    let visible = true;
+    let stored: PairingState = EMPTY_PAIRING_STATE;
+    const ticks: PairingWaitingTick[] = [];
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => "2026-09-27T00:00:00.000Z",
+      panelPresence: () => visible,
+      onWaiting: (tick) => ticks.push(tick),
+    });
+    void controller.decidePairing({ ...CLAUDE, sessionId: "session-h1" });
+    await controller.ready();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(ticks, "nothing is said while the card is in front of the owner").toEqual([]);
+
+    visible = false;
+    controller.panelPresenceChanged();
+
+    expect(ticks).toEqual([
+      { kind: "pairing", sessionId: "session-h1", waitedMs: 30_000, boundMs: CLOSED_PANEL_TIMEOUT_MS, panelConnected: false },
+    ]);
+    await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS * 2);
+    expect(ticks.map((tick) => tick.waitedMs)).toEqual([30_000, 35_000, 40_000]);
+
+    // Past the open-panel bound the card still stands.
+    await vi.advanceTimersByTimeAsync(PAIRING_BOUND_MS);
+    await controller.ready();
+    expect((await controller.state()).pending).toBeDefined();
+
+    // It ends exactly at two minutes from the raise, not from the presence change.
+    await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - 40_000 - PAIRING_BOUND_MS - 1);
+    await controller.ready();
+    expect((await controller.state()).pending).toBeDefined();
+    await vi.advanceTimersByTimeAsync(1);
+    await controller.ready();
+    expect((await controller.state()).pending).toBeUndefined();
+  });
+});

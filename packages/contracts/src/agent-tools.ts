@@ -3069,6 +3069,20 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
      */
     preserved: z.string().min(1).max(64).optional(),
   }),
+  /**
+   * The name of the folder a session works in, as its own host read it (016 FR-226, R-203, R-204).
+   *
+   * Sent by the host once after every `hello-ack`, and only when it has a label: the last segment
+   * of the first `file://` root the client advertised, or of its working directory. A frame of its
+   * own rather than a field on `hello`, because a 0.8.0 relay parses `hello` strictly and would
+   * refuse the whole greeting; a 0.8.0 relay forwards this one like any greeted frame, and a 0.8.0
+   * worker drops it as unknown. Remote input: the panel renders it as inert text, nothing logs it.
+   */
+  z.strictObject({
+    type: z.literal("session-label"),
+    sessionId: z.string().min(1).max(128),
+    label: z.string().min(1).max(64),
+  }),
 ]);
 
 export type AgentLinkFrame = z.infer<typeof agentLinkFrameSchema>;
@@ -3184,10 +3198,26 @@ const pairedAgentSchema = z.strictObject({
   acceptedAt: z.string().min(1).max(64),
 });
 
-/** What a session is doing, as the owner reads it on its card (006 FR-087): working, or waiting on them. */
-export const AGENT_SESSION_STATES = ["working", "waiting"] as const;
+/**
+ * What a session is doing, as the owner reads it on its card (006 FR-087): working, or waiting on them.
+ *
+ * 016 FR-230: `idle` joins them - a session with nothing in flight and no question waiting is not
+ * working, and a card that said so invited an interrupt into an empty session.
+ */
+export const AGENT_SESSION_STATES = ["working", "waiting", "idle"] as const;
 
 export type AgentSessionState = (typeof AGENT_SESSION_STATES)[number];
+
+/**
+ * The colours sessions are given, in the order they are handed out (016 FR-240, R-205).
+ *
+ * Chrome's tab-group colour names, so the card's stripe and the session's tab group can be the same
+ * colour; red and yellow are left out because they read as warnings. A session keeps its colour for
+ * its whole life (`colourIndex % length`), across a worker restart.
+ */
+export const AGENT_SESSION_COLOURS = ["cyan", "green", "purple", "pink", "orange", "grey", "blue"] as const;
+
+export type AgentSessionColour = (typeof AGENT_SESSION_COLOURS)[number];
 
 /** How many things a session card remembers having happened (008 FR-113, data-model ActivityItem). */
 export const AGENT_ACTIVITY_KEPT = 20;
@@ -3272,8 +3302,20 @@ const agentSessionViewSchema = z.strictObject({
    * Optional because a 004 projection did not carry it; the panel reads an absent list as empty.
    */
   sites: z.array(z.string().min(1).max(256)).optional(),
-  /** `waiting` exactly when the pending prompt is this session's; `working` otherwise. */
+  /**
+   * `waiting` exactly when the pending prompt is this session's; otherwise `working` while a call
+   * is in flight and `idle` when none is (016 FR-230). A 0.8.0 worker never sends `idle`.
+   */
   state: z.enum(AGENT_SESSION_STATES).optional(),
+  /**
+   * The folder the session's host reported (016 FR-226, FR-227): remote input, shown as inert text.
+   * Absent until a `session-label` frame arrives, and always from a 0.8.0 host.
+   */
+  label: z.string().min(1).max(64).optional(),
+  /** When the worker first saw this session (016 FR-228): written once, kept across re-greetings. */
+  startedAt: z.string().min(1).max(64).optional(),
+  /** The session's colour, the same one its tab group wears (016 FR-240, R-205). */
+  colour: z.enum(AGENT_SESSION_COLOURS).optional(),
   /** Its last greeting or effect, for ordering the cards newest first. */
   lastActivityAt: z.string().min(1).max(64).optional(),
   /**

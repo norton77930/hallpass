@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -211,6 +214,87 @@ export const UPLOAD_CONSENT_BOUND_ENV = "HALLPASS_UPLOAD_CONSENT_BOUND_MS";
  * sweep while a retention of `0` keeps none at all. A shortened bound is a test's lever, and a
  * mistyped one has to leave the product's own promise standing.
  */
+/** The longest label the `session-label` frame carries (016 contracts/session-label.md). */
+export const SESSION_LABEL_MAX_CHARS = 64;
+
+/**
+ * The name a session's card is titled with, read from the folder it works in (016 FR-226, R-203).
+ *
+ * Only the last path segment - split on both separators, trimmed, at most 64 characters - because
+ * the panel needs a project name and nothing about where it lives. No label for an empty segment, a
+ * drive or filesystem root, or the home directory itself: a client started from any of those says
+ * nothing about a project. The result is remote-bound text and is never passed to `log()`.
+ */
+export function sessionLabelFromPath(path: string, home: string = homedir()): string | undefined {
+  const trimmed = path.trim();
+  if (trimmed.length === 0 || isRootDirectory(trimmed)) {
+    return undefined;
+  }
+  const normalise = (value: string): string => {
+    const resolved = resolvePath(value).replace(/[\\/]+$/u, "");
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  if (home.trim().length > 0 && normalise(trimmed) === normalise(home)) {
+    return undefined;
+  }
+  const segment = trimmed
+    .split(/[\\/]/u)
+    .filter((part) => part.trim().length > 0)
+    .at(-1)
+    ?.trim();
+  if (segment === undefined || /^[A-Za-z]:$/u.test(segment)) {
+    return undefined;
+  }
+  // Cut by code point, so a cap that falls inside a surrogate pair drops the whole character.
+  let label = "";
+  for (const character of segment) {
+    if (label.length + character.length > SESSION_LABEL_MAX_CHARS) {
+      break;
+    }
+    label += character;
+  }
+  label = label.trim();
+  return label.length === 0 ? undefined : label;
+}
+
+/**
+ * The first `file://` root a client advertised that names a local path (016 R-203); `undefined`
+ * when none does. A root whose URL is not a path this machine can name is skipped, not the end of
+ * the search (T444 F4): the next root may well name the project.
+ */
+export function firstFileRoot(roots: ReadonlyArray<{ uri: string }>): string | undefined {
+  for (const root of roots) {
+    if (!root.uri.toLowerCase().startsWith("file:")) {
+      continue;
+    }
+    try {
+      return fileURLToPath(root.uri);
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * How long the host waits for a client's `roots/list` answer before labelling the session from its
+ * working directory (016 R-203, T444). A client that advertises `roots` and never answers would
+ * otherwise hold the label for the SDK's own 60 s; five is ample for a local client that answers.
+ */
+export const ROOTS_TIMEOUT_MS = 5_000;
+
+/**
+ * How the roots bound is shortened for a test that must not wait five seconds for an answer nobody
+ * sends. Read from the environment for the same reason the bounds above are: the process an agent
+ * spawns takes no arguments.
+ */
+export const ROOTS_TIMEOUT_ENV = "HALLPASS_AGENT_ROOTS_TIMEOUT_MS";
+
+function rootsTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env[ROOTS_TIMEOUT_ENV]);
+  return Number.isFinite(raw) && raw > 0 ? raw : ROOTS_TIMEOUT_MS;
+}
+
 export function positiveEnv(name: string, env: NodeJS.ProcessEnv = process.env): number | undefined {
   const raw = Number(env[name]);
   return Number.isFinite(raw) && raw > 0 ? raw : undefined;
@@ -491,6 +575,51 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
   const attachWaiters = new Set<() => void>();
   let displayName = "Unknown agent";
   let initialized = false;
+  /**
+   * This session's project name, once known (016 FR-226, R-203) - from the client's roots or the
+   * working directory, derived at `initialized`. Never logged.
+   */
+  let sessionLabel: string | undefined;
+
+  /**
+   * Tells the worker the label on the current link (016 R-204): once per `hello-ack`, and once more
+   * if the label became known only after the link was already up (the roots answer is async).
+   */
+  function sendSessionLabel(): void {
+    if (sessionLabel === undefined || !attached) {
+      return;
+    }
+    link?.send({ type: "session-label", sessionId, label: sessionLabel });
+  }
+
+  /**
+   * Reads the label (016 R-203): the first `file://` root when the client advertises `roots`,
+   * otherwise - or when that answer fails, names no folder, or does not come within
+   * `ROOTS_TIMEOUT_MS` (T444) - the working directory.
+   */
+  function deriveSessionLabel(): void {
+    const fromCwd = (): string | undefined => sessionLabelFromPath(process.cwd());
+    if (server.server.getClientCapabilities()?.roots === undefined) {
+      sessionLabel = fromCwd();
+      return;
+    }
+    void server.server
+      .listRoots(undefined, { timeout: rootsTimeoutMs() })
+      .then(
+        (answer) => {
+          const root = firstFileRoot(answer.roots);
+          return root === undefined ? fromCwd() : sessionLabelFromPath(root);
+        },
+        () => {
+          log("agent.session.roots-unavailable");
+          return fromCwd();
+        },
+      )
+      .then((label) => {
+        sessionLabel = label;
+        sendSessionLabel();
+      });
+  }
   let pairRequested = false;
 
   let pairing: Promise<PairingOutcome> | undefined;
@@ -998,6 +1127,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       onAttached(relayPid) {
         attached = true;
         log("agent.relay.attached", String(relayPid));
+        // 016 R-204: the label follows every acknowledged greeting, a re-greeting included.
+        sendSessionLabel();
         /**
          * 004 FR-059a: connecting asks the owner nothing - only a tool call raises a pairing request.
          *
@@ -1784,6 +1915,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     displayName = client?.name ?? displayName;
     initialized = true;
     log("agent.mcp.initialized", displayName);
+    deriveSessionLabel();
     // The link is dialled now, because the greeting carries the client's name; the owner is asked
     // nothing until a tool call needs the pairing (004 FR-059a).
     startLink();

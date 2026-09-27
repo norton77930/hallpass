@@ -1,6 +1,7 @@
 import {
   AGENT_ACTIVITY_KEPT,
   AGENT_EFFECT_TOOL_NAMES,
+  AGENT_SESSION_COLOURS,
   INTERRUPT_HINTS,
   isRootDirectory,
   type AgentActivityItem,
@@ -29,6 +30,7 @@ import {
 } from "./agent-bridge.js";
 import { createAgentTabManager, type AgentTab, type AgentTabManager } from "./agent-tab-manager.js";
 import { createDownloadObserver } from "./download-observer.js";
+import { createGroupPresenter } from "./group-presenter.js";
 import {
   createPairingController,
   readPairingState,
@@ -457,7 +459,10 @@ function clearHeartbeatAlarm(): void {
 }
 
 function scheduleReconcileAlarm(): void {
-  chrome.alarms?.create(AGENT_RECONCILE_ALARM, { delayInMinutes: AGENT_RECONCILE_SECONDS / 60 });
+  // Read through globalThis: the reconciliation window is armed at the end of the tab manager's
+  // queue, which since 016 (identity fill, colour counter, re-presenting held groups) can settle
+  // after a test tore its `chrome` stub down. In the extension `chrome` always exists.
+  globalThis.chrome?.alarms?.create(AGENT_RECONCILE_ALARM, { delayInMinutes: AGENT_RECONCILE_SECONDS / 60 });
 }
 
 /**
@@ -584,8 +589,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
     // The session's download records go with its tabs (005/FR-080): the ring is kept per session
     // and there is no session left for it to be about.
-    onSessionEnded: (sessionId) =>
-      void downloads.discard(sessionId).catch(() => reportTestDiagnostic("agent.downloads.discard-failed")),
+    onSessionEnded: (sessionId) => {
+      // 016 R-207: first, and synchronously - the manager withdraws the group's marking right after
+      // this returns, and nothing the presenter still had pending may be written over it.
+      groups.end(sessionId);
+      void downloads.discard(sessionId).catch(() => reportTestDiagnostic("agent.downloads.discard-failed"));
+    },
+    // 016 FR-238, FR-240: the presenter titles a new group from the session's state, in its colour.
+    presentGroup: (sessionId, groupId, colour) => groups.present(sessionId, groupId, colour),
+    onGroupLeft: (sessionId) => groups.end(sessionId),
   });
   /**
    * The browser's downloads, attributed by who holds a tab when each begins (005/R-123). Composed
@@ -604,6 +616,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // A question raised or ended is half of what the icon shows (011 FR-152); the other half is
       // whether anybody has a panel open to see it.
       refreshAttention();
+      // And the bell on its session's group (016 FR-238): raised, or taken down for the next state.
+      groups.refreshAll();
       notify();
     },
     reportDiagnostic: reportTestDiagnostic,
@@ -617,6 +631,17 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    */
   const plans = createStatedPlans();
   const stops = createAgentStopSignals();
+  /**
+   * What each session's tab group says it is doing (016 FR-238 - FR-240, R-207): told by the stop
+   * registry when a session's call count moves, and by the prompt controller (above) when a
+   * question is raised or ended. The question is the one on screen: one is up at a time.
+   */
+  const groups = createGroupPresenter({
+    inFlight: (sessionId) => stops.inFlight(sessionId),
+    waiting: (sessionId) => prompts.currentSession() === sessionId,
+    reportFailure: reportTestDiagnostic,
+  });
+  stops.onChange((sessionId) => groups.refresh(sessionId));
 
   /**
    * Where each held tab has been, and where it has gone without anybody deciding (014 US2, R-186).
@@ -1979,6 +2004,23 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       void tabs.announce(announcement.sessionId, helloAt).catch(() => undefined);
       notify();
     },
+    /**
+     * The folder a session's host reported (016 FR-226, R-204), kept on the session's persisted
+     * record so the card still names it after a worker restart. A label for a session this worker
+     * does not have is somebody else's, and is dropped. Neither the label nor the id is logged.
+     */
+    onSessionLabel({ sessionId, label }) {
+      if (!sessions.has(sessionId)) {
+        reportTestDiagnostic("agent.session.label-unknown");
+        return;
+      }
+      void tabs
+        .setLabel(sessionId, label)
+        .then((stored) => {
+          if (stored) notify();
+        })
+        .catch(() => reportTestDiagnostic("agent.session.label-failed"));
+    },
     async decidePairing(request) {
       // Pairing, and only pairing (004/T099i). The session behind this request announced itself on
       // its greeting; what is left here is the owner's question about the agent.
@@ -2168,9 +2210,21 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       const state = await pairing.state();
       // A session appears only for an agent that is *currently* paired and connected: an entry for
       // one the owner just unpaired would show tabs nobody may still drive.
-      const live: Array<{ sessionId: string; agentId: string; agentName: string; tabs: AgentTab[]; lastActivityAt: string }> = [];
+      const live: Array<{
+        sessionId: string;
+        agentId: string;
+        agentName: string;
+        tabs: AgentTab[];
+        lastActivityAt: string;
+        label?: string;
+        startedAt?: string;
+        colour?: (typeof AGENT_SESSION_COLOURS)[number];
+      }> = [];
       for (const [id, session] of sessions) {
         if (!(await pairing.isPaired(session.agentId))) continue;
+        // 016 FR-226 - FR-228, R-205: who the card is about, read from the persisted record so it
+        // is the same after a worker restart. A session with no record yet shows none of it.
+        const identity = await tabs.identity(id).catch(() => undefined);
         live.push({
           sessionId: id,
           agentId: session.agentId,
@@ -2179,6 +2233,13 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           agentName: session.agentName,
           tabs: (await tabs.context(id)).tabs,
           lastActivityAt: session.lastActivityAt,
+          ...(identity === undefined
+            ? {}
+            : {
+                ...(identity.label === undefined ? {} : { label: identity.label }),
+                startedAt: identity.firstSeenAt,
+                colour: AGENT_SESSION_COLOURS[identity.colourIndex % AGENT_SESSION_COLOURS.length],
+              }),
         });
       }
       /**
@@ -2237,15 +2298,24 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       const recordings = await recorder.listStates().catch(() => ({}) as Awaited<ReturnType<typeof recorder.listStates>>);
       const cards = live.map((session) => {
         const recording = recordings[session.sessionId];
+        const inFlight = stops.inFlight(session.sessionId);
         return {
           ...session,
           sites: [
             ...new Set(session.tabs.map((tab) => hostOfUrl(tab.url)).filter((host): host is string => host !== undefined)),
           ],
-          state: session.sessionId === waitingOn ? ("waiting" as const) : ("working" as const),
+          // 016 FR-230: waiting on the owner wins; otherwise working exactly while a call is in
+          // flight, and idle when none is - a card that said "working" of an empty session
+          // invited an interrupt that had nothing to interrupt.
+          state:
+            session.sessionId === waitingOn
+              ? ("waiting" as const)
+              : inFlight > 0
+                ? ("working" as const)
+                : ("idle" as const),
           // What the card's 中斷 control is enabled by (014 FR-178), read from the registry that
           // would answer the press - never a second tally that could disagree with it.
-          inFlight: stops.inFlight(session.sessionId),
+          inFlight,
           ...(recording === undefined ? {} : { recording }),
           // What happened on this session's tabs while the owner may have been looking elsewhere
           // (008 FR-113), and the one thing the panel is telling them without asking (FR-114).
@@ -2331,12 +2401,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           reportTestDiagnostic("agent.transition.note-failed"),
         );
       });
-      // 004/T099l: a group still titled "Agent" from a browser restart or an extension reload
-      // belongs to no session this worker can reach, and the owner reads it as an agent driving
-      // their tabs. Nothing else in the life of a worker gets the chance to answer for it.
+      // 004/T099l: a group still titled as ours (016 FR-241: "Agent", or "Hallpass" with or without
+      // its prefix) from a browser restart or an extension reload belongs to no session this worker
+      // can reach, and the owner reads it as an agent driving their tabs. Nothing else in the life
+      // of a worker gets the chance to answer for it.
       void tabs
         .sweepOrphanedGroups()
         .catch(() => reportTestDiagnostic("agent.groups.sweep-failed"));
+      // 016 R-207: and the groups live sessions still hold are handed to this worker's presenter,
+      // which remembers nothing from the last one. Queued after the sweep by the manager.
+      void tabs
+        .presentHeldGroups()
+        .catch(() => reportTestDiagnostic("agent.groups.present-failed"));
       // Subscribed at worker start for the reason the message listener below is: a download that
       // begins after an eviction is delivered to the worker Chrome wakes for it, and a listener
       // added any later than this would not be there (005/FR-077).

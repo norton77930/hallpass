@@ -1,9 +1,9 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
-import { AGENT_GROUP_TITLE } from "../../../apps/extension/src/chrome-adapters/tab-groups.js";
+import { groupTitle, isAgentGroupTitle } from "../fixtures/agent-group.js";
 import { INDICATOR_MARKER_ATTRIBUTE } from "../../../apps/extension/src/content-runtime/indicator-marker.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -62,7 +62,7 @@ test.describe("agent claim", () => {
       tabId: panelTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let client: McpHarnessClient | undefined;
     let second: McpHarnessClient | undefined;
@@ -110,7 +110,10 @@ test.describe("agent claim", () => {
         return { groupId: tab.groupId, title: group?.title };
       }, owned.tabId);
       expect(grouping.groupId).toBe(claimed.groupId);
-      expect(grouping.title).toBe(AGENT_GROUP_TITLE);
+      // 016 FR-238: "Hallpass", possibly with the working prefix a moment after the call (FR-239).
+      await expect
+        .poll(async () => isAgentGroupTitle(await groupTitle(extensionWorker, grouping.groupId)), { timeout: 15_000 })
+        .toBe(true);
 
       const text = (await call("get_page_text", { tabId: owned.tabId })) as { text: string };
       expect(text.text.length).toBeGreaterThan(0);

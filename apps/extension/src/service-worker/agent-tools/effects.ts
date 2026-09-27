@@ -1799,6 +1799,34 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     // (004/T129): the keys that follow have to reach the same document the click just focused, not
     // the tab's own top-level session, or they land wherever that session's page has focus instead.
     let sessionId: string | undefined;
+    /**
+     * A dispatch raced against the worker's dialog map, as the click path's is (016/FR-242, R-208).
+     *
+     * A key handler - or the focusing click's own handler - that calls `alert` holds the dispatch for
+     * as long as the box is up, exactly as a click's does; without the race the call waited out the
+     * input deadline and answered page-not-responding for a page that had simply asked the owner
+     * something. `evidence` is what this call can say it delivered up to that point, unconfirmed.
+     */
+    const racedDelivery = async (
+      evidence: Extract<PageExecutionOutcome, { ok: true }>,
+      work: () => Promise<unknown>,
+    ): Promise<AgentNativeResponse | undefined> => {
+      const before = deps.currentDialog?.(binding.tabId);
+      const delivery = await racingDialog(binding.tabId, before, work());
+      if (!("dialog" in delivery)) return undefined;
+      const unverified = observationOf(evidence, "target-unconfirmed");
+      return unverified === undefined
+        ? answer(callId, "failed", "unreadable-evidence")
+        : { callId, outcome: "ok", result: { observed: unverified, dialog: delivery.dialog } };
+    };
+    // What the call had delivered when a dialog took the focusing click: nothing of its own keys.
+    const beforeKeys = (): Extract<PageExecutionOutcome, { ok: true }> =>
+      (tool === "type"
+        ? { ok: true, effect: "text-entered", charactersChanged: 0, documentChanged: false }
+        : { ok: true, effect: "key-pressed", key: String(args.key ?? ""), documentChanged: false }) as Extract<
+        PageExecutionOutcome,
+        { ok: true }
+      >;
     if (named !== undefined) {
       const target = await locator(locators.forDelivery(), context, binding, callId)(named);
       if (!target.ok) return target.response;
@@ -1814,11 +1842,14 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
        * from this line on, an interrupt cannot honestly say the page was given nothing.
        */
       deps.onDelivered?.(callId, {});
-      await pointer.click(binding.tabId, centreOf(target.rect), {
-        button: "left",
-        clickCount: 1,
-        ...(sessionId === undefined ? {} : { sessionId }),
-      });
+      const focusing = await racedDelivery(beforeKeys(), () =>
+        pointer.click(binding.tabId, centreOf(target.rect), {
+          button: "left",
+          clickCount: 1,
+          ...(sessionId === undefined ? {} : { sessionId }),
+        }),
+      );
+      if (focusing !== undefined) return focusing;
     }
 
     if (tool === "type") {
@@ -1856,35 +1887,36 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         );
       }
       // The keys themselves, with or without a target above (014 FR-181).
+      const typed = {
+        ok: true,
+        effect: "text-entered",
+        // The characters this worker delivered, counted the way it delivered them - by code
+        // point, so an emoji is the one character it was typed as.
+        charactersChanged: [...text].length,
+        documentChanged: false,
+        ...(focusRetained === undefined ? {} : { focusRetained }),
+      } as Extract<PageExecutionOutcome, { ok: true }>;
       deps.onDelivered?.(callId, {});
-      await keyboard.type(binding.tabId, text, {
-        replace: args.mode !== "insert",
-        ...(sessionId === undefined ? {} : { sessionId }),
-      });
-      return verifyDelivered(
-        callId,
-        "browser.enter-text",
-        {
-          ok: true,
-          effect: "text-entered",
-          // The characters this worker delivered, counted the way it delivered them - by code
-          // point, so an emoji is the one character it was typed as.
-          charactersChanged: [...text].length,
-          documentChanged: false,
-          ...(focusRetained === undefined ? {} : { focusRetained }),
-        } as Extract<PageExecutionOutcome, { ok: true }>,
-        binding,
-        context,
+      const dialogAnswer = await racedDelivery(typed, () =>
+        keyboard.type(binding.tabId, text, {
+          replace: args.mode !== "insert",
+          ...(sessionId === undefined ? {} : { sessionId }),
+        }),
       );
+      if (dialogAnswer !== undefined) return dialogAnswer;
+      return verifyDelivered(callId, "browser.enter-text", typed, binding, context);
     }
 
     const key = String(args.key ?? "");
     deps.onDelivered?.(callId, {});
-    await keyboard.press(binding.tabId, key, {
-      ...(Array.isArray(args.modifiers) ? { modifiers: args.modifiers as string[] } : {}),
-      repeat: Number(args.repeat ?? 1),
-      ...(sessionId === undefined ? {} : { sessionId }),
-    });
+    const pressedDialog = await racedDelivery(beforeKeys(), () =>
+      keyboard.press(binding.tabId, key, {
+        ...(Array.isArray(args.modifiers) ? { modifiers: args.modifiers as string[] } : {}),
+        repeat: Number(args.repeat ?? 1),
+        ...(sessionId === undefined ? {} : { sessionId }),
+      }),
+    );
+    if (pressedDialog !== undefined) return pressedDialog;
     // 004/T128, B65: a named target's own document says whether it still has focus, asked the same
     // way the click family confirms its point - fresh, after delivery, never assumed. An absent
     // target names nothing to check focus against, so it verifies exactly as before (undefined

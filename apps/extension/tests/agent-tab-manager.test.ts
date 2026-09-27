@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  AGENT_GROUP_COLOR,
   AGENT_GROUP_TITLE,
   RELEASED_GROUP_COLOR,
   RELEASED_GROUP_TITLE,
 } from "../src/chrome-adapters/tab-groups.js";
 import { createAgentTabManager } from "../src/service-worker/agent-tab-manager.js";
+import { createAgentStopSignals } from "../src/service-worker/agent-tools/stop.js";
+import { createGroupPresenter } from "../src/service-worker/group-presenter.js";
 
 /**
  * 003/T016 — tab-group ownership (R-104).
@@ -68,9 +69,14 @@ function installChrome(tabs: FakeTab[]): FakeChrome {
         }
         return target;
       },
+      async ungroup(tabIds: number[]) {
+        for (const tab of state.tabs) if (tabIds.includes(tab.id)) tab.groupId = UNGROUPED;
+      },
     },
     tabGroups: {
       async update(groupId: number, properties: unknown) {
+        // Chrome discards a group with its last tab, and an update to it is refused, not recorded.
+        if (!state.tabs.some((tab) => tab.groupId === groupId)) throw new Error("No group with id: " + groupId);
         state.groupUpdates.push({ groupId, properties });
         const title = (properties as { title?: string }).title;
         if (title !== undefined) state.groupTitles.set(groupId, title);
@@ -118,7 +124,9 @@ describe("T016 agent tab manager", () => {
     const grouped = fake.tabs.find((tab) => tab.id === 2);
     expect(grouped?.groupId).not.toBe(UNGROUPED);
     expect(fake.groupUpdates).toEqual([
-      { groupId: grouped?.groupId, properties: { title: AGENT_GROUP_TITLE, color: AGENT_GROUP_COLOR } },
+      // 016 FR-238, FR-240: "Hallpass" in the session's own colour - the first session is the first
+      // in the rotation.
+      { groupId: grouped?.groupId, properties: { title: AGENT_GROUP_TITLE, color: "cyan" } },
     ]);
   });
 
@@ -227,7 +235,7 @@ describe("T016 agent tab manager", () => {
     // The new group is marked too, or the owner's tab strip would stop naming the agent's tabs.
     expect(fake.groupUpdates.at(-1)).toEqual({
       groupId: secondGroup,
-      properties: { title: AGENT_GROUP_TITLE, color: AGENT_GROUP_COLOR },
+      properties: { title: AGENT_GROUP_TITLE, color: "cyan" },
     });
     await expect(manager.ownership("session-a", 3)).resolves.toEqual({ state: "this" });
   });
@@ -338,5 +346,189 @@ describe("T016 agent tab manager", () => {
     // Without the record removal the hostage stays for ever: SC-024's refusal is about a *live*
     // session's tabs, and a session nobody can reach again owns nothing.
     await expect(manager.adopt("session-b", 2)).resolves.toBeUndefined();
+  });
+
+  /**
+   * 016/T443 - the group is presented, not merely marked (FR-238, FR-240, R-207).
+   *
+   * The presenter decides the title; the manager is where a group comes into existence, so it hands
+   * the presenter the group and the session's own colour, and says when the group stops being the
+   * session's to title.
+   */
+  describe("group presentation (016 T443)", () => {
+    it("hands each new group to the presenter in its session's colour", async () => {
+      const presented: Array<[string, number, string]> = [];
+      const manager = createAgentTabManager({
+        presentGroup: async (sessionId, groupId, colour) => void presented.push([sessionId, groupId, colour]),
+      });
+
+      await manager.adopt("session-a", 2);
+      await manager.adopt("session-a", 3);
+      await manager.claim("session-b", 4);
+
+      const groupOf = (tabId: number) => fake.tabs.find((tab) => tab.id === tabId)?.groupId ?? UNGROUPED;
+      // Once per group, not per tab; the colour is the one the card shows.
+      expect(presented).toEqual([
+        ["session-a", groupOf(2), "cyan"],
+        ["session-b", groupOf(4), "green"],
+      ]);
+      await expect(manager.identity("session-b")).resolves.toMatchObject({ colourIndex: 1 });
+      // The presenter owns the write; the manager wrote no marking of its own.
+      expect(fake.groupUpdates).toEqual([]);
+    });
+
+    it("says when the session let go of the last tab in its group, and presents the next one", async () => {
+      const left: string[] = [];
+      const presented: number[] = [];
+      const manager = createAgentTabManager({
+        presentGroup: async (_sessionId, groupId) => void presented.push(groupId),
+        onGroupLeft: (sessionId) => void left.push(sessionId),
+      });
+      await manager.adopt("session-a", 2);
+      await manager.adopt("session-a", 3);
+
+      await manager.release("session-a", 2);
+      expect(left).toEqual([]);
+      await manager.release("session-a", 3);
+      expect(left).toEqual(["session-a"]);
+
+      await manager.claim("session-a", 4);
+      expect(presented).toHaveLength(2);
+      expect(presented[1]).toBe(fake.tabs.find((tab) => tab.id === 4)?.groupId);
+    });
+
+    it("presents the groups live records hold again at worker start, and none other", async () => {
+      await createAgentTabManager().adopt("session-a", 2);
+      const presented: Array<[string, number, string]> = [];
+      // A fresh worker: the same storage, a presenter that remembers nothing.
+      const manager = createAgentTabManager({
+        presentGroup: async (sessionId, groupId, colour) => void presented.push([sessionId, groupId, colour]),
+      });
+      await manager.announce("session-b", "2026-09-27T00:00:00.000Z");
+
+      await manager.presentHeldGroups();
+
+      expect(presented).toEqual([["session-a", fake.tabs.find((tab) => tab.id === 2)?.groupId, "cyan"]]);
+    });
+  });
+
+  /**
+   * 016/T444 - a group the session no longer holds a tab of is withdrawn (FR-238, R-207, review
+   * F1/F2, contracts/tab-group.md).
+   *
+   * Three ways a session comes to hold none of its group's tabs: it releases the last one, the
+   * owner drags them all out, the owner closes them all. Each withdraws the marking exactly as the
+   * session's end does, and the presenter forgets the group: a group the owner kept alive with a tab
+   * of theirs is theirs, and must not keep a frozen hourglass or be written to again.
+   */
+  describe("withdrawal when the session holds no tab of its group (016 T444)", () => {
+    const RELEASED = { title: RELEASED_GROUP_TITLE, color: RELEASED_GROUP_COLOR };
+    const groupOf = (tabId: number) => fake.tabs.find((tab) => tab.id === tabId)?.groupId ?? UNGROUPED;
+    const updatesTo = (groupId: number) =>
+      fake.groupUpdates.filter((update) => update.groupId === groupId).map((update) => update.properties);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    /** The runtime's wiring (agent-runtime.ts): a real presenter, told by a real stop registry. */
+    function composeWithPresenter() {
+      const stops = createAgentStopSignals();
+      const reported: string[] = [];
+      const left: string[] = [];
+      const presenter = createGroupPresenter({
+        inFlight: (sessionId) => stops.inFlight(sessionId),
+        waiting: () => false,
+        reportFailure: (code) => void reported.push(code),
+      });
+      stops.onChange((sessionId) => presenter.refresh(sessionId));
+      const manager = createAgentTabManager({
+        presentGroup: (sessionId, groupId, colour) => presenter.present(sessionId, groupId, colour),
+        onGroupLeft: (sessionId) => {
+          left.push(sessionId);
+          presenter.end(sessionId);
+        },
+        onSessionEnded: (sessionId) => presenter.end(sessionId),
+      });
+      return { stops, manager, reported, left };
+    }
+
+    it("withdraws the marking when the last tab is released from a group the owner keeps alive (F1)", async () => {
+      const { stops, manager, left } = composeWithPresenter();
+      await manager.adopt("session-a", 2);
+      const groupId = groupOf(2);
+      // The owner drags a tab of theirs into the agent's group.
+      fake.tabs[0]!.groupId = groupId;
+      const call = stops.begin("call-1", "session-a");
+
+      await manager.release("session-a", 2);
+      call.end();
+      await settle();
+
+      expect(left).toEqual(["session-a"]);
+      expect(updatesTo(groupId)).toEqual([{ title: AGENT_GROUP_TITLE, color: "cyan" }, { title: "⌛ Hallpass" }, RELEASED]);
+
+      // The session's next tab opens a group of its own; the owner's group is not marked again.
+      await manager.adopt("session-a", 3);
+      expect(groupOf(3)).not.toBe(groupId);
+      expect(updatesTo(groupId).at(-1)).toEqual(RELEASED);
+    });
+
+    it("withdraws the marking when the owner drags every agent tab out of the group (F1)", async () => {
+      const { stops, manager, left, reported } = composeWithPresenter();
+      await manager.adopt("session-a", 2);
+      await manager.adopt("session-a", 3);
+      const groupId = groupOf(2);
+      fake.tabs[0]!.groupId = groupId;
+      for (const tab of fake.tabs) if (tab.id === 2 || tab.id === 3) tab.groupId = UNGROUPED;
+
+      await expect(manager.context("session-a")).resolves.toEqual({ tabs: [], gone: [2, 3] });
+      stops.begin("call-1", "session-a");
+      await settle();
+
+      expect(left).toEqual(["session-a"]);
+      expect(updatesTo(groupId).at(-1)).toEqual(RELEASED);
+      expect(reported).toEqual([]);
+    });
+
+    it("forgets a group whose tabs the owner closed, so nothing is written to it again (F2)", async () => {
+      const { stops, manager, left, reported } = composeWithPresenter();
+      await manager.adopt("session-a", 2);
+      fake.tabs = fake.tabs.filter((tab) => tab.id !== 2);
+
+      // The withdrawal is refused - the group went with its last tab - and that is not a failure.
+      await expect(manager.context("session-a")).resolves.toEqual({ tabs: [], gone: [2] });
+      stops.begin("call-1", "session-a");
+      await settle();
+
+      expect(left).toEqual(["session-a"]);
+      expect(reported).toEqual([]);
+    });
+
+    it("keeps the withdrawal last when the session's calls move while it is ending", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const { stops, manager } = composeWithPresenter();
+        await manager.adopt("session-a", 2);
+        const groupId = groupOf(2);
+        const area = (globalThis as { chrome: { storage: { session: { set: (values: Record<string, unknown>) => Promise<void> } } } })
+          .chrome.storage.session;
+        const set = area.set.bind(area);
+        let call: { end(): void } | undefined;
+        // Between the record's removal and the presenter being told: a call begins (the hourglass
+        // goes up), then ends (its quiet second is armed).
+        area.set = async (values) => {
+          await set(values);
+          const sessions = values.agentSessions as Record<string, unknown> | undefined;
+          if (sessions !== undefined && !("session-a" in sessions)) call = stops.begin("call-1", "session-a");
+          if (values.agentTabLeases !== undefined && call !== undefined) call.end();
+        };
+
+        await manager.endSession("session-a");
+        vi.advanceTimersByTime(2000);
+
+        expect(call).toBeDefined();
+        expect(updatesTo(groupId)).toEqual([{ title: AGENT_GROUP_TITLE, color: "cyan" }, { title: "⌛ Hallpass" }, RELEASED]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

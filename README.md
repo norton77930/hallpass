@@ -157,6 +157,43 @@ release: the packaged gate (`tests/e2e/packaged/agent-*.spec.ts`, attaching to a
 with `--remote-debugging-port=9222`) and the acceptance probes, which drive the bridge with a real
 coding-agent session. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to run both.
 
+## What 0.9.0 adds
+
+![The 0.9.0 side panel: a question card, the status row "Connected · 2 sessions", and two session cards named by project folder, one waiting for you and one idle, each with its colour stripe](docs/media/016-panel-en-US-light.png)
+
+**The panel reads once.** The status row says the connection is up and how many sessions use it
+("Connected · 2 sessions"); it no longer names an agent. The paired agents are listed under
+**More options**, each with its own **Unpair**. The product name is no longer repeated as a heading
+inside the panel.
+
+**A session card says which project it is.** Each card is titled with the agent and the session's
+project folder (`Claude Code · shop-frontend`), and its second line gives the start time and the
+tabs it holds (without a folder the title carries the start time, and the second line does not
+repeat it). The internal session id moved into **Technical details**. A card is in one of three
+states: **Working** (a call is in flight), **Waiting for you** (a question from it is waiting on
+you; the card is marked), or **Idle** with the time of its last action ("Idle · last action 12 min
+ago"). It shows only the buttons that can act: **End session** always, at the same place;
+**Interrupt this step** only while it is working; **Take back tabs (N)** only while it holds tabs.
+
+**A site row is read once.** The permissive mode ("act without asking") is marked by a warning
+border on its select, not by a second label; the diagnostics checkbox says what it allows —
+"Allow reading console and network logs"; the revoke button reads just **Revoke** (screen readers
+still hear the site). **Allowed upload directories** says what the list is for, says so when it is
+empty and how a directory gets onto it, and shows the list file as a quiet last line.
+
+**The tab strip tells sessions apart.** Each session's tab group is titled `Hallpass`, with `⌛`
+in front while it works and `🔔` while it waits for you, in the session's own colour — the same
+colour as the stripe on its panel card. Groups left over from a restart (titled `Agent` by 0.8.0
+and earlier, or `Hallpass` with or without a prefix) are cleared when the extension starts.
+
+**A keystroke that opens a dialog is answered with the dialog**, as a click that opens one is,
+instead of ending as `page-not-responding`.
+
+**Upgrading from 0.8.0:** reinstall the host (`npm run agent-host:install`, or `install.ps1` from
+the zip) and reload the extension, in either order. The project name comes from the new host: with
+a 0.8.0 host, a card shows the session's start time instead of the project name
+(`Claude Code · started 14:02`); a 0.9.0 host with a 0.8.0 extension works as 0.8.0 did.
+
 ## What 0.8.0 adds
 
 **A press says what it did.** The answer to a click (and every other press, standalone or as a

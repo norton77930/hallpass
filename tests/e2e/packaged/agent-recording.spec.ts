@@ -4,7 +4,7 @@ import { decodeGif, nonBackgroundPixelsIn, sampleColorAt, type DecodedGif } from
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -464,7 +464,7 @@ async function pairedSession(fixtures: {
   });
 
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-  await panel.waitForText(ui("agent.appTitle"));
+  await waitForAgentPanel(panel);
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));

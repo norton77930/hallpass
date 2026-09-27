@@ -288,7 +288,8 @@ describe("T018 agent runtime wiring", () => {
    *
    * A `stop` naming a call is the host's backstop (D-M3-1). A `stop` naming only the session is the
    * MCP session itself ending, and that is the one event that releases the session's tabs: the
-   * group stops reading "Agent" and the record stops holding the tabs against every later session.
+   * group stops reading as the agent's and the record stops holding the tabs against every later
+   * session.
    */
   it("keeps the session's tabs when the relay drops and reconnects", async () => {
     const first = fakePort();
@@ -537,6 +538,70 @@ describe("T018 agent runtime wiring", () => {
     await vi.waitFor(async () =>
       expect(await runtime.tabs.ownership("session-h1", 7)).toEqual({ state: "not-yours" }),
     );
+  });
+
+  /**
+   * 016/T443 — the group presenter wired to the two things it follows (FR-238, FR-239, R-207): the
+   * calls the stop registry counts, and the question the prompt controller holds. And to the end of
+   * the session, after which the group reads as released and nothing writes to it again.
+   */
+  it("titles the session's group from its questions and its calls, and not after it ends", async () => {
+    // A group id of this test's own: the runtimes of the tests above are still alive in this file,
+    // and each fake numbers its groups from 100.
+    const groupId = 4160;
+    const writes: Array<[number, unknown]> = [];
+    const chrome = (globalThis as { chrome: { tabGroups: unknown; tabs: { group: unknown } } }).chrome;
+    chrome.tabGroups = {
+      async update(target: number, properties: unknown) {
+        if (target === groupId) writes.push([target, properties]);
+        return { id: target };
+      },
+    };
+    chrome.tabs.group = async ({ tabIds }: { tabIds: number[] }) => {
+      for (const tab of fake.tabs) if (tabIds.includes(tab.id)) tab.groupId = groupId;
+      return groupId;
+    };
+    const port = fakePort();
+    const runtime = composeAgentRuntime({ connectNative: () => port });
+    runtime.start();
+    port.emit(HELLO);
+    port.emit(PAIR_REQUEST);
+    await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+    await runtime.pairing.decide("agent-1", true);
+    await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+    await runtime.tabs.adopt("session-h1", 7);
+    expect(fake.tabs[0]?.groupId).toBe(groupId);
+    expect(writes.at(-1)).toEqual([groupId, { title: "Hallpass", color: "cyan" }]);
+
+    const asked = runtime.prompts.ask({
+      callId: "call-1",
+      sessionId: "session-h1",
+      site: "https://agent.test",
+      tool: "click",
+      argsSummary: "click a page element",
+    });
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual([groupId, { title: "🔔 Hallpass" }]));
+    runtime.prompts.decide(runtime.prompts.current()?.promptId ?? "", false);
+    await asked;
+    expect(writes.at(-1)).toEqual([groupId, { title: "Hallpass" }]);
+
+    port.emit({ callId: "call-2", sessionId: "session-h1", tool: "tabs_context", args: {} });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+    expect(writes.at(-1)).toEqual([groupId, { title: "⌛ Hallpass" }]);
+    // The second after the call ends: the hourglass comes off.
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual([groupId, { title: "Hallpass" }]), { timeout: 3000 });
+
+    port.emit({ callId: "call-3", sessionId: "session-h1", tool: "tabs_context", args: {} });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+    port.emit({ type: "stop", sessionId: "session-h1" });
+    // The ending path is not instant (recording, windows, attachments), hence the longer bound.
+    await vi.waitFor(() => expect(writes.at(-1)).toEqual([groupId, { title: "", color: "grey" }]), {
+      timeout: 3000,
+    });
+    const released = writes.length;
+    // Whatever second call-3 left pending has passed, and nothing was written over the marking.
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(writes).toHaveLength(released);
   });
 
   /**

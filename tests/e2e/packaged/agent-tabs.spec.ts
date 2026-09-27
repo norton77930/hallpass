@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
-import { AGENT_GROUP_TITLE } from "../../../apps/extension/src/chrome-adapters/tab-groups.js";
+import { groupTitle, isAgentGroupTitle } from "../fixtures/agent-group.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -16,7 +16,7 @@ const SITE = "https://127.0.0.1:19443";
  * 003/T044 — US4 end to end: the agent's own tabs (FR-044..FR-046, SC-024).
  *
  * The group is the boundary and this journey is what proves it is real rather than decorative. The
- * tab the agent created is inside a group Chrome itself titles "Agent" - checked through the browser
+ * tab the agent created is inside a group Chrome itself titles "Hallpass" (016 FR-238) - checked through the browser
  * API, not through the worker that put it there - and a tab the *test* opened beside it is refused
  * by every tool that names a tab, however ordinary the request looks.
  *
@@ -24,7 +24,7 @@ const SITE = "https://127.0.0.1:19443";
  * *relay* Chrome spawned drops the link while the agent's MCP session keeps running, and the tab
  * created before the drop is still the session's - a worker that minted a session id per connection
  * would have stranded it (D-M3-3). Closing the *client* ends the agent session itself, and then the
- * group must stop saying "Agent": the tabs are the owner's again.
+ * group must stop saying "Hallpass": the tabs are the owner's again.
  */
 test.describe("agent tabs", () => {
   test.skip(
@@ -62,7 +62,7 @@ test.describe("agent tabs", () => {
       tabId: ownerTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let client: McpHarnessClient | undefined;
     try {
@@ -88,7 +88,10 @@ test.describe("agent tabs", () => {
         return { groupId: tab.groupId, title: group?.title, url: tab.url };
       }, tabId);
       expect(grouping.groupId).toBeGreaterThan(-1);
-      expect(grouping.title).toBe(AGENT_GROUP_TITLE);
+      // 016 FR-238: "Hallpass", possibly with the working prefix a moment after the call (FR-239).
+      await expect
+        .poll(async () => isAgentGroupTitle(await groupTitle(extensionWorker, grouping.groupId)), { timeout: 15_000 })
+        .toBe(true);
 
       // ================= a blank tab, to prove `url` really is optional =================
       const blank = (await call("tabs_create")) as { tabId: number };
@@ -214,7 +217,7 @@ ${live.stderr()}`,
       expect(gone.isError).toBe(true);
       expect(gone.json).toMatchObject({ outcome: "stale", reason: "tab-gone" });
 
-      // ================= the session ends: the group stops saying "Agent" (M4 Part A) =================
+      // ================= the session ends: the group stops saying "Hallpass" (M4 Part A) =================
       const survivor = (await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number };
       const groupOf = await extensionWorker.evaluate(
         async (id: number) => (await chrome.tabs.get(id)).groupId,
@@ -230,10 +233,10 @@ ${live.stderr()}`,
       await expect
         .poll(
           async () =>
-            extensionWorker.evaluate(async (id: number) => (await chrome.tabGroups.get(id)).title, groupOf),
+            isAgentGroupTitle(await extensionWorker.evaluate(async (id: number) => (await chrome.tabGroups.get(id)).title, groupOf)),
           { timeout: 30_000 },
         )
-        .not.toBe(AGENT_GROUP_TITLE);
+        .toBe(false);
       await extensionWorker.evaluate(async (id: number) => chrome.tabs.remove(id), survivor.tabId);
     } finally {
       await client?.close();

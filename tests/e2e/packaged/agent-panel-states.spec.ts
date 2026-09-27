@@ -1,7 +1,7 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall, isAgentPaired } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, clickLabelled, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -65,7 +65,7 @@ test.describe("agent panel states", () => {
       tabId: ownerTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     // ============ SC-044: nothing paired - the not-paired page and no other section ============
     await expect.poll(() => shellState(panel), { timeout: 15_000 }).toBe("not-connected");
@@ -99,17 +99,18 @@ test.describe("agent panel states", () => {
         return result.json;
       };
 
-      // ============ SC-045: paired - status row with the agent's name, and the site list ============
+      // ============ SC-045: paired - status row, a session card named by its agent, and the site list ============
       await panel.waitForText(ui("agent.status.connected"));
-      expect(await panel.panelText()).toContain("Claude Code");
       expect(await panel.panelText()).not.toContain(ui("agent.notPaired.title"));
       // The session greeted the relay, so its card is up; it holds nothing yet.
       await expect.poll(() => shellState(panel), { timeout: 15_000 }).toBe("sessions");
       await panel.waitForText(ui("agent.session.noSites"));
+      // 016 FR-223: the status row names no agent; the card's title does.
+      expect(await panel.panelText()).toContain("Claude Code");
 
       const tabA = ((await callOn(a, "tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
       // The card names the site it is on, and never the page's title.
-      await panel.waitForText(ui("agent.session.sites").replace("{sites}", "127.0.0.1"));
+      await panel.waitForText(ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1"));
 
       // --- switching the site to `ask` makes the next effect prompt; the consent card is on top ---
       await setSiteMode(panel, SITE, "skip-checks");
@@ -135,10 +136,10 @@ test.describe("agent panel states", () => {
       await panel.clickButton(ui("agent.allowAlways"));
       expect((await always).isError, `stderr:\n${a.stderr()}`).toBe(false);
       await expect.poll(() => modeOf(panel, SITE), { timeout: 15_000 }).toBe("skip-checks");
-      expect(await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE)}]')?.classList.contains('permissive') ?? false`)).toBe(true);
+      expect(await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE)}] select')?.getAttribute('data-permissive') === 'true'`)).toBe(true);
 
       // --- revoking the site removes the row; the default (ask) applies to the next effect ---
-      await panel.clickButton(ui("agent.siteRevoke").replace("{site}", SITE));
+      await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", SITE));
       await expect.poll(() => storedModeOf(extensionWorker, SITE), { timeout: 15_000 }).toBeUndefined();
       const refDefault = await refFor((tool, args) => callOn(a, tool, args), tabA, "Safe action");
       const askedAgain = a.callTool("click", { tabId: tabA, target: { ref: refDefault } });
@@ -185,7 +186,7 @@ ${a.stderr()}`).toMatchObject({ outcome: "stopped", reason: "owner-stopped" });
       expect(stillHeld.find((tab) => tab.tabId === tabA)?.holder).toBe("none");
 
       // --- Release tabs on B: its next read answers not-yours, and it is still paired ---
-      await clickOnCard(panel, sessionB, ui("agent.session.release"));
+      await clickOnCard(panel, sessionB, ui("agent.session.takeBack").replace("{n}", "1"));
       await panel.waitForText(ui("agent.session.noSites"));
       const afterRelease = await b.callTool("get_page_text", { tabId: tabB });
       expect(afterRelease.isError).toBe(true);

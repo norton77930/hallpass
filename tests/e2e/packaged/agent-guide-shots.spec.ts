@@ -4,7 +4,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const SITE = "https://127.0.0.1:19443";
@@ -189,7 +189,7 @@ async function speakGuideLanguage(panel: SidePanelDriver): Promise<void> {
       `{ value: () => ${JSON.stringify(GUIDE_LOCALE)}, configurable: true, writable: true }); } catch { /* keep the browser's */ } })();`,
   });
   await panel.sendToPanel("Page.reload");
-  await panel.waitForText(ui("agent.appTitle"));
+  await waitForAgentPanel(panel);
   expect(await panel.evaluatePanel("document.documentElement.lang")).toBe(GUIDE_LOCALE);
 }
 

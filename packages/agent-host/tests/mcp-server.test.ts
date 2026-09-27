@@ -2465,3 +2465,83 @@ async function advertisePairWithdraw(
   });
   await waitForCondition(() => client.stderr().includes("agent.pair.decline-late"), "the advertisement read");
 }
+
+/**
+ * 016/T450 — the host half of the pairing wait extension, measured (FR-244, R-210, B5).
+ *
+ * A pairing exchange raised under the short bound, then told by a tick that nobody can see the card,
+ * must end at the larger bound counted from when the exchange was *raised* - not from the tick - and
+ * the progress the person reads must switch from the neutral line to the panel-not-seen sentence.
+ * Green here means covered by 011 D-011-7 (`extendPairingBound`, `pairingPanelClosed`).
+ */
+describe("016 pairing wait extension", () => {
+  let dataDir = "";
+  let client: McpHarnessClient | undefined;
+  let worker: FakeAgentWorker | undefined;
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), "hallpass-016-pairing-"));
+  });
+
+  afterEach(async () => {
+    await worker?.close();
+    await client?.close();
+    worker = undefined;
+    client = undefined;
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("re-arms from requestedAt on a tick carrying a larger bound, and switches the progress text", async () => {
+    const { PAIRING_PROGRESS_MESSAGE } = await import("../src/mcp-server.js");
+    const TICK_AT_MS = 600;
+    const EXTENDED_MS = 3_000;
+    client = await startMcpClient({
+      env: {
+        LOCALAPPDATA: dataDir,
+        HALLPASS_AGENT_PAIRING_TIMEOUT_MS: "1000",
+        HALLPASS_AGENT_PAIRING_PROGRESS_MS: "150",
+      },
+    });
+    worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "ignore" });
+
+    const seen: Array<{ message?: string; total?: number }> = [];
+    const pending = client.callTool("tabs_context", {}, { onProgress: (update) => seen.push(update) });
+    const request = (await worker.waitForControlFrame("pair-request")) as { sessionId: string };
+    const raisedAt = Date.now();
+
+    // The owner's focus leaves the panel's window part-way into the short wait.
+    await new Promise((tick) => setTimeout(tick, TICK_AT_MS));
+    const beforeTick = seen.length;
+    worker.send({
+      type: "prompt-waiting",
+      sessionId: request.sessionId,
+      kind: "pairing",
+      panelConnected: false,
+      waitedMs: TICK_AT_MS,
+      boundMs: EXTENDED_MS,
+    });
+
+    const unanswered = await pending;
+    const endedAfterMs = Date.now() - raisedAt;
+
+    // Past the short bound, and at the extended bound measured from the raise: a re-arm from the
+    // tick would have ended near TICK_AT_MS + EXTENDED_MS instead.
+    expect(endedAfterMs).toBeGreaterThanOrEqual(EXTENDED_MS - 500);
+    expect(endedAfterMs).toBeLessThan(TICK_AT_MS + EXTENDED_MS - 200);
+    // The neutral line while the card was in sight, the panel-not-seen sentence once it was not. A
+    // neutral update already on its way when the tick was sent may still land after it, so the switch
+    // is read from the first sentence onward rather than from the moment of sending.
+    expect(beforeTick).toBeGreaterThan(0);
+    const switchedAt = seen.findIndex((update) => update.message === ATTENTION_SENTENCES.pairing);
+    expect(switchedAt).toBeGreaterThanOrEqual(beforeTick);
+    expect(seen.slice(0, switchedAt).every((update) => update.message === PAIRING_PROGRESS_MESSAGE)).toBe(true);
+    const afterSwitch = seen.slice(switchedAt);
+    expect(afterSwitch.every((update) => update.message === ATTENTION_SENTENCES.pairing)).toBe(true);
+    expect(afterSwitch.every((update) => update.total === EXTENDED_MS)).toBe(true);
+    expect(unanswered.json).toEqual({
+      outcome: "timed-out",
+      reason: "not-paired: no answer",
+      hint: ATTENTION_SENTENCES.pairing,
+    });
+  });
+});

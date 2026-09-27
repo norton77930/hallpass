@@ -3,7 +3,7 @@ import type { BrowserContext } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -85,7 +85,7 @@ test.describe("agent downloads", () => {
       tabId: ownerTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let client: McpHarnessClient | undefined;
     let successor: McpHarnessClient | undefined;
@@ -248,7 +248,7 @@ async function pairedSession(fixtures: {
     return tab.id;
   });
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-  await panel.waitForText(ui("agent.appTitle"));
+  await waitForAgentPanel(panel);
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
   await pairWithFirstCall(client, panel, { locale });

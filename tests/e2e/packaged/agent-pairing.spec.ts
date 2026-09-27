@@ -2,7 +2,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { TEST_EXTENSION_ID } from "../../../packages/test-kit/src/build-config.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { unpairAgent } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -62,7 +62,7 @@ test.describe("agent pairing", () => {
       copy,
     });
     const { panelText, waitForText, clickButton, clickIfPresent } = panel;
-    await waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let first: McpHarnessClient | undefined;
     let second: McpHarnessClient | undefined;

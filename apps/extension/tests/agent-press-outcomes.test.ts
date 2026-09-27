@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentDownloadRecord, AgentNativeRequest, AgentNativeResponse } from "@hallpass/contracts";
+import type { AgentDownloadRecord, AgentNativeRequest, AgentNativeResponse, CurrentDialog } from "@hallpass/contracts";
 import { agentEffectObservationSchema } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentEffects, createTargetLocator, type TargetRect } from "../src/service-worker/agent-tools/effects.js";
@@ -133,6 +133,8 @@ async function harness(
     role?: string;
     /** What the post-press probe finds: the same document, or a new one. */
     after?: "same" | "replaced";
+    /** The worker's own dialog map, as the runtime would expose it (016/T447). */
+    currentDialog?: (tabId: number) => CurrentDialog | undefined;
   } = {},
 ) {
   const browser = fakeBrowser();
@@ -159,6 +161,7 @@ async function harness(
     watchTabCreated: browser.watchTabCreated,
     tabUrl: async (tabId) => browser.urls.get(tabId),
     downloads: { createdSince: browser.createdSince },
+    ...(options.currentDialog === undefined ? {} : { currentDialog: options.currentDialog }),
   });
   return { runner, browser };
 }
@@ -522,6 +525,33 @@ describe("T402 an input dispatch the page does not answer", () => {
     }
   });
 
+  /**
+   * 016/T449 — a press held past the bound sends no release (FR-243, R-209, 015 review F3).
+   *
+   * The button-down may still land after the call has answered; a button-up sent then would be a
+   * second input the agent was never told about. `click()` awaits the press before the release, so
+   * the deadline's rejection ends the sequence - pinned here so it stays deliberate.
+   */
+  it("a press whose mousePressed outlives the deadline never sends mouseReleased, even after the late answer", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+    const press = deferred();
+    const mouseTypes: unknown[] = [];
+    browser.hooks.hold = (method, params) => {
+      if (method !== "Input.dispatchMouseEvent") return undefined;
+      mouseTypes.push(params?.type);
+      return params?.type === "mousePressed" ? press.promise : undefined;
+    };
+
+    const { response } = await acrossDeadline(runner, request("click"));
+    expect(response).toEqual({ callId: "call-click", ...NOT_RESPONDING });
+
+    press.resolve({});
+    await vi.advanceTimersByTimeAsync(CONTENT_OPERATION_DEADLINE_MS);
+
+    expect(mouseTypes).toContain("mousePressed");
+    expect(mouseTypes).not.toContain("mouseReleased");
+  });
+
   it("a dispatch that answers inside the deadline is delivered as before", async () => {
     const { runner, browser } = await harness({ role: "button" });
     browser.hooks.hold = (method, params) =>
@@ -537,5 +567,105 @@ describe("T402 an input dispatch the page does not answer", () => {
 
     expect(response?.outcome).toBe("ok");
     expect(observed(response)).toMatchObject({ verified: true });
+  });
+});
+
+/**
+ * 016/T447 — a keystroke that opens a dialog (FR-242, R-208, 015 review F2).
+ *
+ * `Input.dispatchKeyEvent` / `Input.insertText` wait for the renderer the way a mouse event does, so
+ * a key handler that calls `alert` holds the dispatch for as long as the box is up. The click path
+ * already races its dispatch against the worker's dialog map and answers with the dialog; a key,
+ * typed text and the focusing click of a keyboard call must answer the same way, not with
+ * page-not-responding at the deadline.
+ */
+describe("T447 a keyboard dispatch that opens a dialog", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    installChrome();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const DIALOG: CurrentDialog = {
+    id: "d1",
+    type: "alert",
+    message: "Saved!",
+    openedAt: T0,
+    tabId: AGENT_TAB,
+  };
+
+  /** A page whose `matches` input never returns, and whose dialog map reports the alert from then on. */
+  async function dialogOn(matches: (method: string, params?: Record<string, unknown>) => boolean) {
+    let open = false;
+    const built = await harness({
+      role: "textbox",
+      currentDialog: (tabId) => (open && tabId === AGENT_TAB ? DIALOG : undefined),
+    });
+    built.browser.hooks.hold = (method, params) => {
+      if (!matches(method, params)) return undefined;
+      open = true;
+      return new Promise(() => {});
+    };
+    return built;
+  }
+
+  /** Runs one call for a second - far inside the deadline - and past the deadline afterwards. */
+  async function answeredWithin(
+    runner: { run(request: AgentNativeRequest): Promise<AgentNativeResponse> },
+    call: AgentNativeRequest,
+  ): Promise<AgentNativeResponse | undefined> {
+    let response: AgentNativeResponse | undefined;
+    void runner.run(call).then((answer) => {
+      response = answer;
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const early = response;
+    // The held dispatch's own deadline passes afterwards and must surface nothing.
+    await vi.advanceTimersByTimeAsync(CONTENT_OPERATION_DEADLINE_MS);
+    expect(response).toEqual(early);
+    return early;
+  }
+
+  const isKey = (method: string) => method === "Input.dispatchKeyEvent" || method === "Input.insertText";
+
+  it("a key whose dispatch never returns answers with the dialog it opened", async () => {
+    const { runner } = await dialogOn(isKey);
+
+    const response = await answeredWithin(runner, request("key", { key: "Enter" }));
+
+    expect(response?.outcome).toBe("ok");
+    expect(response?.result).toMatchObject({ dialog: DIALOG });
+    expect(observed(response)).toMatchObject({ effect: "key-pressed", verified: false, verdict: "target-unconfirmed" });
+  });
+
+  it("typed text whose dispatch never returns answers with the dialog it opened", async () => {
+    const { runner } = await dialogOn(isKey);
+
+    const response = await answeredWithin(runner, request("type", { text: "a", mode: "insert" }));
+
+    expect(response?.outcome).toBe("ok");
+    expect(response?.result).toMatchObject({ dialog: DIALOG });
+    expect(observed(response)).toMatchObject({ effect: "text-entered", verified: false, verdict: "target-unconfirmed" });
+  });
+
+  it("the focusing click of a keyboard call is raced the same way, and no key follows it", async () => {
+    const { runner, browser } = await dialogOn(
+      (method, params) => method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased",
+    );
+
+    const response = await answeredWithin(
+      runner,
+      request("type", { target: { ref: "t_press" }, text: "a", mode: "insert" }),
+    );
+
+    expect(response?.outcome).toBe("ok");
+    expect(response?.result).toMatchObject({ dialog: DIALOG });
+    expect(observed(response)).toMatchObject({ effect: "text-entered", charactersChanged: 0, verified: false });
+    expect(browser.sent.filter(isKey)).toEqual([]);
   });
 });

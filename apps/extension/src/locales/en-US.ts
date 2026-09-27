@@ -154,15 +154,16 @@ export const messages = {
   "agent.forwardingDisclosure":
     "Everything this agent reads from your pages stays on this device between the browser and the agent, but the agent may send it on to its own model.",
   "agent.accept": "Allow pairing",
-  "agent.unpair": "Unpair this agent",
+  "agent.unpair": "Unpair",
   "agent.sitesTitle": "Sites the agent may act on",
   "agent.sitesNone": "No site has been decided on yet.",
   "agent.siteModeLabel": "What the agent may do on {site}",
   "agent.modeAsk": "Ask me every time",
   "agent.modeFollowAPlan": "Follow a plan I approve",
   "agent.modeSkipChecks": "Act without asking",
-  "agent.diagnosticsLabel": "Allow diagnostics on {site}",
-  "agent.diagnosticsGranted": "Diagnostics are allowed on this site",
+  // 016 FR-236: the visible text says what the grant allows; the accessible name adds the site.
+  "agent.diagnosticsLabel": "Allow reading console and network logs on {site}",
+  "agent.diagnosticsText": "Allow reading console and network logs",
   "agent.promptTitle": "The agent wants to do something on a page",
   "agent.promptTarget": "{role}: {label}",
   "agent.promptCropAlt": "The spot on the page the agent would act on",
@@ -200,18 +201,36 @@ export const messages = {
   "agent.details.lastDisconnectReason": "Reason: {reason}",
   "agent.details.none": "Nothing recorded yet.",
   "agent.status.connected": "Connected",
-  "agent.status.menu": "Options",
+  // 016 FR-223: the row counts sessions and names no agent; the menu names each paired agent.
+  "agent.status.sessions": "{n} sessions",
+  "agent.status.sessionsOne": "1 session",
+  "agent.status.sessionsNone": "no sessions",
+  "agent.status.unpairAgent": "Unpair {agent}",
+  "agent.status.menu": "More options",
+  // 016 FR-237: "Revoke" on screen, the site in the accessible name.
   "agent.siteRevoke": "Revoke {site}",
-  "agent.sitePermissive": "Acts without asking",
-  "agent.session.label": "Session {id}",
+  "agent.siteRevokeText": "Revoke",
+  // 0.8.0 card copy the 016 card no longer shows; kept while the packaged gates still read it (T453).
   "agent.session.sites": "Working on {sites}",
-  "agent.session.noSites": "Holding no tabs",
+  "agent.session.release": "Give my tabs back",
+  // 016 FR-228 – FR-234: the card's title, subtitle, state line, technical details and controls.
+  "agent.session.started": "started {time}",
+  "agent.session.holds": "holds {n} tabs: {sites}",
+  "agent.session.holdsOne": "holds 1 tab: {sites}",
+  "agent.session.noSites": "holds no tabs",
+  "agent.session.siteSeparator": ", ",
   "agent.session.working": "Working",
   "agent.session.waiting": "Waiting for you",
-  "agent.session.stop": "Stop",
-  "agent.session.release": "Give my tabs back",
+  "agent.session.idle": "Idle · last action {ago}",
+  "agent.session.idleUnknown": "Idle",
+  "agent.session.justNow": "just now",
+  "agent.session.minutesAgo": "{m} min ago",
+  "agent.session.hoursAgo": "{h} h {m} min ago",
+  "agent.session.id": "Session ID: {id}",
+  "agent.session.stop": "End session",
+  "agent.session.takeBack": "Take back tabs ({n})",
   // 014 FR-178: the second control, and the line for a press that found nothing running.
-  "agent.session.interrupt": "Interrupt",
+  "agent.session.interrupt": "Interrupt this step",
   "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",
   // 008 FR-109: the one line a card says about a recording - while it runs, when it is full, and
   // after the file is written.
@@ -282,7 +301,10 @@ export const messages = {
   "agent.uploadDecline": "Refuse",
   // 014 FR-191, FR-192: the directories the host may read uploads from, listed beside the sites.
   "agent.uploadRootsTitle": "Allowed upload directories",
-  "agent.uploadRootsPath": "Kept by the local host in {path}",
+  // 0.9.0 owner check: say what the list governs and that it is empty; the file path is a quiet last line.
+  "agent.uploadRootsIntro": "The agent may put files from your computer into a page only from these directories.",
+  "agent.uploadRootsEmpty": "None yet. When the agent needs a file from anywhere else it asks you first; a directory you answer \"These directories from now on\" for is listed here.",
+  "agent.uploadRootsPath": "List file: {path}",
   "agent.uploadRootsMalformed": "The host could not read that file as a list, so no directory is allowed.",
   // S3 review F4: and what it did with the file it could not read, which is the owner's own document.
   "agent.uploadRootsPreserved":

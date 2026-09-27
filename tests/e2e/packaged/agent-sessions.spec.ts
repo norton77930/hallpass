@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
-import { AGENT_GROUP_TITLE } from "../../../apps/extension/src/chrome-adapters/tab-groups.js";
+import { isAgentGroupTitle } from "../fixtures/agent-group.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -66,7 +66,7 @@ test.describe("agent sessions", () => {
       tabId: ownerTabId,
       copy,
     });
-    await panel.waitForText(ui("agent.appTitle"));
+    await waitForAgentPanel(panel);
 
     let alpha: McpHarnessClient | undefined;
     let beta: McpHarnessClient | undefined;
@@ -120,8 +120,9 @@ test.describe("agent sessions", () => {
       expect(groupA.groupId).toBeGreaterThan(-1);
       expect(groupB.groupId).toBeGreaterThan(-1);
       expect(groupA.groupId, "two live sessions must not share one group").not.toBe(groupB.groupId);
-      expect(groupA.title).toBe(AGENT_GROUP_TITLE);
-      expect(groupB.title).toBe(AGENT_GROUP_TITLE);
+      // 016 FR-238: "Hallpass", possibly with the working prefix a moment after the call (FR-239).
+      await expect.poll(async () => isAgentGroupTitle((await groupOf(tabA)).title), { timeout: 15_000 }).toBe(true);
+      await expect.poll(async () => isAgentGroupTitle((await groupOf(tabB)).title), { timeout: 15_000 }).toBe(true);
 
       /**
        * Each session is told which tabs are its own, and only its own (FR-055).
@@ -231,8 +232,8 @@ test.describe("agent sessions", () => {
       beta = undefined;
 
       await expect
-        .poll(async () => (await groupOf(tabB)).title, { timeout: 15_000, intervals: [250] })
-        .not.toBe(AGENT_GROUP_TITLE);
+        .poll(async () => isAgentGroupTitle((await groupOf(tabB)).title), { timeout: 15_000, intervals: [250] })
+        .toBe(false);
       // Beta's tabs are the owner's now, so they stay open.
       expect(await extensionWorker.evaluate(async (id: number) => (await chrome.tabs.get(id)).url, tabB)).toBe(
         `${SITE}/form`,

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 /**
  * Drives the MCP server exactly as Claude Code does: spawn `dist/mcp-server.js`, speak JSON-RPC
@@ -74,6 +75,16 @@ export type StartMcpClientOptions = {
   env?: Record<string, string>;
   /** The server file to spawn; `MCP_SERVER_ENTRY` unless a test has a specific build to prove. */
   entry?: string;
+  /**
+   * The working directory the server is spawned in (016 FR-226, R-203). Absent, the SDK's default
+   * stands - the test runner's own - which is what every caller written before 016 was proven against.
+   */
+  cwd?: string;
+  /**
+   * Roots this client advertises and answers `roots/list` with (016 R-203). Present, the client
+   * declares the `roots` capability as Claude Code may; absent, it declares none, as before.
+   */
+  roots?: Array<{ uri: string; name?: string }>;
 };
 
 export async function startMcpClient(options: StartMcpClientOptions = {}): Promise<McpHarnessClient> {
@@ -82,6 +93,7 @@ export async function startMcpClient(options: StartMcpClientOptions = {}): Promi
     command: process.execPath,
     args: [options.entry ?? MCP_SERVER_ENTRY],
     stderr: "pipe",
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     env: {
       ...(process.env as Record<string, string>),
       // 004/R-111: the server dials the relay and waits 5 s between attempts, which is the right
@@ -93,7 +105,14 @@ export async function startMcpClient(options: StartMcpClientOptions = {}): Promi
       ...options.env,
     },
   });
-  const client = new Client({ name: options.clientName ?? "claude-code", version: "0.0.0" });
+  const roots = options.roots;
+  const client = new Client(
+    { name: options.clientName ?? "claude-code", version: "0.0.0" },
+    roots === undefined ? undefined : { capabilities: { roots: { listChanged: false } } },
+  );
+  if (roots !== undefined) {
+    client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: roots.map((root) => ({ ...root })) }));
+  }
   await client.connect(transport);
   transport.stderr?.on("data", (chunk: Buffer) => {
     stderrText += chunk.toString("utf8");

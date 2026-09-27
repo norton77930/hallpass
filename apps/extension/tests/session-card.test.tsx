@@ -1,5 +1,8 @@
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentPanelCommandSchema, type AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../src/locales/catalog.js";
 import { activityText } from "../src/side-panel/agent/SessionCard.js";
@@ -73,12 +76,13 @@ describe("T191 session card", () => {
 
     const a = card("session-a");
     expect(a.textContent).toContain("Claude Code");
-    expect(a.textContent).toContain(ui("agent.session.sites").replace("{sites}", "shop.test"));
+    // 016 FR-229: the held tabs are counted and the sites named, in the subtitle.
+    expect(a.textContent).toContain("holds 2 tabs: shop.test");
     expect(a.textContent).not.toContain("Cart - Shop");
     expect(a.textContent).not.toContain("https://shop.test/cart");
     const b = card("session-b");
     expect(b.textContent).toContain("Second Agent");
-    expect(b.textContent).toContain(ui("agent.session.sites").replace("{sites}", "docs.test, api.test"));
+    expect(b.textContent).toContain("holds 1 tab: docs.test, api.test");
   });
 
   it("names each session by its own greeting, and falls back to the paired name only when the projection carries none", () => {
@@ -122,7 +126,9 @@ describe("T191 session card", () => {
     renderShell();
     project(port, SESSIONS);
 
-    fireEvent.click(within(card("session-a")).getByRole("button", { name: ui("agent.session.release") }));
+    fireEvent.click(
+      within(card("session-a")).getByRole("button", { name: ui("agent.session.takeBack").replace("{n}", "2") }),
+    );
 
     expect(port.sent).toEqual([{ type: "ui.agent.session-release", payload: { sessionId: "session-a" } }]);
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
@@ -461,8 +467,259 @@ describe("T191 session card", () => {
     renderShell("zh-TW");
     project(port, SESSIONS);
 
-    expect(screen.getAllByRole("button", { name: "停止" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "結束工作階段" })).toHaveLength(2);
     expect(screen.queryByText(ui("agent.session.working"))).toBeNull();
-    expect(card("session-b").textContent).toContain("等你決定");
+    expect(card("session-b").textContent).toContain("等你回答");
+  });
+});
+
+/**
+ * 016/T437 — a card the owner can read (US2, FR-225 – FR-234, contracts/panel.md).
+ *
+ * The 0.8.0 card titled a session with eight hex characters and always offered three buttons, one
+ * of them greyed out. This one says which agent and which folder, when it started, what it holds,
+ * what it is doing now - and offers only the controls that would do something. The id is still
+ * there for the owner who is asked for it, folded under technical details and nowhere else.
+ */
+describe("016 T437 session card", () => {
+  let port: FakeAgentPort;
+  /** Local wall-clock times, so the expected `HH:mm` is the one the card computes in any zone. */
+  const STARTED = new Date(2026, 8, 27, 14, 2, 0).toISOString();
+  const NOW = new Date(2026, 8, 27, 15, 0, 0).getTime();
+  const ago = (ms: number): string => new Date(NOW - ms).toISOString();
+  const MINUTE = 60_000;
+  const TWO_TABS = [
+    { tabId: 7, url: "https://shop.test/cart", title: "Cart", active: false, holder: "this" as const },
+    { tabId: 8, url: "https://localhost:3100/", title: "Dev", active: false, holder: "this" as const },
+  ];
+  const base = {
+    sessionId: "0123abcd-4567-89ef-0123-456789abcdef",
+    agentId: "agent-1",
+    tabs: TWO_TABS,
+    sites: ["shop.test", "localhost:3100"],
+    state: "working" as const,
+    inFlight: 1,
+    startedAt: STARTED,
+    lastActivityAt: ago(0),
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(NOW);
+    port = installAgentPort();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+    vi.useRealTimers();
+  });
+
+  const only = (): HTMLElement => {
+    const node = document.querySelector("[data-session-id]");
+    if (!(node instanceof HTMLElement)) throw new Error("no card");
+    return node;
+  };
+  const buttons = (): string[] => within(only()).getAllByRole("button").map((button) => button.textContent ?? "");
+
+  it("titles the card with the agent and its folder, as inert text", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...base, label: "shop-frontend" }] });
+
+    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code · shop-frontend");
+  });
+
+  it("cuts a long folder name with an ellipsis and keeps the full text in the title", () => {
+    const long = "報表工具-quarterly-reconciliation-archive-2026";
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...base, label: long }] });
+
+    const heading = within(only()).getByRole("heading");
+    expect(heading.textContent).not.toContain(long);
+    expect(heading.textContent).toContain("…");
+    expect(heading.querySelector(`[title="${long}"]`)).not.toBeNull();
+  });
+
+  it("falls back to the start time when no folder was reported, in both locales", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [base] });
+    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code · started 14:02");
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [base] });
+    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code · 14:02 開始");
+  });
+
+  it("says when it started and what it holds, or that it holds nothing, in both locales", () => {
+    const labelled = { ...base, label: "shop-frontend" };
+    renderShell();
+    project(port, { ...IDLE, sessions: [labelled] });
+    expect(only().textContent).toContain("started 14:02 · holds 2 tabs: shop.test, localhost:3100");
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [labelled] });
+    expect(only().textContent).toContain("14:02 開始 · 持有 2 個分頁：shop.test、localhost:3100");
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [], sites: [] }] });
+    expect(only().textContent).toContain("14:02 開始 · 沒有持有分頁");
+    cleanup();
+
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [], sites: [] }] });
+    expect(only().textContent).toContain("started 14:02 · holds no tabs");
+  });
+
+  // 0.9.0 owner check: without a folder the title already ends in the start time, so the subtitle
+  // does not say it a second time.
+  it("does not repeat the start time in the subtitle when the title carries it, in both locales", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...base, tabs: [], sites: [] }] });
+    expect(only().querySelector(".agent-session-sites")?.textContent).toBe("holds no tabs");
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [base] });
+    expect(only().querySelector(".agent-session-sites")?.textContent).toBe("持有 2 個分頁：shop.test、localhost:3100");
+  });
+
+  it("says working, waiting for you, or idle with the last action, and marks a waiting card", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [base] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Working");
+
+    project(port, { ...IDLE, sessions: [{ ...base, state: "waiting" }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Waiting for you");
+    expect(only().getAttribute("data-session-state")).toBe("waiting");
+
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(30_000) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action just now");
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(12 * MINUTE) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action 12 min ago");
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(75 * MINUTE) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action 1 h 15 min ago");
+  });
+
+  it("says the three states and the last action in zh-TW", () => {
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [base] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("正在操作");
+    project(port, { ...IDLE, sessions: [{ ...base, state: "waiting" }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("等你回答");
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(10_000) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 上次動作：剛剛");
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(12 * MINUTE) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 上次動作：12 分鐘前");
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(75 * MINUTE) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 上次動作：1 小時 15 分鐘前");
+  });
+
+  it("moves the last action on once a minute without a new projection", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(30_000) }] });
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action just now");
+
+    act(() => {
+      vi.advanceTimersByTime(MINUTE);
+    });
+
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action 1 min ago");
+    expect(port.sent, "the clock is the panel's own; it asks the worker for nothing").toEqual([]);
+  });
+
+  it("shows the session id under technical details and nowhere else, in both locales", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...base, label: "hallpass" }] });
+
+    const details = only().querySelector("details");
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector("summary")?.textContent).toBe("Technical details");
+    expect(details?.textContent).toContain(`Session ID: ${base.sessionId}`);
+    const rest = only().cloneNode(true) as HTMLElement;
+    rest.querySelector("details")?.remove();
+    expect(rest.textContent).not.toContain(base.sessionId);
+    expect(rest.textContent).not.toContain(base.sessionId.slice(-8));
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [base] });
+    expect(only().querySelector("details summary")?.textContent).toBe("技術資訊");
+    expect(only().querySelector("details")?.textContent).toContain(`工作階段 ID：${base.sessionId}`);
+  });
+
+  it("offers only the controls that would do something, end session always first", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [base] });
+    expect(buttons()).toEqual(["End session", "Interrupt this step", "Take back tabs (2)"]);
+
+    project(port, { ...IDLE, sessions: [{ ...base, state: "waiting", tabs: [TWO_TABS[0]!] }] });
+    expect(buttons()).toEqual(["End session", "Take back tabs (1)"]);
+
+    project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, tabs: [], sites: [] }] });
+    expect(buttons()).toEqual(["End session"]);
+  });
+
+  it("names the three controls in zh-TW", () => {
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [base] });
+    expect(buttons()).toEqual(["結束工作階段", "中斷這一步", "收回分頁（2）"]);
+  });
+
+  it("ends and takes back tabs for exactly this session", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [base] });
+
+    fireEvent.click(within(only()).getByRole("button", { name: "End session" }));
+    fireEvent.click(within(only()).getByRole("button", { name: "Take back tabs (2)" }));
+
+    expect(port.sent).toEqual([
+      { type: "ui.agent.session-stop", payload: { sessionId: base.sessionId } },
+      { type: "ui.agent.session-release", payload: { sessionId: base.sessionId } },
+    ]);
+  });
+
+  it.each(["cyan", "green", "purple", "pink", "orange", "grey", "blue"] as const)(
+    "draws a %s stripe",
+    (colour) => {
+      renderShell();
+      project(port, { ...IDLE, sessions: [{ ...base, colour }] });
+
+      const stripe = only().querySelector(".agent-session-stripe");
+      expect(stripe?.getAttribute("data-colour")).toBe(colour);
+      expect(stripe?.getAttribute("aria-hidden")).toBe("true");
+    },
+  );
+
+  it("draws no stripe for a session the worker gave no colour", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [base] });
+
+    expect(only().querySelector(".agent-session-stripe")).toBeNull();
+  });
+
+  it("styles a waiting card's border and each stripe from tokens, light and dark", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const css = readFileSync(resolve(here, "../src/side-panel/agent/agent.css"), "utf8");
+    const tokens = readFileSync(resolve(here, "../src/side-panel/agent/tokens.css"), "utf8");
+    expect(css).toMatch(/\.agent-session\[data-session-state="waiting"\]\s*\{[^}]*border-color:\s*var\(--warn\)/);
+    const dark = tokens.indexOf("@media (prefers-color-scheme: dark)");
+    for (const colour of ["cyan", "green", "purple", "pink", "orange", "grey", "blue"]) {
+      expect(css).toMatch(new RegExp(`\\[data-colour="${colour}"\\]\\s*\\{[^}]*var\\(--group-${colour}\\)`));
+      expect(tokens.slice(0, dark)).toMatch(new RegExp(`--group-${colour}:\\s*#[0-9a-f]{6};`));
+      expect(tokens.slice(dark)).toMatch(new RegExp(`--group-${colour}:\\s*#[0-9a-f]{6};`));
+    }
+  });
+
+  it("never lets the shell's column squeeze a card to nothing (its overflow is hidden for the stripe)", () => {
+    // Measured on the real panel 2026-09-27: with a question card and the site list in the same
+    // column, both session cards rendered 0 px tall - a flex item whose overflow is not visible has
+    // no content-based minimum height, so the column shrank it away. jsdom cannot lay out, so the
+    // rule itself is the check.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const css = readFileSync(resolve(here, "../src/side-panel/agent/agent.css"), "utf8");
+    expect(css).toMatch(/\.agent-shell \.agent-session\s*\{[^}]*flex-shrink:\s*0/);
   });
 });

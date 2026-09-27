@@ -4,7 +4,7 @@ import { ATTENTION_BADGE_TEXT } from "../../../apps/extension/src/chrome-adapter
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { acceptPairing, pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -136,7 +136,7 @@ test.describe("agent first run: the panel nobody opened", () => {
 
       // --- Scenario 2: the person opens the panel, the card is already there, and the call lands. ---
       panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-      await panel.waitForText(ui("agent.appTitle"));
+      await waitForAgentPanel(panel);
       // `acceptPairing` fails loudly if the card is not on screen, so its `accepted` is FR-149's
       // evidence: the request raised into a closed panel was waiting in the panel that opened.
       expect(await acceptPairing(panel, { locale, timeoutMs: 60_000 })).toBe("accepted");
@@ -178,7 +178,7 @@ test.describe("agent first run: the panel nobody opened", () => {
     let heldTab: number | undefined;
     try {
       panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-      await panel.waitForText(ui("agent.appTitle"));
+      await waitForAgentPanel(panel);
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));
@@ -355,7 +355,7 @@ test.describe("agent first run: the panel nobody opened", () => {
     let heldTab: number | undefined;
     try {
       const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
-      await panel.waitForText(ui("agent.appTitle"));
+      await waitForAgentPanel(panel);
       client = await startMcpClient({ clientName: "Claude Code" });
       const live = client;
       await panel.clickIfPresent(ui("agent.retry"));

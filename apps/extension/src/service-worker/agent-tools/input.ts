@@ -541,7 +541,9 @@ export function isInputDispatchDeadline(error: unknown): error is InputDispatchD
  *
  * The command itself cannot be taken back. Its late answer settles a promise nobody reads any more:
  * both of its outcomes are handled below, so a late failure is never an unhandled rejection, and
- * the caller has already stopped - nothing after the timed-out event is sent.
+ * the caller has already stopped - nothing after the timed-out event is sent. That includes the
+ * button-up of a press whose button-down timed out, deliberately (016/FR-243, 015 review F3): a
+ * release sent after the call answered would be a second input the agent was never told about.
  */
 function dispatchInput(
   attachments: AgentInputAttachments,
