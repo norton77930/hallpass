@@ -12,7 +12,7 @@ Hallpass 是一個 Chrome 擴充功能加一個本機 MCP server。Claude Code�
 > **平台**:Windows 11 + Google Chrome。Chromium 系瀏覽器有註冊但未驗證;macOS / Linux 尚未支援,見 issue #1。
 > **授權**:Apache-2.0。
 
-![coding agent 在使用者的 Chrome 裡搜尋維基百科；每一格都標出動作、步驟編號與 Hallpass 浮水印](docs/media/demo.gif)
+![coding agent 在使用者的 Chrome 裡用 DuckDuckGo 搜尋：輸入前、按 Enter 前，側邊面板都先問使用者，agent 等到按下「Allow once」才動手。頁面那一半是 Hallpass 自己的錄影，帶有動作標籤、步驟編號與浮水印](docs/media/demo.gif)
 
 ## 文件
 

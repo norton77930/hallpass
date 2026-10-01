@@ -21,7 +21,7 @@ stop the agent at any moment and take your tabs back.
 > not supported yet — see [issue #1](../../issues/1).
 > **Licence**: Apache-2.0.
 
-![A coding agent searches Wikipedia in the user's Chrome; every frame carries the action label, the step counter and the Hallpass watermark](docs/media/demo.gif)
+![A coding agent searches DuckDuckGo in the user's Chrome: before it types and before it presses Enter, the side panel asks the user and the agent waits for Allow once. The page half is Hallpass's own recording, with the action label, the step counter and the watermark](docs/media/demo.gif)
 
 - **Your browser, your logins.** No separate profile, no browser started in debugging mode, no
   cookies copied anywhere.
