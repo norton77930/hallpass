@@ -11,6 +11,8 @@ import {
   INTERRUPT_HINTS,
   PAIRING_DECLINED_MARKER,
   PAIRING_REFUSAL_HINTS,
+  SITE_PLAN_FEATURE,
+  SITE_PLAN_UNAVAILABLE,
   type AgentToolName,
 } from "@hallpass/contracts";
 import {
@@ -101,6 +103,8 @@ describe("T012 agent MCP server", () => {
       // 008/S4: the worker hears the page's dialogs and answers them, so it is offered too - and
       // the pending list is empty again, which is the state it should usually be in.
       "dialog",
+      // 017/R-251: always listed; an extension without `site-plan` is answered by the host.
+      "propose_sites",
     ]);
   });
 
@@ -2543,5 +2547,84 @@ describe("016 pairing wait extension", () => {
       reason: "not-paired: no answer",
       hint: ATTENTION_SENTENCES.pairing,
     });
+  });
+});
+
+/**
+ * 017/T462 — the host half of `propose_sites` (R-248, R-251, FR-265).
+ *
+ * The tool is listed before any pairing says which extension is on the other side, so the host
+ * checks the worker's `site-plan` advertisement before forwarding: an extension that never said so
+ * is answered here, with a hint to reload it, and is sent nothing.
+ */
+describe("017 site plan", () => {
+  let dataDir = "";
+  let client: McpHarnessClient | undefined;
+  let worker: FakeAgentWorker | undefined;
+
+  const ARGS = { origins: ["https://example.com", "https://docs.example.org"], purpose: "Compare two pages" };
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), "hallpass-017-site-plan-"));
+  });
+
+  afterEach(async () => {
+    await worker?.close();
+    await client?.close();
+    worker = undefined;
+    client = undefined;
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it("lists propose_sites", async () => {
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    expect(await client.listToolNames()).toContain("propose_sites");
+  });
+
+  it("answers unavailable to an extension that did not advertise site-plan, and sends it nothing", async () => {
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    worker = await startFakeAgentWorker({
+      env: { LOCALAPPDATA: dataDir },
+      pairing: "accept",
+      features: ["upload-consent"],
+      answers: { propose_sites: { callId: "", outcome: "ok", result: { approved: [], leftOut: [] } } },
+    });
+    await worker.waitForHello();
+
+    const result = await client.callTool("propose_sites", ARGS);
+
+    expect(result.json).toEqual({
+      outcome: "unavailable",
+      reason: SITE_PLAN_UNAVAILABLE.reason,
+      hint: SITE_PLAN_UNAVAILABLE.hint,
+    });
+    expect(SITE_PLAN_UNAVAILABLE.reason).toBe("extension-too-old");
+    expect(SITE_PLAN_UNAVAILABLE.hint).toContain("reload the");
+    expect(worker.requests.map((request) => request.tool)).toEqual([]);
+  });
+
+  it("forwards the call unchanged to an extension that advertised site-plan", async () => {
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    worker = await startFakeAgentWorker({
+      env: { LOCALAPPDATA: dataDir },
+      pairing: "accept",
+      features: [SITE_PLAN_FEATURE],
+      answers: {
+        propose_sites: {
+          callId: "",
+          outcome: "ok",
+          result: { approved: ["https://example.com"], leftOut: ["https://docs.example.org"] },
+        },
+      },
+    });
+    await worker.waitForHello();
+
+    const result = await client.callTool("propose_sites", { ...ARGS, steps: ["read", "compare"] });
+
+    expect(result.isError, result.text).toBe(false);
+    expect(result.json).toEqual({ approved: ["https://example.com"], leftOut: ["https://docs.example.org"] });
+    expect(worker.requests.map((request) => ({ tool: request.tool, args: request.args }))).toEqual([
+      { tool: "propose_sites", args: { ...ARGS, steps: ["read", "compare"] } },
+    ]);
   });
 });

@@ -204,6 +204,38 @@ describe("T191 prompt cards", () => {
     expect(screen.getByRole("button", { name: ui("agent.accept") })).toBeTruthy();
   });
 
+  /** 017/T476 (R-247): the site-plan question takes the top slot like the batch plan card, in arrival order. */
+  it("puts the site-plan question in the one question slot, in arrival order", () => {
+    renderShell();
+    const earlier = "2026-09-13T10:00:00.000Z";
+    const later = "2026-09-13T10:00:05.000Z";
+    const sitePlan = { proposalId: "proposal-1", sessionId: "session-a", origins: [SITE], purpose: "Check the fixtures", raisedAt: earlier };
+    const approve = (): HTMLElement | null => screen.queryByRole("button", { name: ui("agent.sitePlan.approve") });
+
+    project(port, { ...IDLE, sitePlan });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(approve()).toBeTruthy();
+
+    // A consent that arrived later waits behind it.
+    project(port, { ...IDLE, sitePlan, prompt: { ...PROMPT, raisedAt: later } });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(approve()).toBeTruthy();
+    expect(screen.queryByRole("button", { name: ui("agent.allowOnce") })).toBeNull();
+
+    // One that arrived earlier is answered first, and the site plan is shown once it is gone.
+    project(port, { ...IDLE, sitePlan: { ...sitePlan, raisedAt: later }, prompt: { ...PROMPT, raisedAt: earlier } });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(approve()).toBeNull();
+    expect(screen.getByRole("button", { name: ui("agent.allowOnce") })).toBeTruthy();
+    project(port, { ...IDLE, sitePlan: { ...sitePlan, raisedAt: later } });
+    expect(approve()).toBeTruthy();
+
+    // A second proposal, even from the same session, moves focus to the card again (R-130).
+    (document.activeElement as HTMLElement).blur();
+    project(port, { ...IDLE, sitePlan: { ...sitePlan, proposalId: "proposal-2", raisedAt: later } });
+    expect(document.activeElement).toBe(screen.getByRole("dialog").querySelector("button, input"));
+  });
+
   /**
    * 008/T227 — the two questions a dialog raises, and the one thing that is told rather than asked
    * (FR-114, FR-115, US3 scenarios 5, 6 and 10).

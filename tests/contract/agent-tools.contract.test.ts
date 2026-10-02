@@ -21,6 +21,9 @@ describe("T005 agent tools contract", () => {
       "stopped",
       "timed-out",
       "failed",
+      // 017: a declined site plan, and a site plan the extension cannot ask about.
+      "declined",
+      "unavailable",
     ]);
     const outcome = contractSchema("agentToolOutcomeSchema");
     for (const value of contractExport<readonly string[]>("AGENT_TOOL_OUTCOMES")) {
@@ -73,6 +76,8 @@ describe("T005 agent tools contract", () => {
       // 008: recording the session as a GIF, and answering the dialogs a page opens.
       "gif_recorder",
       "dialog",
+      // 017: proposing a session site plan the owner approves once.
+      "propose_sites",
     ]);
     // Every name has an argument schema, and nothing else does: the registry and the enum are one
     // list, so a tool cannot be registered without a declared argument shape.

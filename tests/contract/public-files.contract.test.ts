@@ -170,14 +170,15 @@ describe("T257 the README reads in the order FR-132 fixes", () => {
     expect(positions, `headings found: ${headings.join(" / ")}`).toEqual([...positions].sort((a, b) => a - b));
   });
 
-  it("names every tool the host offers, all 33 of them", () => {
+  it("names every tool the host offers, all 34 of them", () => {
     const offered = new Set<string>([
       ...AGENT_TOOL_DESCRIPTORS.map((descriptor) => descriptor.name),
       ...IMPLEMENTED_AGENT_TOOL_NAMES,
       // Listing tabs is answered by the host itself (`mcp-server.ts`), not by a contract descriptor.
       "tabs_context",
     ]);
-    expect(offered.size).toBe(33);
+    // 017 adds `propose_sites`, the thirty-fourth.
+    expect(offered.size).toBe(34);
     for (const name of offered) {
       expect(readme, `the README's tool table does not name \`${name}\``).toContain(`\`${name}\``);
     }

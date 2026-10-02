@@ -89,6 +89,8 @@ import { createAgentStopSignals, STEP_SEPARATOR, type AgentToolRequest } from ".
 import { createAgentTabTools } from "./agent-tools/tabs.js";
 import { createAgentUpload } from "./agent-tools/upload.js";
 import { createAgentWait } from "./agent-tools/wait.js";
+import { createAgentSitePlanRunner, type AgentSitePlanApproval } from "./agent-tools/site-plan.js";
+import { createSitePlanStore, SITE_PLAN_NOT_RECORDED, type SessionSitePlan } from "./site-plan-store.js";
 
 /**
  * The agent path's composition root (003/T013, T018).
@@ -366,8 +368,29 @@ export type AgentPanelPresence = {
   onPresenceChange: (listener: (visible: boolean) => void) => void;
 };
 
+/** 017 R-246: defined beside its one consumer, the `propose_sites` runner. */
+export type { AgentSitePlanApproval } from "./agent-tools/site-plan.js";
+
+/**
+ * The session site plan, as the runner and the panel commands reach it (017 R-246, R-248).
+ *
+ * The only writer of the worker's plan store. Its end paths - session end, unpair - are the
+ * runtime's own and are not exposed: nothing outside the runtime ends a plan except the owner's
+ * withdraw.
+ */
+export type AgentSitePlans = {
+  /** The owner approved these origins for the session: replaces its plan (FR-260), then notifies. */
+  approve(sessionId: string, origins: readonly string[]): Promise<AgentSitePlanApproval>;
+  /** The owner's "withdraw site plan" (FR-259): the session's plan goes at once, then notifies. */
+  withdraw(sessionId: string): Promise<void>;
+  /** The session's active plan, for marking already-approved origins on a new proposal (FR-260). */
+  forSession(sessionId: string): Promise<SessionSitePlan | undefined>;
+};
+
 export type AgentRuntime = {
   bridge: AgentBridge;
+  /** 017: the session site plan's approvals and withdrawals (see `AgentSitePlans`). */
+  sitePlans: AgentSitePlans;
   pairing: PairingController;
   tabs: AgentTabManager;
   /** The owner's per-site decisions; the panel reads and writes them through this runtime. */
@@ -631,6 +654,41 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    */
   const plans = createStatedPlans();
   const stops = createAgentStopSignals();
+  /**
+   * The sites the owner approved for each session (017 R-246): `chrome.storage.session`, looked up
+   * on every call by the store itself - never `{ session: undefined }`, which would be a store that
+   * writes nowhere. Its writes are serialised inside it; this runtime is its only writer.
+   */
+  const sitePlanStore = createSitePlanStore();
+  /**
+   * The gate's input (017 R-245): does *this session's* plan name the site the runner is about to
+   * decide on - the tab's current top-level origin, as `siteOfUrl` keys the site modes. A plan
+   * that cannot be read covers nothing.
+   *
+   * And was it approved for the agent this session belongs to *now* (017 review M1): a known id can
+   * be re-announced by another paired agent, and after a worker restart any paired agent's greeting
+   * with a stored id creates the session under its own agent. A session the worker does not know
+   * belongs to nobody, and nobody's plan covers it.
+   */
+  async function sitePlanCovers(sessionId: string, site: string): Promise<boolean> {
+    const agentId = sessions.get(sessionId)?.agentId;
+    if (agentId === undefined) return false;
+    try {
+      return await sitePlanStore.covers(sessionId, site, agentId);
+    } catch {
+      reportTestDiagnostic("agent.site-plan.read-failed");
+      return false;
+    }
+  }
+  /** A session's plan is over (it ended, or its agent was unpaired). Never throws: ending goes on. */
+  async function endSitePlans(sessionIds: readonly string[]): Promise<void> {
+    if (sessionIds.length === 0) return;
+    try {
+      await sitePlanStore.clearMany(sessionIds);
+    } catch {
+      reportTestDiagnostic("agent.site-plan.clear-failed");
+    }
+  }
   /**
    * What each session's tab group says it is doing (016 FR-238 - FR-240, R-207): told by the stop
    * registry when a session's call count moves, and by the prompt controller (above) when a
@@ -979,6 +1037,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
     statedPlan: (site) => plans.get(site),
     onAdmitted: (site, step) => plans.admit(site, step),
+    // 017 FR-254: accepting a dialog on a site this session's plan names is a covered page action.
+    sitePlanCovers,
     reportDiagnostic: reportTestDiagnostic,
   });
   /**
@@ -1057,6 +1117,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // each approved step from being admitted twice. A batch is the only thing that states one.
     statedPlan: (site) => plans.get(site),
     onAdmitted: (site, step) => plans.admit(site, step),
+    /**
+     * 017 R-245: the session's approved site plan, asked on every gated effect - ref and coordinate
+     * alike, standalone or as a batch step, since a batch step is dispatched here like any call.
+     * `evaluate`, the uploads and a forced leave are decided by runners that are not handed it.
+     */
+    sitePlanCovers,
     // The two halves of 008/US3 an effect owns: what the owner just consented to on this tab, and
     // what the page put on the screen because of it (R-139, FR-111).
     onApproved: (tabId, tool) => dialogs.noteApprovedEffect(tabId, tool),
@@ -1618,6 +1684,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     if (downloadTools.handles(request.tool)) {
       return downloadTools.run(request);
     }
+    if (sitePlanRunner.handles(request.tool)) {
+      return sitePlanRunner.run(request);
+    }
     if (recordingTools.handles(request.tool)) {
       const answered = await recordingTools.run(request);
       // start/stop/export/clear all move the card's recording line (FR-109); the panel re-reads it.
@@ -1633,6 +1702,64 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     recorder,
     // `start` photographs the page the session is working on; the tool names no tab of its own.
     mainTabId: (sessionId) => tabs.mainTabId(sessionId),
+  });
+
+  /** 017 FR-263: one line on the session's card per change of its plan; the count, never the sites. */
+  function noteSitePlan(sessionId: string, outcome: "approved" | "replaced" | "withdrawn" | "ended", count: number): void {
+    noteActivity(sessionId, { at: Date.now(), kind: "site-plan", outcome, message: String(count) });
+  }
+
+  /**
+   * The owner approved these origins for the session (017 R-246, FR-260): the one writer of a plan,
+   * reached only from the owner's answer on the card (the runner) and from the runtime's own API.
+   *
+   * Checked against the live session and its pairing: an approval for a session that is over would
+   * sit in storage for whoever greets next under that id (a fresh greeting after an owner Stop
+   * reuses it), and one for an unpaired agent would come back with the pairing.
+   */
+  async function approveSitePlan(sessionId: string, origins: readonly string[]): Promise<AgentSitePlanApproval> {
+    const refusal = async (): Promise<AgentSitePlanApproval | undefined> => {
+      const live = sessions.get(sessionId);
+      if (!live) return { ok: false, reason: "session-ended" };
+      if (!(await pairing.isPaired(live.agentId))) return { ok: false, reason: "not-paired" };
+      return undefined;
+    };
+    const before = await refusal();
+    if (before) return before;
+    // Read before the write, so the card's line says whether this replaced a plan (FR-263).
+    const earlier = await sitePlanStore.forSession(sessionId).catch(() => undefined);
+    // `refusal` has just seen the session live; its agent is what an unpair clears the plan by.
+    const agentId = sessions.get(sessionId)?.agentId ?? "";
+    try {
+      await sitePlanStore.set(sessionId, origins, agentId);
+    } catch (error) {
+      reportTestDiagnostic(
+        error instanceof Error && error.message === SITE_PLAN_NOT_RECORDED
+          ? "agent.site-plan.no-storage"
+          : "agent.site-plan.write-failed",
+      );
+      return { ok: false, reason: "site-plan-not-recorded" };
+    }
+    /**
+     * And again once written, because the session can end - or its agent be unpaired - while the
+     * check above was still reading, and its clear be queued before this write. Whatever ends after
+     * this second check queues its clear behind the write that has already landed.
+     */
+    const after = await refusal();
+    if (after) {
+      await endSitePlans([sessionId]);
+      return after;
+    }
+    noteSitePlan(sessionId, earlier === undefined ? "approved" : "replaced", origins.length);
+    notify();
+    return { ok: true };
+  }
+
+  /** `propose_sites` (017 R-248): not a batch step, and the only runner that answers `declined`. */
+  const sitePlanRunner = createAgentSitePlanRunner({
+    prompts,
+    activePlan: async (sessionId) => (await sitePlanStore.forSession(sessionId))?.origins,
+    approve: approveSitePlan,
   });
 
   const batch = createAgentBatch({
@@ -1651,6 +1778,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     dispatch: dispatchTool,
     // 014 FR-187: the batch asks this before every step, and stops rather than raising a card.
     pendingTransition: (sessionId, tabId) => pendingTransitionOf(sessionId, tabId),
+    // 017 D-017-9: a `follow-a-plan` site this session's plan covers raises no batch plan card.
+    sitePlanCovers,
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -1713,6 +1842,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
      */
     const standing = prompts.currentSession() === ending ? prompts.current() : undefined;
     prompts.cancelSession(ending, standing?.kind === "upload-directory" ? "interrupted" : questions);
+    // 017 FR-258: the site plan ends with the session, whatever ended it - and first, so nothing
+    // this session still has in flight while the rest is let go is admitted by it.
+    await endSitePlans([ending]);
     // And everything it knew about where its tabs had been, and every pair it was told 繼續 about
     // (014 data-model): 繼續 was an answer about *this* session's work, and the session is over.
     await queueTransition(() => transitionStore.forgetSession(ending)).catch(() => undefined);
@@ -1742,6 +1874,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     }
     await tabs.endSession(ending);
     sessions.delete(ending);
+    /**
+     * And once more now that the session is gone, which no approval can get past: one that was
+     * checked while the session was still live and queued its write behind the clear above lands
+     * before this one, and one checked from here on is refused as `session-ended` (017 R-246).
+     */
+    await endSitePlans([ending]);
     // The binding goes with the session: a later session reusing the id would otherwise inherit its
     // channel nonce and speak into a conversation it never had.
     contexts.delete(ending);
@@ -2045,6 +2183,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     onPairWithdraw({ agentId, sessionId, requestId }) {
       pairing.withdraw(agentId, sessionId, requestId);
     },
+    // 017 R-248, R-251: `propose_sites` is dispatched to `sitePlanRunner` above, so the host may send it.
+    sitePlans: true,
     /**
      * Which run of the browser is answering (013/R-184, FR-168).
      *
@@ -2205,6 +2345,19 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     tabs,
     siteModes,
     prompts,
+    sitePlans: {
+      approve: approveSitePlan,
+      async withdraw(sessionId) {
+        const active = await sitePlanStore.forSession(sessionId).catch(() => undefined);
+        await sitePlanStore.clear(sessionId);
+        // FR-263: one line for a plan that was there; a withdraw of nothing says nothing.
+        if (active !== undefined && sessions.has(sessionId)) {
+          noteSitePlan(sessionId, "withdrawn", active.origins.length);
+        }
+        notify();
+      },
+      forSession: (sessionId) => sitePlanStore.forSession(sessionId),
+    },
     status: () => bridge.status(),
     async projection(): Promise<AgentPanelState> {
       const state = await pairing.state();
@@ -2219,12 +2372,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         label?: string;
         startedAt?: string;
         colour?: (typeof AGENT_SESSION_COLOURS)[number];
+        sitePlan?: { origins: string[] };
       }> = [];
       for (const [id, session] of sessions) {
         if (!(await pairing.isPaired(session.agentId))) continue;
         // 016 FR-226 - FR-228, R-205: who the card is about, read from the persisted record so it
         // is the same after a worker restart. A session with no record yet shows none of it.
         const identity = await tabs.identity(id).catch(() => undefined);
+        // 017 FR-259: the plan the card shows is the one the gate reads, from the same store.
+        const sitePlan = await sitePlanStore.forSession(id).catch(() => undefined);
         live.push({
           sessionId: id,
           agentId: session.agentId,
@@ -2240,6 +2396,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
                 startedAt: identity.firstSeenAt,
                 colour: AGENT_SESSION_COLOURS[identity.colourIndex % AGENT_SESSION_COLOURS.length],
               }),
+          ...(sitePlan === undefined || sitePlan.origins.length === 0
+            ? {}
+            : { sitePlan: { origins: sitePlan.origins } }),
         });
       }
       /**
@@ -2266,6 +2425,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       });
       const prompt = prompts.current();
       const plan = prompts.currentPlan();
+      // 017 R-247: the site-plan proposal awaiting the owner, present only while it is asked.
+      const sitePlanQuestion = prompts.currentSitePlan();
       /**
        * The sites the owner has decided about, plus the ones the session's tabs are actually on.
        *
@@ -2343,6 +2504,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         sites: visible,
         ...(prompt ? { prompt } : {}),
         ...(plan ? { plan } : {}),
+        ...(sitePlanQuestion ? { sitePlan: sitePlanQuestion } : {}),
         bridge: bridge.status(),
         ...(agentName === undefined ? {} : { agentName }),
         // The owner's remembered moves (014 FR-191), for the site list's own section. Always
@@ -2469,6 +2631,32 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
     async unpair(agentId: string): Promise<void> {
       await pairing.unpair(agentId);
+      /**
+       * 017 FR-258, R-246: a site plan is an authorization, and it must not outlive the pairing that
+       * carried it - so every session of this agent loses its plan now, not when it ends. After the
+       * unpair above, an approval for any of them is refused as `not-paired`.
+       *
+       * Cleared by the agent id each plan records, as well as by the sessions in memory: a worker
+       * that restarted knows no session until it greets again, and a plan left behind for one of
+       * those would come back, still approved, when it re-paired.
+       */
+      const mine = [...sessions].filter(([, session]) => session.agentId === agentId).map(([id]) => id);
+      /**
+       * And a proposal one of them is still waiting on (017 review m1): the card would ask the owner
+       * to approve sites for an agent they have just unpaired. Taken down as `stopped` - the owner
+       * acted, and nothing was decided - so its call is answered and nothing is granted.
+       */
+      const proposing = prompts.currentSitePlan()?.sessionId;
+      if (proposing !== undefined && mine.includes(proposing)) prompts.cancelSession(proposing, "stopped");
+      const ending: Array<[string, number]> = [];
+      for (const sessionId of mine) {
+        const active = await sitePlanStore.forSession(sessionId).catch(() => undefined);
+        if (active !== undefined) ending.push([sessionId, active.origins.length]);
+      }
+      await endSitePlans(mine);
+      await sitePlanStore.clearAgent(agentId).catch(() => reportTestDiagnostic("agent.site-plan.clear-failed"));
+      // FR-263: the end of each active plan, on the card the session keeps if it is paired again.
+      for (const [sessionId, count] of ending) noteSitePlan(sessionId, "ended", count);
       // The badge goes when the permission does (FR-062): the session may still hold its leases
       // until it ends, but an unpaired agent can do nothing in those tabs, and a page still saying
       // an agent is working in it would be telling the owner something that is no longer true.

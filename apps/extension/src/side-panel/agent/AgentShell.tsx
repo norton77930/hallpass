@@ -248,7 +248,10 @@ export function AgentShell(props: { locale: string }): ReactElement {
       {notice === undefined ? null : <NoticeCard notice={notice} locale={props.locale} />}
       {composition === "not-connected" ? (
         <NotConnected
-          variant={state.paired.length === 0 ? "not-paired" : "bridge-lost"}
+          variant={
+            // Two browsers (2026-10-02): "another browser has it" wins - pairing here would not help.
+            state.bridge === "standby" ? "standby" : state.paired.length === 0 ? "not-paired" : "bridge-lost"
+          }
           diagnostics={state.diagnostics ?? {}}
           locale={props.locale}
           onRetry={() => {
@@ -281,6 +284,9 @@ export function AgentShell(props: { locale: string }): ReactElement {
               }}
               onInterrupt={() => {
                 send({ type: "ui.agent.session-interrupt", payload: { sessionId: session.sessionId } });
+              }}
+              onWithdrawSitePlan={() => {
+                send({ type: "ui.agent.site-plan-withdraw", payload: { sessionId: session.sessionId } });
               }}
             />
           ))}

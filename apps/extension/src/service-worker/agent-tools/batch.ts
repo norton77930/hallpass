@@ -63,6 +63,14 @@ export type AgentBatchDeps = {
    * says where the tab went, and the agent's next single call is what asks.
    */
   pendingTransition?: (sessionId: string, tabId: number) => Promise<{ from: string; to: string } | undefined>;
+  /**
+   * Whether this session's approved site plan names the batch's site (017 R-249, D-017-9).
+   *
+   * Asked only on a `follow-a-plan` site, and only to decide whether to raise the batch's own plan
+   * card: a covered site raises none and states no plan, and each step then meets the gate with
+   * the session plan as its input, exactly as a single call does. Absent is "not covered".
+   */
+  sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -114,7 +122,15 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
 
     const site = await deps.siteOfTab(request.sessionId, tabId, callId);
     const mode = site === undefined ? undefined : (await deps.siteModes.get(site)).mode;
-    if (site !== undefined && mode === "follow-a-plan") {
+    /**
+     * 017 D-017-9: the owner approved this site for this session a moment ago, so the batch asks
+     * nothing of its own on top - the `ask` path, where every step decides at the gate. Read once,
+     * here; each step's gate reads it again for the tab's origin at that step, so a step that runs
+     * after a navigation away from the approved site is not carried by this answer.
+     */
+    const coveredByPlan =
+      site !== undefined && mode === "follow-a-plan" && (await deps.sitePlanCovers?.(request.sessionId, site)) === true;
+    if (site !== undefined && mode === "follow-a-plan" && !coveredByPlan) {
       const asked = await deps.prompts.askPlan({
         callId,
         // Whether the owner ended this batch before its one question could be raised (014 FR-179).

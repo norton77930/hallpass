@@ -1,0 +1,62 @@
+{
+  "id": "s17-site-plan",
+  "slice": "S17",
+  "evidence": "T492 (017/US1, SC-126)",
+  "page": "https://example.com/",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call. Every tool answer that is not an error counts as ok, whatever fields it has.\n\nI need three small things done in my browser, on three different sites. Do not submit any form.\n1. On https://httpbin.org/forms/post type Probe into the Customer name field and tick the Bacon topping.\n2. On https://lite.duckduckgo.com/lite/ type hallpass into the search box (do not press Enter).\n3. On https://example.com/ click the page's main heading.\nIf anything I have to approve is declined or never answered, stop and tell me.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call, in the order you made them: tool = the exact tool name, outcome = ok or the error text.\n- In observed: write \"planned-once\" if your first browser call was one that asked me to approve all three sites together, it was approved, and every later call ran without any answer saying it was waiting for, or needed, my approval; write \"asked-per-site\" if answers asked for my approval more than once; write \"declined\" if an approval was declined or never answered; write \"no-plan\" if you never asked me to approve the sites together; otherwise write \"other\".\n- In report: what you would say to me now, in one or two sentences.\n- In notes: the origins you asked me to approve, and the verbatim outcome of that request.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed",
+      "report"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "report": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "planned-once"
+  },
+  "maxTurns": 30,
+  "maxBudgetUsd": 0.6,
+  "timeoutMs": 420000,
+  "expectedAfterFix": "SC-126: a real coding-agent caller given a three-site task calls propose_sites first with the three origins, the owner approves the one site-plan card in the side panel, and every press and type on the three sites then runs without a consent card.",
+  "note": "T492 (017). Owner present: the probe accepts pairing for the agent, but only the owner's press in the side panel approves a site plan (FR-253), so the owner approves the one site-plan card when it appears and nothing else. The prompt does not name the tool: whether the agent proposes first is what SC-126 measures, and the tool description is the only guidance it gets. The three sites must be at the default mode (ask) in the probe profile - a remembered mode would hide whether the plan admitted the actions (FR-257). navigate is not gated (spec Assumptions), so the plan card is the only card the run should raise; the owner counts the cards as the second half of the evidence."
+}

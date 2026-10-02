@@ -273,6 +273,24 @@ as ending does.
 A keystroke whose handler opens a JavaScript dialog is now answered with the dialog, as a click that
 opens one already was, instead of timing out as a page that does not respond.
 
+## §11 A session site plan (0.10.0)
+
+**Designed here.** A task that moves between several sites at the default mode raised a card for
+every press on every site, and the only way around it was to change each site's remembered mode —
+a grant that outlives the task and covers every future agent. 0.10.0 lets the agent propose, with
+`propose_sites`, up to ten exact origins and a purpose before it starts; the panel shows them as one
+card with a tick box per site and a warning that page content can steer an agent, and only the
+owner's press approves — no argument, host message or setting can. The approval is held in memory
+for that one session and those exact origins: it admits the session's page actions (press, type,
+key, scroll, hover, drag, fill, accepting a dialog, and the same steps inside a batch, including on
+a site left at follow-a-plan) without a per-action card, and ends with the session, an unpair, a
+browser restart or the withdraw control on the session card; it is never written to the site list.
+Page JavaScript, uploads and the cross-site confirmation keep asking, and a site not on the list
+behaves exactly as without a plan — it is not refused, because refusing would turn a convenience
+into a new way for a task to fail. The plan is deliberately narrower than a remembered site mode:
+one session, the listed origins, page actions only. An extension older than the host answers the
+call as unavailable with a hint to reload it, and grants nothing.
+
 ## Permissions
 
 Every permission the extension declares traces to a capability above and to an acceptance

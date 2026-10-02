@@ -168,7 +168,7 @@ describe("T378 the owner's answer about a directory", () => {
         agentId: "agent-1",
         sessionId: SESSION,
         accepted: true,
-        features: ["upload-consent", "pair-withdraw"],
+        features: ["upload-consent", "pair-withdraw", "site-plan"],
       }),
     ]);
   });

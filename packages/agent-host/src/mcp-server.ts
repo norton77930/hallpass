@@ -19,6 +19,8 @@ import {
   INTERRUPT_HINTS,
   PAIRING_DECLINED_MARKER,
   PAIRING_REFUSAL_HINTS,
+  SITE_PLAN_FEATURE,
+  SITE_PLAN_UNAVAILABLE,
   UPLOAD_HINTS,
   isRootDirectory,
   type AgentNativeResponse,
@@ -1870,6 +1872,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
        * is a fact about a call that then *succeeds* - so it cannot ride on a refusal.
        */
       let uploadHint: string | undefined;
+      /**
+       * 017 FR-265, R-251: the tool is listed before pairing says which extension answers, so a
+       * worker that never advertised `site-plan` is answered here - checked rather than discovered,
+       * as `askUploadConsent` checks `upload-consent` - and is sent nothing: no card, no grant.
+       */
+      if (tool === "propose_sites" && !workerFeatures.has(SITE_PLAN_FEATURE)) {
+        log("agent.site-plan.unsupported");
+        return { callId, outcome: "unavailable", ...SITE_PLAN_UNAVAILABLE };
+      }
       if (tool === "file_upload" || tool === "upload_image") {
         const prepared = await prepareUpload(callId, tool, args);
         if (!prepared.ok) {

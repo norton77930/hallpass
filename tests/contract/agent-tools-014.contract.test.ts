@@ -521,7 +521,8 @@ describe("T350 the frames the host, the relay and the worker agree on", () => {
 
 describe("T350 what this feature does not buy", () => {
   it("adds no tool and no permission", () => {
-    expect(contractExport<readonly string[]>("AGENT_TOOL_NAMES")).toHaveLength(33);
+    // 33 when 014 shipped; 017 adds `propose_sites`, the thirty-fourth.
+    expect(contractExport<readonly string[]>("AGENT_TOOL_NAMES")).toHaveLength(34);
     expect([...AGENT_PROFILE_PERMISSIONS]).toEqual([
       "activeTab",
       "scripting",

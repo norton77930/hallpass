@@ -314,6 +314,64 @@
   font-size: var(--fs-1);
 }
 
+/* 017: the site-plan question. Tokens only, so it follows the light and the dark theme. */
+.agent-siteplan-question {
+  display: block;
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+.agent-siteplan-heading {
+  margin-bottom: var(--sp-1);
+  font-weight: 600;
+}
+
+.agent-prompt ul.agent-siteplan-origins {
+  margin: 0 0 var(--sp-2);
+  padding: 0;
+  list-style: none;
+}
+
+.agent-prompt .agent-siteplan-origins li {
+  display: block;
+}
+
+.agent-siteplan-origins label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--text);
+  font-size: var(--fs-1);
+  overflow-wrap: anywhere;
+}
+
+.agent-siteplan-approved {
+  color: var(--text-2);
+}
+
+.agent-siteplan-warning {
+  padding-left: var(--sp-2);
+  border-left: 3px solid var(--warn);
+}
+
+/* 017: the session card's plan summary beside its withdraw control. */
+.agent-session-site-plan-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.agent-session-site-plan-row .agent-details {
+  flex: 1 1 auto;
+  margin-top: 0;
+}
+
+.agent-session-site-plan li {
+  overflow-wrap: anywhere;
+}
+
 .agent-prompt-actions,
 .agent-session-actions {
   display: flex;

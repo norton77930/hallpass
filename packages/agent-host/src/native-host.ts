@@ -9,6 +9,7 @@ import {
 } from "./bridge-link.js";
 import { bridgeFilePath, hostDataDirectory } from "./host-paths.js";
 import { createRelayMux, type RelayMux } from "./relay-mux.js";
+import { decideRelayAck, readRelayAck, removeBridgeOwner, writeBridgeOwner } from "./relay-ownership.js";
 import { encodeFrame, FrameDecoder } from "./native-frame.js";
 import { createUploadConfigStore } from "./upload-config-store.js";
 
@@ -244,13 +245,6 @@ function startLog(): void {
   }
 }
 
-/** The worker's answer to `relay-started`, addressed to this relay (004/T169). */
-function isRelayAck(frame: unknown): boolean {
-  if (!frame || typeof frame !== "object") return false;
-  const { type, relayPid } = frame as { type?: unknown; relayPid?: unknown };
-  return type === "relay-ack" && relayPid === process.pid;
-}
-
 async function main(): Promise<void> {
   startLog();
   log("relay.started", process.pid.toString());
@@ -284,7 +278,7 @@ async function main(): Promise<void> {
     log,
   });
 
-  const published = await listenAndPublish(
+  const listening = await listenAndPublish(
     {
       onFrame(connection: FrameChannel, frame: unknown) {
         if (mux.fromServer(connection, frame) === "rejected") {
@@ -306,6 +300,28 @@ async function main(): Promise<void> {
     },
     { token, publishOnListen: false },
   );
+  /** The browser run the worker named on its ack, written beside the record (two browsers, 2026-10-02). */
+  let ownerRunId: string | undefined;
+  /**
+   * The record and its owner sidecar as one: every publish writes both and every close retracts
+   * both, each only when it is this process's own. A sidecar that cannot be written is not fatal -
+   * without it another browser's relay simply takes over, which is the behaviour before the sidecar.
+   */
+  const published: PublishedRelay = {
+    port: listening.port,
+    token: listening.token,
+    async republish(): Promise<void> {
+      await listening.republish();
+      await writeBridgeOwner({
+        relayPid: process.pid,
+        ...(ownerRunId === undefined ? {} : { browserRunId: ownerRunId }),
+      }).catch(() => log("relay.owner-write-failed"));
+    },
+    async close(): Promise<void> {
+      await removeBridgeOwner().catch(() => undefined);
+      await listening.close();
+    },
+  };
   log("relay.listening", String(published.port));
   // The worker's 15 s reconciliation starts here: the sessions that greet again inside the window
   // survive a browser restart, and the ones that do not are released. The record's path rides
@@ -318,7 +334,7 @@ async function main(): Promise<void> {
    * nothing from the relay that is serving. A relay whose owner never answers leaves on the bound
    * without ever having written the record.
    */
-  let owned = false;
+  let acknowledged = false;
   /**
    * Set on every path that starts `published.close()`: a `relay-ack` that lands while the sockets
    * are still closing (the bound fired, framing broke, Chrome closed) must not publish a record
@@ -331,18 +347,36 @@ async function main(): Promise<void> {
     void published.close().finally(exitAfterFlush);
   };
   const ackBound = setTimeout(() => {
-    if (owned) return;
+    if (acknowledged) return;
     log("relay.unowned", `no relay-ack within ${RELAY_ACK_BOUND_MS} ms`);
     leave();
   }, RELAY_ACK_BOUND_MS);
   ackBound.unref?.();
-  const onAck = (): void => {
-    if (owned || leaving) return;
-    owned = true;
+  const onAck = (browserRunId: string | undefined): void => {
+    if (acknowledged || leaving) return;
+    acknowledged = true;
     clearTimeout(ackBound);
-    void published
-      .republish()
-      .then(() => {
+    ownerRunId = browserRunId;
+    /**
+     * Two browsers (2026-10-02): an ack is no longer an unconditional take-over. When the record
+     * belongs to a live relay of another browser run, this relay stands by - it writes nothing,
+     * tells its worker why, and leaves; that worker's ordinary reconnect is the retry, and the
+     * first one after the other browser closes takes over. Every other case - this browser's own
+     * previous relay included (004/T169) - takes over as before. A decision that cannot be made
+     * (a read that throws) takes over too: that is the behaviour this check was added to.
+     */
+    void decideRelayAck({ mineRunId: browserRunId })
+      .catch(() => ({ decision: "take-over" as const, servingRelayPid: undefined }))
+      .then(async ({ decision, servingRelayPid }) => {
+        if (leaving) return;
+        if (decision === "stand-by" && servingRelayPid !== undefined) {
+          log("relay.standby", `serving=${servingRelayPid} speaker=${process.pid}`);
+          writeToChrome({ type: "relay-standby", servingRelayPid });
+          leave();
+          return;
+        }
+        await published.republish();
+        if (leaving) return;
         log("relay.owned", String(process.pid));
         exitWhenSuperseded(mux, published, () => {
           superseded = true;
@@ -366,8 +400,9 @@ async function main(): Promise<void> {
       return;
     }
     for (const frame of frames) {
-      if (isRelayAck(frame)) {
-        onAck();
+      const ack = readRelayAck(frame, process.pid);
+      if (ack !== undefined) {
+        onAck(ack.browserRunId);
         continue;
       }
       log("relay.to-server");

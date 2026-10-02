@@ -176,6 +176,15 @@ export const messages: Record<MessageKey, string> = {
   "agent.planExclude": "略過步驟 {step}",
   "agent.approvePlan": "核准這些步驟",
   "agent.denyPlan": "拒絕",
+  // 017 FR-251、FR-252：網站計畫卡片 — 一次問完好幾個網站。
+  "agent.sitePlan.title": "agent 想在這些網站上工作",
+  "agent.sitePlan.purpose": "目的：{purpose}",
+  "agent.sitePlan.originsTitle": "網站（這項工作用不到的請取消勾選）",
+  "agent.sitePlan.alreadyApproved": "已核准",
+  "agent.sitePlan.stepsTitle": "預定步驟",
+  "agent.sitePlan.warning": "網頁可能會誘使 agent 要求更多權限。只核准這項工作需要的網站。",
+  "agent.sitePlan.approve": "核准勾選的網站",
+  "agent.sitePlan.decline": "拒絕",
   /* 003/T068：每個工具一句話，供面板在詢問擁有者時使用（對應 en-US 的 agent.summary.*）。 */
   /* 006：重建後的側欄（S2 文案，T197）。標題用一句話說發生了什麼，按鈕寫它會做什麼。 */
   "agent.appTitle": "Hallpass 瀏覽器代理橋接",
@@ -183,6 +192,8 @@ export const messages: Record<MessageKey, string> = {
   "agent.notPaired.body": "在你的 AI 工具（CodeBuddy、Cursor、Claude Code…）裡加入這個 MCP server，發出第一個瀏覽器工具呼叫就會在這裡出現配對請求。",
   "agent.bridgeLost.title": "和本機 agent 的連線中斷了",
   "agent.bridgeLost.body": "它會自己重新連線。如果這一頁一直沒變，請重新啟動 agent，再檢查一次連線。",
+  "agent.standby.title": "另一個瀏覽器正在服務你的 agent",
+  "agent.standby.body": "這台電腦上的另一個瀏覽器正在服務你的 agent。要改用這個瀏覽器，請關掉那一個；Hallpass 會自己切換過來。",
   "agent.retry": "重新檢查連線",
   "agent.details.title": "技術資訊",
   "agent.details.relayPid": "中繼程序：{pid}",
@@ -219,6 +230,10 @@ export const messages: Record<MessageKey, string> = {
   "agent.session.id": "工作階段 ID：{id}",
   "agent.session.stop": "結束工作階段",
   "agent.session.takeBack": "收回分頁（{n}）",
+  // 017 FR-259：工作階段已核准的網站計畫（可展開），以及立即結束它的按鈕。
+  "agent.session.sitePlan": "網站計畫：{n} 個網站",
+  "agent.session.sitePlanOne": "網站計畫：1 個網站",
+  "agent.session.sitePlanWithdraw": "撤回網站計畫",
   // 014 FR-178：停止旁邊的第二個控制，以及按下時什麼都沒在跑的那一行。
   "agent.session.interrupt": "中斷這一步",
   "agent.session.nothingToInterrupt": "沒有進行中的動作",
@@ -231,6 +246,9 @@ export const messages: Record<MessageKey, string> = {
   "agent.activity.restore": "視窗已還原為{state}",
   "agent.activity.viewportSet": "視窗模擬為 {size}",
   "agent.activity.viewportCleared": "視窗模擬已清除",
+  // 017 FR-263：網站計畫的每個事件一行；後面接結果詞（已核准、已替換……）。
+  "agent.activity.sitePlan": "{n} 個網站的網站計畫",
+  "agent.activity.sitePlanOne": "1 個網站的網站計畫",
   // 014 FR-196:`file_upload` 也會留下這一行,放進表單的是你自己的檔案,所以不說「截圖」。
   "agent.activity.uploadInput": "檔案已放進 {site} 的表單",
   "agent.activity.uploadDrop": "截圖已拖放到 {site}",
@@ -251,6 +269,10 @@ export const messages: Record<MessageKey, string> = {
   "agent.activity.cleared": "已清除",
   "agent.activity.delivered": "已送達",
   "agent.activity.interrupted": "你已中斷",
+  "agent.activity.approved": "你已核准",
+  "agent.activity.replaced": "已替換",
+  "agent.activity.withdrawn": "你已撤回",
+  "agent.activity.ended": "隨工作階段結束",
   // 008 FR-114、FR-115:對話框引發的兩個問題,用「被決定的事」來說。
   "agent.prompt.dialogAccept": "{agent} 想按下網頁確認框的「確定」",
   "agent.prompt.dialogQuote": "「{text}」",
@@ -326,6 +348,7 @@ export const messages: Record<MessageKey, string> = {
   "agent.summary.read_network": "讀取頁面發出的請求",
   "agent.summary.file_upload": "把你的檔案放進頁面的表單",
   "agent.summary.upload_image": "把代理拍的截圖放進頁面",
+  "agent.summary.propose_sites": "提出這個工作階段要使用的網站",
   // 014 FR-196：問題說得出是哪一種放法時,就說哪一種。
   "agent.summary.upload_image.input": "把代理拍的截圖放進頁面的檔案欄位",
   "agent.summary.upload_image.drop": "把代理拍的截圖拖放到頁面上的位置",

@@ -40,6 +40,17 @@ export const AGENT_TOOL_OUTCOMES = [
   "stopped",
   "timed-out",
   "failed",
+  /**
+   * 017 (data-model "Tool answer"): the owner said no to a whole site plan. Not `denied`, which is
+   * a refusal of one action: a declined proposal refused nothing the agent did, it only granted
+   * nothing, and the agent carries on asking site by site as before.
+   */
+  "declined",
+  /**
+   * 017 FR-265, R-251: the other end cannot do this at all - an extension that never said it
+   * supports site plans. Neither a refusal nor a failure of the call: the `hint` says what to update.
+   */
+  "unavailable",
 ] as const;
 
 export type AgentToolOutcome = (typeof AGENT_TOOL_OUTCOMES)[number];
@@ -95,6 +106,8 @@ export const AGENT_TOOL_NAMES = [
   "gif_recorder",
   // Dialogs (008 US3)
   "dialog",
+  // Session site plan (017 US1)
+  "propose_sites",
 ] as const;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
@@ -139,6 +152,24 @@ export type AgentEffectToolName = (typeof AGENT_EFFECT_TOOL_NAMES)[number];
 export function isAgentEffectTool(value: unknown): value is AgentEffectToolName {
   return (AGENT_EFFECT_TOOL_NAMES as readonly unknown[]).includes(value);
 }
+
+/**
+ * The page actions an approved session site plan admits without a card (017 FR-254, R-250).
+ *
+ * The worker gate's own set of gated tools (`requiresGate`) minus the three that keep their own
+ * consent (FR-255): page JavaScript (`evaluate`) and putting files or screenshots into a page
+ * (`file_upload`, `upload_image`) - and minus the two that are gated only when forced (`navigate`,
+ * `tabs_close`): leaving a page that asked to stay throws away the owner's unsaved work, which is
+ * not one of FR-254's page actions, so it still asks under a plan (S1 architecture review).
+ * Written out rather than derived, so a future gated tool is *uncovered* until someone decides
+ * otherwise; a contract test pins it against the gate.
+ */
+export const AGENT_SITE_PLAN_COVERED_TOOLS = [
+  ...AGENT_EFFECT_TOOL_NAMES,
+  "dialog",
+] as const satisfies readonly AgentToolName[];
+
+export type AgentSitePlanCoveredToolName = (typeof AGENT_SITE_PLAN_COVERED_TOOLS)[number];
 
 /**
  * The placeholder argument shape, until the slice that owns a tool replaces it.
@@ -1673,6 +1704,73 @@ export const agentUploadImageResultSchema = z.strictObject({
 export type AgentUploadImageResult = z.infer<typeof agentUploadImageResultSchema>;
 
 /**
+ * `propose_sites` (017 FR-249, FR-250, R-248): the sites a session asks to work across, and why.
+ *
+ * Bounds only in the shape the agent is shown; the origin rules live in the schema the worker
+ * parses with, so a refusal can name the entry and the rule it broke (FR-250) rather than arriving
+ * as the MCP layer's generic complaint. Nothing here grants anything: only the owner's press in the
+ * side panel turns a proposal into a plan (FR-253).
+ */
+export const AGENT_SITE_PLAN_MAX_ORIGINS = 10;
+export const AGENT_SITE_PLAN_MAX_PURPOSE_CHARS = 200;
+export const AGENT_SITE_PLAN_MAX_STEPS = 10;
+export const AGENT_SITE_PLAN_MAX_STEP_CHARS = 120;
+
+/**
+ * Why an entry is not a plan origin, or `undefined` when it is one (FR-250).
+ *
+ * http or https, and exactly what `new URL(x).origin` gives back: no path (not even `/`), query,
+ * fragment, user info, wildcard, upper case or default port. One function so the schema below and
+ * the worker's own named refusal cannot disagree about the rule.
+ */
+export function sitePlanOriginProblem(value: string): string | undefined {
+  if (value.includes("*")) {
+    return "wildcards are not allowed";
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return "not a URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return "only http and https origins are allowed";
+  }
+  if (parsed.origin !== value) {
+    return "must be an exact origin (scheme://host[:port], no path, query or fragment)";
+  }
+  return undefined;
+}
+
+/** One origin of a plan, as every party that holds one states it (proposal, card, store). */
+export const sitePlanOriginSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => sitePlanOriginProblem(value) === undefined, { message: "expected an http(s) origin" });
+
+const agentProposeSitesShape = {
+  origins: z.array(z.string().min(1).max(256)).min(1).max(AGENT_SITE_PLAN_MAX_ORIGINS),
+  purpose: z.string().min(1).max(AGENT_SITE_PLAN_MAX_PURPOSE_CHARS),
+  steps: z.array(z.string().min(1).max(AGENT_SITE_PLAN_MAX_STEP_CHARS)).max(AGENT_SITE_PLAN_MAX_STEPS).optional(),
+};
+
+export const agentProposeSitesArgsSchema = z.strictObject(agentProposeSitesShape).superRefine((value, ctx) => {
+  const seen = new Set<string>();
+  value.origins.forEach((origin, index) => {
+    const problem = sitePlanOriginProblem(origin);
+    if (problem !== undefined) {
+      ctx.addIssue({ code: "custom", message: problem, path: ["origins", index] });
+    } else if (seen.has(origin)) {
+      ctx.addIssue({ code: "custom", message: "listed twice", path: ["origins", index] });
+    }
+    seen.add(origin);
+  });
+});
+
+export type AgentProposeSitesArgs = z.infer<typeof agentProposeSitesArgsSchema>;
+
+/**
  * What post-effect verification concluded, in the attention causes' own words (003/B2).
  *
  * A subset of `ATTENTION_REQUIRED_CAUSES` plus `verified`, and not the whole set: `execute-uncertain`
@@ -2208,6 +2306,16 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "`navigate` / `tabs_close` stay on the page by default and take `force: true` to leave.",
     inputShape: agentDialogShape,
   },
+  {
+    name: "propose_sites",
+    title: "Propose the sites this session will work on",
+    // 017 contracts/propose-sites.md, FR-249: who decides, and what still asks.
+    description:
+      "Before working across several sites, propose them here with a short purpose. The owner approves or " +
+      "declines in the browser's side panel; approved sites then need no consent card for page actions in " +
+      "this session. Page JavaScript and file uploads still ask. Sites not approved behave as before.",
+    inputShape: agentProposeSitesShape,
+  },
 ];
 
 /**
@@ -2310,6 +2418,7 @@ export const agentToolArgSchemas: Record<AgentToolName, z.ZodType> = {
   downloads_context: agentDownloadsContextArgsSchema,
   gif_recorder: agentGifRecorderArgsSchema,
   dialog: agentDialogArgsSchema,
+  propose_sites: agentProposeSitesArgsSchema,
 };
 
 /**
@@ -2620,6 +2729,28 @@ export type AgentNativeResponse = z.infer<typeof agentNativeResponseSchema>;
  * than 0.6.0 already refuse `features` itself, which is 014's documented "reinstall the host" case.
  */
 export const PAIRING_DECLINED_MARKER = "declined-this-request";
+
+/**
+ * The capability a worker advertises in `pair-result.features` when it can raise the site-plan
+ * card (017 R-248, R-251), exactly as `upload-consent` says it can raise the directory card.
+ *
+ * A host never forwards `propose_sites` to a worker that did not say so: the tool is listed before
+ * any pairing says which extension is on the other side, and an older worker would answer an
+ * unknown tool with nothing the agent could act on.
+ */
+export const SITE_PLAN_FEATURE = "site-plan";
+
+/**
+ * What a `propose_sites` call that cannot be asked says (017 FR-265): outcome `unavailable`, this
+ * reason, and this hint. Here for the reason `UPLOAD_HINTS` is: the host composes it and the gates
+ * assert it. No hole to fill (FR-151).
+ */
+export const SITE_PLAN_UNAVAILABLE = {
+  reason: "extension-too-old",
+  hint:
+    "The Hallpass extension in this browser does not support site plans yet. Ask the owner to reload the " +
+    "extension on the browser's extensions page, then propose again; until then each site asks as before.",
+} as const;
 
 /**
  * The frames that are about the connection rather than about a page. They share the channel with
@@ -3016,6 +3147,28 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("relay-ack"),
     relayPid: z.number().int().positive(),
+    /**
+     * Which run of the browser is answering (013/R-184), so a relay can tell its own browser's
+     * previous relay from another browser's (two browsers, 2026-10-02). Optional: a relay from
+     * before it reads only `type` and `relayPid`, and a worker from before it leaves it off, which
+     * the relay reads as "unknown" and takes the record over exactly as it always has.
+     */
+    browserRunId: z.string().min(1).max(64).optional(),
+  }),
+  /**
+   * The relay's answer to `relay-ack` when another browser's relay is serving (two browsers,
+   * 2026-10-02).
+   *
+   * Chrome and Edge each spawn their own relay, and each used to take the record over on its ack -
+   * so the two evicted each other every few seconds and neither browser could be used. A relay that
+   * finds the record held by a live relay of another browser run now leaves without touching it,
+   * and says so first, so the panel can tell the owner why this browser is not connected. The
+   * worker's ordinary reconnect is the retry: once the other browser closes, the next relay takes
+   * over. A worker from before this frame drops it as an unknown type and sees only the port close.
+   */
+  z.strictObject({
+    type: z.literal("relay-standby"),
+    servingRelayPid: z.number().int().positive(),
   }),
   /** The worker's "still waiting" tick (011); see `promptWaitingFrameSchema` for why it is here. */
   promptWaitingFrameSchema,
@@ -3111,6 +3264,23 @@ export const agentBridgeRecordSchema = z.strictObject({
 
 export type AgentBridgeRecord = z.infer<typeof agentBridgeRecordSchema>;
 
+/**
+ * Which browser run the relay named in the record belongs to (two browsers, 2026-10-02).
+ *
+ * A file of its own beside the record rather than a field on it: the record is parsed strictly by
+ * every MCP server already running, and a field they do not know would read to them as no record
+ * at all. Only relays read this one. It is written by the relay that owns the record, right after
+ * the record, and retracted with it; a sidecar that names a different pid than the record is stale
+ * and means nothing.
+ */
+export const agentBridgeOwnerSchema = z.strictObject({
+  relayPid: z.number().int().positive(),
+  /** Absent when the owning worker did not say (a worker from before `relay-ack` carried it). */
+  browserRunId: z.string().min(1).max(64).optional(),
+});
+
+export type AgentBridgeOwner = z.infer<typeof agentBridgeOwnerSchema>;
+
 /** The owner's standing decision for one site (R-107). The agent can never set its own. */
 export const SITE_MODES = ["ask", "follow-a-plan", "skip-checks"] as const;
 
@@ -3160,8 +3330,13 @@ export type SiteModeRecord = z.infer<typeof siteModeRecordSchema>;
  */
 export const AGENT_PANEL_PORT_NAME = "hallpass-panel";
 
-/** How the link to the local agent host looks to the owner. Three states, no free text. */
-export const AGENT_BRIDGE_STATUSES = ["connected", "unavailable", "disconnected"] as const;
+/**
+ * How the link to the local agent host looks to the owner. Closed states, no free text.
+ *
+ * `standby` is a host that answered but stood aside because another browser on this computer is
+ * serving the agents (two browsers, 2026-10-02): not a fault to retry, a fact to tell the owner.
+ */
+export const AGENT_BRIDGE_STATUSES = ["connected", "unavailable", "disconnected", "standby"] as const;
 
 export type AgentBridgeStatusValue = (typeof AGENT_BRIDGE_STATUSES)[number];
 
@@ -3238,8 +3413,10 @@ export const agentActivityItemSchema = z.strictObject({
   /**
    * 012: `viewport` is the emulated size a session gave a tab, and gave back (FR-159).
    * 013: `upload` is a picture the session put into the owner's page (FR-174).
+   * 017: `site-plan` is the owner's approval of a session site plan, its replacement, its withdrawal
+   * and its end (FR-263); `message` is the number of sites, never the origins themselves.
    */
-  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt"]),
+  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt", "site-plan"]),
   outcome: z.enum([
     "accepted",
     "accepted-chained",
@@ -3255,6 +3432,11 @@ export const agentActivityItemSchema = z.strictObject({
     "delivered",
     /** 014 FR-182: the owner ended a step; one line per press, whatever it was in flight. */
     "interrupted",
+    /** 017 FR-263: a session site plan was approved, replaced, withdrawn by the owner, or ended. */
+    "approved",
+    "replaced",
+    "withdrawn",
+    "ended",
   ]),
   /** The host the dialog belonged to; absent when the item is not about a page. */
   site: z.string().max(256).optional(),
@@ -3346,6 +3528,13 @@ const agentSessionViewSchema = z.strictObject({
   activity: z.array(agentActivityItemSchema).max(AGENT_ACTIVITY_KEPT).optional(),
   /** The non-blocking thing the panel is telling the owner about this session right now (FR-114). */
   notice: agentNoticeSchema.optional(),
+  /**
+   * The site plan the owner approved for this session, if any (017 FR-259, R-252). Absent from a
+   * 0.9.0 projection and whenever no plan is active.
+   */
+  sitePlan: z
+    .strictObject({ origins: z.array(sitePlanOriginSchema).min(1).max(AGENT_SITE_PLAN_MAX_ORIGINS) })
+    .optional(),
 });
 
 /**
@@ -3496,6 +3685,24 @@ const agentPlanPromptSchema = z.strictObject({
 export type AgentPlanPrompt = z.infer<typeof agentPlanPromptSchema>;
 
 /**
+ * A session's proposed site plan, as the owner is asked about it once (017 FR-251, R-247).
+ *
+ * The proposal's own words - purpose and steps are the agent's text, shown as inert text - and the
+ * sites already in the session's active plan, so a replacing proposal can mark them (FR-260).
+ */
+const agentSitePlanPromptSchema = z.strictObject({
+  proposalId: z.string().min(1).max(128),
+  sessionId: z.string().min(1).max(128),
+  origins: z.array(sitePlanOriginSchema).min(1).max(AGENT_SITE_PLAN_MAX_ORIGINS),
+  purpose: z.string().min(1).max(AGENT_SITE_PLAN_MAX_PURPOSE_CHARS),
+  steps: z.array(z.string().min(1).max(AGENT_SITE_PLAN_MAX_STEP_CHARS)).max(AGENT_SITE_PLAN_MAX_STEPS).optional(),
+  alreadyApproved: z.array(sitePlanOriginSchema).max(AGENT_SITE_PLAN_MAX_ORIGINS).optional(),
+  raisedAt: z.string().min(1).max(64),
+});
+
+export type AgentSitePlanPrompt = z.infer<typeof agentSitePlanPromptSchema>;
+
+/**
  * A tab as the *owner* is shown it (004/T109a): the browser's own record of it, and who holds it.
  *
  * The same row the agent is given, minus the one thing that is not a fact from the panel's vantage.
@@ -3536,6 +3743,8 @@ export const agentPanelStateSchema = z.strictObject({
   prompt: agentEffectPromptSchema.optional(),
   /** The batch awaiting one answer, on a site the owner set to `follow-a-plan`. */
   plan: agentPlanPromptSchema.optional(),
+  /** 017: a session's site-plan proposal awaiting the owner's answer. A 0.9.0 worker never sets it. */
+  sitePlan: agentSitePlanPromptSchema.optional(),
   bridge: agentBridgeStatusSchema,
   /**
    * The paired agent's stated name, for the status row (006 FR-083). It is the first paired
@@ -3753,6 +3962,29 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("ui.agent.upload-root-clear"),
     payload: z.strictObject({ root: absolutePathSchema }),
+  }),
+  /**
+   * The owner's answer to one site-plan proposal (017 FR-252, R-247). `origins` are the sites left
+   * ticked; an approval must keep at least one, and the worker accepts only sites that were in the
+   * proposal - the panel cannot add one. Ignored when declining.
+   */
+  z.strictObject({
+    type: z.literal("ui.agent.site-plan-decide"),
+    payload: z
+      .strictObject({
+        proposalId: z.string().min(1).max(128),
+        approve: z.boolean(),
+        origins: z.array(sitePlanOriginSchema).max(AGENT_SITE_PLAN_MAX_ORIGINS),
+      })
+      .refine((payload) => !payload.approve || payload.origins.length > 0, {
+        message: "an approval keeps at least one site",
+        path: ["origins"],
+      }),
+  }),
+  /** End one session's site plan at once (017 FR-259, R-252); the session itself goes on. */
+  z.strictObject({
+    type: z.literal("ui.agent.site-plan-withdraw"),
+    payload: z.strictObject({ sessionId: z.string().min(1).max(128) }),
   }),
 ]);
 

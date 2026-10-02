@@ -1,4 +1,9 @@
-import { isAgentEffectTool, type AgentToolName, type SiteMode } from "@hallpass/contracts";
+import {
+  AGENT_SITE_PLAN_COVERED_TOOLS,
+  isAgentEffectTool,
+  type AgentToolName,
+  type SiteMode,
+} from "@hallpass/contracts";
 
 /** The tool that answers a page's dialog (008/US3); named once, used by `requiresGate`. */
 const DIALOG_TOOL: AgentToolName = "dialog";
@@ -50,6 +55,15 @@ export type GateInput = {
   tool: AgentToolName;
   args: Record<string, unknown>;
   plan?: StatedPlan | undefined;
+  /**
+   * Whether *this session's* approved site plan names `site` (017 FR-254, R-245).
+   *
+   * Computed by the caller from the session plan store and the tab's current top-level origin, so
+   * the gate stays free of storage. Absent is `false`. It is worth something only for the page
+   * actions in `AGENT_SITE_PLAN_COVERED_TOOLS` under the two modes that would otherwise ask; page
+   * JavaScript, uploads and a forced leave never read it (FR-255).
+   */
+  sitePlanCovers?: boolean | undefined;
 };
 
 export type GateDecision =
@@ -89,6 +103,11 @@ export function requiresGate(tool: AgentToolName): boolean {
   );
 }
 
+/** Whether an approved session site plan may stand in for the owner's card on this tool (R-250). */
+function isSitePlanCoveredTool(tool: AgentToolName): boolean {
+  return (AGENT_SITE_PLAN_COVERED_TOOLS as readonly AgentToolName[]).includes(tool);
+}
+
 /**
  * Stable equality for one step's arguments.
  *
@@ -115,10 +134,18 @@ export function decideGate(input: GateInput): GateDecision {
   if (input.mode === "skip-checks") {
     return { decision: "admit" };
   }
+  /**
+   * 017 FR-254, FR-257 (D-017-9): what this gate would otherwise ask about, the session's approved
+   * site plan answers - for a covered page action only. Every `prompt` below goes through it, and
+   * nothing else does: it never turns a refusal into an admission, and under `follow-a-plan` a
+   * call the stated plan names is still admitted *as that step*, so the batch's count stays true.
+   */
+  const covered = input.sitePlanCovers === true && isSitePlanCoveredTool(input.tool);
+  const unplanned: GateDecision = covered ? { decision: "admit" } : { decision: "prompt" };
   if (input.mode === "follow-a-plan") {
     const plan = input.plan;
     if (!plan || plan.site !== input.site) {
-      return { decision: "prompt" };
+      return unplanned;
     }
     if (input.tool === DIALOG_TOOL) {
       // 008/FR-112, US3 scenario 7: the plan the owner approved is being carried out on this site,
@@ -131,7 +158,7 @@ export function decideGate(input: GateInput): GateDecision {
     if (next && next.tool === input.tool && sameArguments(next.args, input.args)) {
       return { decision: "admit", step: plan.admittedCount };
     }
-    return { decision: "prompt" };
+    return unplanned;
   }
-  return { decision: "prompt" };
+  return unplanned;
 }

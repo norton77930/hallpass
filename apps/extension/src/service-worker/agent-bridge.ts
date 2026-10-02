@@ -3,6 +3,7 @@ import {
   agentLinkFrameSchema,
   agentNativeRequestSchema,
   PAIRING_DECLINED_MARKER,
+  SITE_PLAN_FEATURE,
   type AgentNativeRequest,
   type AgentNativeResponse,
   type PromptWaitingFrame,
@@ -47,6 +48,26 @@ export const AGENT_RECONNECT_BASE_MS = 5_000;
 export const AGENT_RECONNECT_MAX_MS = 60_000;
 
 /**
+ * How long the ack waits for the browser run id before it goes without it (two browsers, 2026-10-02).
+ *
+ * The id is a `chrome.storage.session` read, normally a few milliseconds. The relay leaves if no ack
+ * arrives within 10 s, and an ack without the id only costs the two-browser check (the relay then
+ * takes over, as before), so the id is never worth more than a short wait.
+ */
+export const AGENT_ACK_RUN_ID_BOUND_MS = 1_000;
+
+/**
+ * How long a link that follows a stand-by must stay up before the panel calls it connected (two
+ * browsers, 2026-10-02).
+ *
+ * While another browser serves, every reconnect of this one opens a relay that greets, is
+ * acknowledged and then stands by a moment later. Flipping to "connected" on each greeting would
+ * flash the connected page every few seconds; a relay that is still there after this long has
+ * taken over. Comfortably past the relay's own decision (the run id bound plus a 500 ms probe).
+ */
+export const AGENT_STANDBY_CLEAR_MS = 3_000;
+
+/**
  * The Port shape this module uses, which is the part of `chrome.runtime.Port` it actually needs.
  * Naming it here is what lets the bridge be tested without a browser.
  */
@@ -60,9 +81,11 @@ export type AgentPortLike = {
 /**
  * What the panel shows about the link. `unavailable` means Chrome could not reach the host at all -
  * not installed, not registered, not allowed - while `disconnected` means a link was there and went
- * away; the owner reads them differently, so they are not collapsed into one word.
+ * away; the owner reads them differently, so they are not collapsed into one word. `standby` means
+ * the host answered and stood aside because another browser on this computer is serving the agents
+ * (two browsers, 2026-10-02).
  */
-export type AgentBridgeStatus = "connected" | "unavailable" | "disconnected";
+export type AgentBridgeStatus = "connected" | "unavailable" | "disconnected" | "standby";
 
 /**
  * The clock the fast reconnect runs on, injected so a test never waits five seconds to see it.
@@ -166,6 +189,12 @@ export type AgentBridgeDeps = {
    */
   onPairWithdraw?: (withdrawal: { agentId: string; sessionId: string; requestId?: string }) => void;
   /**
+   * The composer dispatches `propose_sites` to a runner that can raise the site-plan card (017 R-248,
+   * R-251). Its presence is what this worker advertises as `site-plan` on every pairing answer; a
+   * host never forwards the tool to a worker that did not say so.
+   */
+  sitePlans?: true;
+  /**
    * A relay announced itself on a freshly opened native port. It starts the reconciliation: the
    * sessions whose servers dial back in and greet again survive, the rest are released. The path
    * is where that relay writes its record, when it said (006 FR-082, an optional field).
@@ -255,11 +284,68 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
   let reopen: unknown;
   /** How many times in a row the link has been lost or refused; it decides the next delay. */
   let attempts = 0;
+  /** The armed "this relay kept the link" check after a stand-by, if one is waiting. */
+  let standbyClear: unknown;
 
   function cancelReopen(): void {
     if (reopen === undefined) return;
     timer.clear(reopen);
     reopen = undefined;
+  }
+
+  function cancelStandbyClear(): void {
+    if (standbyClear === undefined) return;
+    timer.clear(standbyClear);
+    standbyClear = undefined;
+  }
+
+  /**
+   * The browser run for the ack, bounded (two browsers, 2026-10-02). A read that fails or is slow
+   * resolves to `undefined`: the ack goes without it, and the relay takes over as it always did.
+   */
+  function browserRunForAck(): Promise<string | undefined> {
+    const read = deps.browserRunId;
+    if (read === undefined) return Promise.resolve(undefined);
+    return new Promise<string | undefined>((resolve) => {
+      const bound = setTimeout(() => {
+        deps.reportDiagnostic?.("agent.bridge.browser-run-slow");
+        resolve(undefined);
+      }, AGENT_ACK_RUN_ID_BOUND_MS);
+      void (async () => {
+        try {
+          return await read();
+        } catch {
+          deps.reportDiagnostic?.("agent.bridge.browser-run-unreadable");
+          return undefined;
+        }
+      })().then((id) => {
+        clearTimeout(bound);
+        resolve(id);
+      });
+    });
+  }
+
+  /**
+   * Answers `relay-started`, then reports the link (004/T169). Split out because the answer may now
+   * wait on the browser run id; nothing is done for a port that went away in the meantime.
+   */
+  function acknowledgeRelay(answering: AgentPortLike, relayPid: number, recordPath: string | undefined, browserRunId: string | undefined): void {
+    if (port !== answering) return;
+    // Before anything else: the relay publishes its record only on this answer (004/T169,
+    // protocol 2), and a `relay-started` this worker never answered is a host with no owner.
+    send({ type: "relay-ack", relayPid, ...(browserRunId === undefined ? {} : { browserRunId }) });
+    if (status === "standby") {
+      // Two browsers (2026-10-02): this relay may stand aside too, a moment from now. It is called
+      // connected only once it has kept the link past the relay's own decision.
+      cancelStandbyClear();
+      standbyClear = timer.set(() => {
+        standbyClear = undefined;
+        if (port === answering) setStatus("connected");
+      }, AGENT_STANDBY_CLEAR_MS);
+    } else {
+      setStatus("connected");
+    }
+    deps.onRelayStarted?.(relayPid, recordPath);
   }
 
   /**
@@ -353,13 +439,32 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
            *
            * Ahead of `onRelayStarted` so the runtime's own reaction to the status - the placeholder
            * session - is in place before the reconciliation this frame starts.
+           *
+           * The ack carries this browser's run id (two browsers, 2026-10-02), read under a short
+           * bound; without an id to read it goes at once, exactly as before.
            */
           attempts = 0;
-          // Before anything else: the relay publishes its record only on this answer (004/T169,
-          // protocol 2), and a `relay-started` this worker never answered is a host with no owner.
-          send({ type: "relay-ack", relayPid: link.data.relayPid });
-          setStatus("connected");
-          deps.onRelayStarted?.(link.data.relayPid, link.data.recordPath);
+          {
+            const answering = port;
+            const { relayPid, recordPath } = link.data;
+            if (answering === undefined) return;
+            if (deps.browserRunId === undefined) {
+              acknowledgeRelay(answering, relayPid, recordPath, undefined);
+            } else {
+              void browserRunForAck().then((id) => acknowledgeRelay(answering, relayPid, recordPath, id));
+            }
+          }
+          return;
+        case "relay-standby":
+          /**
+           * Two browsers (2026-10-02): another browser on this computer is serving the agents, and
+           * this relay stood aside rather than take the bridge from it. The port closes next; the
+           * status holds through that and through the retries, which are the ordinary reconnect -
+           * the first one after the other browser closes takes over.
+           */
+          deps.reportDiagnostic?.("agent.bridge.relay-standby");
+          cancelStandbyClear();
+          setStatus("standby");
           return;
         case "upload-roots":
           // The relay's answer about the owner's own file (014 FR-194). It is a fact about their
@@ -436,6 +541,8 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
               // names its exchange. A 0.7.0 worker's strict parse refuses that `requestId` - and
               // with it the whole card - so the host sends one only after reading this here.
               ...(deps.onPairWithdraw === undefined ? [] : ["pair-withdraw"]),
+              // 017 R-251: this worker raises the site-plan card for `propose_sites`.
+              ...(deps.sitePlans === true ? [SITE_PLAN_FEATURE] : []),
               // 003 FR-032a: the owner declined this request, which is not an unpair. In
               // `features` because a new key would make a 0.6.0 host drop the whole frame; that
               // host ignores the member and answers the refusal as it always has.
@@ -549,9 +656,12 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           return;
         }
         port = undefined;
+        cancelStandbyClear();
         deps.reportDiagnostic?.("agent.bridge.disconnected");
         deps.onDisconnected?.(reason);
-        setStatus("disconnected");
+        // A relay that stood by closes the port as its last act; the owner's fact is still "another
+        // browser has it" (two browsers, 2026-10-02), not a lost link.
+        setStatus(status === "standby" ? "standby" : "disconnected");
         scheduleReopen();
       });
       // Nothing is claimed here. An open Port only means Chrome accepted the name; whether a host

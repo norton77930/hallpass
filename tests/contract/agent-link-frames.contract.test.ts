@@ -88,6 +88,41 @@ describe("T076 agent link frames", () => {
     expectRejected(frame, { type: "resumed", sessionId: SESSION }, "a frame type nobody declared");
   });
 
+  /**
+   * Two browsers (2026-10-02). The ack names the browser run so a relay can tell its own browser's
+   * previous relay from another browser's; optional both ways, because a host from before it reads
+   * only `type` and `relayPid` and a worker from before it never sends one. The relay that stands
+   * aside says so with its own frame, naming the relay that keeps serving.
+   */
+  it("acks with the browser run when it has one, and stands by with the serving relay's pid", () => {
+    const frame = contractSchema("agentLinkFrameSchema");
+
+    expectAccepted(frame, { type: "relay-ack", relayPid: RELAY_PID }, "an ack from a worker before the run id");
+    expectAccepted(frame, { type: "relay-ack", relayPid: RELAY_PID, browserRunId: "run-1" }, "an ack naming its run");
+    expectRejected(frame, { type: "relay-ack", relayPid: RELAY_PID, browserRunId: "" }, "an ack with an empty run");
+    expectRejected(frame, { type: "relay-ack", relayPid: RELAY_PID, browserRunId: "r".repeat(65) }, "an ack with an oversized run");
+
+    expectAccepted(frame, { type: "relay-standby", servingRelayPid: RELAY_PID }, "a relay-standby");
+    expectRejected(frame, { type: "relay-standby" }, "a relay-standby naming no serving relay");
+    expectRejected(frame, { type: "relay-standby", servingRelayPid: 0 }, "a relay-standby naming pid zero");
+    expectRejected(frame, { type: "relay-standby", servingRelayPid: RELAY_PID, sessionId: SESSION }, "a relay-standby naming a session");
+  });
+
+  it("names the record's owner in a sidecar, leaving the record's own shape untouched", () => {
+    const owner = contractSchema("agentBridgeOwnerSchema");
+    const record = contractSchema("agentBridgeRecordSchema");
+
+    expectAccepted(owner, { relayPid: RELAY_PID, browserRunId: "run-1" }, "an owner naming its run");
+    expectAccepted(owner, { relayPid: RELAY_PID }, "an owner whose worker named no run");
+    expectRejected(owner, { browserRunId: "run-1" }, "an owner naming no relay");
+    // The record stays exactly what running servers parse: the run id has no place in it.
+    expectRejected(
+      record,
+      { port: 51_234, token: TOKEN, relayPid: RELAY_PID, startedAt: "2026-10-02T09:00:00.000Z", protocol: AGENT_LINK_PROTOCOL, browserRunId: "run-1" },
+      "a record carrying the owner's run",
+    );
+  });
+
   it("carries the session on every call frame", () => {
     const request = contractSchema("agentNativeRequestSchema");
     const call = { callId: "call-1", sessionId: SESSION, tool: "tabs_context", args: {} };
