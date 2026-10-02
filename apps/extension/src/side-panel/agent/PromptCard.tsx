@@ -3,24 +3,29 @@ import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
+import { SitePlanCard } from "./SitePlanCard.js";
 
 /**
  * The one pending question, on top of whatever else is on screen (006 FR-084, FR-085, D-006-6).
  *
- * Three cards share this place and at most one is shown: the pairing request, the `ask` consent,
- * and the plan a batch states under `follow-a-plan`. They are shown in arrival order (FR-085): the
+ * Four cards share this place and at most one is shown: the pairing request, the `ask` consent,
+ * the plan a batch states under `follow-a-plan`, and (017) a session's site-plan proposal. They are shown in arrival order (FR-085): the
  * worker dates each question, and the earliest is on top until it is answered. A projection with
  * no dates - a 004 worker - falls back to pairing first, then the consent, then the plan. The
  * card is a non-modal dialog: the page under it stays readable, because the owner may need the
  * site list to decide.
  */
 
-/** Which of the three questions is on top: the earliest dated one, undated ones in fixed order. */
-export function questionOnTop(state: Pick<AgentPanelState, "pending" | "prompt" | "plan">): "pairing" | "consent" | "plan" | undefined {
-  const candidates: Array<{ kind: "pairing" | "consent" | "plan"; at: string | undefined }> = [];
+/** Which question is on top: the earliest dated one, undated ones in fixed order. */
+export function questionOnTop(
+  state: Pick<AgentPanelState, "pending" | "prompt" | "plan" | "sitePlan">,
+): "pairing" | "consent" | "plan" | "site-plan" | undefined {
+  const candidates: Array<{ kind: "pairing" | "consent" | "plan" | "site-plan"; at: string | undefined }> = [];
   if (state.pending) candidates.push({ kind: "pairing", at: state.pending.requestedAt });
   if (state.prompt) candidates.push({ kind: "consent", at: state.prompt.raisedAt });
   if (state.plan) candidates.push({ kind: "plan", at: state.plan.raisedAt });
+  // 017 R-247: a session's site-plan proposal is one more question in the same slot.
+  if (state.sitePlan) candidates.push({ kind: "site-plan", at: state.sitePlan.raisedAt });
   const stamp = (at: string | undefined): number => {
     const parsed = at === undefined ? Number.NaN : Date.parse(at);
     // An undated question sorts first, which is the fixed precedence for a projection with none.
@@ -90,7 +95,7 @@ export function PromptCard(props: {
   send: SendCommand;
 }): ReactElement | null {
   const t = (key: string): string => lookup(key, props.locale);
-  const { pending, prompt, plan } = props.state;
+  const { pending, prompt, plan, sitePlan } = props.state;
   /**
    * The steps of the plan on screen that the owner has struck out, by position. Panel-local because
    * striking a step out is not a decision until Approve is pressed, and keyed by the plan so a
@@ -106,7 +111,15 @@ export function PromptCard(props: {
    */
   const cardRef = useRef<HTMLElement | null>(null);
   const questionId =
-    onTop === "pairing" ? pending?.agentId : onTop === "consent" ? prompt?.promptId : onTop === "plan" ? plan?.planId : undefined;
+    onTop === "pairing"
+      ? pending?.agentId
+      : onTop === "consent"
+        ? prompt?.promptId
+        : onTop === "plan"
+          ? plan?.planId
+          : onTop === "site-plan"
+            ? sitePlan?.proposalId
+            : undefined;
   useEffect(() => {
     cardRef.current?.querySelector<HTMLElement>("button, input, select")?.focus();
   }, [onTop, questionId]);
@@ -432,6 +445,24 @@ export function PromptCard(props: {
           </button>
         </div>
       </section>
+    );
+  }
+
+  if (sitePlan && onTop === "site-plan") {
+    const proposing = props.state.sessions.find((session) => session.sessionId === sitePlan.sessionId);
+    return (
+      <SitePlanCard
+        sitePlan={sitePlan}
+        session={proposing}
+        agentName={
+          proposing === undefined
+            ? props.promptAgent
+            : (props.state.paired.find((agent) => agent.agentId === proposing.agentId)?.displayName ?? proposing.agentId)
+        }
+        locale={props.locale}
+        send={props.send}
+        cardRef={cardRef}
+      />
     );
   }
 

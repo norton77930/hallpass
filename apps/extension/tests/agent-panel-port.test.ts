@@ -105,7 +105,13 @@ function fakeFocus(initial?: number) {
   };
 }
 
-function setup(options: { focus?: ReturnType<typeof fakeFocus>; setAttention?: (on: boolean) => void } = {}) {
+function setup(
+  options: {
+    focus?: ReturnType<typeof fakeFocus>;
+    setAttention?: (on: boolean) => void;
+    reportDiagnostic?: (code: string) => void;
+  } = {},
+) {
   const nativePort = fakeNativePort();
   const runtime = composeAgentRuntime({
     connectNative: () => nativePort,
@@ -116,6 +122,7 @@ function setup(options: { focus?: ReturnType<typeof fakeFocus>; setAttention?: (
     sidePanelUrl: PANEL_URL,
     runtime,
     ...(options.focus ? { watchFocusedWindow: options.focus.watch } : {}),
+    ...(options.reportDiagnostic ? { reportDiagnostic: options.reportDiagnostic } : {}),
   });
   // What `agent-entry.ts` does: the runtime reads the panel port's presence.
   if (options.focus) runtime.bindPanelPresence(panel);
@@ -228,7 +235,9 @@ describe("T019 agent panel port", () => {
 
     // The relay's `relay-started` was acknowledged first (004/T169); the decision follows it.
     await vi.waitFor(() => expect(nativePort.sent).toEqual([
-        { type: "relay-ack", relayPid: 4242 },
+        // Two browsers (2026-10-02): the ack names this browser's run, so the relay can tell its own
+        // browser's previous relay from another browser's.
+        { type: "relay-ack", relayPid: 4242, browserRunId: expect.any(String) },
         // 014 FR-194: and the worker asks that relay what the owner's upload directories are, on
         // every link, because the panel's rows are a picture of the host's file.
         { type: "upload-roots-list" },
@@ -241,7 +250,7 @@ describe("T019 agent panel port", () => {
           sessionId: "session-h1",
           accepted: true,
           browserRunId: expect.any(String),
-          features: ["upload-consent", "pair-withdraw"],
+          features: ["upload-consent", "pair-withdraw", "site-plan"],
         },
       ]));
     await vi.waitFor(() =>
@@ -381,6 +390,91 @@ describe("T019 agent panel port", () => {
     });
 
     expect(decidePlan).toHaveBeenCalledWith("plan-1", true, [1]);
+  });
+
+  /**
+   * 017/T480 — the owner's answer to a site plan, and the guard on it (FR-253, SC-125).
+   *
+   * The panel can narrow the agent's list and never add to it. A press naming a site the proposal
+   * did not list, or a proposal the worker does not have, grants nothing and is said; only an answer
+   * to the question actually standing, within its sites, writes a plan.
+   */
+  describe("017 site plan commands", () => {
+    const A = "https://a.test";
+    const B = "https://b.test";
+
+    async function proposing(reportDiagnostic?: (code: string) => void) {
+      const built = setup(reportDiagnostic ? { reportDiagnostic } : {});
+      const port = fakePanelPort();
+      built.panel.accept(port);
+      built.nativePort.emit({ type: "hello", sessionId: "session-h1", agentId: "agent-1", displayName: "Claude Code" });
+      built.nativePort.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+      await vi.waitFor(async () => expect((await built.runtime.pairing.state()).pending).toBeDefined());
+      await built.runtime.pairing.decide("agent-1", true);
+      built.nativePort.emit({
+        callId: "call-sp",
+        sessionId: "session-h1",
+        tool: "propose_sites",
+        args: { origins: [A, B], purpose: "Compare" },
+      });
+      await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ payload: { sitePlan: { origins: [A, B] } } }));
+      const proposalId = built.runtime.prompts.currentSitePlan()?.proposalId ?? "";
+      const answered = () =>
+        built.nativePort.sent.find((frame) => (frame as { callId?: string }).callId === "call-sp") as
+          | { outcome?: string; result?: unknown }
+          | undefined;
+      return { ...built, port, proposalId, answered };
+    }
+
+    it("carries the owner's approval of the ticked sites to the question", async () => {
+      const { port, runtime, proposalId, answered } = await proposing();
+
+      port.emit({ type: "ui.agent.site-plan-decide", payload: { proposalId, approve: true, origins: [B] } });
+
+      await vi.waitFor(() => expect(answered()).toMatchObject({ outcome: "ok", result: { approved: [B], leftOut: [A] } }));
+      expect((await runtime.sitePlans.forSession("session-h1"))?.origins).toEqual([B]);
+    });
+
+    it("grants nothing for a site outside the proposal, keeps the card up, and says so", async () => {
+      const diagnostics: string[] = [];
+      const { port, runtime, proposalId, answered } = await proposing((code) => diagnostics.push(code));
+
+      port.emit({
+        type: "ui.agent.site-plan-decide",
+        payload: { proposalId, approve: true, origins: [A, "https://evil.test"] },
+      });
+
+      expect(diagnostics).toContain("agent.panel.site-plan-refused");
+      expect(runtime.prompts.currentSitePlan()?.proposalId).toBe(proposalId);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(answered()).toBeUndefined();
+      expect(await runtime.sitePlans.forSession("session-h1")).toBeUndefined();
+    });
+
+    it("grants nothing for a proposal the worker does not have, and says so", async () => {
+      const diagnostics: string[] = [];
+      const { port, runtime, proposalId } = await proposing((code) => diagnostics.push(code));
+
+      port.emit({
+        type: "ui.agent.site-plan-decide",
+        payload: { proposalId: "site-plan-forged", approve: true, origins: [A] },
+      });
+
+      expect(diagnostics).toContain("agent.panel.site-plan-refused");
+      expect(runtime.prompts.currentSitePlan()?.proposalId).toBe(proposalId);
+      expect(await runtime.sitePlans.forSession("session-h1")).toBeUndefined();
+    });
+
+    it("routes the session card's withdraw to the runtime (T485)", async () => {
+      const { panel, runtime } = setup();
+      const port = fakePanelPort();
+      panel.accept(port);
+      const withdraw = vi.spyOn(runtime.sitePlans, "withdraw").mockResolvedValue(undefined);
+
+      port.emit({ type: "ui.agent.site-plan-withdraw", payload: { sessionId: "session-h1" } });
+
+      expect(withdraw).toHaveBeenCalledWith("session-h1");
+    });
   });
 
   /**

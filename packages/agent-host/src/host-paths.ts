@@ -43,6 +43,16 @@ export function bridgeFilePath(env: HostEnvironment = process.env): string {
 }
 
 /**
+ * Which browser run the relay in `bridge.json` belongs to (two browsers, 2026-10-02).
+ *
+ * Beside the record rather than inside it: servers parse the record strictly, so only relays read
+ * this file, to tell their own browser's previous relay from another browser's.
+ */
+export function bridgeOwnerFilePath(env: HostEnvironment = process.env): string {
+  return join(hostDataDirectory(env), "bridge-owner.json");
+}
+
+/**
  * The stable identity of *this machine's* agent installation.
  *
  * The owner pairs an agent once and expects the next session not to ask again (SC-020), so the id

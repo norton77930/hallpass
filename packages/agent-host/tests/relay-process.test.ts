@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bridgeFilePath,
   dialRelay,
@@ -12,6 +12,7 @@ import {
   readBridgeRecord,
   type RelayDial,
 } from "../src/index.js";
+import { readBridgeOwner } from "../src/relay-ownership.js";
 
 /**
  * 004/T093 — the relay is the listener, and several servers share it.
@@ -67,7 +68,9 @@ describe("T093 the relay listens and multiplexes", () => {
    * `relay-started` with `relay-ack` (004/T169, protocol 2) - unless a test is about a relay that
    * nobody ever acknowledges, which is what `ack: false` is for.
    */
-  function startRelay(options: { ack?: boolean; ackBoundMs?: number } = {}): ChildProcessWithoutNullStreams {
+  function startRelay(
+    options: { ack?: boolean; ackBoundMs?: number; browserRunId?: string } = {},
+  ): ChildProcessWithoutNullStreams {
     const child = spawn(process.execPath, [RELAY_ENTRY], {
       env: {
         ...process.env,
@@ -84,7 +87,13 @@ describe("T093 the relay listens and multiplexes", () => {
         toChrome.push(frame);
         own.push(frame);
         if (options.ack !== false && isFrame(frame, "relay-started")) {
-          child.stdin.write(encodeFrame({ type: "relay-ack", relayPid: (frame as { relayPid: number }).relayPid }));
+          child.stdin.write(
+            encodeFrame({
+              type: "relay-ack",
+              relayPid: (frame as { relayPid: number }).relayPid,
+              ...(options.browserRunId === undefined ? {} : { browserRunId: options.browserRunId }),
+            }),
+          );
         }
       }
     });
@@ -225,6 +234,53 @@ describe("T093 the relay listens and multiplexes", () => {
         (frame) => (frame as { callId?: unknown }).callId === "c-after",
       );
     }, "the server's call to reach the winning relay");
+  });
+
+  /**
+   * Two browsers (2026-10-02). Chrome and Edge each run a relay; each used to take the record on its
+   * own ack, so the two evicted each other every ~7 s and neither browser worked. The second
+   * browser's relay now stands by - writes nothing, tells its worker, leaves - while the first keeps
+   * serving; and once the first browser closes, the second browser's next relay takes over.
+   */
+  it("stands by while another browser's relay serves, and takes over once it is gone", async () => {
+    const env = { LOCALAPPDATA: dataDir };
+    const first = startRelay({ browserRunId: "run-chrome" });
+    const server = attach("session-one");
+    await server.dial.attached;
+    await waitForRecordPid(first.pid, "the first browser's record");
+    await vi.waitFor(() => expect(readBridgeOwner(env)).resolves.toEqual({ relayPid: first.pid, browserRunId: "run-chrome" }));
+
+    const second = startRelay({ browserRunId: "run-edge" });
+    const secondExited = new Promise<number | null>((resolve) => second.once("exit", (code) => resolve(code)));
+    await expect(within(secondExited, 8_000, "the standing-by relay to leave")).resolves.toBe(0);
+    expect(toChromeByPid.get(second.pid)?.filter((frame) => isFrame(frame, "relay-standby"))).toEqual([
+      { type: "relay-standby", servingRelayPid: first.pid },
+    ]);
+
+    // Past the first relay's one-second record poll: it would have noticed a takeover by now.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await expect(readBridgeRecord(env)).resolves.toMatchObject({ relayPid: first.pid });
+    await expect(readBridgeOwner(env)).resolves.toEqual({ relayPid: first.pid, browserRunId: "run-chrome" });
+    expect(first.exitCode).toBeNull();
+    expect(server.detached()).toBe(false);
+
+    // The first browser closes: its relay retracts the record and the sidecar with it ...
+    const firstExited = new Promise<number | null>((resolve) => first.once("exit", (code) => resolve(code)));
+    first.stdin.end();
+    await expect(within(firstExited, 8_000, "the first browser's relay to exit")).resolves.toBe(0);
+    await expect(readBridgeOwner(env)).resolves.toBeUndefined();
+
+    // ... and the second browser's next relay - its worker's ordinary reconnect - takes over.
+    const third = startRelay({ browserRunId: "run-edge" });
+    await waitForRecordPid(third.pid, "the second browser's relay to take over");
+    // The sidecar follows the record by one write.
+    await vi.waitFor(() => expect(readBridgeOwner(env)).resolves.toEqual({ relayPid: third.pid, browserRunId: "run-edge" }));
+    await waitFor(() => {
+      server.dial.send({ callId: "c-failover", sessionId: "session-one", tool: "tabs_context", args: {} });
+      return (toChromeByPid.get(third.pid) ?? []).some(
+        (frame) => (frame as { callId?: unknown }).callId === "c-failover",
+      );
+    }, "the server's call to reach the relay that took over");
   });
 
   /**

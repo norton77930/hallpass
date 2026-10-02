@@ -723,3 +723,113 @@ describe("016 T437 session card", () => {
     expect(css).toMatch(/\.agent-shell \.agent-session\s*\{[^}]*flex-shrink:\s*0/);
   });
 });
+
+/**
+ * 017/T484 — the session's active site plan, on its card (FR-259, FR-263, FR-264, R-252).
+ *
+ * Revocation lives where the grant is visible: a card that holds a plan says how many sites it
+ * covers, unfolds to the list, and has a control that ends it at once while the session goes on.
+ */
+describe("017 T484 session card site plan", () => {
+  let port: FakeAgentPort;
+  const ORIGINS = ["https://shop.test", "https://docs.test:8443", "https://api.test"];
+  const SESSION = {
+    sessionId: "session-p",
+    agentId: "agent-1",
+    tabs: [],
+    sites: [],
+    state: "working" as const,
+    inFlight: 0,
+    lastActivityAt: "2026-09-13T00:00:02.000Z",
+  };
+  const only = (): HTMLElement => {
+    const node = document.querySelector("[data-session-id]");
+    if (!(node instanceof HTMLElement)) throw new Error("no card");
+    return node;
+  };
+
+  beforeEach(() => {
+    port = installAgentPort();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it("shows nothing about a plan while the session has none", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [SESSION] });
+    expect(only().querySelector(".agent-session-site-plan")).toBeNull();
+    expect(within(only()).queryByRole("button", { name: ui("agent.session.sitePlanWithdraw") })).toBeNull();
+    expect(only().textContent).not.toContain("Site plan");
+  });
+
+  it("says how many sites the plan covers and unfolds to the list", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: ORIGINS } }] });
+
+    const plan = only().querySelector<HTMLDetailsElement>("details.agent-session-site-plan");
+    expect(plan?.querySelector("summary")?.textContent).toBe("Site plan: 3 sites");
+    expect([...(plan?.querySelectorAll("li") ?? [])].map((item) => item.textContent)).toEqual(ORIGINS);
+
+    project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: [ORIGINS[0] as string] } }] });
+    expect(only().querySelector("details.agent-session-site-plan summary")?.textContent).toBe("Site plan: 1 site");
+  });
+
+  it("withdraws the plan of exactly this session", () => {
+    renderShell();
+    project(port, {
+      ...IDLE,
+      sessions: [
+        { ...SESSION, sitePlan: { origins: ORIGINS } },
+        { ...SESSION, sessionId: "session-q", sitePlan: { origins: [ORIGINS[0] as string] } },
+      ],
+    });
+    const card = document.querySelector<HTMLElement>('[data-session-id="session-p"]') as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: ui("agent.session.sitePlanWithdraw") }));
+
+    expect(port.sent).toEqual([{ type: "ui.agent.site-plan-withdraw", payload: { sessionId: "session-p" } }]);
+    expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("writes the activity sentence from the site count, with the outcome word", () => {
+    const t = (key: string): string => lookup(key, "en-US");
+    const item = (message: string) => ({ at: 1_700_000_007_000, kind: "site-plan", outcome: "approved", message }) as const;
+    expect(activityText(item("3"), t)).toBe("Site plan for 3 sites");
+    expect(activityText(item("1"), t)).toBe("Site plan for 1 site");
+    expect(lookup("agent.activity.sitePlan", "zh-TW")).toMatch(/[一-鿿]/);
+
+    renderShell();
+    project(port, {
+      ...IDLE,
+      sessions: [
+        {
+          ...SESSION,
+          activity: [
+            { at: 1_700_000_009_000, kind: "site-plan", outcome: "withdrawn", message: "3" },
+            { at: 1_700_000_008_000, kind: "site-plan", outcome: "replaced", message: "2" },
+            { at: 1_700_000_007_000, kind: "site-plan", outcome: "approved", message: "3" },
+            { at: 1_700_000_006_000, kind: "site-plan", outcome: "ended", message: "2" },
+          ],
+        },
+      ],
+    });
+    const lines = within(only()).getAllByRole("listitem").map((entry) => entry.textContent);
+    expect(lines).toEqual([
+      `Site plan for 3 sites ${ui("agent.activity.withdrawn")}`,
+      `Site plan for 2 sites ${ui("agent.activity.replaced")}`,
+      `Site plan for 3 sites ${ui("agent.activity.approved")}`,
+      `Site plan for 2 sites ${ui("agent.activity.ended")}`,
+    ]);
+  });
+
+  it("renders the summary and the withdraw control in zh-TW", () => {
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: ORIGINS } }] });
+    expect(only().querySelector("details.agent-session-site-plan summary")?.textContent).toBe(
+      lookup("agent.session.sitePlan", "zh-TW").replace("{n}", "3"),
+    );
+    expect(within(only()).getByRole("button", { name: lookup("agent.session.sitePlanWithdraw", "zh-TW") })).toBeTruthy();
+  });
+});

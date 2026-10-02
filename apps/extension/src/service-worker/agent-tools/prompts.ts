@@ -3,6 +3,7 @@ import {
   type AgentEffectPrompt,
   type AgentNativeResponse,
   type AgentPlanPrompt,
+  type AgentSitePlanPrompt,
   type SiteMode,
 } from "@hallpass/contracts";
 import { STEP_SEPARATOR } from "./stop.js";
@@ -126,6 +127,21 @@ export type PlanDecision =
   | { decision: "interrupted" };
 
 /**
+ * The owner's answer to a session site plan (017 R-247, FR-252).
+ *
+ * `approved` is never wider than the proposal and never empty; `leftOut` is the rest of the
+ * proposal, both in the proposal's own order. Every ending that is not the owner's press grants
+ * nothing - the same endings the other two kinds have.
+ */
+export type SitePlanDecision =
+  | { decision: "approve"; approved: string[]; leftOut: string[] }
+  | { decision: "declined" }
+  | { decision: "timed-out"; hint?: string }
+  | { decision: "stopped" }
+  | { decision: "released" }
+  | { decision: "interrupted" };
+
+/**
  * Which call a question belongs to (003/B5).
  *
  * It is carried beside the prompt rather than inside it because it is not something the owner is
@@ -175,6 +191,8 @@ export type AgentPromptController = {
   current(): AgentEffectPrompt | undefined;
   /** The plan the panel should be showing, if any. */
   currentPlan(): AgentPlanPrompt | undefined;
+  /** 017: the site-plan proposal the panel should be showing, if any. */
+  currentSitePlan(): AgentSitePlanPrompt | undefined;
   /**
    * Whose question is up (006 R-127): the session that raised the pending prompt or plan, so the
    * panel can say "waiting for you" on that session's card and on no other. `undefined` when
@@ -200,6 +218,19 @@ export type AgentPromptController = {
   ): boolean;
   /** The panel's answer to a plan. Returns whether it settled a plan that was still alive. */
   decidePlan(planId: string, approve: boolean, excludedIndexes?: readonly number[]): boolean;
+  /**
+   * 017 R-247: one question about the sites a session asks to work across. `alreadyApproved` is the
+   * session's active plan, carried so a replacing proposal can mark it (FR-260); the caller reads it.
+   */
+  askSitePlan(
+    proposal: Omit<AgentSitePlanPrompt, "proposalId" | "raisedAt"> & PromptOwner,
+  ): Promise<SitePlanDecision | { decision: "busy" }>;
+  /**
+   * The panel's answer to a site plan (017 FR-252, FR-253). An approval must name at least one
+   * origin and only origins of the proposal - the panel can narrow it, never widen it; anything else
+   * settles nothing, leaves the question up and is reported. `origins` is ignored on a decline.
+   */
+  decideSitePlan(proposalId: string, approve: boolean, origins: readonly string[]): boolean;
   /**
    * Ends a pending prompt without an answer - the owner's Stop, the link going away, or the host
    * abandoning one call.
@@ -316,6 +347,7 @@ type PendingPrompt = {
   sessionId: string;
   effect?: AgentEffectPrompt;
   plan?: AgentPlanPrompt;
+  sitePlan?: AgentSitePlanPrompt;
   timer: ReturnType<typeof setTimeout>;
   /** The five-second "still waiting", running for exactly as long as this question does (011). */
   ticker?: ReturnType<typeof setInterval>;
@@ -332,6 +364,7 @@ type PendingPrompt = {
   end: (ending: PromptEnding, hint?: string) => void;
   settleEffect?: (decision: PromptDecision) => void;
   settlePlan?: (decision: PlanDecision) => void;
+  settleSitePlan?: (decision: SitePlanDecision) => void;
 };
 
 export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPromptController {
@@ -433,6 +466,9 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     currentPlan() {
       return pending?.plan;
     },
+    currentSitePlan() {
+      return pending?.sitePlan;
+    },
     currentSession() {
       return pending?.sessionId;
     },
@@ -480,6 +516,34 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
         }));
       });
     },
+    askSitePlan({ callId, hostCallId, sessionId, promptKind: _promptKind, stopped, alreadyApproved, ...proposal }) {
+      if (stopped?.()) return Promise.resolve({ decision: "interrupted" as const });
+      if (pending) {
+        return Promise.resolve({ decision: "busy" as const });
+      }
+      const full: AgentSitePlanPrompt = {
+        proposalId: newId("site-plan"),
+        sessionId,
+        ...proposal,
+        // An empty active plan marks nothing; the field is left out rather than sent empty.
+        ...(alreadyApproved === undefined || alreadyApproved.length === 0 ? {} : { alreadyApproved }),
+        raisedAt: raisedAt(),
+      };
+      return new Promise<SitePlanDecision>((resolve) => {
+        // Ticked as `plan`: a site plan is one answer about a whole piece of work, like a batch's,
+        // and the host's prompt-waiting enum has no other word for it (contracts AgentPromptKind).
+        arm({ kind: "plan", callId: hostCallId ?? callId, sessionId }, (timer) => ({
+          id: full.proposalId,
+          callId,
+          sessionId,
+          sitePlan: full,
+          timer,
+          end: (ending, hint) =>
+            resolve(ending === "timed-out" && hint !== undefined ? { decision: ending, hint } : { decision: ending }),
+          settleSitePlan: resolve,
+        }));
+      });
+    },
     decide(promptId, allow, rememberMode, rememberTransition, rememberDirectory) {
       if (pending?.effect?.promptId !== promptId) {
         // Either the owner answered a prompt that has already expired, or the panel is showing one
@@ -516,6 +580,37 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
       settle?.(
         approve ? { decision: "approve", planId, excluded: excludedIndexes ?? [] } : { decision: "deny" },
       );
+      deps.onChange?.();
+      return true;
+    },
+    decideSitePlan(proposalId, approve, origins) {
+      const proposal = pending?.sitePlan;
+      if (proposal?.proposalId !== proposalId) {
+        deps.reportDiagnostic?.("agent.prompt.late-answer");
+        return false;
+      }
+      let decision: SitePlanDecision = { decision: "declined" };
+      if (approve) {
+        /**
+         * FR-253: the panel narrows the agent's list and never adds to it. An answer that names a
+         * site the owner was not shown, or approves nothing, is not an answer to this card: it is
+         * refused, the card stays where the owner can answer it, and the refusal is said.
+         */
+        const chosen = new Set(origins);
+        const outside = [...chosen].some((origin) => !proposal.origins.includes(origin));
+        if (outside || chosen.size === 0) {
+          deps.reportDiagnostic?.("agent.site-plan.outside-proposal");
+          return false;
+        }
+        decision = {
+          decision: "approve",
+          approved: proposal.origins.filter((origin) => chosen.has(origin)),
+          leftOut: proposal.origins.filter((origin) => !chosen.has(origin)),
+        };
+      }
+      const settle = pending?.settleSitePlan;
+      close();
+      settle?.(decision);
       deps.onChange?.();
       return true;
     },

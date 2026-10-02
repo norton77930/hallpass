@@ -56,6 +56,13 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
       item.message === "input" ? t("agent.activity.uploadInput") : t("agent.activity.uploadDrop");
     return sentence.replace("{site}", () => item.site ?? t("agent.activity.unknownSite"));
   }
+  if (item.kind === "site-plan") {
+    // 017 FR-263: one sentence per plan event, from the site count the worker sends; the outcome word
+    // (approved, replaced, withdrawn, ended) is the card's, as for every other kind.
+    return item.message === "1"
+      ? t("agent.activity.sitePlanOne")
+      : t("agent.activity.sitePlan").replace("{n}", () => item.message ?? "");
+  }
   return t("agent.activity.dialog")
     .replace("{site}", () => item.site ?? "")
     .replace("{message}", () => item.message ?? "");
@@ -157,6 +164,36 @@ export function recordingLine(
     : t("agent.session.recordingExported").replace("{filename}", recording.lastExport);
 }
 
+/**
+ * What a session is called on a card (016 FR-226 – FR-228): the agent's name, then the folder its
+ * host reported, else when it started. Both are remote input and rendered as inert text; the folder
+ * is cut past a couple of dozen characters with the whole of it in `title`. The session card's title
+ * and the site-plan question (017 FR-251) both use this, so the owner sees one name for one session.
+ */
+export function SessionTitle(props: {
+  agentName: string;
+  label?: string | undefined;
+  startedAt?: string | undefined;
+  t: (key: string) => string;
+}): ReactElement {
+  const started = clockTime(props.startedAt);
+  return (
+    <>
+      {props.agentName}
+      {props.label !== undefined ? (
+        <>
+          {" · "}
+          <span className="agent-session-label" title={props.label}>
+            {visibleLabel(props.label)}
+          </span>
+        </>
+      ) : started !== undefined ? (
+        ` · ${props.t("agent.session.started").replace("{time}", started)}`
+      ) : null}
+    </>
+  );
+}
+
 /** How long the "nothing was running" line stays up (FR-178): long enough to read, then gone. */
 export const NOTHING_TO_INTERRUPT_MS = 4_000;
 
@@ -169,6 +206,8 @@ export function SessionCard(props: {
   onStop: () => void;
   onRelease: () => void;
   onInterrupt: () => void;
+  /** 017 FR-259: ends this session's site plan at once; the session goes on. */
+  onWithdrawSitePlan: () => void;
 }): ReactElement {
   const t = (key: string): string => lookup(key, props.locale);
   const { session } = props;
@@ -191,7 +230,7 @@ export function SessionCard(props: {
   const activity = session.activity ?? [];
   const titleId = `agent-session-${session.sessionId}`;
   const held = session.tabs.length;
-  const started = clockTime(session.startedAt);
+  const sitePlan = session.sitePlan;
 
   return (
     <section
@@ -210,19 +249,13 @@ export function SessionCard(props: {
         <h2 id={titleId}>
           {/* The name this session's greeting carried, as inert text - it is remote input. The paired
               record's name is only a fallback: one agent id is shared by every MCP client on the machine. */}
-          {session.agentName ?? props.agentName}
-          {/* 016 FR-226 – FR-228: the folder its host reported, as inert text (remote input), cut past
-              a couple of dozen characters with the whole of it in `title`; else when it started. */}
-          {session.label !== undefined ? (
-            <>
-              {" · "}
-              <span className="agent-session-label" title={session.label}>
-                {visibleLabel(session.label)}
-              </span>
-            </>
-          ) : started !== undefined ? (
-            ` · ${t("agent.session.started").replace("{time}", started)}`
-          ) : null}
+          {/* 016 FR-226 – FR-228: then the folder its host reported, else when it started. */}
+          <SessionTitle
+            agentName={session.agentName ?? props.agentName}
+            label={session.label}
+            startedAt={session.startedAt}
+            t={t}
+          />
         </h2>
         <p className="agent-session-sites">{subtitleText(session, t)}</p>
         <p className="agent-session-state">{stateText(session, props.now, t)}</p>
@@ -253,6 +286,31 @@ export function SessionCard(props: {
               </li>
             ))}
           </ul>
+        )}
+        {/*
+          017 FR-259, R-252: the plan this session works under, where the owner can see it and end it.
+          The count is the summary and the sites unfold beneath it, as inert text; withdrawing is one
+          press, always in view, and leaves the session, its tabs and its remembered sites untouched.
+          Absent entirely with no plan.
+        */}
+        {sitePlan === undefined ? null : (
+          <div className="agent-session-site-plan-row">
+            <details className="agent-details agent-session-site-plan">
+              <summary>
+                {sitePlan.origins.length === 1
+                  ? t("agent.session.sitePlanOne")
+                  : t("agent.session.sitePlan").replace("{n}", String(sitePlan.origins.length))}
+              </summary>
+              <ul>
+                {sitePlan.origins.map((origin) => (
+                  <li key={origin}>{origin}</li>
+                ))}
+              </ul>
+            </details>
+            <button type="button" onClick={props.onWithdrawSitePlan}>
+              {t("agent.session.sitePlanWithdraw")}
+            </button>
+          </div>
         )}
         {/*
           014 FR-178: what the owner is told when they interrupt a session that was not doing

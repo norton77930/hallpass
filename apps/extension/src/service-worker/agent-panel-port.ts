@@ -261,6 +261,25 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
               command.payload.excludedIndexes,
             );
             return;
+          case "ui.agent.site-plan-decide": {
+            /**
+             * 017 FR-252, FR-253: the owner's answer to a site plan. The controller accepts only an
+             * answer to the question standing, within the sites it listed; anything else - a forged
+             * or stale id, a site the proposal never named - grants nothing, leaves the card up and
+             * is said here as well as there.
+             */
+            const settled = input.runtime.prompts.decideSitePlan(
+              command.payload.proposalId,
+              command.payload.approve,
+              command.payload.origins,
+            );
+            if (!settled) input.reportDiagnostic?.("agent.panel.site-plan-refused");
+            return;
+          }
+          case "ui.agent.site-plan-withdraw":
+            // 017 FR-259, R-252: the session goes on; only its plan ends, at once.
+            void input.runtime.sitePlans.withdraw(command.payload.sessionId);
+            return;
           case "ui.agent.site-mode":
             void input.runtime.setSiteMode(command.payload.site, command.payload.mode);
             return;

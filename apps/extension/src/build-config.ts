@@ -181,7 +181,7 @@ const AGENT_CONTENT_SCRIPTS = [
  * takes its name from the manifest, and the MCP host answers with the same literal so a client that
  * asks who it is talking to cannot be told a different release than the one loaded.
  */
-export const AGENT_EXTENSION_VERSION = "0.9.0";
+export const AGENT_EXTENSION_VERSION = "0.10.0";
 
 export function createManifest(
   config: ExtensionBuildConfig,

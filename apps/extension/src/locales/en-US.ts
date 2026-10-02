@@ -172,6 +172,15 @@ export const messages = {
   "agent.planExclude": "Leave step {step} out",
   "agent.approvePlan": "Approve these steps",
   "agent.denyPlan": "Refuse",
+  // 017 FR-251, FR-252: the site-plan card - one question about several sites at once.
+  "agent.sitePlan.title": "The agent wants to work on these sites",
+  "agent.sitePlan.purpose": "Purpose: {purpose}",
+  "agent.sitePlan.originsTitle": "Sites (untick any this task does not need)",
+  "agent.sitePlan.alreadyApproved": "already approved",
+  "agent.sitePlan.stepsTitle": "Planned steps",
+  "agent.sitePlan.warning": "Web pages can try to steer an agent into asking for more. Approve only the sites this task needs.",
+  "agent.sitePlan.approve": "Approve selected sites",
+  "agent.sitePlan.decline": "Decline",
   /*
    * What one tool call is, in the owner's own language (003/T068).
    *
@@ -193,6 +202,8 @@ export const messages = {
   "agent.notPaired.body": "Add this MCP server to your AI tool (CodeBuddy, Cursor, Claude Code, …); its first browser tool call raises a pairing request here.",
   "agent.bridgeLost.title": "The connection to the local agent was lost",
   "agent.bridgeLost.body": "It reconnects on its own. If this page stays, start the agent again and check the connection.",
+  "agent.standby.title": "Another browser is serving your agents",
+  "agent.standby.body": "Another browser on this computer is serving your agents right now. Close it to use this one; Hallpass switches over on its own.",
   "agent.retry": "Check the connection again",
   "agent.details.title": "Technical details",
   "agent.details.relayPid": "Relay process: {pid}",
@@ -229,6 +240,10 @@ export const messages = {
   "agent.session.id": "Session ID: {id}",
   "agent.session.stop": "End session",
   "agent.session.takeBack": "Take back tabs ({n})",
+  // 017 FR-259: the session's approved site plan, folded, and the control that ends it.
+  "agent.session.sitePlan": "Site plan: {n} sites",
+  "agent.session.sitePlanOne": "Site plan: 1 site",
+  "agent.session.sitePlanWithdraw": "Withdraw site plan",
   // 014 FR-178: the second control, and the line for a press that found nothing running.
   "agent.session.interrupt": "Interrupt this step",
   "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",
@@ -243,6 +258,9 @@ export const messages = {
   "agent.activity.restore": "Window put back to {state}",
   "agent.activity.viewportSet": "Viewport set to {size}",
   "agent.activity.viewportCleared": "Viewport cleared",
+  // 017 FR-263: one line per plan event; the outcome word (approved, replaced, ...) follows it.
+  "agent.activity.sitePlan": "Site plan for {n} sites",
+  "agent.activity.sitePlanOne": "Site plan for 1 site",
   // 014 FR-196: `file_upload` earns this line too, and what it puts into the form is one of the
   // owner's own files - so the sentence says "file" rather than claiming every upload is a picture.
   "agent.activity.uploadInput": "File put into a form on {site}",
@@ -264,6 +282,10 @@ export const messages = {
   "agent.activity.cleared": "Cleared",
   "agent.activity.delivered": "Delivered",
   "agent.activity.interrupted": "Interrupted by you",
+  "agent.activity.approved": "Approved by you",
+  "agent.activity.replaced": "Replaced",
+  "agent.activity.withdrawn": "Withdrawn by you",
+  "agent.activity.ended": "Ended with the session",
   // 008 FR-114, FR-115: the two questions a dialog raises, in the words of what is decided.
   "agent.prompt.dialogAccept": "{agent} wants to press OK on the page's dialog",
   "agent.prompt.dialogQuote": "“{text}”",
@@ -346,6 +368,7 @@ export const messages = {
   "agent.summary.evaluate": "Run a script on the page",
   "agent.summary.file_upload": "Put one of your files into a form on the page",
   "agent.summary.upload_image": "Put a screenshot the agent took into the page",
+  "agent.summary.propose_sites": "Propose the sites this session will work on",
   // 014 FR-196: which of the two things that tool does is being asked about, when the question says.
   "agent.summary.upload_image.input": "Put a screenshot the agent took into a file field on the page",
   "agent.summary.upload_image.drop": "Drop a screenshot the agent took onto a place on the page",

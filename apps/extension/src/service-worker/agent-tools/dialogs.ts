@@ -104,6 +104,12 @@ export type AgentDialogsDeps = {
   onNotice(sessionId: string, notice: AgentNotice): void;
   statedPlan?: (site: string) => StatedPlan | undefined;
   onAdmitted?: (site: string, step: number) => void;
+  /**
+   * Whether the calling session's approved site plan names `site` (017 R-245, FR-254: accepting a
+   * page dialog is a covered page action). Asked with the site the mode was read for - the tab's
+   * current top-level origin from the browser's record. Absent is "not covered".
+   */
+  sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
   now?: () => number;
   livenessMs?: number;
   chainWindowMs?: number;
@@ -364,6 +370,7 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
         tool: DIALOG_TOOL,
         args: args as unknown as Record<string, unknown>,
         ...(deps.statedPlan ? { plan: deps.statedPlan(site) } : {}),
+        sitePlanCovers: (await deps.sitePlanCovers?.(request.sessionId, site)) === true,
       });
       if (decision.decision === "refuse") return { callId, outcome: "failed", reason: decision.reason };
       if (decision.decision === "admit" && decision.step !== undefined) deps.onAdmitted?.(site, decision.step);

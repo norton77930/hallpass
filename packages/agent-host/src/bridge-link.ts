@@ -39,10 +39,14 @@ export type BridgeRecord = AgentBridgeRecord;
  * in place rather than a truncated one.
  */
 export async function writeBridgeRecord(record: BridgeRecord, env?: HostEnvironment): Promise<void> {
+  await writeHostFileAtomically(bridgeFilePath(env), record, env);
+}
+
+/** The record's temp-then-rename write, for any small JSON file beside it (the owner sidecar too). */
+export async function writeHostFileAtomically(target: string, value: unknown, env?: HostEnvironment): Promise<void> {
   await mkdir(hostDataDirectory(env), { recursive: true });
-  const target = bridgeFilePath(env);
   const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(temp, `${JSON.stringify(record)}\n`, "utf8");
+  await writeFile(temp, `${JSON.stringify(value)}\n`, "utf8");
   try {
     for (let attempt = 0; ; attempt += 1) {
       try {

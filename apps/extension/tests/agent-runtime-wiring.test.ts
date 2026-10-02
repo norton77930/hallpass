@@ -188,7 +188,7 @@ describe("T018 agent runtime wiring", () => {
       // 014/R-187: and what this worker can be asked - the host asks about an upload directory
       // only where a card can actually be raised.
       // 015 FR-219: and that it takes a withdrawal, which is what lets the host name its exchange.
-      features: ["upload-consent", "pair-withdraw"],
+      features: ["upload-consent", "pair-withdraw", "site-plan"],
     });
 
     await runtime.tabs.adopt("session-h1", 7);

@@ -9,8 +9,11 @@ import { lookup } from "../../locales/catalog.js";
  * Two copy variants on one layout. `not-paired` is a browser no agent has ever paired with, whatever
  * the link is doing - the owner's next step is to start an agent, not to retry a bridge. `bridge-lost`
  * is a paired browser whose link is down, which is the case the retry and the details are for.
+ * `standby` is a host that stood aside because another browser on this computer is serving the
+ * agents (two browsers, 2026-10-02): nothing is broken, and the owner's step is to close the other
+ * browser - this one takes over on its own.
  */
-export type NotConnectedVariant = "not-paired" | "bridge-lost";
+export type NotConnectedVariant = "not-paired" | "bridge-lost" | "standby";
 
 export function NotConnected(props: {
   variant: NotConnectedVariant;
@@ -22,9 +25,11 @@ export function NotConnected(props: {
   // Literal keys per variant, never a built one: the locale contract test scans the panel's
   // sources for `t("agent.…")` literals, and a key it cannot see is a key it cannot check.
   const copy =
-    props.variant === "not-paired"
-      ? { title: t("agent.notPaired.title"), body: t("agent.notPaired.body") }
-      : { title: t("agent.bridgeLost.title"), body: t("agent.bridgeLost.body") };
+    props.variant === "standby"
+      ? { title: t("agent.standby.title"), body: t("agent.standby.body") }
+      : props.variant === "not-paired"
+        ? { title: t("agent.notPaired.title"), body: t("agent.notPaired.body") }
+        : { title: t("agent.bridgeLost.title"), body: t("agent.bridgeLost.body") };
   const { relayPid, recordPath, lastDisconnect } = props.diagnostics;
   const known = relayPid !== undefined || recordPath !== undefined || lastDisconnect !== undefined;
 

@@ -10,7 +10,7 @@
 English · [繁體中文](README.zh-TW.md)
 
 Hallpass is a Chrome extension plus a local MCP server. Claude Code, Codex CLI, Cursor, Claude
-Desktop or any stdio MCP client gets 33 browser tools that work in the Chrome you already use, with
+Desktop or any stdio MCP client gets 34 browser tools that work in the Chrome you already use, with
 your logins. Every site the agent touches, and every action that changes a page, is gated by a
 decision you make in the side panel: allow once, allow this site from now on, or refuse. You can
 stop the agent at any moment and take your tabs back.
@@ -128,6 +128,11 @@ the host needs no reinstall.
 | **follow-a-plan** | A multi-step `browser_batch` is approved once as a plan (you can strike steps); single actions still ask | Fixed flows such as filling a form |
 | **skip-checks** | Nothing is asked on this site; marked with a warning in the list | Sites you trust with no sensitive data |
 
+- **A session site plan** covers a task that spans several sites. The agent proposes the sites with
+  `propose_sites`; you approve them once in the panel and can untick any. For that agent session
+  only, page actions on exactly those sites then run without a card, until the session ends, you
+  unpair the agent, the browser closes, or you press **Withdraw site plan** on the session card. Page
+  JavaScript, uploads and a move to an undecided site still ask, and unlisted sites are unchanged.
 - **Reads never ask.** Reading the page, finding elements, screenshots and waiting need no consent.
 - **Diagnostics** (console, network records, evaluating script) need a separate per-site grant you
   tick in the panel. Evaluating script also counts as an action.
@@ -192,6 +197,7 @@ The agent sees these as `mcp__hallpass__<name>` in Claude Code.
 | `read_console` / `read_network` / `evaluate` | Diagnostics, behind the per-site grant |
 | `file_upload` | Put your files into a file input; one outside your allowed directories asks you (this file once / its directory from now on / decline) |
 | `upload_image` | Put a screenshot the session took into a file input or onto a drop target |
+| `propose_sites` | Propose the sites a task will use; the owner approves once in the side panel, for this session only |
 | `gif_recorder` | Start, stop, export or clear a recording of the session |
 | `dialog` | Accept or dismiss an alert, confirm or prompt |
 

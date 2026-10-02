@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentBatchStepResultSchema, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
+import { agentBatchStepResultSchema, agentToolArgSchemas, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
 import { createAgentBatch } from "../src/service-worker/agent-tools/batch.js";
+import { decideGate } from "../src/service-worker/agent-tools/gate.js";
 import { createStatedPlans } from "../src/service-worker/agent-tools/plans.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import { createAgentStopSignals, type AgentToolRequest } from "../src/service-worker/agent-tools/stop.js";
@@ -510,5 +511,119 @@ describe("T047 browser_batch", () => {
 
     expect(response).toEqual({ callId: "call-1", outcome: "failed", reason: "invalid-arguments" });
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 017/T468 — a `follow-a-plan` site the session's approved site plan covers (R-249, D-017-9).
+ *
+ * The owner has just approved that site for this session, so the batch raises no plan card of its
+ * own on top: it states no plan, and each step meets the gate exactly as a single call would - with
+ * the session plan as its input. What that leaves asking is the gate's business, which is why the
+ * dispatch here *is* the gate: page JavaScript and uploads still prompt inside a covered batch.
+ */
+describe("017", () => {
+  const EVALUATE = { tool: "evaluate", args: { expression: "document.title" } };
+
+  /** A dispatch that answers each step the way the runtime's gate would, with the plan covering. */
+  function gatedHarness(covers: boolean) {
+    const prompted: string[] = [];
+    const asked: Array<{ sessionId: string; site: string }> = [];
+    const built = harness(
+      {
+        sitePlanCovers: async (sessionId, site) => {
+          asked.push({ sessionId, site });
+          return covers;
+        },
+      },
+      async (request) => {
+        // Parsed, as every runner parses before it gates: the stated plan holds parsed arguments.
+        const parsed = agentToolArgSchemas[request.tool].safeParse(request.args);
+        const decision = decideGate({
+          sessionId: request.sessionId,
+          tabId: AGENT_TAB,
+          site: SITE,
+          mode: (await built.siteModes.get(SITE)).mode,
+          tool: request.tool,
+          args: parsed.success ? (parsed.data as Record<string, unknown>) : request.args,
+          plan: built.plans.get(SITE),
+          sitePlanCovers: covers,
+        });
+        if (decision.decision === "admit") {
+          if (decision.step !== undefined) built.plans.admit(SITE, decision.step);
+          return { callId: request.callId, outcome: "ok" };
+        }
+        prompted.push(request.tool);
+        return { callId: request.callId, outcome: "denied", reason: "owner-denied" };
+      },
+    );
+    return { ...built, prompted, asked };
+  }
+
+  it("raises no plan card on a covered follow-a-plan site, and its covered steps run", async () => {
+    const { runner, siteModes, prompts, plans, seen, prompted, asked } = gatedHarness(true);
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const response = await runner.run(batchRequest([CLICK, TYPE]));
+
+    expect(prompts.currentPlan(), "a plan card was raised on a site the owner already approved").toBeUndefined();
+    expect(response.result).toEqual({
+      results: [
+        { index: 0, outcome: "ok" },
+        { index: 1, outcome: "ok" },
+      ],
+    });
+    expect(seen.map((step) => step.tool)).toEqual(["click", "type"]);
+    expect(prompted).toEqual([]);
+    // No stated plan stands for the site: the session plan is the authority, not a batch copy of it.
+    expect(plans.get(SITE)).toBeUndefined();
+    // Asked about this batch's session and the site the tab is on, nothing wider.
+    expect(asked).toEqual([{ sessionId: "session-h1", site: SITE }]);
+  });
+
+  it("still asks about page JavaScript inside a covered batch", async () => {
+    const { runner, siteModes, prompts, seen, prompted } = gatedHarness(true);
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const response = await runner.run(batchRequest([CLICK, EVALUATE, TYPE]));
+
+    expect(prompts.currentPlan()).toBeUndefined();
+    // The click was covered; the script reached the gate as itself and was asked about.
+    expect(seen.map((step) => step.tool)).toEqual(["click", "evaluate"]);
+    expect(prompted).toEqual(["evaluate"]);
+    expect(response.result).toMatchObject({
+      results: [
+        { index: 0, outcome: "ok" },
+        { index: 1, outcome: "denied", reason: "owner-denied" },
+        { index: 2, outcome: "failed", reason: "not-run" },
+      ],
+    });
+  });
+
+  it("raises the plan card exactly as before when the session plan does not cover the site", async () => {
+    const { runner, siteModes, prompts, seen } = gatedHarness(false);
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const pending = runner.run(batchRequest([CLICK, TYPE]));
+    await vi.waitFor(() => expect(prompts.currentPlan()).toBeDefined());
+    expect(seen, "a step ran before the plan card was answered").toEqual([]);
+    prompts.decidePlan(prompts.currentPlan()?.planId ?? "", true);
+    const response = await pending;
+
+    expect(response.result).toEqual({
+      results: [
+        { index: 0, outcome: "ok" },
+        { index: 1, outcome: "ok" },
+      ],
+    });
+  });
+
+  it("asks the plan store nothing on an ask or skip-checks site, where no plan card is raised anyway", async () => {
+    for (const mode of ["ask", "skip-checks"] as const) {
+      const { runner, siteModes, asked } = gatedHarness(true);
+      await siteModes.set(SITE, { mode });
+      await runner.run(batchRequest([CLICK]));
+      expect(asked, mode).toEqual([]);
+    }
   });
 });

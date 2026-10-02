@@ -137,3 +137,175 @@ describe("T356 a question the owner interrupted", () => {
     expect(prompts.decide(promptId, true)).toBe(false);
   });
 });
+
+/**
+ * 017/T472 — the site-plan question (R-247, FR-252, FR-253, FR-260).
+ *
+ * A third kind beside the effect and the batch plan, under the same one-question rule. The claims
+ * that matter for authorization: the answer can only narrow the proposal - an origin it did not
+ * name, or an approval of nothing, settles nothing and leaves the card up - and every ending that
+ * is not the owner's press grants nothing.
+ */
+describe("017 site plan", () => {
+  const A = "https://a.test";
+  const B = "https://b.test";
+  const C = "https://c.test:8443";
+
+  function controller() {
+    const diagnostics: string[] = [];
+    const prompts = createAgentPromptController({
+      timeoutMs: 60_000,
+      now: () => Date.parse("2026-10-02T12:00:00.000Z"),
+      reportDiagnostic: (code) => diagnostics.push(code),
+    });
+    return { prompts, diagnostics };
+  }
+
+  const propose = (
+    prompts: ReturnType<typeof createAgentPromptController>,
+    extra: { sessionId?: string; alreadyApproved?: string[]; stopped?: () => boolean } = {},
+  ) =>
+    prompts.askSitePlan({
+      callId: "call-sp",
+      sessionId: extra.sessionId ?? "session-a",
+      origins: [A, B, C],
+      purpose: "Compare the release notes",
+      steps: ["read the notes"],
+      ...(extra.alreadyApproved === undefined ? {} : { alreadyApproved: extra.alreadyApproved }),
+      ...(extra.stopped === undefined ? {} : { stopped: extra.stopped }),
+    });
+
+  it("raises one question carrying the proposal, the active plan and when it was raised", async () => {
+    const { prompts } = controller();
+    void propose(prompts, { alreadyApproved: [A] });
+
+    const question = prompts.currentSitePlan();
+    expect(question).toEqual({
+      proposalId: expect.stringMatching(/^site-plan-[0-9a-f]{16}$/),
+      sessionId: "session-a",
+      origins: [A, B, C],
+      purpose: "Compare the release notes",
+      steps: ["read the notes"],
+      alreadyApproved: [A],
+      raisedAt: "2026-10-02T12:00:00.000Z",
+    });
+    // Whose question it is, so the session card can say it is waiting (006 R-127).
+    expect(prompts.currentSession()).toBe("session-a");
+    // Not dressed up as either of the other two kinds.
+    expect(prompts.current()).toBeUndefined();
+    expect(prompts.currentPlan()).toBeUndefined();
+  });
+
+  it("mints a fresh id per proposal", async () => {
+    const { prompts } = controller();
+    void propose(prompts);
+    const first = prompts.currentSitePlan()?.proposalId;
+    prompts.decideSitePlan(first ?? "", false, []);
+    void propose(prompts);
+    expect(prompts.currentSitePlan()?.proposalId).not.toBe(first);
+  });
+
+  it("resolves an approval of a subset with what was approved and what was left out", async () => {
+    const { prompts } = controller();
+    const pending = propose(prompts);
+    const { proposalId } = prompts.currentSitePlan() ?? { proposalId: "" };
+
+    // Ticked in another order, and one twice: the answer is in the proposal's order, once each.
+    expect(prompts.decideSitePlan(proposalId, true, [C, A, A])).toBe(true);
+
+    await expect(pending).resolves.toEqual({ decision: "approve", approved: [A, C], leftOut: [B] });
+    expect(prompts.currentSitePlan()).toBeUndefined();
+  });
+
+  it("refuses an approval naming an origin outside the proposal, and keeps the question up", async () => {
+    const { prompts, diagnostics } = controller();
+    let settled = false;
+    void propose(prompts).then(() => (settled = true));
+    const { proposalId } = prompts.currentSitePlan() ?? { proposalId: "" };
+
+    expect(prompts.decideSitePlan(proposalId, true, [A, "https://evil.test"])).toBe(false);
+
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(prompts.currentSitePlan()?.proposalId).toBe(proposalId);
+    expect(diagnostics).toContain("agent.site-plan.outside-proposal");
+  });
+
+  it("refuses an approval of nothing, and keeps the question up", async () => {
+    const { prompts } = controller();
+    void propose(prompts);
+    const { proposalId } = prompts.currentSitePlan() ?? { proposalId: "" };
+
+    expect(prompts.decideSitePlan(proposalId, true, [])).toBe(false);
+    expect(prompts.currentSitePlan()?.proposalId).toBe(proposalId);
+  });
+
+  it("resolves a decline as declined, whatever origins came with it", async () => {
+    const { prompts } = controller();
+    const pending = propose(prompts);
+    const { proposalId } = prompts.currentSitePlan() ?? { proposalId: "" };
+
+    expect(prompts.decideSitePlan(proposalId, false, ["https://evil.test"])).toBe(true);
+
+    await expect(pending).resolves.toEqual({ decision: "declined" });
+  });
+
+  it("settles nothing for an unknown or already-answered proposal", async () => {
+    const { prompts, diagnostics } = controller();
+    const pending = propose(prompts);
+    const { proposalId } = prompts.currentSitePlan() ?? { proposalId: "" };
+
+    expect(prompts.decideSitePlan("site-plan-0000000000000000", true, [A])).toBe(false);
+    expect(diagnostics).toContain("agent.prompt.late-answer");
+    expect(prompts.decideSitePlan(proposalId, true, [A])).toBe(true);
+    await pending;
+    // A second press on the same card is a late answer, never a second approval.
+    expect(prompts.decideSitePlan(proposalId, true, [A, B])).toBe(false);
+  });
+
+  it("is busy while another question is up, and makes the next one wait the same way", async () => {
+    const { prompts } = controller();
+    void prompts.ask({
+      callId: "call-1",
+      sessionId: "session-b",
+      site: A,
+      tool: "click",
+      argsSummary: "click a page element",
+    });
+    await expect(propose(prompts)).resolves.toEqual({ decision: "busy" });
+    expect(prompts.currentSitePlan()).toBeUndefined();
+
+    prompts.cancel();
+    void propose(prompts);
+    await expect(
+      prompts.ask({ callId: "call-2", sessionId: "session-b", site: A, tool: "click", argsSummary: "click" }),
+    ).resolves.toEqual({ decision: "busy" });
+  });
+
+  it("is withdrawn when its call ends, when its session ends, and on an interrupt - granting nothing", async () => {
+    const { prompts } = controller();
+
+    const byCall = propose(prompts);
+    prompts.cancel("call-sp");
+    await expect(byCall).resolves.toEqual({ decision: "timed-out" });
+    expect(prompts.currentSitePlan()).toBeUndefined();
+
+    const bySession = propose(prompts);
+    prompts.cancelSession("session-other");
+    expect(prompts.currentSitePlan(), "another session's end took this question down").toBeDefined();
+    prompts.cancelSession("session-a");
+    await expect(bySession).resolves.toEqual({ decision: "timed-out" });
+
+    const byInterrupt = propose(prompts);
+    prompts.cancelSession("session-a", "interrupted");
+    await expect(byInterrupt).resolves.toEqual({ decision: "interrupted" });
+
+    await expect(propose(prompts, { stopped: () => true })).resolves.toEqual({ decision: "interrupted" });
+    expect(prompts.currentSitePlan()).toBeUndefined();
+  });
+
+  it("expires on the ordinary bound with no approval", async () => {
+    const prompts = createAgentPromptController({ timeoutMs: 10 });
+    await expect(propose(prompts)).resolves.toEqual({ decision: "timed-out" });
+  });
+});

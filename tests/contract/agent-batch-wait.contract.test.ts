@@ -86,6 +86,8 @@ describe("T045 agent batch and wait contracts", () => {
     // inside a batch would change which tabs the session holds after the batch's one ownership check.
     // 008 adds two that a batch could not run: `gif_recorder` is about the session and names no tab,
     // and `dialog` is about a tab a dialog has stopped - which is a state that ends the batch.
+    // 017 adds `propose_sites`: a site plan is about the session and waits on the owner's card,
+    // so it is never one step of a batch (R-248).
     expect([...steps]).toEqual(
       all.filter(
         (tool) =>
@@ -97,6 +99,7 @@ describe("T045 agent batch and wait contracts", () => {
             "tabs_release",
             "gif_recorder",
             "dialog",
+            "propose_sites",
           ].includes(tool),
       ),
     );

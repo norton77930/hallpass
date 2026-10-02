@@ -5,6 +5,29 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.10.0 — 2026-10-02
+
+**An agent can ask for its sites once, up front.** A new tool, `propose_sites`, lets an agent name the
+sites a task needs and say why (34 tools now). The side panel shows one card listing every site with
+the purpose; you can untick sites you do not want, and the card warns that a web page can try to
+steer an agent, so approve only the sites you expect for the task. Nothing is granted until you press
+**Approve selected sites**; no agent argument can approve for you. The approval lets that one agent
+session press, type, fill and scroll on exactly those sites (scheme, host and port) without a card
+per action. It
+ends when the session ends, when you unpair the agent, or when the browser closes, is never added to
+your remembered site list, and the session card shows it with **Withdraw site plan** to end it at
+once. Running page JavaScript, uploading files and a page moving the tab to a site you have not
+decided about still ask; sites outside the list, and other sessions, behave exactly as before. This
+needs the 0.10.0 extension: with an older one, the tool answers that the extension should be
+reloaded, and grants nothing.
+
+**Fixed: two browsers with Hallpass no longer knock each other out.** With Hallpass in two browsers
+on one computer (Chrome and Edge, say), the two kept taking the connection from each other every
+few seconds, and agent calls in either browser timed out. Now the browser that connected first keeps
+serving your agents; the other one's panel says another browser is serving them, and takes over by
+itself once you close the first. Both browsers need this version of the extension: with an older one
+in either browser, the two still take the connection from each other.
+
 ## 0.9.0 — 2026-09-27
 
 ![The 0.9.0 side panel: a question card, the status row "Connected · 2 sessions", and two session cards named by project folder, one waiting for you and one idle, each with its colour stripe](docs/media/016-panel-en-US-light.png)

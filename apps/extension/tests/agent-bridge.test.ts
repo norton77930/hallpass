@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { agentControlFrameSchema, agentLinkFrameSchema, PAIRING_DECLINED_MARKER } from "@hallpass/contracts";
 import {
+  AGENT_ACK_RUN_ID_BOUND_MS,
   AGENT_RECONNECT_BASE_MS,
   AGENT_RECONNECT_MAX_MS,
+  AGENT_STANDBY_CLEAR_MS,
   createAgentBridge,
   type AgentPortLike,
 } from "../src/service-worker/agent-bridge.js";
@@ -420,6 +422,52 @@ describe("T013 agent bridge", () => {
     expect(sentWhenConnected).toContainEqual({ type: "relay-ack", relayPid: 4321 });
   });
 
+  /**
+   * Two browsers (2026-10-02). The ack names this browser run, so a relay can tell its own browser's
+   * previous relay - which it replaces - from another browser's, which it must leave serving.
+   */
+  it("names its browser run on the ack, and still reports connected after it (two browsers)", async () => {
+    let sentWhenConnected: unknown[] | undefined;
+    const { bridge, port } = bridgeWith({
+      browserRunId: async () => "run-chrome",
+      onStatusChange: (status) => {
+        if (status === "connected") sentWhenConnected = [...port.sent];
+      },
+    });
+    bridge.connect();
+
+    port.emit({ type: "relay-started", relayPid: 4321 });
+
+    await vi.waitFor(() => expect(bridge.status()).toBe("connected"));
+    expect(port.sent).toContainEqual({ type: "relay-ack", relayPid: 4321, browserRunId: "run-chrome" });
+    expect(sentWhenConnected).toContainEqual({ type: "relay-ack", relayPid: 4321, browserRunId: "run-chrome" });
+    expect(agentLinkFrameSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("still acks, without the run, when its browser run cannot be read or takes too long", async () => {
+    const failing = bridgeWith({
+      browserRunId: async () => {
+        throw new Error("storage-unavailable");
+      },
+    });
+    failing.bridge.connect();
+    failing.port.emit({ type: "relay-started", relayPid: 4321 });
+    await vi.waitFor(() => expect(failing.port.sent).toContainEqual({ type: "relay-ack", relayPid: 4321 }));
+
+    vi.useFakeTimers();
+    try {
+      const hanging = bridgeWith({ browserRunId: () => new Promise<string | undefined>(() => undefined) });
+      hanging.bridge.connect();
+      hanging.port.emit({ type: "relay-started", relayPid: 4322 });
+      // The relay waits 10 s for an ack before it leaves; the id is never worth that.
+      await vi.advanceTimersByTimeAsync(AGENT_ACK_RUN_ID_BOUND_MS);
+      expect(hanging.port.sent).toContainEqual({ type: "relay-ack", relayPid: 4322 });
+      expect(hanging.bridge.status()).toBe("connected");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports an unavailable bridge when the native host cannot be reached at all", () => {
     const { bridge, scheduleRetry } = bridgeWith({ connectNative: () => undefined });
     bridge.connect();
@@ -746,6 +794,76 @@ describe("T099h the host has answered only when it says so", () => {
     // The next loss is a fresh one: it gets the reference's cadence, not the delay the outage grew to.
     ports[2]!.drop();
     expect(clock.delays()).toEqual([AGENT_RECONNECT_BASE_MS]);
+  });
+});
+
+/**
+ * Two browsers (2026-10-02) — the worker's half of standing by.
+ *
+ * A relay that finds another browser's relay serving says `relay-standby` and leaves. The owner must
+ * read that as "another browser has it", not as a lost link, and the status must hold through the
+ * port closing and through each retry's brief `relay-started`, then clear once a relay does take over.
+ */
+describe("two browsers: standing by", () => {
+  function standbyBridge() {
+    const clock = fakeTimer();
+    const ports: FakePort[] = [];
+    const harness = bridgeWith({
+      connectNative: () => {
+        const port = fakePort();
+        ports.push(port);
+        return port;
+      },
+      timer: clock.timer,
+    });
+    return { ...harness, clock, ports };
+  }
+
+  it("reports standby when the relay stands aside, and keeps it while the port closes and retries", () => {
+    const { bridge, clock, ports, statuses, scheduleRetry } = standbyBridge();
+    bridge.connect();
+    ports[0]!.emit({ type: "relay-started", relayPid: 4242 });
+    ports[0]!.emit({ type: "relay-standby", servingRelayPid: 1111 });
+    ports[0]!.drop();
+
+    expect(bridge.status()).toBe("standby");
+    expect(statuses).toEqual(["connected", "standby"]);
+    // The ordinary reconnect is the retry: nothing about the cadence changes.
+    expect(scheduleRetry).toHaveBeenCalledTimes(1);
+    expect(clock.delays()).toEqual([AGENT_RECONNECT_BASE_MS]);
+
+    // The next relay stands by as well; the owner never sees a "connected" flash in between.
+    clock.fire();
+    ports[1]!.emit({ type: "relay-started", relayPid: 4243 });
+    ports[1]!.emit({ type: "relay-standby", servingRelayPid: 1111 });
+    ports[1]!.drop();
+    expect(statuses).toEqual(["connected", "standby"]);
+    expect(bridge.status()).toBe("standby");
+  });
+
+  it("clears standby once a later relay keeps the link (the other browser closed)", () => {
+    const { bridge, clock, ports, statuses } = standbyBridge();
+    bridge.connect();
+    ports[0]!.emit({ type: "relay-started", relayPid: 4242 });
+    ports[0]!.emit({ type: "relay-standby", servingRelayPid: 1111 });
+    ports[0]!.drop();
+    clock.fire();
+
+    ports[1]!.emit({ type: "relay-started", relayPid: 4243 });
+    expect(bridge.status()).toBe("standby");
+    expect(clock.delays()).toEqual([AGENT_STANDBY_CLEAR_MS]);
+    clock.fire();
+
+    expect(bridge.status()).toBe("connected");
+    expect(statuses).toEqual(["connected", "standby", "connected"]);
+  });
+
+  it("treats a relay-standby from a host build it predates as an unknown frame (0.9.0 worker)", () => {
+    // What a worker from before this frame does with it: neither of the unions it shares with this
+    // build declares the type, so it falls to "frame-rejected" and the port closing is all it sees.
+    const frame = { type: "relay-standby", servingRelayPid: 1111 };
+    expect(agentControlFrameSchema.safeParse(frame).success).toBe(false);
+    expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
   });
 });
 

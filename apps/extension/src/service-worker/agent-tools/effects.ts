@@ -177,6 +177,12 @@ export type AgentEffectDeps = {
    */
   onAdmitted?: (site: string, step: number) => void;
   /**
+   * Whether the calling session's approved site plan names `site` (017 R-245): the gate's input,
+   * asked with the same site the mode was read for - the binding's, i.e. the tab's current
+   * top-level origin. Absent is "not covered", which is every answer the gate gave before 017.
+   */
+  sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
+  /**
    * Photographing the tab (004/T139, US7, FR-069).
    *
    * An effect runner had no use for a camera until `computer` arrived, and it now has two: the
@@ -2168,6 +2174,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       tool,
       args,
       ...(deps.statedPlan ? { plan: deps.statedPlan(binding.site) } : {}),
+      // 017: the calling session's own plan, for the site this decision is about.
+      sitePlanCovers: (await deps.sitePlanCovers?.(request.sessionId, binding.site)) === true,
     });
     if (decision.decision === "refuse") {
       return answer(callId, "failed", decision.reason);

@@ -73,6 +73,11 @@ export const ACTIVITY_OUTCOME_KEYS: Record<AgentActivityItem["outcome"], string>
   delivered: "agent.activity.delivered",
   // 014: the owner ended a step and kept everything else (FR-182).
   interrupted: "agent.activity.interrupted",
+  // 017: what became of a session site plan (FR-263).
+  approved: "agent.activity.approved",
+  replaced: "agent.activity.replaced",
+  withdrawn: "agent.activity.withdrawn",
+  ended: "agent.activity.ended",
 };
 
 /**
@@ -100,6 +105,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.notPaired.body",
   "agent.bridgeLost.title",
   "agent.bridgeLost.body",
+  // Two browsers (2026-10-02): another browser on this computer is serving the agents.
+  "agent.standby.title",
+  "agent.standby.body",
   "agent.retry",
   "agent.details.title",
   "agent.details.relayPid",
@@ -160,6 +168,10 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.session.id",
   "agent.session.stop",
   "agent.session.takeBack",
+  // 017 FR-259: the active site plan on the card.
+  "agent.session.sitePlan",
+  "agent.session.sitePlanOne",
+  "agent.session.sitePlanWithdraw",
   // The second control beside Stop, and what it says when nothing was running (014 FR-178).
   "agent.session.interrupt",
   "agent.session.nothingToInterrupt",
@@ -176,6 +188,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // The emulated viewport a session gave a tab, and gave back (012 FR-159).
   "agent.activity.viewportSet",
   "agent.activity.viewportCleared",
+  // 017 FR-263: the site-plan activity sentence.
+  "agent.activity.sitePlan",
+  "agent.activity.sitePlanOne",
   // The picture a session put into one of the owner's pages (013 FR-174), and the panel's own word
   // for a page whose site the worker did not resolve.
   "agent.activity.uploadInput",
@@ -221,6 +236,15 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.planExclude",
   "agent.approvePlan",
   "agent.denyPlan",
+  // 017 FR-251, FR-252: the site-plan card.
+  "agent.sitePlan.title",
+  "agent.sitePlan.purpose",
+  "agent.sitePlan.originsTitle",
+  "agent.sitePlan.alreadyApproved",
+  "agent.sitePlan.stepsTitle",
+  "agent.sitePlan.warning",
+  "agent.sitePlan.approve",
+  "agent.sitePlan.decline",
   ...Object.values(MODE_KEYS),
   ...Object.values(TOOL_SUMMARY_KEYS),
   ...Object.values(UPLOAD_DELIVERY_SUMMARY_KEYS),
