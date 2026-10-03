@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactElement } from "react";
 import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { ACTIVITY_OUTCOME_KEYS, WINDOW_STATE_KEYS } from "../agent-panel-keys.js";
+import { displayOrigin } from "./display-origin.js";
 
 /**
  * One live session (006 FR-087, D-006-5): which agent, where it is working, whether it is waiting
@@ -54,7 +55,7 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
     // could not name leaves no hole in either, the way a restore's missing state does not.
     const sentence =
       item.message === "input" ? t("agent.activity.uploadInput") : t("agent.activity.uploadDrop");
-    return sentence.replace("{site}", () => item.site ?? t("agent.activity.unknownSite"));
+    return sentence.replace("{site}", () => (item.site === undefined ? t("agent.activity.unknownSite") : displayOrigin(item.site)));
   }
   if (item.kind === "site-plan") {
     // 017 FR-263: one sentence per plan event, from the site count the worker sends; the outcome word
@@ -64,7 +65,7 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
       : t("agent.activity.sitePlan").replace("{n}", () => item.message ?? "");
   }
   return t("agent.activity.dialog")
-    .replace("{site}", () => item.site ?? "")
+    .replace("{site}", () => displayOrigin(item.site ?? ""))
     .replace("{message}", () => item.message ?? "");
 }
 
@@ -303,7 +304,7 @@ export function SessionCard(props: {
               </summary>
               <ul>
                 {sitePlan.origins.map((origin) => (
-                  <li key={origin}>{origin}</li>
+                  <li key={origin}>{displayOrigin(origin)}</li>
                 ))}
               </ul>
             </details>

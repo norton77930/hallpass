@@ -195,6 +195,26 @@ describe("013 screenshot cache", () => {
     expect(cache.take(last.imageId)).toMatchObject({ kind: "ok" });
   });
 
+  /**
+   * 018 T507 M1 (FR-275, R-272): a picture belongs to the browser that took it. Asked for from
+   * another browser it is an id never issued there - not merely gone - so it cannot be put into a
+   * page the owner never let it be taken in.
+   */
+  it("answers unknown for a picture taken under another browser, and ok under its own", () => {
+    const cache = createScreenshotCache({ now: clock().now, randomId: counter() });
+
+    const taken = cache.issue("a", PNG, "browser-a");
+
+    expect(cache.take(taken.imageId, "browser-b")).toEqual({ kind: "unknown" });
+    expect(cache.take(taken.imageId, "browser-a")).toMatchObject({ kind: "ok" });
+    // And once gone, still not admitted as "gone" to the other browser.
+    cache.clear();
+    const oversize = createScreenshotCache({ now: clock().now, randomId: counter(), budgetChars: 1 });
+    const big = oversize.issue("abc", PNG, "browser-a");
+    expect(oversize.take(big.imageId, "browser-b")).toEqual({ kind: "unknown" });
+    expect(oversize.take(big.imageId, "browser-a")).toEqual({ kind: "gone", why: "oversize" });
+  });
+
   it("mints opaque ids that do not repeat", () => {
     const cache = createScreenshotCache({ now: clock().now });
 

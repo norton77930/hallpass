@@ -55,9 +55,10 @@ describe("T207 the 008 tool contracts", () => {
     const names = contractExport<readonly string[]>("AGENT_TOOL_NAMES");
     expect(names).toContain("gif_recorder");
     expect(names).toContain("dialog");
-    // 012 adds the thirty-second, `viewport`, 013 the thirty-third, `upload_image`, and 017 the
-    // thirty-fourth, `propose_sites`; the count itself is pinned by each of those slices' own tests.
-    expect(names).toHaveLength(34);
+    // 012 adds the thirty-second, `viewport`, 013 the thirty-third, `upload_image`, 017 the
+    // thirty-fourth, `propose_sites`, and 018 three browser tools; the count itself is pinned by
+    // each of those slices' own tests.
+    expect(names).toHaveLength(37);
 
     const descriptors = contractExport<ReadonlyArray<{ name: string; description: string }>>(
       "AGENT_TOOL_DESCRIPTORS",
@@ -214,7 +215,7 @@ describe("T208 the agent artefact's permission and version", () => {
   });
 
   it("writes the agent artefact's version once, and the host answers with the same one", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.10.0");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.11.0");
     const agent = createManifest(resolveBuildConfig("agent"));
     expect(agent.version).toBe(AGENT_EXTENSION_VERSION);
     // FR-122: the extension and the host it talks to are one release. Two literals that may not

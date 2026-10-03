@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,13 +7,16 @@ import { z } from "zod";
 import {
   agentToolArgSchemas,
   AGENT_015_REASON_OUTCOMES,
+  AGENT_LINK_PROTOCOL,
   AGENT_TOOL_DESCRIPTORS,
   ATTENTION_SENTENCES,
+  BROWSER_REFUSAL_HINTS,
   INTERRUPT_HINTS,
   PAIRING_DECLINED_MARKER,
   PAIRING_REFUSAL_HINTS,
   SITE_PLAN_FEATURE,
   SITE_PLAN_UNAVAILABLE,
+  type AgentBrowserKind,
   type AgentToolName,
 } from "@hallpass/contracts";
 import {
@@ -105,6 +109,11 @@ describe("T012 agent MCP server", () => {
       "dialog",
       // 017/R-251: always listed; an extension without `site-plan` is answered by the host.
       "propose_sites",
+      // 018/S4a: answered by the host from the browser records, no pairing needed (R-273).
+      "list_browsers",
+      "select_browser",
+      // 018/S5: the in-browser choice, coordinated by this server (FR-274).
+      "request_browser_choice",
     ]);
   });
 
@@ -362,6 +371,39 @@ describe("T012 agent MCP server", () => {
 
     expect(result.isError).toBe(true);
     expect(result.json).toEqual({ outcome: "failed", reason: "call-unconfirmed" });
+  });
+
+  /**
+   * FR-043 - of two calls on one tab, the one the agent sent second is the one told `busy`.
+   *
+   * 018 put a directory read in front of every call (R-278 (3)); read per call and concurrently,
+   * the reads could finish out of order and let the second call reach the router first - so the
+   * first was refused and the second ran (T513, agent-actions). Several pairs at once, so an
+   * ordering that only holds by luck does not pass.
+   */
+  it("refuses the later of two calls on one tab as busy, in the order the agent sent them (FR-043)", async () => {
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    worker = await startFakeAgentWorker({
+      env: { LOCALAPPDATA: dataDir },
+      pairing: "accept",
+      answers: {
+        tabs_context: { callId: "", outcome: "ok", result: [] },
+        // The first call on each tab stays in flight, so the second finds the tab busy.
+        click: "hang",
+        hover: { callId: "", outcome: "ok", result: { observed: { effect: "hovered", verified: true } } },
+      },
+    });
+    await expect(client.callTool("tabs_context")).resolves.toMatchObject({ isError: false });
+
+    const tabs = [1, 2, 3, 4, 5, 6, 7, 8];
+    const seconds = tabs.map((tabId) => {
+      void client!.callTool("click", { tabId, target: { x: 1, y: 1 } });
+      return client!.callTool("hover", { tabId, target: { x: 1, y: 1 } });
+    });
+    const answers = await Promise.all(seconds);
+
+    expect(answers.map((answer) => answer.json)).toEqual(tabs.map(() => ({ outcome: "busy", reason: "tab-in-flight" })));
+    expect(worker.requests.filter((request) => request.tool === "hover")).toEqual([]);
   });
 
   /**
@@ -2626,5 +2668,157 @@ describe("017 site plan", () => {
     expect(worker.requests.map((request) => ({ tool: request.tool, args: request.args }))).toEqual([
       { tool: "propose_sites", args: { ...ARGS, steps: ["read", "compare"] } },
     ]);
+  });
+});
+
+/**
+ * 018/S4a (T504, FR-269, FR-270, FR-273, R-273) - `list_browsers` and `select_browser` are answered
+ * by the host from the browser records and the choice store: always offered, no pairing, nothing
+ * sent to any worker. Routing a call by the selection is S4b; here the selection is stored and
+ * shows as `current`.
+ */
+describe("018 T504 host-answered browser tools", () => {
+  let dataDir = "";
+  let client: McpHarnessClient | undefined;
+  let worker: FakeAgentWorker | undefined;
+  /** One listener per record: a connected browser's port answers (T515 m4), though S4a never greets it. */
+  const listeners: Server[] = [];
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(join(tmpdir(), "hallpass-"));
+  });
+
+  afterEach(async () => {
+    await worker?.close();
+    await client?.close();
+    worker = undefined;
+    client = undefined;
+    await Promise.all(listeners.splice(0).map((listener) => new Promise<void>((done) => listener.close(() => done()))));
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  async function listeningPort(): Promise<number> {
+    const listener = createServer((socket) => socket.destroy());
+    listeners.push(listener);
+    await new Promise<void>((done) => listener.listen(0, "127.0.0.1", done));
+    return (listener.address() as AddressInfo).port;
+  }
+
+  async function writeRecord(browserId: string, kind: AgentBrowserKind, startedAt: string): Promise<void> {
+    const directory = join(dataDir, "hallpass", "browsers");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, `${browserId}.json`),
+      JSON.stringify({
+        browserId,
+        kind,
+        legacy: false,
+        features: [],
+        // This test process: a pid that is certainly alive, behind a port that answers but that
+        // nobody greets in S4a.
+        relayPid: process.pid,
+        port: await listeningPort(),
+        token: "t".repeat(64),
+        startedAt,
+        protocol: AGENT_LINK_PROTOCOL,
+      }),
+    );
+  }
+
+  async function agentId(): Promise<string> {
+    return (await readFile(join(dataDir, "hallpass", "agent-id"), "utf8")).trim();
+  }
+
+  const CHROME = { browserId: "browser-chrome", name: "Chrome", kind: "chrome" } as const;
+  const EDGE = { browserId: "browser-edge", name: "Edge", kind: "edge" } as const;
+
+  async function twoBrowsers(): Promise<void> {
+    await writeRecord(CHROME.browserId, "chrome", "2026-10-03T08:00:00.000Z");
+    await writeRecord(EDGE.browserId, "edge", "2026-10-03T09:00:00.000Z");
+  }
+
+  type Listed = { browsers: Array<{ browserId: string; current: boolean }> };
+
+  it("lists nothing, rather than bridge-unavailable, when no browser is connected", async () => {
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+
+    const result = await client.callTool("list_browsers");
+
+    expect(result.isError, result.text).toBe(false);
+    expect(result.json).toEqual({ browsers: [] });
+  });
+
+  it("lists the connected browsers, none current while several are connected and none chosen", async () => {
+    await twoBrowsers();
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+
+    const result = await client.callTool("list_browsers");
+
+    expect(result.json).toEqual({
+      browsers: [
+        { ...CHROME, connectedSince: "2026-10-03T08:00:00.000Z", current: false },
+        { ...EDGE, connectedSince: "2026-10-03T09:00:00.000Z", current: false },
+      ],
+    });
+  });
+
+  it("selects a connected browser, remembers it for the agent and lists it as current", async () => {
+    await twoBrowsers();
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+
+    const selected = await client.callTool("select_browser", { browserId: EDGE.browserId });
+
+    expect(selected.isError, selected.text).toBe(false);
+    expect(selected.json).toEqual(EDGE);
+    const choice = JSON.parse(await readFile(join(dataDir, "hallpass", "choices", `${await agentId()}.json`), "utf8"));
+    expect(choice).toEqual({ browserId: EDGE.browserId, chosenAt: expect.any(String) });
+    const listed = (await client.callTool("list_browsers")).json as Listed;
+    expect(listed.browsers.map(({ browserId, current }) => ({ browserId, current }))).toEqual([
+      { browserId: CHROME.browserId, current: false },
+      { browserId: EDGE.browserId, current: true },
+    ]);
+  });
+
+  it("refuses a browser that is not connected with browser-not-chosen, the list and the hint", async () => {
+    await twoBrowsers();
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+
+    const result = await client.callTool("select_browser", { browserId: "browser-gone" });
+
+    expect(result.isError).toBe(true);
+    expect(result.json).toEqual({
+      outcome: "denied",
+      reason: "browser-not-chosen",
+      refusal: { reason: "browser-not-chosen", browsers: [CHROME, EDGE] },
+      hint: BROWSER_REFUSAL_HINTS.notChosen,
+    });
+    await expect(readFile(join(dataDir, "hallpass", "choices", `${await agentId()}.json`), "utf8")).rejects.toThrow();
+  });
+
+  it("shows the browser an earlier session chose as current in a new one (FR-273)", async () => {
+    await twoBrowsers();
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    await client.callTool("select_browser", { browserId: CHROME.browserId });
+    await client.close();
+
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    const listed = (await client.callTool("list_browsers")).json as Listed;
+
+    expect(listed.browsers.find((browser) => browser.current)?.browserId).toBe(CHROME.browserId);
+  });
+
+  it("answers without pairing and sends nothing to the worker of a legacy relay, listed as the one browser", async () => {
+    client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+    worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept" });
+    await worker.waitForHello();
+
+    const listed = await client.callTool("list_browsers");
+    const selected = await client.callTool("select_browser", { browserId: "legacy-bridge" });
+
+    const legacy = { browserId: "legacy-bridge", name: "Browser (older Hallpass)", kind: "unknown" };
+    expect(listed.json).toEqual({ browsers: [{ ...legacy, connectedSince: expect.any(String), current: true }] });
+    expect(selected.json).toEqual(legacy);
+    await expect(worker.waitForControlFrame("pair-request", 300)).rejects.toThrow(/timed out/);
+    expect(worker.requests).toEqual([]);
   });
 });

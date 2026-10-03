@@ -285,6 +285,20 @@ function answer(
 }
 
 /**
+ * What an agent is told when a click or drag target could not be located (017 follow-up, probe S17).
+ *
+ * A bare `target-not-located` left the agent guessing coordinates; this names the two moves that
+ * actually get a target. Fixed text - nothing from the page is ever put in a hint of this kind.
+ */
+export const TARGET_NOT_LOCATED_HINT =
+  "Nothing could be located there. Take a screenshot to see the page, or use find or read_page to get a ref and act on the ref instead of guessing coordinates.";
+
+/** The `target-not-located` answer with its hint; every place that cannot locate a target uses it. */
+function targetNotLocatedAnswer(callId: string): AgentNativeResponse {
+  return { ...answer(callId, "failed", "target-not-located"), hint: TARGET_NOT_LOCATED_HINT };
+}
+
+/**
  * A ref whose element has genuinely left the document (004/T136): a different next move from
  * `target-not-located` ("I could not find that anywhere") - this one means "your ref is dead, read
  * the page again" - so it carries the schema's own `stale-reference` refusal, like its `stale-*`
@@ -1569,7 +1583,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (rect !== undefined && "notActionable" in rect) {
         return { ok: false, response: answer(callId, "not-actionable", "unsupported-page") };
       }
-      if (rect === undefined) return { ok: false, response: answer(callId, "failed", "target-not-located") };
+      if (rect === undefined) return { ok: false, response: targetNotLocatedAnswer(callId) };
       // 004/T136: the ref resolved a moment ago (`targetResolver` above), but the element it names
       // has left the document since - a fact only this locate, which actually asks every frame, can
       // observe. That is a dead reference, not a page this locate simply could not search.
@@ -1613,13 +1627,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (fromLocated !== undefined && "notActionable" in fromLocated) {
         return answer(callId, "not-actionable", "unsupported-page");
       }
-      if (fromLocated === undefined) return answer(callId, "failed", "target-not-located");
+      if (fromLocated === undefined) return targetNotLocatedAnswer(callId);
       if ("stale" in fromLocated) return staleReferenceAnswer(callId);
       const toLocated = await locate({ context, binding, ref: to.ref, scroll: false });
       if (toLocated !== undefined && "notActionable" in toLocated) {
         return answer(callId, "not-actionable", "unsupported-page");
       }
-      if (toLocated === undefined) return answer(callId, "failed", "target-not-located");
+      if (toLocated === undefined) return targetNotLocatedAnswer(callId);
       if ("stale" in toLocated) return staleReferenceAnswer(callId);
       const fromRect = fromLocated;
       const toRect = toLocated;

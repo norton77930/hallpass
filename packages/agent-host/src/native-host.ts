@@ -1,31 +1,58 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { AGENT_LINK_PROTOCOL, agentBrowserNameSchema, type AgentBrowserRecord } from "@hallpass/contracts";
+import {
+  browserPeers,
+  browserRecordPath,
+  decideLegacyClaim,
+  decideOwnRecordOnAck,
+  decideOwnRecordTurn,
+  identityFromAck,
+  inspectBrowserRecord,
+  listBrowserRecords,
+  liveOtherRecords,
+  ownRecordFacts,
+  removeOwnBrowserRecord,
+  sweepDeadBrowserRecords,
+  writeBrowserRecord,
+  type BrowserIdentity,
+} from "./browser-record.js";
 import {
   inspectBridgeRecord,
   listenAndPublish,
+  removeBridgeRecord,
   type FrameChannel,
-  type PublishedRelay,
 } from "./bridge-link.js";
-import { bridgeFilePath, hostDataDirectory } from "./host-paths.js";
+import { browsersDirectory, hostDataDirectory } from "./host-paths.js";
 import { createRelayMux, type RelayMux } from "./relay-mux.js";
-import { decideRelayAck, readRelayAck, removeBridgeOwner, writeBridgeOwner } from "./relay-ownership.js";
+import {
+  decideRelayAck,
+  readRelayAck,
+  removeBridgeOwner,
+  repairBridgeOwner,
+  writeBridgeOwner,
+  type RelayAck,
+} from "./relay-ownership.js";
 import { encodeFrame, FrameDecoder } from "./native-frame.js";
 import { createUploadConfigStore } from "./upload-config-store.js";
 
 /**
  * The native-messaging relay Chrome spawns (R-102, 004/R-111).
  *
- * It is the singular side of the link: Chrome spawns exactly one of it, so it is the one process
- * that can own a listening port and be the single writer of `bridge.json`. Every MCP server an
- * agent starts dials in, greets with the record's token, and is multiplexed onto this one native
- * port by `createRelayMux`. 003 had it the other way round - the server listened and this process
- * dialled - which made the record a file with N writers and told a second agent session that the
- * bridge was unavailable.
+ * It is the singular side of the link: Chrome spawns exactly one of it per browser, so it is the
+ * one process that can own a listening port and be the single writer of that browser's record,
+ * `browsers/<browserId>.json` (018 R-266). Every MCP server an agent starts dials in, greets with the
+ * record's token, and is multiplexed onto this one native port by `createRelayMux`. 003 had it the
+ * other way round - the server listened and this process dialled - which made the record a file
+ * with N writers and told a second agent session that the bridge was unavailable. Every browser's
+ * relay serves at once (018 R-267, R-274): none stands by or leaves because another browser is
+ * running. The legacy `bridge.json` is kept for servers older than 018 by whichever relay claims it.
  *
- * It still has no policy in it. It reads two fields of a frame to decide which way it goes and
- * rewrites none of them; pairing, tab ownership and the per-site gate all live in the worker or in
- * the server, so this process can be read end to end and seen to add no authority.
+ * It still has no policy in it. It reads two fields of a session's frame to decide which way it goes
+ * and rewrites none of them; pairing, tab ownership and the per-site gate all live in the worker or
+ * in the server, so this process can be read end to end and seen to add no authority. The frames it
+ * consumes itself - `relay-ack`, `browser-name` - are about its own record, never a session's.
  */
 
 /**
@@ -120,7 +147,7 @@ const DRAIN_POLL_MS = 50;
  * design decision; `mcp-server.ts` is the "answered honestly" half, for whatever the bound could not
  * cover.
  */
-async function drainThenClose(mux: RelayMux, published: PublishedRelay): Promise<void> {
+async function drainThenClose(mux: RelayMux, close: () => Promise<void>): Promise<void> {
   const deadline = Date.now() + DRAIN_BOUND_MS;
   while (mux.pendingCallCount() > 0 && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, DRAIN_POLL_MS));
@@ -131,17 +158,17 @@ async function drainThenClose(mux: RelayMux, published: PublishedRelay): Promise
     // `call-unconfirmed` a moment later on a socket this process can no longer see.
     log("relay.drain.abandoned", String(abandoned));
   }
-  await published.close();
+  await close();
 }
 
 /**
- * How often a relay re-reads the record to check it still owns it (004/R-111, T099c).
+ * How often a relay re-reads its records (004/R-111, T099c; 018 R-266).
  *
- * A poll rather than `fs.watch`: the record shares its directory with the relay log this process
+ * A poll rather than `fs.watch`: the records share a directory tree with the relay log this process
  * writes on every frame, so a directory watch would wake on the relay's own writes and have to
  * re-read anyway, and `fs.watch` is the one fs API Node documents as not available - or not
- * event-for-event - on every platform and filesystem. One read of a ~150-byte file per second costs
- * nothing next to the frames already crossing this process, and it bounds the detection time.
+ * event-for-event - on every platform and filesystem. A few small reads per second cost nothing next
+ * to the frames already crossing this process, and the poll bounds the detection time.
  */
 const RECORD_CHECK_MS = 1_000;
 
@@ -155,80 +182,14 @@ const RECORD_CHECK_MS = 1_000;
  * a call it could no longer answer. So the record is written only after `relay-ack`, and a relay
  * nobody acknowledges never touches it. The bound is generous next to a worker's turnaround (the
  * answer is sent from the frame handler) and short next to a test; the environment override is for
- * the relay's own process tests, nothing else reads it.
+ * the relay's own process tests, nothing else reads it. An 018 worker reads its identity before it
+ * answers, inside this same bound (R-279), so the identity always arrives on the ack itself and the
+ * relay never has to publish a legacy record first and correct it later.
  */
 const RELAY_ACK_BOUND_MS = (() => {
   const raw = Number(process.env.HALLPASS_RELAY_ACK_BOUND_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 10_000;
 })();
-
-/**
- * Keeps the record and this relay in agreement, in both directions (004/T099c, T099f).
- *
- * Servers only ever dial the record, so the record is the whole of this relay's reachability, and
- * the poll is the one place that sees it. Two things can go wrong with it and each has its own
- * repair:
- *
- * - The record names *another* relay. This one can be reached by nobody: it is an orphan holding a
- *   second native port open, which is exactly the split bridge B13 measured. It exits, and the
- *   worker's reconnect re-establishes a single link.
- * - The record is *gone* while this relay is still serving. A dying relay reads the record and
- *   deletes it, so one that loses the race with the winner's write deletes the winner's record;
- *   every server then reads no record and answers `bridge-unavailable` for a relay that is up -
- *   the owner's E1 through the mechanism built to remove it. So an absent record is republished
- *   rather than ignored. Two relays racing to republish still converge: whichever pid ends up on
- *   disk owns it, and the other sees the first case on its next turn and exits.
- *
- * A record that does not *parse* is neither. It is a file this process cannot attribute - a torn
- * read of someone's write, or a shape from another version - and republishing on top of it would
- * take the link away from a relay that may well be live. It is left alone, and the next turn reads
- * whatever the writer finished writing.
- */
-function exitWhenSuperseded(mux: RelayMux, published: PublishedRelay, onSuperseded: () => void): void {
-  const timer = setInterval(() => {
-    void (async () => {
-      const reading = await inspectBridgeRecord();
-      if (reading.status === "unparseable") {
-        return;
-      }
-      if (reading.status === "protocol-mismatch") {
-        /**
-         * A relay from another build owns the record (004/T099j). Chrome keeps the relay it spawned
-         * for the life of the browser, so a host upgrade leaves this process running against
-         * servers that no longer speak to it - and the stamp it finds is not its own is exactly
-         * that fact. It leaves, the same way it leaves when another relay of its own build takes
-         * the record over, and Chrome's reconnect spawns the current one.
-         */
-        clearInterval(timer);
-        log("relay.protocol-mismatch", `found=${reading.protocol ?? "none"}`);
-        onSuperseded();
-        void drainThenClose(mux, published).finally(exitAfterFlush);
-        return;
-      }
-      if (reading.status === "absent") {
-        log("relay.record-republished");
-        await published.republish().catch(() => {
-          // A record that cannot be written is retried on the next turn; there is nothing else
-          // this process can do about it, and taking the relay down would strand its servers.
-          log("relay.record-republish-failed");
-        });
-        return;
-      }
-      if (reading.record.relayPid === process.pid) {
-        return;
-      }
-      clearInterval(timer);
-      // Both pids, not just the winner's (004/T162, B107): the winner is who the record now names,
-      // and the speaker is whoever writes this line, which the reader cannot otherwise tell apart -
-      // that gap is what misled the previous investigation into reporting a guard bypass that never
-      // happened.
-      log("relay.superseded", `winner=${reading.record.relayPid} speaker=${process.pid}`);
-      onSuperseded();
-      void drainThenClose(mux, published).finally(exitAfterFlush);
-    })();
-  }, RECORD_CHECK_MS);
-  timer.unref?.();
-}
 
 function startLog(): void {
   try {
@@ -247,6 +208,8 @@ function startLog(): void {
 
 async function main(): Promise<void> {
   startLog();
+  // The run marker between relay runs (B106). The browser id is not known yet - it arrives on the
+  // ack - so it rides on `relay.owned`, the line that says which browser this run serves.
   log("relay.started", process.pid.toString());
 
   /**
@@ -255,7 +218,7 @@ async function main(): Promise<void> {
    * relay that has nothing to hand it to.
    */
   const token = randomBytes(32).toString("hex");
-  /** Set once the record names another relay: from then on this process's socket closes say nothing. */
+  /** Set once this browser's next relay took its record: from then on this process's socket closes say nothing. */
   let superseded = false;
   /**
    * The owner's upload directories, as this process may read and write them (014 FR-194).
@@ -300,51 +263,79 @@ async function main(): Promise<void> {
     },
     { token, publishOnListen: false },
   );
-  /** The browser run the worker named on its ack, written beside the record (two browsers, 2026-10-02). */
-  let ownerRunId: string | undefined;
-  /**
-   * The record and its owner sidecar as one: every publish writes both and every close retracts
-   * both, each only when it is this process's own. A sidecar that cannot be written is not fatal -
-   * without it another browser's relay simply takes over, which is the behaviour before the sidecar.
-   */
-  const published: PublishedRelay = {
-    port: listening.port,
-    token: listening.token,
-    async republish(): Promise<void> {
-      await listening.republish();
-      await writeBridgeOwner({
-        relayPid: process.pid,
-        ...(ownerRunId === undefined ? {} : { browserRunId: ownerRunId }),
-      }).catch(() => log("relay.owner-write-failed"));
-    },
-    async close(): Promise<void> {
-      await removeBridgeOwner().catch(() => undefined);
-      await listening.close();
-    },
-  };
-  log("relay.listening", String(published.port));
+  log("relay.listening", String(listening.port));
   // The worker's 15 s reconciliation starts here: the sessions that greet again inside the window
-  // survive a browser restart, and the ones that do not are released. The record's path rides
+  // survive a browser restart, and the ones that do not are released. Where the record goes rides
   // along (006 FR-082): the worker cannot see this directory, and the not-connected page shows it.
-  writeToChrome({ type: "relay-started", relayPid: process.pid, recordPath: bridgeFilePath() });
+  // Since 018 that is the per-browser directory - the file inside it is named after the browser's
+  // id, which arrives only on the ack this frame asks for.
+  writeToChrome({ type: "relay-started", relayPid: process.pid, recordPath: browsersDirectory() });
 
   /**
-   * Owned, or not (004/T169). The record is published - and the supersession watch armed - only
-   * once the worker has answered; until then this process can be dialled by nobody and takes
-   * nothing from the relay that is serving. A relay whose owner never answers leaves on the bound
-   * without ever having written the record.
+   * The record this relay publishes for its browser (018 R-266), set once the ack is adopted and
+   * cleared again only by an identity collision found on the poll. While it is set, this relay is
+   * that browser's relay: it repairs the record, answers `browser-name`, and counts peers.
+   */
+  let ownRecord: AgentBrowserRecord | undefined;
+  /**
+   * The identity refused because another live browser of another run holds it (R-276). Until the
+   * worker answers again with a different id, this relay publishes nothing at all - no record and
+   * no claim on `bridge.json` - so no server can reach a browser whose identity is ambiguous.
+   */
+  let conflictedId: string | undefined;
+  /** A rename that arrived while the ack was still being adopted; applied with it. */
+  let pendingName: string | undefined;
+  /** The last `browser-peers` sent, so the frame goes on change only. */
+  let lastPeers: string | undefined;
+  /**
+   * Whether the last sidecar write failed. The poll retries the write every turn, so a write that
+   * keeps failing is logged once per failure streak rather than once a second (review m5).
+   */
+  let ownerWriteFailing = false;
+  const noteOwnerWrite = (ok: boolean): void => {
+    if (!ok && !ownerWriteFailing) log("relay.owner-write-failed");
+    ownerWriteFailing = !ok;
+  };
+
+  /**
+   * Claims the legacy `bridge.json` for servers older than 018 (R-277), with its owner sidecar. A
+   * sidecar that cannot be written is not fatal: it only informs another relay's ack-time choice.
+   */
+  const claimLegacy = async (record: AgentBrowserRecord): Promise<void> => {
+    await listening.republish();
+    await writeBridgeOwner({
+      relayPid: process.pid,
+      ...(record.browserRunId === undefined ? {} : { browserRunId: record.browserRunId }),
+    }).then(
+      () => noteOwnerWrite(true),
+      () => noteOwnerWrite(false),
+    );
+  };
+
+  /** Retracts everything this relay published, each file only when it is still this process's own. */
+  const close = async (): Promise<void> => {
+    const mine = ownRecord;
+    if (mine !== undefined) await removeOwnBrowserRecord(mine.browserId, process.pid).catch(() => undefined);
+    await removeBridgeOwner().catch(() => undefined);
+    await listening.close();
+  };
+
+  /**
+   * Owned, or not (004/T169). Nothing is published - and the poll is not armed - until the worker
+   * has answered; until then this process can be dialled by nobody. A relay whose owner never
+   * answers leaves on the bound without ever having written a record.
    */
   let acknowledged = false;
   /**
-   * Set on every path that starts `published.close()`: a `relay-ack` that lands while the sockets
-   * are still closing (the bound fired, framing broke, Chrome closed) must not publish a record
-   * for a process that is leaving - nothing would retract it (review B121 #1).
+   * Set on every path that starts `close()`: an ack that lands while the sockets are still closing
+   * (the bound fired, framing broke, Chrome closed) must not publish a record for a process that is
+   * leaving - nothing would retract it (review B121 #1).
    */
   let leaving = false;
   const leave = (): void => {
     if (leaving) return;
     leaving = true;
-    void published.close().finally(exitAfterFlush);
+    void close().finally(exitAfterFlush);
   };
   const ackBound = setTimeout(() => {
     if (acknowledged) return;
@@ -352,40 +343,222 @@ async function main(): Promise<void> {
     leave();
   }, RELAY_ACK_BOUND_MS);
   ackBound.unref?.();
-  const onAck = (browserRunId: string | undefined): void => {
-    if (acknowledged || leaving) return;
+
+  /**
+   * One task at a time: adopting an ack, a rename and a poll turn all read and then write the same
+   * record, and two of them interleaved could write a stale copy over a fresh one.
+   */
+  let queue: Promise<void> = Promise.resolve();
+  const enqueue = (task: () => Promise<void>): void => {
+    queue = queue.then(task).catch(() => log("relay.task-failed"));
+  };
+
+  /**
+   * `browser-peers` (R-269), on change only, and only to a worker that sent an identity: a worker
+   * older than 018 does not read the frame (contracts "Link frames": each is sent only to a peer
+   * known to read it).
+   */
+  const sendPeers = async (record: AgentBrowserRecord): Promise<void> => {
+    if (record.legacy) return;
+    const others = await liveOtherRecords(await listBrowserRecords(), record.browserId);
+    if (leaving || ownRecord !== record) return;
+    const peers = browserPeers(record, others);
+    const key = JSON.stringify(peers);
+    if (key === lastPeers) return;
+    lastPeers = key;
+    writeToChrome({ type: "browser-peers", ...peers });
+  };
+
+  const refuseIdentity = (browserId: string, holderPid: number | undefined): void => {
+    conflictedId = browserId;
+    log("relay.identity-conflict", `browser=${browserId} holder=${holderPid ?? "unknown"} speaker=${process.pid}`);
+    writeToChrome({ type: "browser-identity-conflict" });
+  };
+
+  /** The record for an identity this relay has just been given, or a refusal (R-276). */
+  const adopt = async (identity: BrowserIdentity): Promise<void> => {
+    const reading = await inspectBrowserRecord(browserRecordPath(identity.browserId));
+    const facts = await ownRecordFacts({ selfPid: process.pid, mineRunId: identity.browserRunId, reading });
+    if (leaving) return;
+    if (decideOwnRecordOnAck(facts) === "conflict") {
+      refuseIdentity(identity.browserId, reading.status === "ok" ? reading.record.relayPid : undefined);
+      return;
+    }
+    conflictedId = undefined;
+    const name = pendingName ?? identity.name;
+    pendingName = undefined;
+    const { name: _ackName, ...rest } = identity;
+    const record: AgentBrowserRecord = {
+      ...rest,
+      ...(name === undefined ? {} : { name }),
+      relayPid: process.pid,
+      port: listening.port,
+      token: listening.token,
+      startedAt: listening.startedAt,
+      protocol: AGENT_LINK_PROTOCOL,
+    };
+    try {
+      await writeBrowserRecord(record);
+    } catch {
+      log("relay.record-publish-failed");
+      leave();
+      return;
+    }
+    ownRecord = record;
+    if (leaving) {
+      // `close()` may have read `ownRecord` before it was set; retract it here instead.
+      await removeOwnBrowserRecord(record.browserId, process.pid).catch(() => undefined);
+      return;
+    }
+    /**
+     * The legacy record, by today's ownership rule (`decideOnAck` + sidecar): this browser's own
+     * previous relay is replaced there too (004/T169), and a live relay of another browser run
+     * keeps it - this relay serves through its own record either way (R-267, R-274).
+     * A decision that cannot be made claims it, as it always has.
+     */
+    const { decision } = await decideRelayAck({ mineRunId: record.browserRunId }).catch(() => ({
+      decision: "claim-legacy" as const,
+    }));
+    if (leaving) return;
+    if (decision === "claim-legacy") {
+      await claimLegacy(record).catch(() => log("relay.legacy-claim-failed"));
+    }
+    log("relay.owned", `${process.pid} browser=${record.browserId}${record.legacy ? " legacy" : ""}`);
+    await sendPeers(record);
+    armPoll();
+  };
+
+  /** One turn of the 1 s poll: the own record, then the legacy record, then the directory. */
+  const turn = async (): Promise<void> => {
+    const record = ownRecord;
+    if (leaving || superseded || record === undefined) return;
+
+    const reading = await inspectBrowserRecord(browserRecordPath(record.browserId));
+    const facts = await ownRecordFacts({ selfPid: process.pid, mineRunId: record.browserRunId, reading });
+    if (leaving || ownRecord !== record) return;
+    switch (decideOwnRecordTurn(facts)) {
+      case "keep":
+      case "wait":
+        break;
+      case "republish":
+        // 004/T099f, per browser: something deleted (or a dead relay holds) this browser's record
+        // while this relay serves it, and only this relay can put it back.
+        log("relay.browser-record-republished", record.browserId);
+        await writeBrowserRecord(record).catch(() => log("relay.record-republish-failed"));
+        break;
+      case "superseded": {
+        // This browser's next relay - the same run - took the record (004/T169), or another build
+        // of this browser did (T099j). Both pids, not just the winner's (004/T162, B107).
+        const winner = reading.status === "ok" ? reading.record.relayPid : reading.status === "protocol-mismatch" ? reading.relayPid : undefined;
+        if (reading.status === "protocol-mismatch") log("relay.protocol-mismatch", "browser record");
+        log("relay.superseded", `winner=${winner ?? "unknown"} speaker=${process.pid} browser=${record.browserId}`);
+        superseded = true;
+        void drainThenClose(mux, close).finally(exitAfterFlush);
+        return;
+      }
+      case "conflict":
+        // The late half of a collision: two acks raced past each other's check, and the other
+        // browser's write landed. It keeps the id; this relay stops publishing anything, and
+        // retracts its claim on the legacy record, until its worker names a new identity.
+        ownRecord = undefined;
+        lastPeers = undefined;
+        await removeBridgeRecord().catch(() => undefined);
+        await removeBridgeOwner().catch(() => undefined);
+        refuseIdentity(record.browserId, reading.status === "ok" ? reading.record.relayPid : undefined);
+        return;
+    }
+
+    const legacy = await inspectBridgeRecord();
+    if (leaving || ownRecord !== record) return;
+    switch (decideLegacyClaim(legacy, process.pid)) {
+      case "claim":
+        log("relay.legacy-claimed", String(process.pid));
+        await claimLegacy(record).catch(() => log("relay.legacy-claim-failed"));
+        break;
+      case "own": {
+        // `removeBridgeOwner` reads then deletes, so a relay on its way out can delete the sidecar
+        // this one wrote; it is rewritten when missing or naming another relay or run.
+        let repaired: boolean;
+        try {
+          repaired = await repairBridgeOwner({
+            browserRunId: record.browserRunId,
+            shouldWrite: () => !leaving && ownRecord === record,
+          });
+        } catch {
+          noteOwnerWrite(false);
+          break;
+        }
+        noteOwnerWrite(true);
+        if (repaired) log("relay.owner-repaired", String(process.pid));
+        break;
+      }
+      case "leave":
+        break;
+    }
+
+    const swept = await sweepDeadBrowserRecords({ ownBrowserId: record.browserId }).catch(() => []);
+    if (swept.length > 0) log("relay.browser-records-swept", String(swept.length));
+    await sendPeers(record);
+  };
+
+  let pollArmed = false;
+  let turnQueued = false;
+  /**
+   * The poll starts with the first adopted record and runs until the relay leaves. A relay that is
+   * leaving stops (review m4): its `close()` retracts its records on purpose, and a turn that then
+   * read `absent` would republish them for a process about to exit, with nobody left to retract
+   * them. `leaving` is asked at the top of a turn and again after every read.
+   */
+  const armPoll = (): void => {
+    if (pollArmed) return;
+    pollArmed = true;
+    const timer = setInterval(() => {
+      if (leaving || superseded) {
+        clearInterval(timer);
+        return;
+      }
+      if (turnQueued) return;
+      turnQueued = true;
+      enqueue(async () => {
+        turnQueued = false;
+        await turn();
+      });
+    }, RECORD_CHECK_MS);
+    timer.unref?.();
+  };
+
+  /**
+   * The worker's ack (004/T169) and, after a refused identity, its answer with a new one (R-276).
+   * Any other repeat is ignored: an ack is a one-time fact about this port.
+   */
+  const onAck = (ack: RelayAck): void => {
+    if (leaving) return;
+    if (acknowledged && conflictedId === undefined) return;
+    const identity = identityFromAck(ack, process.pid);
+    if (conflictedId !== undefined && identity.browserId === conflictedId) {
+      log("relay.identity-conflict.repeated", identity.browserId);
+      return;
+    }
     acknowledged = true;
     clearTimeout(ackBound);
-    ownerRunId = browserRunId;
-    /**
-     * Two browsers (2026-10-02): an ack is no longer an unconditional take-over. When the record
-     * belongs to a live relay of another browser run, this relay stands by - it writes nothing,
-     * tells its worker why, and leaves; that worker's ordinary reconnect is the retry, and the
-     * first one after the other browser closes takes over. Every other case - this browser's own
-     * previous relay included (004/T169) - takes over as before. A decision that cannot be made
-     * (a read that throws) takes over too: that is the behaviour this check was added to.
-     */
-    void decideRelayAck({ mineRunId: browserRunId })
-      .catch(() => ({ decision: "take-over" as const, servingRelayPid: undefined }))
-      .then(async ({ decision, servingRelayPid }) => {
-        if (leaving) return;
-        if (decision === "stand-by" && servingRelayPid !== undefined) {
-          log("relay.standby", `serving=${servingRelayPid} speaker=${process.pid}`);
-          writeToChrome({ type: "relay-standby", servingRelayPid });
-          leave();
-          return;
-        }
-        await published.republish();
-        if (leaving) return;
-        log("relay.owned", String(process.pid));
-        exitWhenSuperseded(mux, published, () => {
-          superseded = true;
-        });
-      })
-      .catch(() => {
-        log("relay.record-publish-failed");
-        leave();
-      });
+    enqueue(() => adopt(identity));
+  };
+
+  /** The owner renamed this browser in its panel (FR-268): this relay rewrites its own record. */
+  const onBrowserName = (name: string): void => {
+    enqueue(async () => {
+      const record = ownRecord;
+      if (record === undefined) {
+        pendingName = name;
+        return;
+      }
+      // A superseded relay is only draining: the record belongs to the winner now (T515 m1).
+      if (leaving || superseded || record.name === name) return;
+      const renamed = { ...record, name };
+      ownRecord = renamed;
+      await writeBrowserRecord(renamed).catch(() => log("relay.record-rename-failed"));
+      log("relay.browser-renamed", record.browserId);
+    });
   };
 
   const decoder = new FrameDecoder();
@@ -402,7 +575,15 @@ async function main(): Promise<void> {
     for (const frame of frames) {
       const ack = readRelayAck(frame, process.pid);
       if (ack !== undefined) {
-        onAck(ack.browserRunId);
+        onAck(ack);
+        continue;
+      }
+      if (isFrameOfType(frame, "browser-name")) {
+        // A frame for the relay itself, like the ack: it is about this browser's record, never a
+        // session's traffic, so it is not forwarded - not even when its name is refused.
+        const name = agentBrowserNameSchema.safeParse((frame as { name?: unknown }).name);
+        if (name.success) onBrowserName(name.data);
+        else log("relay.browser-name-refused");
         continue;
       }
       log("relay.to-server");
@@ -411,11 +592,15 @@ async function main(): Promise<void> {
   });
   process.stdin.on("end", () => {
     // Chrome closed the native port, so there is no browser behind this relay any more. Every
-    // dialled-in server is dropped and the record retracted before the exit, so the servers stop
+    // dialled-in server is dropped and the records retracted before the exit, so the servers stop
     // sending into a link nobody is reading and dial the *next* relay instead of this one's port.
     log("relay.chrome.closed");
     leave();
   });
+}
+
+function isFrameOfType(frame: unknown, type: string): boolean {
+  return typeof frame === "object" && frame !== null && (frame as { type?: unknown }).type === type;
 }
 
 await main();

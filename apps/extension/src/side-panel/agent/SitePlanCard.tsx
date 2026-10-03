@@ -1,7 +1,8 @@
-import { useState, type ReactElement, type Ref } from "react";
+import type { ReactElement, Ref } from "react";
 import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import type { SendCommand } from "./AgentShell.js";
+import { displayOrigin } from "./display-origin.js";
 import { SessionTitle } from "./SessionCard.js";
 
 /**
@@ -15,7 +16,8 @@ import { SessionTitle } from "./SessionCard.js";
  *
  * The panel cannot add a site and does not decide: it sends what is left ticked, and the worker
  * accepts only origins that were in the proposal (FR-253). Which boxes are ticked is panel-local
- * until Approve is pressed, and keyed by the proposal so a second one never inherits the first's.
+ * until Approve is pressed (held by the PromptCard), and keyed by the proposal so a second one never
+ * inherits the first's.
  */
 export function SitePlanCard(props: {
   sitePlan: NonNullable<AgentPanelState["sitePlan"]>;
@@ -26,10 +28,15 @@ export function SitePlanCard(props: {
   locale: string;
   send: SendCommand;
   cardRef: Ref<HTMLElement>;
+  /**
+   * 017 follow-up: the unticked origins live in the PromptCard, which stays mounted when an earlier
+   * question takes the slot and this card unmounts - so the owner's unticks survive the swap.
+   */
+  unticked: { proposalId: string; origins: string[] };
+  setUnticked: (next: { proposalId: string; origins: string[] }) => void;
 }): ReactElement {
   const t = (key: string): string => lookup(key, props.locale);
-  const { sitePlan, session } = props;
-  const [unticked, setUnticked] = useState<{ proposalId: string; origins: string[] }>({ proposalId: "", origins: [] });
+  const { sitePlan, session, unticked, setUnticked } = props;
   const left = unticked.proposalId === sitePlan.proposalId ? unticked.origins : [];
   const ticked = sitePlan.origins.filter((origin) => !left.includes(origin));
   const approved = sitePlan.alreadyApproved ?? [];
@@ -88,7 +95,7 @@ export function SitePlanCard(props: {
                 }}
               />
               {/* An origin is the agent's word: inert text, never a link. */}
-              <span className="agent-siteplan-origin">{origin}</span>
+              <span className="agent-siteplan-origin">{displayOrigin(origin)}</span>
               {approved.includes(origin) ? (
                 <span className="agent-siteplan-approved"> ({t("agent.sitePlan.alreadyApproved")})</span>
               ) : null}

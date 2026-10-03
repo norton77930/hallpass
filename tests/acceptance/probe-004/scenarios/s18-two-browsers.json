@@ -1,0 +1,62 @@
+{
+  "id": "s18-two-browsers",
+  "slice": "S18",
+  "evidence": "T514 (018/US1, SC-133)",
+  "page": "https://example.com/",
+  "prompt": "You are a probe. Do not explain and do not retry a failed call. Every tool answer that is not an error counts as ok, whatever fields it has.\n\nI have more than one browser running. Use the browser named Chrome (not any other) to open https://example.com/ and read the page title. Do not use any other browser. If you cannot tell which browser is the one named Chrome, stop and tell me.\n\nAnswer with JSON only, matching the schema.\n- In steps, put one entry per call, in the order you made them: tool = the exact tool name, outcome = ok or the error text.\n- In observed: write \"selected-named\" if you found out that several browsers were connected (an answer told you so, or you listed them yourself), chose the browser named Chrome by its id, and the title was read in it; write \"no-choice-needed\" if only one browser was connected; write \"wrong-browser\" if you selected a browser not named Chrome; write \"failed\" if you could not read the title; otherwise write \"other\".\n- In report: the page title you read, and which browser (name and id) you used.\n- In notes: the list of browsers you were shown (names and ids), verbatim.",
+  "answerSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "scenario",
+      "steps",
+      "observed",
+      "report"
+    ],
+    "properties": {
+      "scenario": {
+        "type": "string"
+      },
+      "steps": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tool",
+            "outcome"
+          ],
+          "properties": {
+            "tool": {
+              "type": "string"
+            },
+            "args": {
+              "type": "string"
+            },
+            "outcome": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "observed": {
+        "type": "string"
+      },
+      "report": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "string"
+      }
+    }
+  },
+  "expect": {
+    "kind": "observed-equals",
+    "value": "selected-named"
+  },
+  "maxTurns": 20,
+  "maxBudgetUsd": 0.4,
+  "timeoutMs": 300000,
+  "expectedAfterFix": "SC-133: with two browsers running Hallpass, a real coding-agent caller's first browser call is refused browser-not-chosen with both browsers listed; it selects the one the user named (by id, via list_browsers / select_browser) and reads the page title there; nothing happens in the other browser.",
+  "note": "T514 (018). Two browsers run Hallpass on one host: the owner's branded Chrome (the attached probe browser, where the agent is already paired, default name Chrome) and a second Chromium (default name Chromium). No remembered choice may exist for the agent before the run (clear %LOCALAPPDATA%\\hallpass\\choices), or the first call would not be refused. The prompt names the browser the user wants, as a user would; it does not name the tools - whether the agent lists and selects by id is what SC-133 measures. The title is Example Domain. 2026-10-03: the first run read no heading because example.com no longer has an h1 (multilingual page, title kept); the task now reads the title, and an agent that lists the browsers before any refusal also counts - the refusal itself is covered by the two-browser gate (SC-127/128). The expectation is unchanged."
+}

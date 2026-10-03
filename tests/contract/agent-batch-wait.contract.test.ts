@@ -88,6 +88,8 @@ describe("T045 agent batch and wait contracts", () => {
     // and `dialog` is about a tab a dialog has stopped - which is a state that ends the batch.
     // 017 adds `propose_sites`: a site plan is about the session and waits on the owner's card,
     // so it is never one step of a batch (R-248).
+    // 018 adds the three browser tools: they choose which browser the session's calls run in, so a
+    // step that did that would move the batch's own tab to another browser mid-batch (R-273).
     expect([...steps]).toEqual(
       all.filter(
         (tool) =>
@@ -100,6 +102,9 @@ describe("T045 agent batch and wait contracts", () => {
             "gif_recorder",
             "dialog",
             "propose_sites",
+            "list_browsers",
+            "select_browser",
+            "request_browser_choice",
           ].includes(tool),
       ),
     );

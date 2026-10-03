@@ -121,6 +121,19 @@ describe("017 site-plan card", () => {
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 
+  it("shows an IDN origin in both forms, and still approves it by its ASCII origin (017 follow-up)", () => {
+    const IDN = "https://xn--r8jz45g.jp";
+    renderShell();
+    project(port, { ...STATE, sitePlan: { ...SITE_PLAN, origins: [IDN] } });
+
+    const row = card().querySelector(`li[data-origin="${IDN}"]`) as HTMLElement;
+    expect(row.querySelector(".agent-siteplan-origin")?.textContent).toBe("https://例え.jp (xn--r8jz45g.jp)");
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.sitePlan.approve") }));
+    expect(port.sent).toEqual([
+      { type: "ui.agent.site-plan-decide", payload: { proposalId: "proposal-1", approve: true, origins: [IDN] } },
+    ]);
+  });
+
   it("disables Approve while nothing is ticked, and enables it again with one tick", () => {
     renderShell();
     project(port, STATE);

@@ -105,9 +105,6 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.notPaired.body",
   "agent.bridgeLost.title",
   "agent.bridgeLost.body",
-  // Two browsers (2026-10-02): another browser on this computer is serving the agents.
-  "agent.standby.title",
-  "agent.standby.body",
   "agent.retry",
   "agent.details.title",
   "agent.details.relayPid",
@@ -124,6 +121,21 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.status.unpairAgent",
   "agent.status.menu",
   "agent.unpair",
+  // 018 FR-268, FR-279: this browser's name, its inline rename, and how many others are connected.
+  "agent.browser.this",
+  "agent.browser.rename",
+  "agent.browser.renameLabel",
+  "agent.browser.nameLabel",
+  "agent.browser.save",
+  "agent.browser.cancel",
+  "agent.browser.nameInvalid",
+  "agent.browser.others",
+  "agent.browser.othersOne",
+  // 018 FR-274: the in-browser choice card ("Use this browser for <agent>?").
+  "agent.browserChoice.title",
+  "agent.browserChoice.body",
+  "agent.browserChoice.confirm",
+  "agent.browserChoice.decline",
   // The site list (FR-086).
   "agent.sitesTitle",
   "agent.sitesNone",

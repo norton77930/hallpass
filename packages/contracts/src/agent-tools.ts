@@ -108,6 +108,10 @@ export const AGENT_TOOL_NAMES = [
   "dialog",
   // Session site plan (017 US1)
   "propose_sites",
+  // Several browsers (018 US1, US3): answered by the host, never forwarded to a worker (R-273).
+  "list_browsers",
+  "select_browser",
+  "request_browser_choice",
 ] as const;
 
 export type AgentToolName = (typeof AGENT_TOOL_NAMES)[number];
@@ -1771,6 +1775,171 @@ export const agentProposeSitesArgsSchema = z.strictObject(agentProposeSitesShape
 export type AgentProposeSitesArgs = z.infer<typeof agentProposeSitesArgsSchema>;
 
 /**
+ * What kind of browser a Hallpass browser is (018 data-model, R-268).
+ *
+ * Computed by the worker from the user-agent brands and never stored, because a profile does not
+ * change browser. `unknown` is the word for an extension older than 018, which says nothing about
+ * itself, and for a brand the worker cannot place - it is a fact, not a fault.
+ */
+export const AGENT_BROWSER_KINDS = ["chrome", "edge", "brave", "chromium", "unknown"] as const;
+
+export type AgentBrowserKind = (typeof AGENT_BROWSER_KINDS)[number];
+
+export const agentBrowserKindSchema = z.enum(AGENT_BROWSER_KINDS);
+
+/**
+ * A browser's identifier as every party but the worker sees it (018 data-model, R-268, R-276).
+ *
+ * The minted identity is a random UUID, but a record for an extension older than 018 is named
+ * `run-<browserRunId>` or `pid-<pid>` by its relay, so the floor is one character rather than the
+ * identity's eight. The character set is closed because the relay names a file after it
+ * (`browsers/<browserId>.json`): an id that could hold a separator could name a file anywhere.
+ */
+export const agentBrowserIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9-]+$/u, { message: "letters, digits and '-' only" });
+
+/**
+ * The identity a worker mints and sends on `relay-ack` (018 data-model "Browser identity"). Eight
+ * characters at least: a minted id is a UUID, and only a relay invents the short legacy forms.
+ */
+const agentMintedBrowserIdSchema = agentBrowserIdSchema.min(8);
+
+/**
+ * A browser's name as the owner chose it or the host derived it (018 FR-268, R-269): 1-40
+ * characters and no control characters.
+ *
+ * Control characters are refused rather than stripped here because the name travels into a file,
+ * into the agent's hint sentence and onto the panel, and a newline in any of them would read as a
+ * second line nobody wrote. The panel's own rename command is laxer on purpose - the worker strips
+ * what the owner pasted (T501) - so every name past the worker already fits this.
+ */
+export const AGENT_BROWSER_NAME_MAX_CHARS = 40;
+
+export const agentBrowserNameSchema = z
+  .string()
+  .min(1)
+  .max(AGENT_BROWSER_NAME_MAX_CHARS)
+  .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value), { message: "no control characters" });
+
+/** At most this many browsers in any list an agent is given (018 contracts/browser-tools.md). */
+export const AGENT_BROWSER_LIST_MAX = 16;
+
+/**
+ * One browser as an agent is told about it in a refusal or a selection (018 contracts
+ * "BrowserSummary"): the id it must act on, the name it shows the person, and the kind. Nothing
+ * about the browser's tabs or pairings - a list is answered without any pairing (R-273), so it may
+ * not carry anything a pairing would have guarded.
+ */
+export const agentBrowserSummarySchema = z.strictObject({
+  browserId: agentBrowserIdSchema,
+  name: agentBrowserNameSchema,
+  kind: agentBrowserKindSchema,
+});
+
+export type AgentBrowserSummary = z.infer<typeof agentBrowserSummarySchema>;
+
+const agentBrowserListSchema = z.array(agentBrowserSummarySchema).max(AGENT_BROWSER_LIST_MAX);
+
+/** `list_browsers` takes nothing (018 contracts/browser-tools.md); closed, so a filter is refused. */
+const agentListBrowsersShape = {};
+
+export const agentListBrowsersArgsSchema = z.strictObject(agentListBrowsersShape);
+
+/**
+ * `select_browser` names one browser by id (018 FR-270, D-018-14). Plain 1-64 rather than the id's
+ * own character set: an id that cannot exist is simply not connected, and the answer to that is the
+ * connected list (`browser-not-chosen`), which helps the agent more than "invalid arguments".
+ */
+const agentSelectBrowserShape = { browserId: z.string().min(1).max(64) };
+
+export const agentSelectBrowserArgsSchema = z.strictObject(agentSelectBrowserShape);
+
+/** `request_browser_choice` takes nothing: the owner picks, so the agent has nothing to propose. */
+const agentRequestBrowserChoiceShape = {};
+
+export const agentRequestBrowserChoiceArgsSchema = z.strictObject(agentRequestBrowserChoiceShape);
+
+/**
+ * The `list_browsers` answer (018 FR-269). `connectedSince` is the record's `startedAt`; `current`
+ * is true for the session's bound or resolved browser, so the agent can tell which one its calls run
+ * in without comparing names that can renumber (R-269).
+ */
+export const agentListBrowsersResultSchema = z.strictObject({
+  browsers: z
+    .array(
+      agentBrowserSummarySchema.extend({
+        connectedSince: z.string().min(1).max(64),
+        current: z.boolean(),
+      }),
+    )
+    .max(AGENT_BROWSER_LIST_MAX),
+});
+
+export type AgentListBrowsersResult = z.infer<typeof agentListBrowsersResultSchema>;
+
+/** The `select_browser` answer: the browser now selected, as a summary (018 FR-270). */
+export const agentSelectBrowserResultSchema = agentBrowserSummarySchema;
+
+/**
+ * The `request_browser_choice` answer (018 FR-274): the browser the owner confirmed, or
+ * `chosen: false` when every card was declined or the bound ran out - and then the earlier choice
+ * stands. There is no `chosen: true` without a browser: a yes that named nothing is not an answer.
+ */
+export const agentRequestBrowserChoiceResultSchema = z.union([
+  agentBrowserSummarySchema,
+  z.strictObject({ chosen: z.literal(false) }),
+]);
+
+export type AgentRequestBrowserChoiceResult = z.infer<typeof agentRequestBrowserChoiceResultSchema>;
+
+/**
+ * How long the owner has to answer the in-browser choice (018 data-model "Browser choice request",
+ * FR-274): the same two minutes a closed panel gives every other question (011 R-162).
+ */
+export const AGENT_BROWSER_CHOICE_BOUND_MS = 120_000;
+
+/**
+ * One browser's record in `%LOCALAPPDATA%\hallpass\browsers\<browserId>.json` (018 data-model,
+ * R-266). One writer: that browser's relay.
+ *
+ * It repeats the address fields of `agentBridgeRecordSchema` rather than extending it, because
+ * `bridge.json` stays exactly as 0.10.0 servers parse it (R-277) and the two must be free to move
+ * apart. `browserRunId` is what tells a worker restart (same run: replace) from a copied profile
+ * (another run: collision, R-276); `legacy` marks a record a relay named for an extension that sent
+ * no identity, which is never offered the in-browser choice.
+ */
+export const agentBrowserRecordSchema = z.strictObject({
+  browserId: agentBrowserIdSchema,
+  browserRunId: z.string().min(1).max(64).optional(),
+  kind: agentBrowserKindSchema,
+  name: agentBrowserNameSchema.optional(),
+  legacy: z.boolean(),
+  features: z.array(z.string().min(1).max(64)).max(16),
+  relayPid: z.number().int().positive(),
+  port: z.number().int().positive().max(65_535),
+  token: z.string().min(32).max(128),
+  startedAt: z.string().min(1).max(64),
+  protocol: z.number().int().min(1),
+});
+
+export type AgentBrowserRecord = z.infer<typeof agentBrowserRecordSchema>;
+
+/**
+ * The browser an agent chose last, in `%LOCALAPPDATA%\hallpass\choices\<agentId>.json` (018
+ * data-model, R-271, D-018-5, D-018-11). One file per agent so a later key cannot lose an update;
+ * written temp-then-rename, last writer wins.
+ */
+export const agentBrowserChoiceRecordSchema = z.strictObject({
+  browserId: agentBrowserIdSchema,
+  chosenAt: z.string().min(1).max(64),
+});
+
+export type AgentBrowserChoiceRecord = z.infer<typeof agentBrowserChoiceRecordSchema>;
+
+/**
  * What post-effect verification concluded, in the attention causes' own words (003/B2).
  *
  * A subset of `ATTENTION_REQUIRED_CAUSES` plus `verified`, and not the whole set: `execute-uncertain`
@@ -2316,6 +2485,40 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "this session. Page JavaScript and file uploads still ask. Sites not approved behave as before.",
     inputShape: agentProposeSitesShape,
   },
+  /**
+   * 018 (contracts/browser-tools.md, R-273): answered by the host, need no pairing, and say in their
+   * own words that the owner decides and that a browser is named by id - the two things an agent
+   * would otherwise get wrong by guessing (D-018-4, R-269).
+   */
+  {
+    name: "list_browsers",
+    title: "List the connected browsers",
+    description:
+      "List the browsers running Hallpass on this computer. When several are connected and none is chosen, ask the " +
+      "user which one to use and call select_browser with its browserId; never pick one yourself. Refer to " +
+      "browsers by browserId, not by name.",
+    inputShape: agentListBrowsersShape,
+  },
+  {
+    name: "select_browser",
+    title: "Use one browser for this session",
+    description:
+      "Use the connected browser with this browserId for this session; the choice is remembered for your next " +
+      "sessions. Select only the browser the user named. You must be paired in that browser to act there: the " +
+      "next call asks the owner for pairing as usual. A browserId that is not connected is refused with the " +
+      "connected list.",
+    inputShape: agentSelectBrowserShape,
+  },
+  {
+    name: "request_browser_choice",
+    title: "Ask the user to choose a browser in the browser",
+    description:
+      "Ask the user to choose the browser for this session from inside the browsers: each connected browser that " +
+      "can show it asks \"Use this browser?\" in its side panel, and the first confirm selects it as select_browser " +
+      "does. Waits up to 2 minutes. If every browser declines or nobody answers, the answer is `chosen: false` " +
+      "and the earlier choice is unchanged.",
+    inputShape: agentRequestBrowserChoiceShape,
+  },
 ];
 
 /**
@@ -2419,6 +2622,9 @@ export const agentToolArgSchemas: Record<AgentToolName, z.ZodType> = {
   gif_recorder: agentGifRecorderArgsSchema,
   dialog: agentDialogArgsSchema,
   propose_sites: agentProposeSitesArgsSchema,
+  list_browsers: agentListBrowsersArgsSchema,
+  select_browser: agentSelectBrowserArgsSchema,
+  request_browser_choice: agentRequestBrowserChoiceArgsSchema,
 };
 
 /**
@@ -2503,6 +2709,23 @@ export const agentRefusalSchema = z.discriminatedUnion("reason", [
   z.strictObject({ reason: z.literal("download-failed"), downloadReason: z.string().min(1).max(200) }),
   /** The owner pressed refuse on a dialog accept; the dialog was dismissed rather than left open. */
   z.strictObject({ reason: z.literal("refused") }),
+  /**
+   * 018 (FR-272, D-018-13, contracts/browser-tools.md): several browsers are connected and this
+   * agent has no connected choice - or its remembered browser is offline, or `select_browser` named
+   * one that is not connected. Refused before anything reaches any worker, with the connected list,
+   * because "ask the user which one" is the agent's next move and it needs the ids to make it.
+   */
+  z.strictObject({ reason: z.literal("browser-not-chosen"), browsers: agentBrowserListSchema }),
+  /**
+   * 018 (FR-277, D-018-8, R-278): the session's bound browser has been gone longer than the attach
+   * bound. It names the lost browser and the others, and never falls back to one of them: which
+   * browser acts is the owner's decision, not an availability accident.
+   */
+  z.strictObject({
+    reason: z.literal("browser-disconnected"),
+    browser: agentBrowserSummarySchema,
+    browsers: agentBrowserListSchema,
+  }),
 ]);
 
 export type AgentRefusal = z.infer<typeof agentRefusalSchema>;
@@ -2631,6 +2854,27 @@ export const PAIRING_REFUSAL_HINTS = {
 } as const;
 
 /**
+ * What the two browser refusals tell the agent to do (018 contracts/browser-tools.md, FR-272,
+ * FR-277), English line then zh-TW line as `PAIRING_REFUSAL_HINTS`.
+ *
+ * Here for the reason those are: the host composes them, the agent relays them to the person and
+ * the gates assert them. `disconnected` has one hole, the browser's name, because "which browser"
+ * is the whole of what the person is being asked about; the name is the owner's own text, already
+ * free of control characters (`agentBrowserNameSchema`), and at 40 characters the sentence stays
+ * inside the response's 400-character `hint`.
+ */
+export const BROWSER_REFUSAL_HINTS = {
+  notChosen:
+    "Several browsers are running Hallpass. Ask the user which one to use, then call select_browser with its " +
+    "browserId (or request_browser_choice to let them pick it in the browser).\n" +
+    "有多個瀏覽器正在執行 Hallpass。請問使用者要用哪一個,再用它的 browserId 呼叫 select_browser(或呼叫 request_browser_choice 讓使用者在瀏覽器裡選)。",
+  disconnected: (name: string): string =>
+    `The browser this session was using (${name}) is no longer connected. Ask the user whether to wait for it ` +
+    "or to use another browser.\n" +
+    `這個工作階段使用的瀏覽器(${name})已經沒有連線。請問使用者要等它回來,還是改用另一個瀏覽器。`,
+} as const;
+
+/**
  * Whether a directory is a whole drive or a whole share (014 FR-194, S3 review F7).
  *
  * The card's "from now on" adds the file's own parent, and for a file sitting at `D:\` or at
@@ -2739,6 +2983,17 @@ export const PAIRING_DECLINED_MARKER = "declined-this-request";
  * unknown tool with nothing the agent could act on.
  */
 export const SITE_PLAN_FEATURE = "site-plan";
+
+/**
+ * The capability a worker advertises in `relay-ack.features` when it can show the "Use this browser
+ * for <agent>?" card (018 R-273, R-279).
+ *
+ * On the ack rather than on `pair-result`, because the choice is asked of browsers the agent may not
+ * be paired in yet; and read from the worker rather than from the relay's version, because a new
+ * host beside an old extension is routine. The relay copies it into its record, and a server opens
+ * a choose-only link (`hello.intent: "choose"`) only to a browser whose record carries it.
+ */
+export const BROWSER_CHOICE_FEATURE = "browser-choice";
 
 /**
  * What a `propose_sites` call that cannot be asked says (017 FR-265): outcome `unavailable`, this
@@ -3022,6 +3277,12 @@ export const AGENT_PROMPT_KINDS = [
   "diagnostics",
   "transition",
   "upload-directory",
+  /**
+   * 018 FR-274: "Use this browser for <agent>?". A kind of its own because the card is a different
+   * sentence with different buttons, and because the tick that keeps the requesting call alive for
+   * its two minutes names its kind.
+   */
+  "browser-choice",
 ] as const;
 
 export type AgentPromptKind = (typeof AGENT_PROMPT_KINDS)[number];
@@ -3101,6 +3362,14 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
      * than failing to parse as "some frame".
      */
     protocol: z.number().int().min(1).optional(),
+    /**
+     * 018 R-273, R-279: this link exists only to ask "Use this browser?" - the worker raises the
+     * choice card for it and creates no session card and no tab group. Optional, and sent only to a
+     * relay whose record advertises `BROWSER_CHOICE_FEATURE`: an older relay parses `hello` strictly
+     * and would refuse the whole greeting. The session id on such a link is derived from the
+     * requesting session's, because a `hello` naming a live session replaces that connection.
+     */
+    intent: z.literal("choose").optional(),
   }),
   /**
    * The relay's acknowledgement, and the whole of it: its pid. That is what lets a server tell a
@@ -3154,22 +3423,21 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
      * the relay reads as "unknown" and takes the record over exactly as it always has.
      */
     browserRunId: z.string().min(1).max(64).optional(),
+    /**
+     * Who this browser is (018 data-model, R-268): its minted id, its kind, the name the owner set
+     * (absent = the default name, R-269) and what it can be asked (`BROWSER_CHOICE_FEATURE`). The
+     * relay writes them into its own `browsers/<browserId>.json`. All optional, exactly as
+     * `browserRunId` was added: a 0.10.0 relay reads only `type`/`relayPid`/`browserRunId`, and a
+     * worker older than 018 sends none, which the relay records as a legacy browser.
+     */
+    browserId: agentMintedBrowserIdSchema.optional(),
+    browserKind: agentBrowserKindSchema.optional(),
+    browserName: agentBrowserNameSchema.optional(),
+    features: z.array(z.string().min(1).max(64)).max(16).optional(),
   }),
-  /**
-   * The relay's answer to `relay-ack` when another browser's relay is serving (two browsers,
-   * 2026-10-02).
-   *
-   * Chrome and Edge each spawn their own relay, and each used to take the record over on its ack -
-   * so the two evicted each other every few seconds and neither browser could be used. A relay that
-   * finds the record held by a live relay of another browser run now leaves without touching it,
-   * and says so first, so the panel can tell the owner why this browser is not connected. The
-   * worker's ordinary reconnect is the retry: once the other browser closes, the next relay takes
-   * over. A worker from before this frame drops it as an unknown type and sees only the port close.
-   */
-  z.strictObject({
-    type: z.literal("relay-standby"),
-    servingRelayPid: z.number().int().positive(),
-  }),
+  // `relay-standby` (two browsers, 2026-10-02) is gone: 018 serves every browser through its own
+  // record, so no relay stands aside (R-274, FR-280). A 0.10.x relay that still sends it to a newer
+  // worker is refused at this union and dropped, which is all it needs.
   /** The worker's "still waiting" tick (011); see `promptWaitingFrameSchema` for why it is here. */
   promptWaitingFrameSchema,
   /**
@@ -3235,6 +3503,64 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
     type: z.literal("session-label"),
     sessionId: z.string().min(1).max(128),
     label: z.string().min(1).max(64),
+  }),
+  /**
+   * 018 (contracts/browser-tools.md "Link frames"). New frame types, so an older side drops them as
+   * unknown and the protocol stays 2 (R-267); each is sent only to a peer known to read it.
+   *
+   * The owner renamed this browser in its panel (FR-268): worker to relay, which rewrites its own
+   * record. Nothing else on the machine may name a browser.
+   */
+  z.strictObject({
+    type: z.literal("browser-name"),
+    name: agentBrowserNameSchema,
+  }),
+  /**
+   * How many other browsers are connected, and this browser's default name, from the relay's 1 s
+   * directory poll (FR-268, R-269): relay to worker, for the panel's "This browser" row. The default
+   * name comes from the relay because numbering depends on the others, which only the host can see.
+   */
+  z.strictObject({
+    type: z.literal("browser-peers"),
+    others: z.number().int().nonnegative().max(1_000),
+    defaultName: agentBrowserNameSchema,
+  }),
+  /**
+   * Another live browser of another run already holds this browser's id (a copied profile, R-276):
+   * relay to worker, which mints a new identity. It carries nothing - the worker knows its own id,
+   * and naming the other browser's run would tell one profile about another for no use.
+   */
+  z.strictObject({
+    type: z.literal("browser-identity-conflict"),
+  }),
+  /**
+   * The in-browser choice (FR-274, R-273): the requesting server asks every browser that advertised
+   * `BROWSER_CHOICE_FEATURE`, on a choose-only link (`hello.intent: "choose"`).
+   *
+   * `sessionId` is the choose link's own (derived) session id. It is not in the contract table, and
+   * it is on these three frames because the relay routes nothing without it: a server frame whose
+   * `sessionId` is not its greeting's is refused (`relay-mux.ts`, T099e), and a worker frame is
+   * delivered to the server that owns its session. Echoed, never chosen, as on `pair-withdraw`.
+   */
+  z.strictObject({
+    type: z.literal("browser-choice-request"),
+    sessionId: z.string().min(1).max(128),
+    requestId: z.string().min(1).max(128),
+    agentName: z.string().min(1).max(128),
+    boundMs: z.number().int().positive().max(AGENT_MAX_CALL_TIMEOUT_MS),
+  }),
+  /** The owner's answer on one browser's card; the first confirm anywhere settles the request. */
+  z.strictObject({
+    type: z.literal("browser-choice-result"),
+    sessionId: z.string().min(1).max(128),
+    requestId: z.string().min(1).max(128),
+    decision: z.enum(["confirm", "decline"]),
+  }),
+  /** The request was settled elsewhere or ran out: the worker takes its card down (as 015's withdraw). */
+  z.strictObject({
+    type: z.literal("browser-choice-withdraw"),
+    sessionId: z.string().min(1).max(128),
+    requestId: z.string().min(1).max(128),
   }),
 ]);
 
@@ -3333,10 +3659,9 @@ export const AGENT_PANEL_PORT_NAME = "hallpass-panel";
 /**
  * How the link to the local agent host looks to the owner. Closed states, no free text.
  *
- * `standby` is a host that answered but stood aside because another browser on this computer is
- * serving the agents (two browsers, 2026-10-02): not a fault to retry, a fact to tell the owner.
+ * (`standby`, from the two-browser stop-gap of 2026-10-02, went with 018: every browser is served.)
  */
-export const AGENT_BRIDGE_STATUSES = ["connected", "unavailable", "disconnected", "standby"] as const;
+export const AGENT_BRIDGE_STATUSES = ["connected", "unavailable", "disconnected"] as const;
 
 export type AgentBridgeStatusValue = (typeof AGENT_BRIDGE_STATUSES)[number];
 
@@ -3745,6 +4070,31 @@ export const agentPanelStateSchema = z.strictObject({
   plan: agentPlanPromptSchema.optional(),
   /** 017: a session's site-plan proposal awaiting the owner's answer. A 0.9.0 worker never sets it. */
   sitePlan: agentSitePlanPromptSchema.optional(),
+  /**
+   * 018 FR-268: this browser as the owner sees it - the name in use, the default it falls back to
+   * when the owner clears theirs, its kind, and how many other browsers are connected (from the
+   * relay's `browser-peers`). Optional: a 0.10.0 worker never sets it, and a worker whose relay has
+   * not reported peers yet has nothing honest to say about the others.
+   */
+  browser: z
+    .strictObject({
+      name: agentBrowserNameSchema,
+      defaultName: agentBrowserNameSchema,
+      kind: agentBrowserKindSchema,
+      others: z.number().int().nonnegative().max(1_000),
+    })
+    .optional(),
+  /**
+   * 018 FR-274: an agent asking to use this browser (prompt kind `browser-choice`). One at a time,
+   * as `sitePlan`; the agent's name is its own stated name, shown as inert text.
+   */
+  browserChoice: z
+    .strictObject({
+      requestId: z.string().min(1).max(128),
+      agentName: z.string().min(1).max(128),
+      raisedAt: z.string().min(1).max(64),
+    })
+    .optional(),
   bridge: agentBridgeStatusSchema,
   /**
    * The paired agent's stated name, for the status row (006 FR-083). It is the first paired
@@ -3985,6 +4335,20 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("ui.agent.site-plan-withdraw"),
     payload: z.strictObject({ sessionId: z.string().min(1).max(128) }),
+  }),
+  /**
+   * The owner naming this browser (018 FR-268). 1-40 characters and nothing else checked here: the
+   * worker strips control characters and trims before it stores or sends the name (T501), so what
+   * leaves the worker fits `agentBrowserNameSchema`. The name only; the kind is the browser's.
+   */
+  z.strictObject({
+    type: z.literal("ui.agent.browser-rename"),
+    payload: z.strictObject({ name: z.string().min(1).max(AGENT_BROWSER_NAME_MAX_CHARS) }),
+  }),
+  /** The owner's answer on the "Use this browser?" card (018 FR-274): confirm or decline, once. */
+  z.strictObject({
+    type: z.literal("ui.agent.browser-choice-decide"),
+    payload: z.strictObject({ requestId: z.string().min(1).max(128), confirm: z.boolean() }),
   }),
 ]);
 

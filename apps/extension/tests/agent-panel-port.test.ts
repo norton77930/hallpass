@@ -130,15 +130,28 @@ function setup(
   // The relay's first frame, which is what makes the link `connected` (004/T099h): an open Port on
   // its own only means Chrome accepted the host's name.
   nativePort.emit({ type: "relay-started", relayPid: 4242 });
+  linksAwaitingAck.push(nativePort);
   return { runtime, panel, nativePort };
 }
+
+/**
+ * Every link `setup` opened. The ack waits on the identity read (018 R-279), so it can land after a
+ * test that never awaited it; teardown lets it land while `chrome` still exists.
+ */
+const linksAwaitingAck: Array<ReturnType<typeof fakeNativePort>> = [];
 
 describe("T019 agent panel port", () => {
   beforeEach(() => {
     installChrome();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const links = linksAwaitingAck.splice(0);
+    await vi.waitFor(() => {
+      for (const link of links) {
+        expect(link.sent.some((frame) => (frame as { type?: string }).type === "relay-ack")).toBe(true);
+      }
+    });
     delete (globalThis as { chrome?: unknown }).chrome;
   });
 
@@ -177,6 +190,8 @@ describe("T019 agent panel port", () => {
         bridge: "connected",
         transitions: [],
         diagnostics: { relayPid: 4242 },
+        // 018 FR-268: this browser, named by its kind until the relay reports the others.
+        browser: { name: "Browser", defaultName: "Browser", kind: "unknown", others: 0 },
       },
     });
   });
@@ -237,7 +252,17 @@ describe("T019 agent panel port", () => {
     await vi.waitFor(() => expect(nativePort.sent).toEqual([
         // Two browsers (2026-10-02): the ack names this browser's run, so the relay can tell its own
         // browser's previous relay from another browser's.
-        { type: "relay-ack", relayPid: 4242, browserRunId: expect.any(String) },
+        // 018 R-268: and who this browser is - its id minted into `chrome.storage.local`, its kind
+        // (`unknown` under Node, which has no user-agent brands). 018 R-279: and that it can show
+        // the "Use this browser?" card.
+        {
+          type: "relay-ack",
+          relayPid: 4242,
+          browserRunId: expect.any(String),
+          browserId: expect.any(String),
+          browserKind: "unknown",
+          features: ["browser-choice"],
+        },
         // 014 FR-194: and the worker asks that relay what the owner's upload directories are, on
         // every link, because the panel's rows are a picture of the host's file.
         { type: "upload-roots-list" },
@@ -390,6 +415,20 @@ describe("T019 agent panel port", () => {
     });
 
     expect(decidePlan).toHaveBeenCalledWith("plan-1", true, [1]);
+  });
+
+  /** 018/T509 — the owner's answer on the "Use this browser?" card reaches the runtime (FR-274). */
+  it("carries the owner's answer to a browser choice, and says so when it settled nothing", () => {
+    const diagnostics: string[] = [];
+    const { panel, runtime } = setup({ reportDiagnostic: (code) => diagnostics.push(code) });
+    const port = fakePanelPort();
+    panel.accept(port);
+    const decide = vi.spyOn(runtime, "decideBrowserChoice");
+
+    port.emit({ type: "ui.agent.browser-choice-decide", payload: { requestId: "req-1", confirm: true } });
+
+    expect(decide).toHaveBeenCalledWith("req-1", true);
+    expect(diagnostics).toContain("agent.panel.browser-choice-refused");
   });
 
   /**

@@ -47,14 +47,22 @@ test — all applied).
 
 ## Follow-ups (not in scope, recorded)
 
-- Session card and the "already approved" marks read the stored plan without the agent check (admission is agent-bound).
-- `propose_sites` could be answered `blocked-by-dialog` if a host sent it with a tabId while a dialog is open (`DIALOG_PASS_THROUGH`).
-- Tick state on the card resets if an earlier question takes the top slot and hands it back.
-- IDN origins show as punycode on the card.
-- `computer` screenshot / wait actions are admitted under a plan (reads).
-- An orphaned plan of an old session id after a worker restart stays until unpair or browser restart (unreachable).
-- `docs/zh-TW/qa-guide.html` still describes 0.9.0 (needs screenshots).
-- Probe S17: the agent's coordinate click on example.com's heading (no ref, guessed at 400,150) answered `target-not-located`; unrelated to the plan (no card was raised), but the agent could not finish step 3 without a screenshot.
+- ~~Session card and the "already approved" marks read the stored plan without the agent check (admission is agent-bound).~~ Fixed 2026-10-03 (`planOf` in the runtime; `agent-runtime-site-plan.test.ts` "re-announced by another agent").
+- `propose_sites` could be answered `blocked-by-dialog` if a host sent it with a tabId while a dialog is open (`DIALOG_PASS_THROUGH`). Kept as recorded: the host never sends this tool with a tabId.
+- ~~Tick state on the card resets if an earlier question takes the top slot and hands it back.~~ Fixed 2026-10-03 (state held by `PromptCard`; `prompt-card.test.tsx` "keeps the unticked sites").
+- ~~IDN origins show as punycode on the card.~~ Fixed 2026-10-03: Unicode with the ASCII host beside it on every panel surface (`display-origin.ts`, code review applied; spec change log).
+- `computer` screenshot / wait actions are admitted under a plan (reads). Kept: reads never needed a card.
+- An orphaned plan of an old session id after a worker restart stays until unpair or browser restart (unreachable). Kept as recorded.
+- `docs/zh-TW/qa-guide.html` still describes 0.9.0 (needs screenshots). With the next release.
+- ~~Probe S17: the agent's coordinate click on example.com's heading (no ref, guessed at 400,150) answered `target-not-located`; unrelated to the plan (no card was raised), but the agent could not finish step 3 without a screenshot.~~ Fixed 2026-10-03: the answer now carries a hint to take a screenshot or use a ref (`agent-effects.test.ts` "target-not-located hint").
+
+### Two-browser stand-by (relay fix on this branch), 2026-10-03
+
+- Stand-by churn: the worker's reopen backs off 5 → 10 → 20 s while standing by (owner chose worker backoff over a resident stand-by host); takeover after the serving browser closes takes up to ~20 s.
+- Stand-by survives a worker eviction (`agentBridgeStandby` in `storage.session`, bounded by the retry alarm period plus the cap).
+- The owning relay repairs `bridge-owner.json` on its record poll (closes the read-then-rm window); the poll stops once the relay leaves.
+- Contract: the built panel projection accepts `bridge: "standby"`.
+- Open: a host that greets and drops within the 3 s hold on every cycle keeps the panel on stand-by (pre-existing hold-through-drop rule). Full multi-browser selection (per-browser id and name, agent-side choice) goes to spec 018.
 
 ## Owner run (T492), 2026-10-03
 

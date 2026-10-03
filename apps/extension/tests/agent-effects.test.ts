@@ -6,6 +6,7 @@ import {
   createFocusConfirmer,
   createOopifSessionResolver,
   createTargetConfirmer,
+  TARGET_NOT_LOCATED_HINT,
 } from "../src/service-worker/agent-tools/effects.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
@@ -651,6 +652,43 @@ describe("T028 agent effect tools", () => {
     expect(response).toEqual({ callId: "call-1", outcome: "failed", reason: "cross-frame-drag" });
     // Refused, not delivered: no pointer traffic at all.
     expect(input.commands.some((command) => command.method === "Input.dispatchMouseEvent")).toBe(false);
+  });
+
+  /**
+   * 017 follow-up (probe S17) - a click or drag whose target cannot be located answered a bare
+   * `target-not-located`, and the agent kept guessing coordinates. The answer now names the next
+   * move; the sentence is fixed and carries nothing from the page.
+   */
+  describe("target-not-located hint", () => {
+    const notLocated = {
+      callId: "call-1",
+      outcome: "failed",
+      reason: "target-not-located",
+      hint: expect.stringContaining("screenshot"),
+    };
+
+    it("tells a click whose point cannot be located to take a screenshot or use a ref", async () => {
+      const { runner, siteModes } = harness({ locate: async () => undefined });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { x: 12, y: 34 } } }));
+
+      expect(response).toEqual(notLocated);
+      expect(response.hint).toBe(TARGET_NOT_LOCATED_HINT);
+      expect((response.hint ?? "").length).toBeLessThanOrEqual(400);
+    });
+
+    it.each(["t_alpha", "t_beta"])("gives a drag whose %s endpoint cannot be located the same hint", async (missing) => {
+      const { runner, siteModes } = harness({
+        locate: async ({ ref }) => (ref === missing ? undefined : { x: 100, y: 40, width: 80, height: 20 }),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(dragRequest());
+
+      expect(response).toEqual(notLocated);
+      expect(response.hint).toBe(TARGET_NOT_LOCATED_HINT);
+    });
   });
 
   it("refuses a tab the session does not own, before it touches the page", async () => {

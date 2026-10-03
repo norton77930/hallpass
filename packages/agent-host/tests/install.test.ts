@@ -21,7 +21,15 @@ import {
   unregisterAll,
   type RegRunner,
 } from "../src/install/registration.js";
-import { agentIdFilePath, bridgeFilePath, hostDataDirectory, hostManifestPath, launcherPath } from "../src/host-paths.js";
+import {
+  agentIdFilePath,
+  bridgeFilePath,
+  browserChoicesDirectory,
+  browsersDirectory,
+  hostDataDirectory,
+  hostManifestPath,
+  launcherPath,
+} from "../src/host-paths.js";
 
 const env = { LOCALAPPDATA: "C:\\Users\\owner\\AppData\\Local" };
 
@@ -234,5 +242,10 @@ describe("host paths", () => {
     expect(launcherPath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\native-host.cmd");
     expect(bridgeFilePath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\bridge.json");
     expect(agentIdFilePath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\agent-id");
+  });
+
+  it("keeps the per-browser records and the remembered choices in their own folders (018 R-266, R-271)", () => {
+    expect(browsersDirectory(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\browsers");
+    expect(browserChoicesDirectory(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\choices");
   });
 });

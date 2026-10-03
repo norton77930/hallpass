@@ -7,6 +7,7 @@ import {
 } from "@hallpass/contracts";
 import { reportTestDiagnostic } from "../../diagnostics.js";
 import { panelWindowMessage } from "../../panel-window.js";
+import { BrowserRow } from "./BrowserRow.js";
 import { NotConnected } from "./NotConnected.js";
 import { NoticeCard, PromptCard } from "./PromptCard.js";
 import { SessionCard } from "./SessionCard.js";
@@ -236,6 +237,21 @@ export function AgentShell(props: { locale: string }): ReactElement {
     .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined)
     .sort((left, right) => right.at - left.at)[0];
 
+  /**
+   * 018 FR-268, FR-279: "This browser" with its rename, whenever the link is up and the worker
+   * named the browser - before any agent pairs too, so the owner can name it first.
+   */
+  const browserRow =
+    state.browser !== undefined && state.bridge === "connected" ? (
+      <BrowserRow
+        browser={state.browser}
+        locale={props.locale}
+        onRename={(name) => {
+          send({ type: "ui.agent.browser-rename", payload: { name } });
+        }}
+      />
+    ) : null;
+
   return (
     <div className="agent-shell" data-agent-state={composition}>
       {/* 016 FR-224: no in-panel heading - the browser's side-panel header already names the product. */}
@@ -247,17 +263,17 @@ export function AgentShell(props: { locale: string }): ReactElement {
       */}
       {notice === undefined ? null : <NoticeCard notice={notice} locale={props.locale} />}
       {composition === "not-connected" ? (
-        <NotConnected
-          variant={
-            // Two browsers (2026-10-02): "another browser has it" wins - pairing here would not help.
-            state.bridge === "standby" ? "standby" : state.paired.length === 0 ? "not-paired" : "bridge-lost"
-          }
-          diagnostics={state.diagnostics ?? {}}
-          locale={props.locale}
-          onRetry={() => {
-            send({ type: "ui.agent.retry-bridge", payload: {} });
-          }}
-        />
+        <>
+          <NotConnected
+            variant={state.paired.length === 0 ? "not-paired" : "bridge-lost"}
+            diagnostics={state.diagnostics ?? {}}
+            locale={props.locale}
+            onRetry={() => {
+              send({ type: "ui.agent.retry-bridge", payload: {} });
+            }}
+          />
+          {browserRow}
+        </>
       ) : (
         <>
           <StatusRow
@@ -269,6 +285,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
               send({ type: "ui.agent.unpair", payload: { agentId } });
             }}
           />
+          {browserRow}
           {sessions.map((session) => (
             <SessionCard
               key={session.sessionId}

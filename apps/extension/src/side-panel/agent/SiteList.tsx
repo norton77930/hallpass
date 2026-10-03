@@ -3,6 +3,7 @@ import type { AgentPanelState, SiteMode, SiteModeRecord } from "@hallpass/contra
 import { lookup } from "../../locales/catalog.js";
 import { MODE_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
+import { displayOrigin } from "./display-origin.js";
 
 /**
  * The site list (006 FR-086, D-006-7): one row per site the owner has decided about, its mode as a
@@ -70,12 +71,12 @@ export function SiteList(props: {
           {props.sites.map((record) => (
             <li key={record.site} data-site={record.site} className="agent-site">
               <div className="agent-site-head">
-                <span className="agent-site-name">{record.site}</span>
+                <span className="agent-site-name">{displayOrigin(record.site)}</span>
               </div>
               {/* The label names the control for assistive technology; on screen the site name
                   above it already says which site, so the text is visually hidden. */}
               <label className="agent-site-mode">
-                <span className="agent-sr-only">{t("agent.siteModeLabel").replace("{site}", record.site)}</span>
+                <span className="agent-sr-only">{t("agent.siteModeLabel").replace("{site}", () => displayOrigin(record.site))}</span>
                 <select
                   value={record.mode}
                   data-permissive={record.mode === "skip-checks" ? "true" : undefined}
@@ -97,7 +98,7 @@ export function SiteList(props: {
                 <label className="agent-site-diagnostics">
                   <input
                     type="checkbox"
-                    aria-label={t("agent.diagnosticsLabel").replace("{site}", () => record.site)}
+                    aria-label={t("agent.diagnosticsLabel").replace("{site}", () => displayOrigin(record.site))}
                     checked={record.diagnosticsGranted}
                     onChange={(event) => {
                       props.send({
@@ -111,7 +112,7 @@ export function SiteList(props: {
                 <button
                   type="button"
                   className="agent-quiet"
-                  aria-label={t("agent.siteRevoke").replace("{site}", () => record.site)}
+                  aria-label={t("agent.siteRevoke").replace("{site}", () => displayOrigin(record.site))}
                   onClick={() => {
                     props.send({ type: "ui.agent.site-clear", payload: { site: record.site } });
                   }}
@@ -139,8 +140,8 @@ export function SiteList(props: {
               <li key={`${pair.from}→${pair.to}`} data-transition={`${pair.from}→${pair.to}`} className="agent-transition">
                 <span className="agent-transition-pair">
                   {t("agent.transitionRow")
-                    .replace("{from}", () => pair.from)
-                    .replace("{to}", () => pair.to)}
+                    .replace("{from}", () => displayOrigin(pair.from))
+                    .replace("{to}", () => displayOrigin(pair.to))}
                 </span>
                 {/* When it was last used is what makes a row reviewable a month later; a pair
                     nothing has used says so rather than showing an empty date. */}
@@ -157,8 +158,8 @@ export function SiteList(props: {
                   }}
                 >
                   {t("agent.transitionRevoke")
-                    .replace("{from}", () => pair.from)
-                    .replace("{to}", () => pair.to)}
+                    .replace("{from}", () => displayOrigin(pair.from))
+                    .replace("{to}", () => displayOrigin(pair.to))}
                 </button>
               </li>
             ))}

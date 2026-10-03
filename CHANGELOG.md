@@ -5,6 +5,31 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.11.0 — 2026-10-03
+
+**Several browsers at once; you choose which one an agent uses.** Every browser (or profile) running
+Hallpass is now served at the same time — no browser waits for another to close. With one browser
+running nothing changes. With several, an agent's first browser tool is refused until you say which
+one: three new tools (37 now) let it list the browsers (`list_browsers`), select the one you named
+(`select_browser`), or ask you to pick it in the browser itself (`request_browser_choice`: every side
+panel shows *"Use this browser for …?"*, and the one you confirm in is used; no answer in two minutes
+ends the request). Hallpass never picks for you. The choice is remembered for the agent and used
+whenever that browser is running; if it is closed, the agent is told and asks again — nothing moves to
+another browser on its own. Each browser keeps its own consent: the agent pairs, and every site asks,
+separately in each browser, and an approval in one never allows anything in another. The side panel
+shows this browser's name — rename it there — and how many other browsers are connected.
+
+Upgrading: reinstall the host and reload the extension in **every** browser. A browser whose extension
+has not been reloaded yet is listed with a generic name ("Browser") and cannot show the in-browser
+choice; a browser still talking to the host it started before the upgrade is listed as "Browser
+(older Hallpass)" until it restarts. Both keep working, one browser each. The "another browser is
+serving your agents" page of 0.10.0 is gone with this change.
+
+**Also**: a click or drag on a spot nothing can be found at now tells the agent to take a screenshot
+or use a reference instead of guessing coordinates; site plans unticked on a card survive another
+question taking its place; internationalised site names show in your script with the plain-ASCII name
+beside them; the session card only shows a site plan to the agent it was approved for.
+
 ## 0.10.0 — 2026-10-02
 
 **An agent can ask for its sites once, up front.** A new tool, `propose_sites`, lets an agent name the

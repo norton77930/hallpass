@@ -2,7 +2,9 @@ import {
   agentControlFrameSchema,
   agentLinkFrameSchema,
   agentNativeRequestSchema,
+  BROWSER_CHOICE_FEATURE,
   PAIRING_DECLINED_MARKER,
+  type AgentBrowserKind,
   SITE_PLAN_FEATURE,
   type AgentNativeRequest,
   type AgentNativeResponse,
@@ -57,15 +59,22 @@ export const AGENT_RECONNECT_MAX_MS = 60_000;
 export const AGENT_ACK_RUN_ID_BOUND_MS = 1_000;
 
 /**
- * How long a link that follows a stand-by must stay up before the panel calls it connected (two
- * browsers, 2026-10-02).
+ * How long the ack waits for this browser's identity before the worker gives up on this link (018
+ * R-279, T513).
  *
- * While another browser serves, every reconnect of this one opens a relay that greets, is
- * acknowledged and then stands by a moment later. Flipping to "connected" on each greeting would
- * flash the connected page every few seconds; a relay that is still there after this long has
- * taken over. Comfortably past the relay's own decision (the run id bound plus a 500 ms probe).
+ * The identity is a `chrome.storage.local` read. An ack without it would make the relay publish
+ * this browser as a run-scoped legacy entry beside its proper record, so a worker with an identity
+ * store never acks without one: a read that does not answer in time drops the link and the normal
+ * backoff retries it. A slow read therefore costs a retry rather than a wrong record, so the bound
+ * is short - and well inside the relay's 10 s ack bound.
  */
-export const AGENT_STANDBY_CLEAR_MS = 3_000;
+export const AGENT_ACK_IDENTITY_BOUND_MS = 3_000;
+
+/** The identity store exists but did not answer in time, or failed (T513): not the same as "none". */
+const IDENTITY_UNREAD: unique symbol = Symbol("identity-unread");
+
+/** Who this browser is, as the ack carries it (018 data-model "Browser identity"). */
+export type AgentBrowserIdentity = { browserId: string; kind: AgentBrowserKind; name?: string };
 
 /**
  * The Port shape this module uses, which is the part of `chrome.runtime.Port` it actually needs.
@@ -81,11 +90,9 @@ export type AgentPortLike = {
 /**
  * What the panel shows about the link. `unavailable` means Chrome could not reach the host at all -
  * not installed, not registered, not allowed - while `disconnected` means a link was there and went
- * away; the owner reads them differently, so they are not collapsed into one word. `standby` means
- * the host answered and stood aside because another browser on this computer is serving the agents
- * (two browsers, 2026-10-02).
+ * away; the owner reads them differently, so they are not collapsed into one word.
  */
-export type AgentBridgeStatus = "connected" | "unavailable" | "disconnected" | "standby";
+export type AgentBridgeStatus = "connected" | "unavailable" | "disconnected";
 
 /**
  * The clock the fast reconnect runs on, injected so a test never waits five seconds to see it.
@@ -129,6 +136,22 @@ export type AgentBridgeDeps = {
    * host: it keeps clearing its retained screenshots on the link, as 013/S1 did.
    */
   browserRunId?: () => Promise<string | undefined>;
+  /**
+   * This browser's identity (018 R-268), carried on every `relay-ack`, and its re-mint for when the
+   * relay reports another live browser holding the same id (R-276). Injected for the same reason as
+   * the run id: it lives in `chrome.storage.local` (`browser-identity.ts`) and the transport neither
+   * mints nor interprets it. Absent, or a read that answers `undefined` (no storage area), the ack
+   * goes without it; a read that fails or does not answer within its bound gets no ack at all.
+   */
+  browserIdentity?: {
+    read: () => Promise<AgentBrowserIdentity | undefined>;
+    remint: () => Promise<AgentBrowserIdentity | undefined>;
+  };
+  /**
+   * How many other browsers are connected and this browser's default name, from the relay's
+   * directory poll (018 `browser-peers`), for the panel's "This browser" row.
+   */
+  onBrowserPeers?: (peers: { others: number; defaultName: string }) => void;
   /** Answers one tool call. Everything it may refuse is refused inside it, never here. */
   callTool: (request: AgentNativeRequest) => Promise<AgentNativeResponse>;
   /**
@@ -167,7 +190,15 @@ export type AgentBridgeDeps = {
    * binding the session already owns. The token the server presented to the relay is not part of
    * it; it never leaves the host.
    */
-  onSessionAnnounced?: (session: { sessionId: string; agentId: string; displayName: string }) => void;
+  onSessionAnnounced?: (session: { sessionId: string; agentId: string; displayName: string; intent?: "choose" }) => void;
+  /**
+   * 018 FR-274, R-273: a server on a choose-only link asks whether this browser is the one to use.
+   * Its *presence* is what the ack advertises as `browser-choice`, so the relay's record never says
+   * this worker can show a card it cannot raise (the upload-consent rule, applied to the ack).
+   */
+  onBrowserChoiceRequest?: (request: { sessionId: string; requestId: string; agentName: string; boundMs: number }) => void;
+  /** 018: the request was settled in another browser or ran out; the card goes, silently. */
+  onBrowserChoiceWithdraw?: (withdrawal: { sessionId: string; requestId: string }) => void;
   /**
    * One server's socket closed and the relay named the session it belonged to (004 US2).
    *
@@ -258,6 +289,10 @@ export type AgentBridge = {
   requestUploadRoots(): void;
   /** The owner's revoke of one directory, made again on the next link until the relay answers. */
   removeUploadRoot(root: string): void;
+  /** The owner renamed this browser (018 FR-268): the relay rewrites its record. Lost with no link. */
+  sendBrowserName(name: string): void;
+  /** 018 FR-274: the owner's answer on the choice card, addressed to the choose link's session. */
+  sendBrowserChoiceResult(sessionId: string, requestId: string, decision: "confirm" | "decline"): void;
   disconnect(): void;
 };
 
@@ -284,8 +319,18 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
   let reopen: unknown;
   /** How many times in a row the link has been lost or refused; it decides the next delay. */
   let attempts = 0;
-  /** The armed "this relay kept the link" check after a stand-by, if one is waiting. */
-  let standbyClear: unknown;
+  /**
+   * The last link ended on an identity conflict this worker could not re-mint its way out of (T515
+   * M1). The next `relay-started` then does not start the cadence over: with storage still failing
+   * that relay meets the same conflict, and resetting there is what made it a respawn loop.
+   */
+  let unresolvedConflict = false;
+  /**
+   * The last link ended because this browser's identity could not be read in time (T513). Like an
+   * unresolved conflict, the next `relay-started` does not start the cadence over, so a storage
+   * that keeps hanging backs off instead of dialling a relay every few seconds.
+   */
+  let identityUnread = false;
 
   function cancelReopen(): void {
     if (reopen === undefined) return;
@@ -293,58 +338,110 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     reopen = undefined;
   }
 
-  function cancelStandbyClear(): void {
-    if (standbyClear === undefined) return;
-    timer.clear(standbyClear);
-    standbyClear = undefined;
-  }
-
   /**
-   * The browser run for the ack, bounded (two browsers, 2026-10-02). A read that fails or is slow
-   * resolves to `undefined`: the ack goes without it, and the relay takes over as it always did.
+   * One fact for the ack, bounded. A read that fails or is slow resolves to `undefined`: the ack
+   * goes without it, which every relay reads as "not said".
    */
-  function browserRunForAck(): Promise<string | undefined> {
-    const read = deps.browserRunId;
+  function boundedForAck<T>(
+    read: (() => Promise<T | undefined>) | undefined,
+    boundMs: number,
+    codes: { slow: string; unreadable: string },
+    onSlow?: T,
+  ): Promise<T | undefined> {
     if (read === undefined) return Promise.resolve(undefined);
-    return new Promise<string | undefined>((resolve) => {
+    return new Promise<T | undefined>((resolve) => {
       const bound = setTimeout(() => {
-        deps.reportDiagnostic?.("agent.bridge.browser-run-slow");
-        resolve(undefined);
-      }, AGENT_ACK_RUN_ID_BOUND_MS);
+        deps.reportDiagnostic?.(codes.slow);
+        resolve(onSlow);
+      }, boundMs);
       void (async () => {
         try {
           return await read();
         } catch {
-          deps.reportDiagnostic?.("agent.bridge.browser-run-unreadable");
+          deps.reportDiagnostic?.(codes.unreadable);
           return undefined;
         }
-      })().then((id) => {
+      })().then((value) => {
         clearTimeout(bound);
-        resolve(id);
+        resolve(value);
       });
     });
+  }
+
+  /**
+   * The browser run for the ack, under its short bound (two browsers, 2026-10-02): without it the
+   * relay takes over as it always did.
+   */
+  function browserRunForAck(): Promise<string | undefined> {
+    return boundedForAck(deps.browserRunId, AGENT_ACK_RUN_ID_BOUND_MS, {
+      slow: "agent.bridge.browser-run-slow",
+      unreadable: "agent.bridge.browser-run-unreadable",
+    });
+  }
+
+  /**
+   * The identity for the ack, under its own bound (018 R-279). `IDENTITY_UNREAD` when the store
+   * exists but failed or did not answer in time: unlike the run id, that is not "goes without it" -
+   * a new worker with no identity yet is not yet published, never legacy (T513).
+   */
+  function identityForAck(): Promise<AgentBrowserIdentity | undefined | typeof IDENTITY_UNREAD> {
+    const read = deps.browserIdentity?.read;
+    if (read === undefined) return Promise.resolve(undefined);
+    return boundedForAck<AgentBrowserIdentity | typeof IDENTITY_UNREAD>(
+      () => read().catch(() => {
+        deps.reportDiagnostic?.("agent.bridge.identity-unreadable");
+        return IDENTITY_UNREAD;
+      }),
+      AGENT_ACK_IDENTITY_BOUND_MS,
+      { slow: "agent.bridge.identity-slow", unreadable: "agent.bridge.identity-unreadable" },
+      IDENTITY_UNREAD,
+    );
+  }
+
+  /**
+   * The identity store did not answer (T513): no ack, so the relay publishes nothing for this
+   * worker; the link goes and the normal backoff retries it.
+   */
+  function abandonUnidentifiedLink(answering: AgentPortLike): void {
+    deps.reportDiagnostic?.("agent.bridge.identity-unread");
+    identityUnread = true;
+    if (port !== answering) return;
+    port = undefined;
+    answering.disconnect();
+    setStatus("disconnected");
+    scheduleReopen();
   }
 
   /**
    * Answers `relay-started`, then reports the link (004/T169). Split out because the answer may now
    * wait on the browser run id; nothing is done for a port that went away in the meantime.
    */
-  function acknowledgeRelay(answering: AgentPortLike, relayPid: number, recordPath: string | undefined, browserRunId: string | undefined): void {
+  function acknowledgeRelay(
+    answering: AgentPortLike,
+    relayPid: number,
+    recordPath: string | undefined,
+    browserRunId: string | undefined,
+    identity: AgentBrowserIdentity | undefined,
+  ): void {
     if (port !== answering) return;
     // Before anything else: the relay publishes its record only on this answer (004/T169,
     // protocol 2), and a `relay-started` this worker never answered is a host with no owner.
-    send({ type: "relay-ack", relayPid, ...(browserRunId === undefined ? {} : { browserRunId }) });
-    if (status === "standby") {
-      // Two browsers (2026-10-02): this relay may stand aside too, a moment from now. It is called
-      // connected only once it has kept the link past the relay's own decision.
-      cancelStandbyClear();
-      standbyClear = timer.set(() => {
-        standbyClear = undefined;
-        if (port === answering) setStatus("connected");
-      }, AGENT_STANDBY_CLEAR_MS);
-    } else {
-      setStatus("connected");
-    }
+    send({
+      type: "relay-ack",
+      relayPid,
+      ...(browserRunId === undefined ? {} : { browserRunId }),
+      // 018 R-268: who this browser is, so the relay writes `browsers/<browserId>.json`.
+      ...(identity === undefined
+        ? {}
+        : {
+            browserId: identity.browserId,
+            browserKind: identity.kind,
+            ...(identity.name === undefined ? {} : { browserName: identity.name }),
+          }),
+      // 018 R-279: the relay's "can show the choice card" flag comes from here, not its version.
+      ...(deps.onBrowserChoiceRequest === undefined ? {} : { features: [BROWSER_CHOICE_FEATURE] }),
+    });
+    setStatus("connected");
     deps.onRelayStarted?.(relayPid, recordPath);
   }
 
@@ -414,7 +511,23 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
             sessionId: link.data.sessionId,
             agentId: link.data.agentId,
             displayName: link.data.displayName,
+            // 018 R-273: a choose-only link; the runtime creates no session state for it.
+            ...(link.data.intent === undefined ? {} : { intent: link.data.intent }),
           });
+          return;
+        case "browser-choice-request":
+          // 018 FR-274: the agent's name is remote input; the code is logged, the name never is.
+          deps.reportDiagnostic?.("agent.bridge.browser-choice-request");
+          deps.onBrowserChoiceRequest?.({
+            sessionId: link.data.sessionId,
+            requestId: link.data.requestId,
+            agentName: link.data.agentName,
+            boundMs: link.data.boundMs,
+          });
+          return;
+        case "browser-choice-withdraw":
+          deps.reportDiagnostic?.("agent.bridge.browser-choice-withdraw");
+          deps.onBrowserChoiceWithdraw?.({ sessionId: link.data.sessionId, requestId: link.data.requestId });
           return;
         case "session-ended":
           deps.reportDiagnostic?.("agent.bridge.session-ended");
@@ -443,29 +556,60 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
            * The ack carries this browser's run id (two browsers, 2026-10-02), read under a short
            * bound; without an id to read it goes at once, exactly as before.
            */
-          attempts = 0;
+          if (!unresolvedConflict && !identityUnread) attempts = 0;
+          unresolvedConflict = false;
+          identityUnread = false;
           {
             const answering = port;
             const { relayPid, recordPath } = link.data;
             if (answering === undefined) return;
-            if (deps.browserRunId === undefined) {
-              acknowledgeRelay(answering, relayPid, recordPath, undefined);
+            if (deps.browserRunId === undefined && deps.browserIdentity === undefined) {
+              acknowledgeRelay(answering, relayPid, recordPath, undefined, undefined);
             } else {
-              void browserRunForAck().then((id) => acknowledgeRelay(answering, relayPid, recordPath, id));
+              void Promise.all([browserRunForAck(), identityForAck()]).then(([id, identity]) => {
+                if (identity === IDENTITY_UNREAD) abandonUnidentifiedLink(answering);
+                else acknowledgeRelay(answering, relayPid, recordPath, id, identity);
+              });
             }
           }
           return;
-        case "relay-standby":
-          /**
-           * Two browsers (2026-10-02): another browser on this computer is serving the agents, and
-           * this relay stood aside rather than take the bridge from it. The port closes next; the
-           * status holds through that and through the retries, which are the ordinary reconnect -
-           * the first one after the other browser closes takes over.
-           */
-          deps.reportDiagnostic?.("agent.bridge.relay-standby");
-          cancelStandbyClear();
-          setStatus("standby");
+        case "browser-peers":
+          // 018 FR-268, FR-279: the others are counted, never named; for the panel only.
+          deps.onBrowserPeers?.({ others: link.data.others, defaultName: link.data.defaultName });
           return;
+        case "browser-identity-conflict": {
+          /**
+           * 018 R-276: another live browser of another run holds this browser's id (a copied
+           * profile). The relay did not publish; this worker mints a new identity and opens a new
+           * link, whose relay hears the new id on its ack. A reconnect rather than a second ack on
+           * this port: the relay has already had the one ack it waits for.
+           */
+          deps.reportDiagnostic?.("agent.bridge.identity-conflict");
+          const conflicted = port;
+          const remint = deps.browserIdentity?.remint;
+          if (conflicted === undefined || remint === undefined) return;
+          void remint().then(
+            () => {
+              // A link that already went away needs nothing: its re-open reads the new identity.
+              if (port !== conflicted) return;
+              port = undefined;
+              conflicted.disconnect();
+              bridge.connect();
+            },
+            () => {
+              deps.reportDiagnostic?.("agent.bridge.identity-remint-failed");
+              // T515 M1: the identity is unchanged, so dialling at once would only meet the same
+              // conflict - one host process every few hundred ms. Lost link, normal backoff.
+              unresolvedConflict = true;
+              if (port !== conflicted) return;
+              port = undefined;
+              conflicted.disconnect();
+              setStatus("disconnected");
+              scheduleReopen();
+            },
+          );
+          return;
+        }
         case "upload-roots":
           // The relay's answer about the owner's own file (014 FR-194). It is a fact about their
           // machine, shown to them: it never goes to a page, a call or an agent.
@@ -480,7 +624,8 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           return;
         default:
           // `hello-ack` belongs to the relay's loopback half; a relay sending one up the native
-          // port is not speaking this protocol.
+          // port is not speaking this protocol. A 0.10.x relay's `relay-standby` lands here too:
+          // stand-by is retired (018 R-274), so it is dropped and the port closing is a lost link.
           deps.reportDiagnostic?.("agent.bridge.frame-unexpected");
           return;
       }
@@ -656,12 +801,9 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           return;
         }
         port = undefined;
-        cancelStandbyClear();
         deps.reportDiagnostic?.("agent.bridge.disconnected");
         deps.onDisconnected?.(reason);
-        // A relay that stood by closes the port as its last act; the owner's fact is still "another
-        // browser has it" (two browsers, 2026-10-02), not a lost link.
-        setStatus(status === "standby" ? "standby" : "disconnected");
+        setStatus("disconnected");
         scheduleReopen();
       });
       // Nothing is claimed here. An open Port only means Chrome accepted the name; whether a host
@@ -687,6 +829,12 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     },
     removeUploadRoot(root: string): void {
       send({ type: "upload-roots-remove", root });
+    },
+    sendBrowserName(name: string): void {
+      send({ type: "browser-name", name });
+    },
+    sendBrowserChoiceResult(sessionId: string, requestId: string, decision: "confirm" | "decline"): void {
+      send({ type: "browser-choice-result", sessionId, requestId, decision });
     },
     disconnect(): void {
       const open = port;

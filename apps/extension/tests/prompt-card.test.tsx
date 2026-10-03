@@ -106,6 +106,19 @@ describe("T191 prompt cards", () => {
     });
   });
 
+  it("names an IDN site in both forms on the consent card (017 follow-up)", () => {
+    const idn = "https://xn--r8jz45g.jp";
+    renderShell();
+    project(port, { ...IDLE, prompt: { ...PROMPT, site: idn } });
+
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.consentBody")
+        .replace("{agent}", "Claude Code")
+        .replace("{action}", ui("agent.summary.click"))
+        .replace("{site}", "https://例え.jp (xn--r8jz45g.jp)"),
+    );
+  });
+
   it("shows the consent card over the idle page: agent, action, site, and three answers", () => {
     renderShell();
     project(port, { ...IDLE, sites: [{ site: SITE, mode: "ask", diagnosticsGranted: false }], prompt: PROMPT });
@@ -234,6 +247,34 @@ describe("T191 prompt cards", () => {
     (document.activeElement as HTMLElement).blur();
     project(port, { ...IDLE, sitePlan: { ...sitePlan, proposalId: "proposal-2", raisedAt: later } });
     expect(document.activeElement).toBe(screen.getByRole("dialog").querySelector("button, input"));
+  });
+
+  /** 017 follow-up: an earlier question takes the slot while the site-plan card is up; the owner's unticks survive it. */
+  it("keeps the unticked sites of a site-plan question across a swap of the question slot", () => {
+    renderShell();
+    const earlier = "2026-09-13T10:00:00.000Z";
+    const later = "2026-09-13T10:00:05.000Z";
+    const other = "https://other.test:19443";
+    const sitePlan = { proposalId: "proposal-1", sessionId: "session-a", origins: [SITE, other], purpose: "Check the fixtures", raisedAt: later };
+    const box = (origin: string): HTMLInputElement =>
+      screen.getByRole("dialog").querySelector<HTMLInputElement>(`li[data-origin="${origin}"] input`) as HTMLInputElement;
+
+    project(port, { ...IDLE, sitePlan });
+    fireEvent.click(box(other));
+    expect(box(other).checked).toBe(false);
+
+    // An earlier question takes the slot; the site-plan card leaves, then comes back.
+    project(port, { ...IDLE, sitePlan, prompt: { ...PROMPT, raisedAt: earlier } });
+    expect(screen.queryByRole("button", { name: ui("agent.sitePlan.approve") })).toBeNull();
+    project(port, { ...IDLE, sitePlan });
+    expect(box(SITE).checked).toBe(true);
+    expect(box(other).checked).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.sitePlan.approve") }));
+    expect(port.sent.at(-1)).toEqual({
+      type: "ui.agent.site-plan-decide",
+      payload: { proposalId: "proposal-1", approve: true, origins: [SITE] },
+    });
   });
 
   /**
@@ -388,6 +429,13 @@ describe("T191 prompt cards", () => {
     // A decline never carries "remember": that would be saying no and yes to the same move.
     expect(port.sent[2]).toEqual({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-t1", allow: false } });
     for (const sent of port.sent) expect(agentPanelCommandSchema.safeParse(sent).success).toBe(true);
+
+    // 017 follow-up: an IDN origin on either side of the move is shown in both forms.
+    const idnTo = "https://xn--r8jz45g.jp";
+    project(port, { ...IDLE, prompt: { ...moved, promptId: "prompt-t2", site: idnTo, transition: { from: "https://a.test", to: idnTo } } });
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.prompt.transition").replace("{from}", "https://a.test").replace("{to}", "https://例え.jp (xn--r8jz45g.jp)"),
+    );
   });
 
   /**

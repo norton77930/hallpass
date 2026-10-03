@@ -58,4 +58,6 @@ export { matchDescription, describedWords } from "./description-matching.js";
 export type { DescriptionCandidate } from "./description-matching.js";
 export { canonicalDigest } from "./canonical-digest.js";
 export { createActionGrant, consumeActionGrant } from "./action-grant.js";
+export { defaultBrowserNames } from "./browser-names.js";
+export type { BrowserNameInput } from "./browser-names.js";
 export type { ActionGrant } from "./action-grant.js";

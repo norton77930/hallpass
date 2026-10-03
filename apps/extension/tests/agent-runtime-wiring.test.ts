@@ -90,6 +90,9 @@ function installChrome(): {
     async set(values: Record<string, unknown>) {
       Object.assign(store, values);
     },
+    async remove(keys: string[]) {
+      for (const key of keys) delete store[key];
+    },
   });
   (globalThis as { chrome?: unknown }).chrome = {
     storage: { local: area(local), session: area(session) },
