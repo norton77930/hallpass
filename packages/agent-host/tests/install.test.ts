@@ -65,6 +65,34 @@ describe("native host manifest", () => {
       "",
     ]);
   });
+
+  it("runs the installer's own node by absolute path and falls back to PATH node when it is gone", () => {
+    const script = createLauncherScript(
+      "C:\\repo\\packages\\agent-host\\dist\\native-host.js",
+      "C:\\Program Files (x86)\\nodejs\\node.exe",
+    );
+
+    expect(script.split("\r\n")).toEqual([
+      "@echo off",
+      'if not exist "C:\\Program Files (x86)\\nodejs\\node.exe" goto pathnode',
+      '"C:\\Program Files (x86)\\nodejs\\node.exe" "C:\\repo\\packages\\agent-host\\dist\\native-host.js" %*',
+      "exit /b %errorlevel%",
+      ":pathnode",
+      'node "C:\\repo\\packages\\agent-host\\dist\\native-host.js" %*',
+      "",
+    ]);
+  });
+
+  it.each(["C:\\data\\100%\\node.exe", "C:\\data\\wow!\\node.exe", 'C:\\data\\"q"\\node.exe'])(
+    "writes only the PATH form when the node path holds a character cmd would interpret (%s)",
+    (nodePath) => {
+      expect(createLauncherScript("C:\\data\\native-host.js", nodePath).split("\r\n")).toEqual([
+        "@echo off",
+        'node "C:\\data\\native-host.js" %*',
+        "",
+      ]);
+    },
+  );
 });
 
 describe("relay entry resolution", () => {

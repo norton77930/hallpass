@@ -77,6 +77,10 @@ this branch and restored after every run.
 - Follow-up (design, predates 018): the pairing card's withdrawal waits on a `storage.local` write
   before the panel changes. The reference updates the card in memory first and persists without
   waiting; adopting that would make the card leave even when storage stalls.
+  - Fixed: a transition that changes only the card (connection, Ignore, withdrawal, abandon,
+    decline) no longer writes, since storage holds only `paired`; accept and unpair still write
+    before they are believed (003 FR-032a F1). Unit test "018 T513 follow-up" in
+    `apps/extension/tests/pairing-controller.test.ts`.
 
 ## Probe S18 (T514, SC-133), 2026-10-03
 

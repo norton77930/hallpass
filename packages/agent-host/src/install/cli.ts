@@ -25,7 +25,8 @@ async function install(): Promise<number> {
   const relayEntry = resolveRelayEntryPath(import.meta.url, existsSync);
 
   await mkdir(dataDir, { recursive: true });
-  await writeFile(launcher, createLauncherScript(relayEntry), "utf8");
+  // The node running this installer, by absolute path: the browser's environment may not find one.
+  await writeFile(launcher, createLauncherScript(relayEntry, process.execPath), "utf8");
   await writeFile(manifestPath, `${JSON.stringify(createNativeHostManifest(launcher), null, 2)}\n`, "utf8");
   /**
    * The upload configuration (US7, FR-051), created once and never overwritten.

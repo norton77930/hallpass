@@ -215,7 +215,7 @@ describe("T208 the agent artefact's permission and version", () => {
   });
 
   it("writes the agent artefact's version once, and the host answers with the same one", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.11.0");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.11.1");
     const agent = createManifest(resolveBuildConfig("agent"));
     expect(agent.version).toBe(AGENT_EXTENSION_VERSION);
     // FR-122: the extension and the host it talks to are one release. Two literals that may not

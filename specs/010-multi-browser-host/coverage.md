@@ -62,4 +62,14 @@ fixture behind a welcome page: launch with `--disable-sync --disable-features=ms
   failure screenshot shows Transition B). The same move while remembered passes. The settle watcher
   (`agent-tools/tabs.ts` `settleAfter` / `watchTabSettle`) does not see this load on Edge. Open
   Edge-specific defect; diagnose with a worker log of the tab's `onUpdated` events.
+  - **Fixed 2026-10-04.** The worker log showed the real cause, and it is not about the card: the
+    gate's `tabs_create` → immediate `navigate` sent `tabs.update` while the new tab was still on
+    `about:blank` with its own first navigation not yet begun. Edge then loaded the *original* url,
+    reported `status: "unloaded"` (not discarded, no renderer) about a second later and dropped
+    ours - 6 of 12 runs of that pair, alternating, card or no card; Chromium always starts the first
+    navigation before the update. `navigate` now waits for a new tab's own first commit (about:blank
+    with a pending url or still loading; at most min(5 s, bound / 5), taken out of the navigation
+    bound), then moves it. Edge 154: the same pair 12 / 12, `agent-transitions` 1 / 1,
+    `agent-pairing-withdraw` 2 / 2; a deliberately blank tab reports `complete` within 200 ms, so
+    it waits at most that long.
 - Brave was not run (not installed on this machine).

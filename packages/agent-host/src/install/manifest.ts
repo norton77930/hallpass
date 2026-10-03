@@ -62,9 +62,38 @@ export function createNativeHostManifest(launcherPath: string): NativeHostManife
  * `%*` forwards the arguments Chrome appends (the calling extension's origin and, on Windows, the
  * parent window handle). They are not read here, but a host that swallowed them would be lying to
  * anything that later wants them, and Chrome's own examples pass them through.
+ *
+ * `nodePath` is the node that ran the installer, written in by absolute path because the browser
+ * hands its own environment to the launcher and that environment can make `node` unfindable. In the
+ * 2026-10-04 measurement a browser started from a shell carrying both `PATH` (only the browser's
+ * own directory) and `Path` (the full one) passed both on; cmd read the broken one, `node` was not
+ * found, and the host exited before it could write relay.log, so the panel only ever said the
+ * native host had exited.
+ *
+ * The bare `node` line stays as the fallback, reached when that file no longer exists: node was
+ * moved or uninstalled, or the installer ran under a version-manager shim whose path goes away
+ * (fnm's per-shell multishell directories do; nvm-windows' `C:\Program Files\nodejs` symlink stays
+ * put). The branch is a `goto` rather than a parenthesised if/else because a `)` inside a path such
+ * as "Program Files (x86)" would close such a block early.
+ *
+ * A node path cmd could not carry literally inside quotes gets only the fallback: `%` is expanded
+ * even there, `!` is expanded when delayed expansion is switched on in the registry, and a `"` (or
+ * a line break) would end the quoted string or the line.
  */
-export function createLauncherScript(hostEntryPath: string): string {
-  return ["@echo off", `node "${hostEntryPath}" %*`, ""].join("\r\n");
+export function createLauncherScript(hostEntryPath: string, nodePath?: string): string {
+  const pathNode = `node "${hostEntryPath}" %*`;
+  if (nodePath === undefined || /[%!"\r\n]/.test(nodePath)) {
+    return ["@echo off", pathNode, ""].join("\r\n");
+  }
+  return [
+    "@echo off",
+    `if not exist "${nodePath}" goto pathnode`,
+    `"${nodePath}" "${hostEntryPath}" %*`,
+    "exit /b %errorlevel%",
+    ":pathnode",
+    pathNode,
+    "",
+  ].join("\r\n");
 }
 
 /**

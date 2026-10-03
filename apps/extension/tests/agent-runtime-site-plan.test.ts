@@ -536,8 +536,11 @@ describe("T482 the plan ends with the session, the pairing, and not the interrup
     const { runtime } = await pairedRuntime();
     // The approval has seen a live session and is waiting on the pairing queue - behind a write
     // about some other agent - when the owner stops the session, and the whole stop runs first.
+    // An accept, because only a change to the paired list writes (018 T513 follow-up).
+    void runtime.pairing.decidePairing({ agentId: "agent-elsewhere", displayName: "Other", origin: "stdio:local" });
+    await runtime.pairing.ready();
     const release = fake.holdNextLocalWrite("agentPairings");
-    const unrelated = runtime.pairing.unpair("agent-elsewhere");
+    const unrelated = runtime.pairing.decide("agent-elsewhere", true);
     const approving = runtime.sitePlans.approve(S1, [A]);
     await runtime.stopSessionFromOwner(S1);
     release();

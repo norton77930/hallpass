@@ -426,9 +426,12 @@ describe("FR-032a one answer per session", () => {
  * 003 FR-032a review F1: a transition whose write failed is not believed. Before FR-032a a failed
  * decision left the session sticky-refused, so a half-applied prompt was unreachable; now the host
  * re-requests after its bound, and that re-request must reach the panel as a prompt.
+ *
+ * Since the 018 T513 follow-up only a transition that changes `paired` writes at all, so the write
+ * that can fail - and must not be believed - is the owner's accept (or an unpair).
  */
 describe("FR-032a F1 a failed write is not taken", () => {
-  it("raises the prompt to the panel on the re-request after a failed write", async () => {
+  it("leaves the agent unpaired and the prompt up when the accept's write fails", async () => {
     let stored: PairingState = EMPTY_PAIRING_STATE;
     let failNext = true;
     const projections: PairingState[] = [];
@@ -445,14 +448,69 @@ describe("FR-032a F1 a failed write is not taken", () => {
       onChange: (state) => projections.push(state),
     });
 
-    await expect(controller.decidePairing(CLAUDE)).rejects.toThrow("storage unavailable");
-    expect((await controller.state()).pending).toBeUndefined();
-    expect(projections).toEqual([]);
-
     void controller.decidePairing(CLAUDE);
     await controller.ready();
-
-    expect((await controller.state()).pending).toEqual(CLAUDE);
     expect(projections.at(-1)?.pending).toEqual(CLAUDE);
+
+    await expect(controller.decide("agent-1", true)).rejects.toThrow("storage unavailable");
+    expect(await controller.isPaired("agent-1")).toBe(false);
+    expect((await controller.state()).pending).toEqual(CLAUDE);
+    expect(projections.at(-1)).toEqual({ paired: [], pending: CLAUDE });
+
+    await controller.decide("agent-1", true);
+
+    expect(stored.paired).toEqual([{ ...CLAUDE, acceptedAt: AT }]);
+    expect(projections.at(-1)?.paired).toEqual([{ ...CLAUDE, acceptedAt: AT }]);
+  });
+
+  it("leaves the agent paired, and announces no projection without it, when the unpair's write fails", async () => {
+    const stored: PairingState = { paired: [{ ...CLAUDE, acceptedAt: AT }] };
+    const projections: PairingState[] = [];
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async () => {
+        throw new Error("storage unavailable");
+      },
+      now: () => AT,
+      onChange: (state) => projections.push(state),
+    });
+    await controller.ready();
+
+    await expect(controller.unpair("agent-1")).rejects.toThrow("storage unavailable");
+
+    expect(await controller.isPaired("agent-1")).toBe(true);
+    expect(stored.paired).toEqual([{ ...CLAUDE, acceptedAt: AT }]);
+    expect(projections.every((state) => state.paired.some((agent) => agent.agentId === "agent-1"))).toBe(true);
+  });
+});
+
+/**
+ * Follow-up of 018 T513 (coverage.md): the host's withdrawal arrived on time, but the worker's
+ * `storage.local` had stopped answering, and the card waited on a write before it could leave. Only
+ * `paired` is stored, so a transition that changes nothing but the card has nothing to write.
+ */
+describe("018 T513 follow-up: the card does not wait on storage", () => {
+  it("takes the card down on the host's withdrawal while storage never answers a write", async () => {
+    const projections: PairingState[] = [];
+    const controller = createPairingController({
+      read: async () => EMPTY_PAIRING_STATE,
+      write: () => new Promise<void>(() => undefined),
+      now: () => AT,
+      onChange: (state) => projections.push(state),
+    });
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+
+    void controller.decidePairing({ ...CLAUDE, sessionId: "s-1", requestId: "r-1" });
+    await settle();
+    expect(projections.at(-1)?.pending).toEqual(CLAUDE);
+    expect(controller.waitingSessions("agent-1")).toBe(1);
+
+    controller.withdraw("agent-1", "s-1", "r-1");
+    await settle();
+
+    expect(projections.at(-1)?.pending).toBeUndefined();
+    expect(controller.waitingSessions("agent-1")).toBe(0);
   });
 });

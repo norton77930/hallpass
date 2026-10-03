@@ -9,6 +9,7 @@ import {
 } from "@hallpass/contracts";
 import {
   createTab,
+  getTabLoadState,
   getTabSnapshot,
   goBackInTab,
   goForwardInTab,
@@ -160,6 +161,18 @@ export const NAVIGATION_TIMEOUT_MS = 25_000;
 const COMMIT_POLL_MS = 100;
 
 /**
+ * The longest a url navigation waits for a just-created tab's own first commit (010 coverage, Edge
+ * transitions), and the share of the navigation bound it may take when that bound is shorter.
+ *
+ * Five seconds is generous for the gap it covers - on Edge the tab's own load began within a few
+ * hundred milliseconds of the create - and still leaves the navigation four fifths of its bound.
+ * The wait is taken out of the navigation's bound, not added to it, so the call as a whole still
+ * answers inside `NAVIGATION_TIMEOUT_MS` and keeps its lead on the transport's deadline.
+ */
+const FIRST_COMMIT_WAIT_MS = 5_000;
+const FIRST_COMMIT_WAIT_SHARE = 5;
+
+/**
  * How long a call that may meet a "leave site?" prompt waits for its outcome (FR-115, §3.1).
  *
  * The reference's own race budget, and it is a race rather than a poll: a dismissed prompt resolves
@@ -233,15 +246,17 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
    * is for the url asked for - the record keeps the pre-redirect url, so equality holds - and began
    * no earlier than the navigation did; an older record of the same url, or another url's, is not.
    * `over` is the watcher's own ending: a poll that outlived it must not stop a watcher that has
-   * already answered.
+   * already answered. `boundMs` is the watcher's own bound - the navigation's, less any first-commit
+   * hold (010 coverage) - so the poll's deadline is the watcher's and not a later one.
    */
   async function downloadInsteadOf(
     sessionId: string,
     url: string,
     begunAt: number,
+    boundMs: number,
     isOver: () => boolean,
   ): Promise<AgentDownloadRecord | undefined> {
-    const deadline = begunAt + navigationTimeoutMs;
+    const deadline = begunAt + boundMs;
     while (!isOver() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(COMMIT_POLL_MS, Math.max(0, deadline - Date.now()))));
       if (isOver()) return undefined;
@@ -252,10 +267,45 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     return undefined;
   }
 
+  /**
+   * Holds a url navigation until a just-created tab has committed its own first address (010
+   * coverage, Edge transitions). Answers how long it held, so the caller can take that out of the
+   * navigation's bound.
+   *
+   * `tabs_create` answers before the tab's first navigation has begun (004/T167, by design), so an
+   * agent that navigates at once reaches a tab still on its initial empty document. Measured on Edge
+   * 154: a `tabs.update` sent then was lost in half the runs - the tab went on to load the url it was
+   * created with, dropped to `unloaded` about a second later with no renderer, never loaded ours,
+   * and the call ran out its full bound as `navigation-timeout`. Holding the update until the tab's
+   * address had left `about:blank` made every run pass; Chromium never showed it only because its
+   * first navigation always starts before the update lands.
+   *
+   * "Its own navigation pending" is read from the tab record: still on the empty document, and
+   * either on its way somewhere (`pendingUrl`) or still loading. A tab that is blank on purpose has
+   * neither and is not held at all. On the bound the navigation proceeds as it always did.
+   *
+   * `undefined` is the "gone" case, as for every tab read in this file: a tab closed during the hold
+   * (or before it) is a stale tab, and sending it a `tabs.update` would only have Chrome throw and
+   * the call misreport it as a url the browser refused (010 review follow-up).
+   */
+  async function awaitFirstCommit(tabId: number): Promise<number | undefined> {
+    const startedAt = Date.now();
+    const deadline =
+      startedAt + Math.min(FIRST_COMMIT_WAIT_MS, Math.floor(navigationTimeoutMs / FIRST_COMMIT_WAIT_SHARE));
+    for (;;) {
+      const tab = await getTabLoadState(tabId);
+      if (tab === undefined) return undefined;
+      const pending = tab.url === "about:blank" && (tab.pendingUrl !== undefined || tab.loading);
+      if (!pending || Date.now() >= deadline) return Date.now() - startedAt;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(COMMIT_POLL_MS, Math.max(0, deadline - Date.now()))));
+    }
+  }
+
   async function settleAfter(
     tabId: number,
     action: () => Promise<void>,
     mayDownload?: { sessionId: string; url: string },
+    boundMs = navigationTimeoutMs,
   ): Promise<
     { ok: true; download?: AgentNavigateDownload } | { ok: false; reason: "navigation-refused" | "navigation-timeout" }
   > {
@@ -263,7 +313,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     // not mistaken for this navigation's (B4).
     const before = await getTabSnapshot(tabId);
     const begunAt = Date.now();
-    const watcher = watchTabSettle(tabId, navigationTimeoutMs, {
+    const watcher = watchTabSettle(tabId, boundMs, {
       ...(before === undefined ? {} : { fromUrl: before.url }),
     });
     try {
@@ -282,7 +332,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       return settled;
     });
     const found = await Promise.race([
-      downloadInsteadOf(mayDownload.sessionId, mayDownload.url, begunAt, () => over),
+      downloadInsteadOf(mayDownload.sessionId, mayDownload.url, begunAt, boundMs, () => over),
       settling.then(() => undefined),
     ]);
     if (found) {
@@ -671,6 +721,11 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     const { callId, sessionId } = request;
     const url = typeof args.url === "string" ? args.url : undefined;
     const direction = args.direction as "back" | "forward" | undefined;
+    // Only a url navigation can meet a tab still on its way to its first page; a history move on a
+    // tab with no history yet is refused by Chrome on its own (010 coverage, Edge transitions).
+    const held = url === undefined ? 0 : await awaitFirstCommit(tabId);
+    // Closed while held: nothing was sent, so nothing moved and there is no binding to invalidate.
+    if (held === undefined) return answer(callId, "stale", "tab-gone");
     const settling = settleAfter(
       tabId,
       async () => {
@@ -682,6 +737,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       },
       // Only a url can be one the browser downloads; history moves go to pages it rendered.
       url === undefined ? undefined : { sessionId, url },
+      navigationTimeoutMs - held,
     );
     /**
      * Raced, not awaited (FR-115, §3.1: the reference's own shape).

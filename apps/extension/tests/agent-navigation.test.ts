@@ -28,6 +28,9 @@ type FakeTab = {
   /** The tab's content area, as Chrome reports it (012/S2c F4): smaller than the window it is in. */
   width: number;
   height: number;
+  /** Where the tab is on its way to, before its first document commits (010 coverage, Edge). */
+  pendingUrl?: string;
+  status?: string;
 };
 
 type FakeChrome = {
@@ -60,6 +63,21 @@ type FakeChrome = {
    * became a download rather than by a `complete` that never comes.
    */
   downloads: AgentDownloadRecord[];
+  /**
+   * Edge's shape for `tabs.create({ url })` (010 coverage, Edge transitions): the tab answers on its
+   * initial empty document with the url it was asked for still pending, and commits it a moment
+   * later. A `tabs.update` that lands before that commit is lost the way Edge loses it - see the
+   * fake `update`.
+   */
+  firstNavigationPending: boolean;
+  /**
+   * With `firstNavigationPending`: the first navigation never commits, so the tab stays on its
+   * empty document with the url still pending until the hold's own bound releases it.
+   */
+  firstNavigationNeverCommits: boolean;
+  /** When each `tabs.update` was made, against when the first navigation committed. */
+  updatedAt: number[];
+  committedAt: number | undefined;
 };
 
 const UNGROUPED = -1;
@@ -101,6 +119,10 @@ function installChrome(): FakeChrome {
     closeRaces: false,
     commitsLate: false,
     downloads: [],
+    firstNavigationPending: false,
+    firstNavigationNeverCommits: false,
+    updatedAt: [],
+    committedAt: undefined,
   };
   let nextTabId = 2;
   let nextGroupId = 100;
@@ -158,6 +180,21 @@ function installChrome(): FakeChrome {
           height: 700,
         };
         state.tabs.push(tab);
+        if (state.firstNavigationPending && url !== undefined) {
+          tab.url = "about:blank";
+          tab.pendingUrl = url;
+          tab.status = "loading";
+          setTimeout(() => {
+            if (state.firstNavigationNeverCommits || tab.pendingUrl !== url) return;
+            tab.url = url;
+            delete tab.pendingUrl;
+            state.committedAt = Date.now();
+            announce(tab, { status: "loading", url });
+            tab.status = "complete";
+            announce(tab, { status: "complete" });
+          }, 100);
+          return tab;
+        }
         if (state.commitsLate) {
           setTimeout(() => {
             tab.url = url ?? "about:blank";
@@ -172,6 +209,22 @@ function installChrome(): FakeChrome {
         const tab = state.tabs.find((candidate) => candidate.id === tabId);
         if (!tab) throw new Error("No tab with id");
         if (url === "https://refused.test/") throw new Error("Cannot navigate to that url");
+        state.updatedAt.push(Date.now());
+        if (url !== undefined && tab.url === "about:blank" && tab.pendingUrl !== undefined) {
+          // Edge, measured: the tab goes on to load its *original* url, then drops to `unloaded` with
+          // no renderer. The url asked for here is never loaded and nothing ever completes.
+          const original = tab.pendingUrl;
+          delete tab.pendingUrl;
+          setTimeout(() => {
+            tab.status = "loading";
+            announce(tab, { status: "loading", url: original });
+            setTimeout(() => {
+              tab.status = "unloaded";
+              announce(tab, { status: "unloaded" });
+            }, 20);
+          }, 10);
+          return tab;
+        }
         // A url the browser downloads rather than renders (005/US2): the tab stays on its page,
         // nothing commits and nothing is announced - the download record is the only trace.
         if (url?.endsWith(".zip")) return tab;
@@ -544,6 +597,83 @@ describe("T041 agent tab tools", () => {
     });
     // Every ref minted against the old document belongs to a page that is no longer there.
     expect(invalidated).toContain(tabId);
+  });
+
+  /**
+   * 010 coverage (Edge transitions). `tabs_create` answers before the tab's first navigation has
+   * begun (004/T167), and an agent that navigates at once used to send the tab elsewhere while it
+   * was still on its initial empty document. Edge then loaded the original url anyway, dropped the
+   * tab to `unloaded` and never loaded ours: half the runs answered `navigation-timeout` at the full
+   * bound. The navigation now waits, briefly, for the tab's own first commit.
+   */
+  it("waits for a new tab's own first navigation to commit before sending it elsewhere (010, Edge)", async () => {
+    fake.firstNavigationPending = true;
+    const tools = build(2_000);
+    const created = await tools.run(call("tabs_create", { url: "https://example.test/transition-a" }));
+    const { tabId } = created.result as { tabId: number };
+
+    const navigated = await tools.run(call("navigate", { tabId, url: "https://example.test/go-b" }));
+
+    expect(navigated).toEqual({ callId: "call-1", outcome: "ok", result: { url: "https://example.test/go-b" } });
+    expect(fake.committedAt).toBeDefined();
+    expect(fake.updatedAt[0]).toBeGreaterThanOrEqual(fake.committedAt ?? Infinity);
+  });
+
+  it("answers a tab closed during the first-commit hold as gone, not refused (010, Edge)", async () => {
+    fake.firstNavigationPending = true;
+    fake.firstNavigationNeverCommits = true;
+    // A 20 s bound holds for up to 4 s: the tab is closed 2 s into that.
+    const tools = build(20_000);
+    const created = await tools.run(call("tabs_create", { url: "https://example.test/closing" }));
+    const { tabId } = created.result as { tabId: number };
+    setTimeout(() => {
+      fake.tabs.splice(
+        fake.tabs.findIndex((candidate) => candidate.id === tabId),
+        1,
+      );
+    }, 2_000);
+
+    const navigated = await tools.run(call("navigate", { tabId, url: "https://example.test/go-b" }));
+
+    expect(navigated).toEqual({ callId: "call-1", outcome: "stale", reason: "tab-gone" });
+    expect(fake.updatedAt).toEqual([]);
+  });
+
+  it("releases the hold on a first navigation that never commits, inside the navigation bound (010, Edge)", async () => {
+    fake.firstNavigationPending = true;
+    fake.firstNavigationNeverCommits = true;
+    const bound = 2_000;
+    const tools = build(bound);
+    const created = await tools.run(call("tabs_create", { url: "https://example.test/stuck" }));
+    const { tabId } = created.result as { tabId: number };
+
+    const startedAt = Date.now();
+    const navigated = await tools.run(call("navigate", { tabId, url: "https://example.test/go-b" }));
+    const elapsed = Date.now() - startedAt;
+
+    // The update goes out once the hold's own bound - min(5 s, bound / 5) = 400 ms - has passed.
+    const sentAfter = (fake.updatedAt[0] ?? Infinity) - startedAt;
+    expect(sentAfter).toBeGreaterThanOrEqual(bound / 5);
+    expect(sentAfter).toBeLessThan(bound / 5 + 150);
+    // Edge loses that update, so the call runs out its bound: the one bound with the hold taken out
+    // of it, not the bound on top of the hold (bound + 400 ms). The slack is timer jitter only.
+    expect(navigated).toEqual({ callId: "call-1", outcome: "failed", reason: "navigation-timeout" });
+    expect(elapsed).toBeLessThan(bound + 100);
+  });
+
+  it("navigates a deliberately blank tab at once: nothing pending is nothing to wait for (010, Edge)", async () => {
+    const tools = build(2_000);
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+    const tab = fake.tabs.find((candidate) => candidate.id === tabId);
+    if (tab) tab.status = "complete";
+
+    const startedAt = Date.now();
+    const navigated = await tools.run(call("navigate", { tabId, url: "https://example.test/two" }));
+
+    expect(navigated.outcome).toBe("ok");
+    // Well inside the first-commit wait's bound (400 ms at a 2 s navigation bound).
+    expect((fake.updatedAt[0] ?? Infinity) - startedAt).toBeLessThan(50);
   });
 
   it("walks the tab's own history back and forward", async () => {

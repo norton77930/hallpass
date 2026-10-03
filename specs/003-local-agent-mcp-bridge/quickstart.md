@@ -24,7 +24,7 @@ all under `%LOCALAPPDATA%\hallpass\`:
 
 | Thing | Value |
 | --- | --- |
-| `native-host.cmd` | `@echo off` + `node "<repo>\packages\agent-host\dist\native-host.js" %*` |
+| `native-host.cmd` | `@echo off`, then the installing node by absolute path - `"<node.exe>" "<repo>\packages\agent-host\dist\native-host.js" %*` - with a fallback to `node "<…>\native-host.js" %*` from PATH when that file is gone (since 0.11.1: a browser can hand the host an environment whose PATH cannot find node) |
 | `com.hallpass.host.json` | `{ name, description, path: <the .cmd>, type: "stdio", allowed_origins: ["chrome-extension://adgpccmmbgnchnphfaoabfflfcepbopd/"] }` |
 | `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.hallpass.host` | default value = the manifest path |
 | `HKCU\Software\Chromium\NativeMessagingHosts\com.hallpass.host` | default value = the manifest path |
