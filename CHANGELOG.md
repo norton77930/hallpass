@@ -5,6 +5,24 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.11.1 — 2026-10-04
+
+**Reliability fixes.**
+
+- **The host starts even when the browser cannot find `node`.** A browser started from a shell can hand
+  the host an environment whose `PATH` does not reach Node.js; the host then exited at once and the
+  side panel only said no agent was connected. The host launcher now runs the Node.js that installed it,
+  by its full path, and falls back to `node` from `PATH` only when that file is gone. The host therefore
+  keeps using the Node.js it was installed with until you reinstall it.
+- **Microsoft Edge: `navigate` right after `tabs_create` no longer times out.** The new tab had not yet
+  begun loading its own page, and Edge dropped the second navigation; `navigate` now waits for a new
+  tab's first page (at most five seconds, inside the usual bound). A tab closed during that wait is
+  reported as gone.
+- **The pairing card leaves when the request is withdrawn**, even if the browser's extension storage
+  is slow to answer.
+
+Upgrading: reinstall the host (this is what writes the new launcher) and reload the extension.
+
 ## 0.11.0 — 2026-10-03
 
 **Several browsers at once; you choose which one an agent uses.** Every browser (or profile) running

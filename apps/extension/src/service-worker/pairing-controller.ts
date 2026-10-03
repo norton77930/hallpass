@@ -519,7 +519,16 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     // holding a prompt the panel was never told about, and the host's re-request then matched it as
     // "already on screen" - no card, and every call timed out. Now the failed transition is simply
     // not taken, and the next request raises it afresh.
-    await deps.write(next);
+    //
+    // Only when the durable half changes, though (follow-up of 018 T513, coverage.md). Storage holds
+    // `paired` and nothing else, so a transition that moves only the card - a connection raising it,
+    // an Ignore, the host's withdrawal, an abandon, a decline - would write back exactly what is
+    // already there, and no failure of that write could leave `loaded` disagreeing with storage:
+    // the two disagree only about `pending`, which storage never holds. Waiting on it bought
+    // nothing and cost the card: measured on 2026-10-03, `storage.local` stopped answering a
+    // second after the request, the withdrawal's write never completed, and the card stayed up
+    // after the host had already let the agent go. An accept or an unpair still waits.
+    if (!samePaired(current.paired, next.paired)) await deps.write(next);
     loaded = next;
     syncWaiting(next);
     deps.onChange?.(next);

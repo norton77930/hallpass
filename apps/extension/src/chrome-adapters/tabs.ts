@@ -83,6 +83,31 @@ export async function tabContentSize(tabId: number): Promise<{ width: number; he
   }
 }
 
+/**
+ * Where a tab's own loading stands: the committed address, the one it is on its way to, and
+ * whether Chrome still calls it loading (010 coverage, Edge transitions).
+ *
+ * Not on `AgentTabSnapshot` for the reason `tabContentSize` is not: one caller asks - a navigation
+ * that has to know whether the tab is still on its way to its *first* page before sending it
+ * anywhere else - and every other reader of a snapshot would carry two fields it never looks at.
+ * The url is normalised the way a snapshot's is (004/T166), so `about:blank` means one thing here
+ * too. `undefined` is the "gone" case, as everywhere in this file.
+ */
+export async function getTabLoadState(
+  tabId: number,
+): Promise<{ url: string; pendingUrl?: string; loading: boolean } | undefined> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return {
+      url: tab.url === undefined || tab.url === "" ? "about:blank" : tab.url,
+      ...(tab.pendingUrl === undefined || tab.pendingUrl === "" ? {} : { pendingUrl: tab.pendingUrl }),
+      loading: tab.status === "loading",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Every tab in the current profile, as snapshots; the caller filters by group. */
 export async function queryTabSnapshots(): Promise<AgentTabSnapshot[]> {
   const tabs = await chrome.tabs.query({});
