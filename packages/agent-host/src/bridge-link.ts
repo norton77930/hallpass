@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server as NetServer, type Socket } from "node:net";
+import { dirname } from "node:path";
 import {
   AGENT_LINK_PROTOCOL,
   agentBridgeRecordSchema,
   agentLinkFrameSchema,
   type AgentBridgeRecord,
 } from "@hallpass/contracts";
-import { bridgeFilePath, hostDataDirectory, type HostEnvironment } from "./host-paths.js";
+import { bridgeFilePath, type HostEnvironment } from "./host-paths.js";
 import { encodeFrame, FrameDecoder } from "./native-frame.js";
 
 /**
@@ -39,12 +40,15 @@ export type BridgeRecord = AgentBridgeRecord;
  * in place rather than a truncated one.
  */
 export async function writeBridgeRecord(record: BridgeRecord, env?: HostEnvironment): Promise<void> {
-  await writeHostFileAtomically(bridgeFilePath(env), record, env);
+  await writeHostFileAtomically(bridgeFilePath(env), record);
 }
 
-/** The record's temp-then-rename write, for any small JSON file beside it (the owner sidecar too). */
-export async function writeHostFileAtomically(target: string, value: unknown, env?: HostEnvironment): Promise<void> {
-  await mkdir(hostDataDirectory(env), { recursive: true });
+/**
+ * The record's temp-then-rename write, for any small JSON file the host owns (the owner sidecar, and
+ * since 018 the per-browser records one directory down - so the target's own directory is created).
+ */
+export async function writeHostFileAtomically(target: string, value: unknown): Promise<void> {
+  await mkdir(dirname(target), { recursive: true });
   const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   await writeFile(temp, `${JSON.stringify(value)}\n`, "utf8");
   try {
@@ -227,6 +231,8 @@ export function createFrameChannel(
 export type PublishedRelay = {
   port: number;
   token: string;
+  /** When this relay started listening: the record's `startedAt`, shared by the per-browser record (018). */
+  startedAt: string;
   /**
    * Writes this relay's record again, unchanged (004/T099f).
    *
@@ -299,6 +305,7 @@ export async function listenAndPublish(
   return {
     port,
     token,
+    startedAt: record.startedAt,
     async republish(): Promise<void> {
       await writeBridgeRecord(record, options.env);
       published = true;
@@ -347,7 +354,16 @@ export type LinkConnector = (
 
 export type DialRelayOptions = {
   /** Who is dialling. The relay registers the session under this id and the worker labels it.  */
-  hello: { sessionId: string; agentId: string; displayName: string };
+  hello: {
+    sessionId: string;
+    agentId: string;
+    displayName: string;
+    /**
+     * 018 R-273, R-279: a choose-only link. Set only for a relay whose record advertises the
+     * in-browser choice - an older relay parses `hello` strictly and would refuse the greeting.
+     */
+    intent?: "choose";
+  };
   /** Every frame from the relay except the acknowledgement, which the loop consumes itself. */
   onFrame: (value: unknown) => void;
   onAttached?: (relayPid: number) => void;
@@ -360,6 +376,13 @@ export type DialRelayOptions = {
   retryMs?: number;
   /** The first wait after a drop, before the ramp back to `retryMs` (T099k); injected by tests. */
   detachRetryMs?: number;
+  /**
+   * What to dial, asked afresh on every attempt (018 R-278 (2)); `undefined` is "nothing to dial
+   * now". With it the loop never reads `bridge.json`: a server's link belongs to the browser its
+   * session resolved to, and the target is that browser's own directory entry - so a link cannot
+   * land on whichever relay happens to hold the legacy record. Without it, the 004 behaviour.
+   */
+  target?: () => Promise<BridgeRecord | undefined>;
   log?: (code: string, detail?: string) => void;
 };
 
@@ -413,6 +436,23 @@ export function dialRelay(options: DialRelayOptions): RelayDial {
   });
 
   async function attempt(): Promise<void> {
+    const record = options.target === undefined ? await recordFromBridgeFile() : await options.target();
+    if (record === undefined) {
+      // The bridge file says why on its own; a target that names nothing is the same fact here.
+      if (options.target !== undefined) log("agent.dial.no-record");
+      return;
+    }
+    if (!alive(record.relayPid)) {
+      // A record naming a relay that has exited is a record of a browser that is gone. Dialling its
+      // port would either fail or reach whatever took the port over.
+      log("agent.dial.relay-gone", String(record.relayPid));
+      return;
+    }
+    await connectTo(record);
+  }
+
+  /** The 004 target: the one record at `bridge.json`, with a mismatch said once (T099j). */
+  async function recordFromBridgeFile(): Promise<BridgeRecord | undefined> {
     const reading = await inspectBridgeRecord(options.env);
     if (reading.status === "protocol-mismatch") {
       /**
@@ -427,21 +467,17 @@ export function dialRelay(options: DialRelayOptions): RelayDial {
         mismatchLogged = true;
         log("agent.dial.protocol-mismatch", `found=${reading.protocol ?? "none"} own=${AGENT_LINK_PROTOCOL}`);
       }
-      return;
+      return undefined;
     }
     mismatchLogged = false;
     if (reading.status !== "ok") {
       log("agent.dial.no-record");
-      return;
+      return undefined;
     }
-    const record = reading.record;
-    if (!alive(record.relayPid)) {
-      // A record naming a relay that has exited is a record of a browser that is gone. Dialling its
-      // port would either fail or reach whatever took the port over.
-      log("agent.dial.relay-gone", String(record.relayPid));
-      return;
-    }
+    return reading.record;
+  }
 
+  async function connectTo(record: BridgeRecord): Promise<void> {
     let closed: () => void = () => undefined;
     const untilClosed = new Promise<void>((resolve) => {
       closed = resolve;
@@ -464,6 +500,12 @@ export function dialRelay(options: DialRelayOptions): RelayDial {
     } catch {
       // A recorded port nothing answers on: the relay is starting, or died without retracting.
       log("agent.dial.refused", String(record.port));
+      return;
+    }
+    if (stopped) {
+      // Stopped while the connect was in flight (018 R-272): the server has moved off this relay,
+      // so it is not greeted - a greeting would register the session there again.
+      await connection.close();
       return;
     }
 

@@ -91,10 +91,10 @@ describe("T076 agent link frames", () => {
   /**
    * Two browsers (2026-10-02). The ack names the browser run so a relay can tell its own browser's
    * previous relay from another browser's; optional both ways, because a host from before it reads
-   * only `type` and `relayPid` and a worker from before it never sends one. The relay that stands
-   * aside says so with its own frame, naming the relay that keeps serving.
+   * only `type` and `relayPid` and a worker from before it never sends one. The stand-by frame that
+   * once answered it is gone with 018 (R-274): every browser is served.
    */
-  it("acks with the browser run when it has one, and stands by with the serving relay's pid", () => {
+  it("acks with the browser run when it has one, and no longer knows a stand-by frame", () => {
     const frame = contractSchema("agentLinkFrameSchema");
 
     expectAccepted(frame, { type: "relay-ack", relayPid: RELAY_PID }, "an ack from a worker before the run id");
@@ -102,10 +102,7 @@ describe("T076 agent link frames", () => {
     expectRejected(frame, { type: "relay-ack", relayPid: RELAY_PID, browserRunId: "" }, "an ack with an empty run");
     expectRejected(frame, { type: "relay-ack", relayPid: RELAY_PID, browserRunId: "r".repeat(65) }, "an ack with an oversized run");
 
-    expectAccepted(frame, { type: "relay-standby", servingRelayPid: RELAY_PID }, "a relay-standby");
-    expectRejected(frame, { type: "relay-standby" }, "a relay-standby naming no serving relay");
-    expectRejected(frame, { type: "relay-standby", servingRelayPid: 0 }, "a relay-standby naming pid zero");
-    expectRejected(frame, { type: "relay-standby", servingRelayPid: RELAY_PID, sessionId: SESSION }, "a relay-standby naming a session");
+    expectRejected(frame, { type: "relay-standby", servingRelayPid: RELAY_PID }, "a 0.10.x relay-standby");
   });
 
   it("names the record's owner in a sidecar, leaving the record's own shape untouched", () => {
@@ -121,6 +118,19 @@ describe("T076 agent link frames", () => {
       { port: 51_234, token: TOKEN, relayPid: RELAY_PID, startedAt: "2026-10-02T09:00:00.000Z", protocol: AGENT_LINK_PROTOCOL, browserRunId: "run-1" },
       "a record carrying the owner's run",
     );
+  });
+
+  // The built panel projection carries exactly the bridge states the worker produces; the stand-by
+  // state of the 2026-10-02 stop-gap went with 018 (R-274).
+  it("lets the panel projection carry each bridge state, and no stand-by", () => {
+    const panel = contractSchema("agentPanelStateSchema");
+    const base = { paired: [], sessions: [], tabs: [], sites: [] };
+
+    for (const bridge of ["connected", "unavailable", "disconnected"]) {
+      expectAccepted(panel, { ...base, bridge }, `a projection whose bridge is ${bridge}`);
+    }
+    expectRejected(panel, { ...base, bridge: "standby" }, "a projection still standing by");
+    expectRejected(panel, { ...base, bridge: "serving" }, "a projection with an unknown bridge status");
   });
 
   it("carries the session on every call frame", () => {

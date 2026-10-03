@@ -78,6 +78,10 @@ describe("T005 agent tools contract", () => {
       "dialog",
       // 017: proposing a session site plan the owner approves once.
       "propose_sites",
+      // 018: listing and choosing among several connected browsers, answered by the host.
+      "list_browsers",
+      "select_browser",
+      "request_browser_choice",
     ]);
     // Every name has an argument schema, and nothing else does: the registry and the enum are one
     // list, so a tool cannot be registered without a declared argument shape.

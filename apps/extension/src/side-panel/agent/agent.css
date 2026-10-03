@@ -246,6 +246,58 @@
   width: auto;
 }
 
+/* ---------- this browser (018 FR-268, FR-279) ---------- */
+
+.agent-browser {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.agent-browser-line,
+.agent-browser-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-browser-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-browser-input {
+  flex: 1 1 12em;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.agent-browser-input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.agent-browser-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--fs-1);
+  color: var(--danger);
+}
+
+.agent-browser-others {
+  margin: 0;
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
 /* ---------- prompt card ---------- */
 
 .agent-prompt {

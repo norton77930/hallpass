@@ -31,8 +31,9 @@ describe("T303 the viewport tool", () => {
   it("joins the closed tool list and the batchable steps", () => {
     const names = contractExport<readonly string[]>("AGENT_TOOL_NAMES");
     expect(names).toContain("viewport");
-    // 013 adds the thirty-third, `upload_image`, and 017 the thirty-fourth, `propose_sites`.
-    expect(names).toHaveLength(34);
+    // 013 adds the thirty-third, `upload_image`, 017 the thirty-fourth, `propose_sites`, and 018
+    // the three browser tools.
+    expect(names).toHaveLength(37);
 
     // It is about one tab, exactly as `resize_window` is, so it composes inside a batch.
     expect(contractExport<readonly string[]>("AGENT_BATCH_STEP_TOOL_NAMES")).toContain("viewport");

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentControlFrameSchema, agentLinkFrameSchema, PAIRING_DECLINED_MARKER } from "@hallpass/contracts";
+import { agentControlFrameSchema, agentLinkFrameSchema, BROWSER_CHOICE_FEATURE, PAIRING_DECLINED_MARKER } from "@hallpass/contracts";
 import {
+  AGENT_ACK_IDENTITY_BOUND_MS,
   AGENT_ACK_RUN_ID_BOUND_MS,
   AGENT_RECONNECT_BASE_MS,
   AGENT_RECONNECT_MAX_MS,
-  AGENT_STANDBY_CLEAR_MS,
   createAgentBridge,
   type AgentPortLike,
 } from "../src/service-worker/agent-bridge.js";
@@ -798,72 +798,37 @@ describe("T099h the host has answered only when it says so", () => {
 });
 
 /**
- * Two browsers (2026-10-02) — the worker's half of standing by.
- *
- * A relay that finds another browser's relay serving says `relay-standby` and leaves. The owner must
- * read that as "another browser has it", not as a lost link, and the status must hold through the
- * port closing and through each retry's brief `relay-started`, then clear once a relay does take over.
+ * 018 R-274 — stand-by is retired. A 0.10.x relay may still send `relay-standby` to this worker
+ * before it leaves; the frame is dropped as one this worker does not act on, the status is not
+ * moved by it, and the port closing afterwards is an ordinary lost link on the ordinary cadence.
  */
-describe("two browsers: standing by", () => {
-  function standbyBridge() {
+describe("018 relay-standby is ignored", () => {
+  it("drops a relay-standby from a 0.10.x relay without changing the status or the backoff", () => {
     const clock = fakeTimer();
     const ports: FakePort[] = [];
-    const harness = bridgeWith({
+    const diagnostics: string[] = [];
+    const { bridge, statuses } = bridgeWith({
       connectNative: () => {
         const port = fakePort();
         ports.push(port);
         return port;
       },
       timer: clock.timer,
+      reportDiagnostic: (code) => diagnostics.push(code),
     });
-    return { ...harness, clock, ports };
-  }
-
-  it("reports standby when the relay stands aside, and keeps it while the port closes and retries", () => {
-    const { bridge, clock, ports, statuses, scheduleRetry } = standbyBridge();
     bridge.connect();
     ports[0]!.emit({ type: "relay-started", relayPid: 4242 });
     ports[0]!.emit({ type: "relay-standby", servingRelayPid: 1111 });
-    ports[0]!.drop();
-
-    expect(bridge.status()).toBe("standby");
-    expect(statuses).toEqual(["connected", "standby"]);
-    // The ordinary reconnect is the retry: nothing about the cadence changes.
-    expect(scheduleRetry).toHaveBeenCalledTimes(1);
-    expect(clock.delays()).toEqual([AGENT_RECONNECT_BASE_MS]);
-
-    // The next relay stands by as well; the owner never sees a "connected" flash in between.
-    clock.fire();
-    ports[1]!.emit({ type: "relay-started", relayPid: 4243 });
-    ports[1]!.emit({ type: "relay-standby", servingRelayPid: 1111 });
-    ports[1]!.drop();
-    expect(statuses).toEqual(["connected", "standby"]);
-    expect(bridge.status()).toBe("standby");
-  });
-
-  it("clears standby once a later relay keeps the link (the other browser closed)", () => {
-    const { bridge, clock, ports, statuses } = standbyBridge();
-    bridge.connect();
-    ports[0]!.emit({ type: "relay-started", relayPid: 4242 });
-    ports[0]!.emit({ type: "relay-standby", servingRelayPid: 1111 });
-    ports[0]!.drop();
-    clock.fire();
-
-    ports[1]!.emit({ type: "relay-started", relayPid: 4243 });
-    expect(bridge.status()).toBe("standby");
-    expect(clock.delays()).toEqual([AGENT_STANDBY_CLEAR_MS]);
-    clock.fire();
 
     expect(bridge.status()).toBe("connected");
-    expect(statuses).toEqual(["connected", "standby", "connected"]);
-  });
+    expect(statuses).toEqual(["connected"]);
+    expect(diagnostics).not.toContain("agent.bridge.relay-standby");
+    expect(clock.delays()).toEqual([]);
 
-  it("treats a relay-standby from a host build it predates as an unknown frame (0.9.0 worker)", () => {
-    // What a worker from before this frame does with it: neither of the unions it shares with this
-    // build declares the type, so it falls to "frame-rejected" and the port closing is all it sees.
-    const frame = { type: "relay-standby", servingRelayPid: 1111 };
-    expect(agentControlFrameSchema.safeParse(frame).success).toBe(false);
-    expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
+    ports[0]!.drop();
+    expect(bridge.status()).toBe("disconnected");
+    expect(statuses).toEqual(["connected", "disconnected"]);
+    expect(clock.delays()).toEqual([AGENT_RECONNECT_BASE_MS]);
   });
 });
 
@@ -899,5 +864,273 @@ describe("016 session-label frame", () => {
 
     expect(onSessionLabel).not.toHaveBeenCalled();
     expect(diagnostics).toEqual(["agent.bridge.frame-rejected", "agent.bridge.frame-rejected"]);
+  });
+});
+
+/**
+ * 018/T499, T500 — the ack says who this browser is (R-268, R-276, R-279).
+ *
+ * The identity is a `chrome.storage.local` read, and it is worth the relay's whole ack bound rather
+ * than the run id's 1 s: without it a new worker would be published as a run-scoped legacy entry
+ * beside the browser's proper record. A conflict (a copied profile) is answered by minting a new
+ * identity and reconnecting, so the next relay hears the new one on its ack.
+ */
+describe("018 browser identity on the link", () => {
+  type Identity = { browserId: string; kind: "chrome" | "edge"; name?: string };
+  const IDENTITY: Identity = { browserId: "aaaaaaaa-1111", kind: "edge", name: "Work" };
+
+  function identityDeps(read: () => Promise<Identity | undefined>) {
+    return { read, remint: vi.fn(async () => IDENTITY) };
+  }
+
+  it("carries the identity on the ack", async () => {
+    const { bridge, port } = bridgeWith({ browserRunId: async () => "run-1", browserIdentity: identityDeps(async () => IDENTITY) });
+    bridge.connect();
+    port.emit({ type: "relay-started", relayPid: 4321 });
+
+    await vi.waitFor(() => expect(bridge.status()).toBe("connected"));
+    const ack = port.sent[0];
+    expect(ack).toEqual({
+      type: "relay-ack",
+      relayPid: 4321,
+      browserRunId: "run-1",
+      browserId: "aaaaaaaa-1111",
+      browserKind: "edge",
+      browserName: "Work",
+    });
+    expect(agentLinkFrameSchema.safeParse(ack).success).toBe(true);
+  });
+
+  it("waits past the run id's bound for a slow identity read, and acks with it inside its own bound", async () => {
+    vi.useFakeTimers();
+    try {
+      const slow = bridgeWith({
+        browserIdentity: identityDeps(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => resolve({ browserId: "bbbbbbbb-2222", kind: "chrome" }), AGENT_ACK_IDENTITY_BOUND_MS - 500),
+            ),
+        ),
+      });
+      slow.bridge.connect();
+      slow.port.emit({ type: "relay-started", relayPid: 4322 });
+      await vi.advanceTimersByTimeAsync(AGENT_ACK_RUN_ID_BOUND_MS);
+      expect(slow.port.sent).toEqual([]);
+      await vi.advanceTimersByTimeAsync(AGENT_ACK_IDENTITY_BOUND_MS - 500 - AGENT_ACK_RUN_ID_BOUND_MS);
+      expect(slow.port.sent).toEqual([{ type: "relay-ack", relayPid: 4322, browserId: "bbbbbbbb-2222", browserKind: "chrome" }]);
+      // Inside the relay's own 10 s, with room for the frame to arrive.
+      expect(AGENT_ACK_IDENTITY_BOUND_MS).toBeGreaterThan(AGENT_ACK_RUN_ID_BOUND_MS);
+      expect(AGENT_ACK_IDENTITY_BOUND_MS).toBeLessThan(10_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never acks without its identity when the store does not answer: it drops the link and backs off (R-279, T513)", async () => {
+    // A worker with an identity store that acked without it was published as a run-scoped legacy
+    // browser beside its proper record, so the directory listed two browsers. Not answered is "not
+    // yet published": no ack, the link goes, and the retry backs off while the store stays silent.
+    vi.useFakeTimers();
+    try {
+      const clock = fakeTimer();
+      const ports: Array<FakePort & { disconnect: ReturnType<typeof vi.fn> }> = [];
+      const diagnostics: string[] = [];
+      const { bridge, statuses } = bridgeWith({
+        connectNative: () => {
+          const port = fakePort();
+          const disconnect = vi.fn(port.disconnect);
+          const spied = Object.assign(port, { disconnect });
+          ports.push(spied);
+          return spied;
+        },
+        timer: clock.timer,
+        reportDiagnostic: (code) => diagnostics.push(code),
+        browserRunId: async () => "run-1",
+        browserIdentity: identityDeps(() => new Promise(() => undefined)),
+      });
+      bridge.connect();
+
+      const delays: number[] = [];
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        const port = ports.at(-1)!;
+        port.emit({ type: "relay-started", relayPid: 6000 + cycle });
+        await vi.advanceTimersByTimeAsync(AGENT_ACK_IDENTITY_BOUND_MS - 1);
+        expect(port.disconnect).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(port.sent).toEqual([]);
+        expect(port.disconnect).toHaveBeenCalledTimes(1);
+        expect(clock.delays()).toHaveLength(1);
+        expect(ports).toHaveLength(cycle + 1);
+        delays.push(clock.delays()[0]!);
+        clock.fire();
+      }
+
+      expect(delays).toEqual([AGENT_RECONNECT_BASE_MS, AGENT_RECONNECT_BASE_MS * 2, AGENT_RECONNECT_BASE_MS * 4]);
+      expect(diagnostics.filter((code) => code === "agent.bridge.identity-unread")).toHaveLength(3);
+      expect(statuses).not.toContain("connected");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never acks without its identity when the store's read fails", async () => {
+    const diagnostics: string[] = [];
+    const { bridge, port } = bridgeWith({
+      reportDiagnostic: (code) => diagnostics.push(code),
+      browserIdentity: identityDeps(async () => {
+        throw new Error("storage-failed");
+      }),
+    });
+    bridge.connect();
+    port.emit({ type: "relay-started", relayPid: 4324 });
+
+    await vi.waitFor(() => expect(diagnostics).toContain("agent.bridge.identity-unread"));
+    expect(port.sent).toEqual([]);
+    expect(bridge.status()).toBe("disconnected");
+  });
+
+  it("acks without an identity when there is no identity store to read (storage unavailable)", async () => {
+    // `localBrowserIdentity` over no storage area answers `undefined` at once: nothing to wait for,
+    // and nothing that could be published beside it.
+    const { bridge, port } = bridgeWith({ browserIdentity: identityDeps(async () => undefined) });
+    bridge.connect();
+    port.emit({ type: "relay-started", relayPid: 4325 });
+
+    await vi.waitFor(() => expect(port.sent).toEqual([{ type: "relay-ack", relayPid: 4325 }]));
+    expect(bridge.status()).toBe("connected");
+  });
+
+  it("re-mints on a conflict and reconnects, so the next relay hears the new identity", async () => {
+    const ports: FakePort[] = [];
+    let current: Identity = IDENTITY;
+    const remint = vi.fn(async () => {
+      current = { browserId: "cccccccc-3333", kind: "edge", name: "Work 2" };
+      return current;
+    });
+    const bridge = createAgentBridge({
+      connectNative: () => {
+        const port = fakePort();
+        ports.push(port);
+        return port;
+      },
+      decidePairing: async () => "accepted" as const,
+      callTool: async (request) => ({ callId: request.callId, outcome: "ok", result: [] }),
+      scheduleRetry: vi.fn(),
+      browserIdentity: { read: async () => current, remint },
+    });
+    bridge.connect();
+    ports[0]!.emit({ type: "relay-started", relayPid: 4242 });
+    await vi.waitFor(() => expect(ports[0]!.sent).toHaveLength(1));
+
+    ports[0]!.emit({ type: "browser-identity-conflict" });
+    await vi.waitFor(() => expect(ports).toHaveLength(2));
+    expect(remint).toHaveBeenCalledTimes(1);
+
+    ports[1]!.emit({ type: "relay-started", relayPid: 4243 });
+    await vi.waitFor(() =>
+      expect(ports[1]!.sent).toEqual([
+        { type: "relay-ack", relayPid: 4243, browserId: "cccccccc-3333", browserKind: "edge", browserName: "Work 2" },
+      ]),
+    );
+  });
+
+  it("backs off instead of re-dialling at once when the re-mint fails, and keeps backing off while the conflict persists", async () => {
+    // T515 M1: storage that keeps failing must not turn the conflict into a relay respawn loop.
+    const clock = fakeTimer();
+    const ports: FakePort[] = [];
+    const remint = vi.fn(async (): Promise<Identity> => {
+      throw new Error("storage-unavailable");
+    });
+    const { bridge, statuses } = bridgeWith({
+      connectNative: () => {
+        const port = fakePort();
+        ports.push(port);
+        return port;
+      },
+      timer: clock.timer,
+      browserIdentity: { read: async () => IDENTITY, remint },
+    });
+    bridge.connect();
+
+    const delays: number[] = [];
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const port = ports.at(-1)!;
+      port.emit({ type: "relay-started", relayPid: 5000 + cycle });
+      await vi.waitFor(() => expect(port.sent).toHaveLength(1));
+      port.emit({ type: "browser-identity-conflict" });
+      await vi.waitFor(() => expect(clock.delays()).toHaveLength(1));
+      // No immediate re-open: the next link waits for the armed timer.
+      expect(ports).toHaveLength(cycle + 1);
+      delays.push(clock.delays()[0]!);
+      clock.fire();
+    }
+
+    expect(remint).toHaveBeenCalledTimes(3);
+    expect(delays).toEqual([AGENT_RECONNECT_BASE_MS, AGENT_RECONNECT_BASE_MS * 2, AGENT_RECONNECT_BASE_MS * 4]);
+    // The owner sees the link down between cycles, not a "connected" that is about to end.
+    expect(statuses).toEqual(["connected", "disconnected", "connected", "disconnected", "connected", "disconnected"]);
+  });
+
+  it("hands the relay's peers to the runtime and sends the owner's name to the relay", () => {
+    const onBrowserPeers = vi.fn();
+    const { bridge, port } = bridgeWith({ onBrowserPeers });
+    bridge.connect();
+    port.emit({ type: "browser-peers", others: 2, defaultName: "Chrome 2" });
+    expect(onBrowserPeers).toHaveBeenCalledWith({ others: 2, defaultName: "Chrome 2" });
+
+    bridge.sendBrowserName("Lab box");
+    expect(port.sent).toEqual([{ type: "browser-name", name: "Lab box" }]);
+  });
+});
+
+/**
+ * 018/T509 — the in-browser choice on the link (FR-274, R-273, R-279).
+ *
+ * The ack says this worker can show the "Use this browser?" card, derived from the handler that
+ * shows it, so the relay's record never claims a card nobody raises. The three choice frames pass
+ * through as parsed, and a choose greeting keeps its intent so the runtime can tell it apart.
+ */
+describe("018 browser choice on the link", () => {
+  it("advertises browser-choice on the ack when it can raise the card, and not otherwise", async () => {
+    const able = bridgeWith({ onBrowserChoiceRequest: vi.fn() });
+    able.bridge.connect();
+    able.port.emit({ type: "relay-started", relayPid: 4321 });
+    await vi.waitFor(() => expect(able.bridge.status()).toBe("connected"));
+    expect(able.port.sent[0]).toEqual({ type: "relay-ack", relayPid: 4321, features: [BROWSER_CHOICE_FEATURE] });
+    expect(agentLinkFrameSchema.safeParse(able.port.sent[0]).success).toBe(true);
+
+    const unable = bridgeWith();
+    unable.bridge.connect();
+    unable.port.emit({ type: "relay-started", relayPid: 4322 });
+    await vi.waitFor(() => expect(unable.port.sent).toEqual([{ type: "relay-ack", relayPid: 4322 }]));
+  });
+
+  it("passes the choose intent, the request and the withdrawal on, and sends the result", () => {
+    const onSessionAnnounced = vi.fn();
+    const onBrowserChoiceRequest = vi.fn();
+    const onBrowserChoiceWithdraw = vi.fn();
+    const { bridge, port } = bridgeWith({ onSessionAnnounced, onBrowserChoiceRequest, onBrowserChoiceWithdraw });
+    bridge.connect();
+
+    port.emit({ type: "hello", sessionId: "s1~choose", agentId: "agent-1", displayName: "Claude Code", intent: "choose" });
+    expect(onSessionAnnounced).toHaveBeenCalledWith({
+      sessionId: "s1~choose",
+      agentId: "agent-1",
+      displayName: "Claude Code",
+      intent: "choose",
+    });
+    port.emit({ type: "browser-choice-request", sessionId: "s1~choose", requestId: "req-1", agentName: "Claude Code", boundMs: 120_000 });
+    expect(onBrowserChoiceRequest).toHaveBeenCalledWith({
+      sessionId: "s1~choose",
+      requestId: "req-1",
+      agentName: "Claude Code",
+      boundMs: 120_000,
+    });
+    port.emit({ type: "browser-choice-withdraw", sessionId: "s1~choose", requestId: "req-1" });
+    expect(onBrowserChoiceWithdraw).toHaveBeenCalledWith({ sessionId: "s1~choose", requestId: "req-1" });
+
+    bridge.sendBrowserChoiceResult("s1~choose", "req-1", "confirm");
+    expect(port.sent).toEqual([{ type: "browser-choice-result", sessionId: "s1~choose", requestId: "req-1", decision: "confirm" }]);
+    expect(agentLinkFrameSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 });

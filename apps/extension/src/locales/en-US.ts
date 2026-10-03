@@ -202,8 +202,6 @@ export const messages = {
   "agent.notPaired.body": "Add this MCP server to your AI tool (CodeBuddy, Cursor, Claude Code, …); its first browser tool call raises a pairing request here.",
   "agent.bridgeLost.title": "The connection to the local agent was lost",
   "agent.bridgeLost.body": "It reconnects on its own. If this page stays, start the agent again and check the connection.",
-  "agent.standby.title": "Another browser is serving your agents",
-  "agent.standby.body": "Another browser on this computer is serving your agents right now. Close it to use this one; Hallpass switches over on its own.",
   "agent.retry": "Check the connection again",
   "agent.details.title": "Technical details",
   "agent.details.relayPid": "Relay process: {pid}",
@@ -218,6 +216,21 @@ export const messages = {
   "agent.status.sessionsNone": "no sessions",
   "agent.status.unpairAgent": "Unpair {agent}",
   "agent.status.menu": "More options",
+  // 018 FR-268, FR-279: this browser's name and rename; the others are counted, never named.
+  "agent.browser.this": "This browser: {name}",
+  "agent.browser.rename": "Rename",
+  "agent.browser.renameLabel": "Rename this browser",
+  "agent.browser.nameLabel": "Browser name",
+  "agent.browser.save": "Save",
+  "agent.browser.cancel": "Cancel",
+  "agent.browser.nameInvalid": "Use 1 to 40 characters.",
+  "agent.browser.others": "{n} other browsers connected",
+  "agent.browser.othersOne": "1 other browser connected",
+  // 018 FR-274: an agent asking the owner to pick the browser it works in, in the browser itself.
+  "agent.browserChoice.title": "Use this browser for {agent}?",
+  "agent.browserChoice.body": "Several browsers are running Hallpass. Answer in the one the agent should work in.",
+  "agent.browserChoice.confirm": "Use this browser",
+  "agent.browserChoice.decline": "Not this one",
   // 016 FR-237: "Revoke" on screen, the site in the accessible name.
   "agent.siteRevoke": "Revoke {site}",
   "agent.siteRevokeText": "Revoke",
@@ -375,6 +388,10 @@ export const messages = {
   "agent.summary.downloads_context": "List the files it downloaded",
   "agent.summary.gif_recorder": "Record this session as a GIF",
   "agent.summary.dialog": "Answer a dialog the page opened",
+  // 018: answered by the host and never raised as a card (R-273); reviewed copy all the same.
+  "agent.summary.list_browsers": "List the browsers running Hallpass",
+  "agent.summary.select_browser": "Choose which browser this agent uses",
+  "agent.summary.request_browser_choice": "Ask you which browser to use",
 } as const;
 
 export type MessageKey = keyof typeof messages;

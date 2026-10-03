@@ -319,6 +319,17 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
           case "ui.agent.transition-clear":
             void input.runtime.clearTransition(command.payload.from, command.payload.to);
             return;
+          case "ui.agent.browser-rename":
+            // 018 FR-268: validated again in the worker, which strips and trims before storing.
+            void input.runtime.renameBrowser(command.payload.name);
+            return;
+          case "ui.agent.browser-choice-decide":
+            // 018 FR-274: an answer to a card that was withdrawn, expired or never raised sends
+            // nothing to the host; said here as the site plan's refusal is.
+            if (!input.runtime.decideBrowserChoice(command.payload.requestId, command.payload.confirm)) {
+              input.reportDiagnostic?.("agent.panel.browser-choice-refused");
+            }
+            return;
           case "ui.agent.upload-root-clear":
             // The press goes to the host; the row goes when the host answers (014 FR-192). Nothing
             // is awaited here - the panel is told by the next projection, as it is for everything.

@@ -192,8 +192,6 @@ export const messages: Record<MessageKey, string> = {
   "agent.notPaired.body": "在你的 AI 工具（CodeBuddy、Cursor、Claude Code…）裡加入這個 MCP server，發出第一個瀏覽器工具呼叫就會在這裡出現配對請求。",
   "agent.bridgeLost.title": "和本機 agent 的連線中斷了",
   "agent.bridgeLost.body": "它會自己重新連線。如果這一頁一直沒變，請重新啟動 agent，再檢查一次連線。",
-  "agent.standby.title": "另一個瀏覽器正在服務你的 agent",
-  "agent.standby.body": "這台電腦上的另一個瀏覽器正在服務你的 agent。要改用這個瀏覽器，請關掉那一個；Hallpass 會自己切換過來。",
   "agent.retry": "重新檢查連線",
   "agent.details.title": "技術資訊",
   "agent.details.relayPid": "中繼程序：{pid}",
@@ -208,6 +206,20 @@ export const messages: Record<MessageKey, string> = {
   "agent.status.sessionsNone": "沒有工作階段",
   "agent.status.unpairAgent": "解除與 {agent} 的配對",
   "agent.status.menu": "更多選項",
+  // 018 FR-268、FR-279：這個瀏覽器的名稱與重新命名；其他瀏覽器只說有幾個，不說是哪些。
+  "agent.browser.this": "這個瀏覽器：{name}",
+  "agent.browser.rename": "重新命名",
+  "agent.browser.renameLabel": "重新命名這個瀏覽器",
+  "agent.browser.nameLabel": "瀏覽器名稱",
+  "agent.browser.save": "儲存",
+  "agent.browser.cancel": "取消",
+  "agent.browser.nameInvalid": "請輸入 1 到 40 個字元。",
+  "agent.browser.others": "另有 {n} 個瀏覽器已連線",
+  "agent.browser.othersOne": "另有 1 個瀏覽器已連線",
+  "agent.browserChoice.title": "要讓 {agent} 使用這個瀏覽器嗎？",
+  "agent.browserChoice.body": "有多個瀏覽器正在執行 Hallpass。請在要讓代理程式使用的那個瀏覽器中回答。",
+  "agent.browserChoice.confirm": "使用這個瀏覽器",
+  "agent.browserChoice.decline": "不是這個",
   // 016 FR-237：畫面上只寫「撤銷」，網站放在無障礙名稱裡。
   "agent.siteRevoke": "撤銷 {site}",
   "agent.siteRevokeText": "撤銷",
@@ -355,4 +367,8 @@ export const messages: Record<MessageKey, string> = {
   "agent.summary.downloads_context": "列出它下載的檔案",
   "agent.summary.gif_recorder": "把這次工作錄成 GIF",
   "agent.summary.dialog": "回應網頁跳出的確認框",
+  // 018：由 host 回答，不會變成卡片（R-273）；文案照樣審過。
+  "agent.summary.list_browsers": "列出正在執行 Hallpass 的瀏覽器",
+  "agent.summary.select_browser": "選擇這個 agent 要用的瀏覽器",
+  "agent.summary.request_browser_choice": "請你選要用哪個瀏覽器",
 };

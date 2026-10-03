@@ -604,6 +604,26 @@ describe("017 review: the plan is bound to its agent", () => {
     expect(asked.site).toBe(A);
   });
 
+  it("shows no plan, and marks nothing already approved, for a session re-announced by another agent (M1)", async () => {
+    const { runtime, port, send } = await pairedRuntime();
+    expect(await runtime.sitePlans.approve(S1, [A])).toEqual({ ok: true });
+
+    port.emit({ type: "hello", sessionId: S1, agentId: "agent-2", displayName: "Other agent" });
+    port.emit({ type: "pair-request", agentId: "agent-2", displayName: "Other agent", origin: "stdio:local", sessionId: S1 });
+    await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
+    await runtime.pairing.decide("agent-2", true);
+    await vi.waitFor(async () => expect(await runtime.pairing.isPaired("agent-2")).toBe(true));
+    expect(storedPlans(fake)[S1]).toMatchObject({ origins: [A], agentId: "agent-1" });
+
+    const sessionCard = (await runtime.projection()).sessions.find((session) => session.sessionId === S1);
+    expect(sessionCard).toBeDefined();
+    expect(sessionCard?.sitePlan).toBeUndefined();
+
+    send("propose_sites", { origins: [A, B], purpose: "More" });
+    await vi.waitFor(async () => expect((await runtime.projection()).sitePlan).toBeDefined(), { timeout: 3_000 });
+    expect((await runtime.projection()).sitePlan?.alreadyApproved ?? []).toEqual([]);
+  });
+
   it("takes down a pending proposal of an agent the owner unpairs, granting nothing (m1)", async () => {
     const { runtime, send, answer } = await pairedRuntime();
 

@@ -37,3 +37,29 @@
   `npm run agent-host:install` on your machine if you want your own registry to carry the Edge and
   Brave roots (harmless either way).
 - The live run on Edge and Brave: issue #2.
+
+## Live run on Microsoft Edge (issue #2), 2026-10-03
+
+Edge 154.0.4258.37 (Stable, Windows 11), private profile and private `LOCALAPPDATA`, Edge's HKCU host
+key pointed for the run at a manifest whose host is this branch's `native-host.js` (restored to the
+installed host afterwards), the packaged gate in attach mode with a fresh browser per spec file. A
+fresh Edge profile on a domain-joined machine signs in implicitly and starts syncing, which hides the
+fixture behind a welcome page: launch with `--disable-sync --disable-features=msImplicitSignin,msEdgeOnRampFRE`.
+
+| Result | Specs |
+| --- | --- |
+| all passed | pairing, actions, batch-upload, batch-wait, claim, computer, diagnostics, dialogs, false-stale, first-run, form-values, frames, input, interrupt, pairing-withdraw, panel-016, panel-multi, panel-states, privacy, reads, refs, sessions, site-plan, tabs, upload, upload-directory, upload-image, viewport, window-restore |
+| passed until a download | downloads 1/2, recording 3/6, press-outcomes 1/2 |
+| failed | transitions 0/1 (reproduced on a second run) |
+
+- **After a download** Edge keeps an `edge://downloads-hub/` page target that `/json/close` does not
+  close, and every later `connectOverCDP` times out. The product's part passed in each case (the
+  download was reported by its saved path; the GIF was written); the later tests never reached the
+  extension. Harness/Edge interaction, not a Hallpass defect - open: a way to keep the downloads
+  flyout from opening in the test profile, then re-run the three specs.
+- **transitions**: after the remembered A → B move is revoked, `navigate` to A's `/go-b` (redirected
+  to B, which now needs the owner's answer) answers `navigation-timeout` although B has loaded (the
+  failure screenshot shows Transition B). The same move while remembered passes. The settle watcher
+  (`agent-tools/tabs.ts` `settleAfter` / `watchTabSettle`) does not see this load on Edge. Open
+  Edge-specific defect; diagnose with a worker log of the tab's `onUpdated` events.
+- Brave was not run (not installed on this machine).

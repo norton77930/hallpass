@@ -10,15 +10,15 @@
 English · [繁體中文](README.zh-TW.md)
 
 Hallpass is a Chrome extension plus a local MCP server. Claude Code, Codex CLI, Cursor, Claude
-Desktop or any stdio MCP client gets 34 browser tools that work in the Chrome you already use, with
+Desktop or any stdio MCP client gets 37 browser tools that work in the Chrome you already use, with
 your logins. Every site the agent touches, and every action that changes a page, is gated by a
 decision you make in the side panel: allow once, allow this site from now on, or refuse. You can
 stop the agent at any moment and take your tabs back.
 
 > **Platform**: Windows 11. The installer registers the host for Google Chrome, Chromium,
-> Microsoft Edge and Brave. Google Chrome is the browser the acceptance suite runs on; Edge and
-> Brave are registered but not live-verified — see [issue #2](../../issues/2). macOS and Linux are
-> not supported yet — see [issue #1](../../issues/1).
+> Microsoft Edge and Brave. Google Chrome is the browser the acceptance suite runs on; Edge was
+> live-verified on 2026-10-03 and Brave is registered but not live-verified — see
+> [issue #2](../../issues/2). macOS and Linux are not supported yet — see [issue #1](../../issues/1).
 > **Licence**: Apache-2.0.
 
 ![A coding agent searches DuckDuckGo in the user's Chrome: before it types and before it presses Enter, the side panel asks the user and the agent waits for Allow once. The page half is Hallpass's own recording, with the action label, the step counter and the watermark](docs/media/demo.gif)
@@ -120,6 +120,22 @@ the host needs no reinstall.
 
 ![The side panel: a question card, the status row "Connected · 2 sessions", and two session cards named by project folder, one waiting for you and one idle, each with its colour stripe](docs/media/016-panel-en-US-light.png)
 
+### More than one browser
+
+Every browser (or browser profile) that runs Hallpass is served at the same time. The side panel
+shows what this browser is called — rename it there, e.g. "Work Edge" — and how many other browsers
+are connected.
+
+- With **one** browser running, nothing changes: the agent uses it.
+- With **several**, the agent's first browser tool is refused until you say which one: it lists the
+  browsers and asks you, then selects the one you named (`select_browser`) — or asks you to pick it
+  in the browser itself (`request_browser_choice`): every panel shows *"Use this browser for …?"*
+  and the one you confirm in is used. Hallpass never picks one for you.
+- The choice is remembered for the agent and used whenever that browser is running. If it is
+  closed, the agent is told and asks again; nothing moves to another browser on its own.
+- Each browser keeps its own consent: the agent is paired, and every site asks, separately in each
+  browser. Approving something in one browser never allows anything in another.
+
 ## The consent model
 
 | Site mode | Meaning | Use it for |
@@ -200,6 +216,8 @@ The agent sees these as `mcp__hallpass__<name>` in Claude Code.
 | `propose_sites` | Propose the sites a task will use; the owner approves once in the side panel, for this session only |
 | `gif_recorder` | Start, stop, export or clear a recording of the session |
 | `dialog` | Accept or dismiss an alert, confirm or prompt |
+| `list_browsers` / `select_browser` | List the browsers running Hallpass; select one by id when several are connected (remembered for the agent; pairing is still asked in that browser) |
+| `request_browser_choice` | Ask you to pick the browser from inside the browsers: each side panel asks *"Use this browser for …?"*, the first confirm selects it; waits up to 2 minutes |
 
 ## Testing
 

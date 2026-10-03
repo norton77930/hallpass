@@ -62,9 +62,15 @@ export type ScreenshotCache = {
    * Mint an id for a picture and keep the bytes if they fit. `retained: false` is the oversize
    * case: the id is issued anyway, so the answer can tell the agent why on the spot.
    */
-  issue(bytesBase64: string, mimeType: string): { imageId: string; retained: boolean };
-  /** Resolve an id. Does *not* remove it: one picture may go into two pages inside the window. */
-  take(imageId: string): ScreenshotTake;
+  issue(bytesBase64: string, mimeType: string, issuer?: string): { imageId: string; retained: boolean };
+  /**
+   * Resolve an id. Does *not* remove it: one picture may go into two pages inside the window.
+   *
+   * 018 (T507 M1, FR-275): `issuer` is the browser the picture was taken in and `requester` the
+   * browser asking. A picture asked for from another browser is `unknown` - never issued *there* -
+   * so a screenshot cannot travel into a page in a browser where the owner never let it be taken.
+   */
+  take(imageId: string, requester?: string): ScreenshotTake;
   /** Drop the bytes and the issued set together (R-180: link loss, reconnect, unpair). */
   clear(): void;
 };
@@ -117,6 +123,8 @@ export function createScreenshotCache(options: ScreenshotCacheOptions = {}): Scr
    * held; the two are one structure so a forgotten id cannot be remembered as gone by accident.
    */
   const issued = new Map<string, ScreenshotGoneReason | undefined>();
+  /** Which browser each id was issued under (018 T507 M1); forgotten exactly when the id is. */
+  const issuers = new Map<string, string>();
   let charsHeld = 0;
 
   function forget(imageId: string, why: ScreenshotGoneReason): void {
@@ -168,13 +176,17 @@ export function createScreenshotCache(options: ScreenshotCacheOptions = {}): Scr
         charsHeld -= entry.bytesBase64.length;
       }
       issued.delete(oldest.value);
+      issuers.delete(oldest.value);
     }
   }
 
   return {
-    issue(bytesBase64, mimeType) {
+    issue(bytesBase64, mimeType, issuer) {
       sweep();
       const imageId = mint();
+      if (issuer !== undefined) {
+        issuers.set(imageId, issuer);
+      }
       if (bytesBase64.length > retainLimit) {
         // Nothing is evicted for a picture that could not be kept even in an empty cache: the
         // session's other screenshots are not the reason this one does not fit.
@@ -194,8 +206,12 @@ export function createScreenshotCache(options: ScreenshotCacheOptions = {}): Scr
       return { imageId, retained: true };
     },
 
-    take(imageId) {
+    take(imageId, requester) {
       sweep();
+      const issuer = issuers.get(imageId);
+      if (requester !== undefined && issuer !== undefined && issuer !== requester) {
+        return { kind: "unknown" };
+      }
       const entry = held.get(imageId);
       if (entry !== undefined) {
         return { kind: "ok", file: { type: entry.mimeType, bytesBase64: entry.bytesBase64 } };
@@ -210,6 +226,7 @@ export function createScreenshotCache(options: ScreenshotCacheOptions = {}): Scr
     clear() {
       held.clear();
       issued.clear();
+      issuers.clear();
       charsHeld = 0;
     },
   };

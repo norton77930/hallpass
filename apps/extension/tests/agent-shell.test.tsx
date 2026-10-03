@@ -78,29 +78,6 @@ describe("T191 the shell derives its composition from the projection", () => {
     expect(details?.textContent).toContain("2026-09-13T01:02:03.000Z");
   });
 
-  /**
-   * Two browsers (2026-10-02): this browser's host stood aside because another browser on the
-   * computer is serving the agents. The owner is told that, and what to do - not "connection lost",
-   * which would send them restarting an agent that is working fine in the other browser. It wins
-   * over not-paired as well: pairing here would not help while the other browser has the bridge.
-   */
-  it("says another browser is serving, in both locales, when the host stood by", () => {
-    renderShell();
-    project(port, { ...IDLE, bridge: "standby" });
-
-    expect(shellState()).toBe("not-connected");
-    expect(screen.getByRole("heading", { name: ui("agent.standby.title") })).toBeTruthy();
-    expect(screen.getByText(ui("agent.standby.body"))).toBeTruthy();
-    expect(screen.queryByText(ui("agent.bridgeLost.title"))).toBeNull();
-
-    cleanup();
-    renderShell("zh-TW");
-    project(port, { ...NOT_PAIRED, bridge: "standby" });
-    expect(screen.getByRole("heading", { name: "另一個瀏覽器正在服務你的 agent" })).toBeTruthy();
-    expect(screen.getByText(/請關掉那一個/)).toBeTruthy();
-    expect(screen.queryByText("還沒有 agent 連上這個瀏覽器")).toBeNull();
-  });
-
   it("asks the worker to re-check the bridge on Retry", () => {
     renderShell();
     project(port, { ...NOT_PAIRED, bridge: "unavailable" });

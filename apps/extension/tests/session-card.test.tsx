@@ -775,6 +775,10 @@ describe("017 T484 session card site plan", () => {
 
     project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: [ORIGINS[0] as string] } }] });
     expect(only().querySelector("details.agent-session-site-plan summary")?.textContent).toBe("Site plan: 1 site");
+
+    // 017 follow-up: an IDN origin is listed in both forms.
+    project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: ["https://xn--r8jz45g.jp"] } }] });
+    expect(only().querySelector("details.agent-session-site-plan li")?.textContent).toBe("https://例え.jp (xn--r8jz45g.jp)");
   });
 
   it("withdraws the plan of exactly this session", () => {

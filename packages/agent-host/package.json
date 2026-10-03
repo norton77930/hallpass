@@ -18,6 +18,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "@hallpass/contracts": "0.0.0",
+    "@hallpass/domain": "0.0.0",
     "zod": "4.4.3"
   }
 }

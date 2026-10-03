@@ -53,6 +53,27 @@ export function bridgeOwnerFilePath(env: HostEnvironment = process.env): string 
 }
 
 /**
+ * Where each browser's relay writes its own record, `<browserId>.json` (018 R-266).
+ *
+ * A directory rather than one more file beside `bridge.json`, because there is one writer per
+ * browser now and N browsers: each relay owns exactly its own file, and a server lists the folder
+ * to see every connected browser. `bridge.json` stays where it is for servers older than 018 (R-277).
+ */
+export function browsersDirectory(env: HostEnvironment = process.env): string {
+  return join(hostDataDirectory(env), "browsers");
+}
+
+/**
+ * Where the browser each agent chose last is remembered, `<agentId>.json` (018 R-271, D-018-11).
+ *
+ * One file per agent so that a later key cannot lose another agent's update; the agent id is the
+ * per-Windows-user id `agentIdFilePath` holds, so every agent of one user shares the choice.
+ */
+export function browserChoicesDirectory(env: HostEnvironment = process.env): string {
+  return join(hostDataDirectory(env), "choices");
+}
+
+/**
  * The stable identity of *this machine's* agent installation.
  *
  * The owner pairs an agent once and expects the next session not to ask again (SC-020), so the id
@@ -61,4 +82,17 @@ export function bridgeOwnerFilePath(env: HostEnvironment = process.env): string 
  */
 export function agentIdFilePath(env: HostEnvironment = process.env): string {
   return join(hostDataDirectory(env), "agent-id");
+}
+
+/**
+ * Whether a name is one of Windows' reserved device names (018 T507 m4).
+ *
+ * `NUL.json`, `COM1.json` and their kin name the device, not a file in the folder - whatever the
+ * case, and whatever extension follows. An id that becomes a file name (an agent id in `choices/`, a
+ * browser id in `browsers/`) is refused as one, rather than read from or written to a device.
+ */
+const WINDOWS_DEVICE_NAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/iu;
+
+export function isWindowsDeviceName(name: string): boolean {
+  return WINDOWS_DEVICE_NAME.test(name);
 }

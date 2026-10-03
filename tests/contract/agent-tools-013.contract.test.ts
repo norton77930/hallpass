@@ -37,8 +37,8 @@ describe("T325 the upload_image tool", () => {
   it("joins the closed tool list and the batchable steps, beside file_upload", () => {
     const names = contractExport<readonly string[]>("AGENT_TOOL_NAMES");
     expect(names).toContain("upload_image");
-    // 017 adds the thirty-fourth, `propose_sites`.
-    expect(names).toHaveLength(34);
+    // 017 adds the thirty-fourth, `propose_sites`, and 018 the three browser tools.
+    expect(names).toHaveLength(37);
 
     // Parity with `file_upload` (R-181): putting a file into a page is one step of a batch, and
     // the two tools differ only in where the bytes came from.

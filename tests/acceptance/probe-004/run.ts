@@ -44,10 +44,10 @@ export async function probeMcpConfig(repositoryRoot: string): Promise<string> {
 /**
  * The owner's slice order from plan.md; `--all` means exactly this list, in this order.
  * S7 and S8 are feature 005's two scenarios (form values, downloads), run through this same harness;
- * S9 (recording) and S10 (dialogs) are feature 008's (T237). S12 (viewport) is feature 012's; S13 (upload_image) is feature 013's (T346); S14 (site transition) is feature 014's (T391); S17 (session site plan) is feature 017's (T492)
+ * S9 (recording) and S10 (dialogs) are feature 008's (T237). S12 (viewport) is feature 012's; S13 (upload_image) is feature 013's (T346); S14 (site transition) is feature 014's (T391); S17 (session site plan) is feature 017's (T492); S18 (two browsers) is feature 018's (T514)
  * (T322); 011 had no probe scenario of its own, so there is no S11.
  */
-export const PROBE_SLICES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S12", "S13", "S14", "S17"] as const;
+export const PROBE_SLICES = ["S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S12", "S13", "S14", "S17", "S18"] as const;
 
 export type ProbeSlice = (typeof PROBE_SLICES)[number];
 
@@ -56,11 +56,11 @@ export type ParsedArgs =
   | { ok: false; message: string };
 
 const USAGE = [
-  "usage: npm run probe:004 -- --slice <S0..S10, S12..S14, S17>",
+  "usage: npm run probe:004 -- --slice <S0..S10, S12..S14, S17, S18>",
   "       npm run probe:004 -- --all",
   "",
-  "  --slice <S0..S10, S12..S14, S17>  run one slice's acceptance scenarios",
-  "  --all             run every slice, in the order S0..S10, S12..S14, S17",
+  "  --slice <S0..S10, S12..S14, S17, S18>  run one slice's acceptance scenarios",
+  "  --all             run every slice, in the order S0..S10, S12..S14, S17, S18",
   "",
   "  --slice and --all are mutually exclusive; exactly one is required.",
 ].join("\n");

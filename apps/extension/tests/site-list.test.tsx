@@ -59,6 +59,18 @@ describe("T191 site list", () => {
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 
+  it("names an IDN site in both forms, and still revokes it by its ASCII origin (017 follow-up)", () => {
+    const idn = { site: "https://xn--r8jz45g.jp", mode: "ask" as const, diagnosticsGranted: false };
+    const shown = "https://例え.jp (xn--r8jz45g.jp)";
+    renderShell();
+    project(port, { ...IDLE, sites: [idn] });
+
+    const row = document.querySelector(`li[data-site="${idn.site}"]`) as HTMLElement;
+    expect(row.querySelector(".agent-site-name")?.textContent).toBe(shown);
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.siteRevoke").replace("{site}", shown) }));
+    expect(port.sent).toEqual([{ type: "ui.agent.site-clear", payload: { site: idn.site } }]);
+  });
+
   /**
    * 016/T445 — a site row that reads once (US3, FR-235 – FR-237, contracts/panel.md).
    *
@@ -161,6 +173,20 @@ describe("T191 site list", () => {
       { type: "ui.agent.transition-clear", payload: { from: pair.from, to: pair.to } },
     ]);
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  it("names IDN origins of a remembered pair in both forms, and revokes it by its ASCII origins (017 follow-up)", () => {
+    renderShell();
+    const pair = { from: "https://a.test", to: "https://xn--r8jz45g.jp", allowedAt: "2026-09-20T09:00:00.000Z" };
+    const shown = "https://例え.jp (xn--r8jz45g.jp)";
+    project(port, { ...IDLE, transitions: [pair] });
+
+    const row = document.querySelector(`[data-transition="${pair.from}→${pair.to}"]`) as HTMLElement;
+    expect(row.textContent).toContain(ui("agent.transitionRow").replace("{from}", pair.from).replace("{to}", shown));
+    fireEvent.click(
+      screen.getByRole("button", { name: ui("agent.transitionRevoke").replace("{from}", pair.from).replace("{to}", shown) }),
+    );
+    expect(port.sent).toEqual([{ type: "ui.agent.transition-clear", payload: { from: pair.from, to: pair.to } }]);
   });
 
   it("shows no remembered-decisions section when nothing is remembered", () => {

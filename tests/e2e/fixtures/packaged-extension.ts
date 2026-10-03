@@ -1,8 +1,8 @@
 import { chromium, test as base, type BrowserContext } from "@playwright/test";
-import { readBridgeRecord } from "@hallpass/agent-host";
-import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { hostDataDirectory, readBridgeRecord } from "@hallpass/agent-host";
+import { execFile, spawn } from "node:child_process";
+import { readdir, readFile, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   foreignAgentServersProblem,
@@ -22,6 +22,9 @@ type PackagedFixtures = {
   extensionContext: BrowserContext;
   extensionId: string;
   extensionWorker: PackagedWorker;
+  /** 018/T512: the second attached browser; only a spec that asks for these needs `HALLPASS_CDP_ENDPOINTS`. */
+  extensionContext2: BrowserContext;
+  extensionWorker2: PackagedWorker;
 };
 
 /**
@@ -40,7 +43,21 @@ const locale = process.env.HALLPASS_LOCALE === "zh-TW" ? "zh-TW" : "en-US";
  * The browser decides its own UI language, so `HALLPASS_LOCALE` must match the `--lang` it was started
  * with - the panel copy the driver asserts comes from `chrome.i18n`, not from this process.
  */
-const cdpEndpoint = process.env.HALLPASS_CDP_ENDPOINT;
+/**
+ * 018/T512: `HALLPASS_CDP_ENDPOINTS` is a comma-separated list of two attached browsers (for the
+ * two-browser gate). The first is the one every fixture above already means; the second is reached
+ * only through `extensionContext2` / `extensionWorker2`. With the list unset (or one entry) nothing
+ * here differs from the single-endpoint gate.
+ */
+const cdpEndpointList = (process.env.HALLPASS_CDP_ENDPOINTS ?? "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter((entry) => entry.length > 0);
+const cdpEndpoint = process.env.HALLPASS_CDP_ENDPOINT ?? cdpEndpointList[0];
+/** The second attached browser's endpoint, or `undefined` for a run with one browser. */
+export const secondCdpEndpoint: string | undefined = cdpEndpointList.length >= 2 ? cdpEndpointList[1] : undefined;
+/** The first attached browser's endpoint (what `extensionContext` is attached to), if any. */
+export const firstCdpEndpoint: string | undefined = cdpEndpoint;
 
 type CdpTarget = { id: string; type: string; url: string; webSocketDebuggerUrl?: string };
 type CdpEvaluation = { result?: { value?: unknown }; exceptionDetails?: unknown };
@@ -370,8 +387,20 @@ async function printBridgeDisconnects(endpoint: string): Promise<void> {
   }
 }
 
-/** One check per gate process: the build cannot change under a run that is already going. */
-let attachedBuildCheck: Promise<void> | undefined;
+/** One check per endpoint per gate process: the build cannot change under a run that is already going. */
+const attachedBuildChecks = new Map<string, Promise<void>>();
+let foreignServersCheck: Promise<void> | undefined;
+
+async function assertAttachedEndpointReady(endpoint: string): Promise<void> {
+  foreignServersCheck ??= assertNoForeignAgentServers();
+  await foreignServersCheck;
+  let check = attachedBuildChecks.get(endpoint);
+  if (!check) {
+    check = assertAttachedBuildIsCurrent(endpoint);
+    attachedBuildChecks.set(endpoint, check);
+  }
+  await check;
+}
 
 /**
  * The launched gate gives every test a fresh profile. An attached browser keeps its state, so each
@@ -420,6 +449,19 @@ async function resetAttachedBrowser(context: BrowserContext, endpoint: string): 
   }
   for (const page of context.pages()) {
     if (page !== keep) await page.close().catch(() => undefined);
+  }
+  if (secondCdpEndpoint) {
+    // 018/T512: a two-browser gate counts tabs per browser, so it starts from one blank tab. Pages
+    // the attachment does not list (another window's tabs, an agent's leftovers) go by their target.
+    const session = await context.newCDPSession(keep);
+    const keepId = ((await session.send("Target.getTargetInfo")) as { targetInfo: { targetId: string } }).targetInfo
+      .targetId;
+    await session.detach().catch(() => undefined);
+    for (const target of await listTargets(endpoint)) {
+      if (target.type === "page" && target.id !== keepId && !target.url.startsWith(prefix)) {
+        await browserSend(endpoint, "Target.closeTarget", { targetId: target.id }).catch(() => undefined);
+      }
+    }
   }
 }
 
@@ -478,25 +520,35 @@ async function attachCdpWorker(context: BrowserContext, endpoint: string): Promi
   };
 }
 
+/** Attaches to one running browser for the length of a test, after putting it back to a clean start. */
+async function withAttachedContext(endpoint: string, use: (context: BrowserContext) => Promise<void>): Promise<void> {
+  // 018/T512: a two-browser test that closed this browser and could not start it again must not
+  // take every later test with it; when the runner said how to start it, start it here.
+  if (secondCdpEndpoint && !(await endpointAnswers(endpoint)) && relaunchProblem(endpoint) === undefined) {
+    await launchBrowserProcess(endpoint);
+  }
+  await assertAttachedEndpointReady(endpoint);
+  const browser = await chromium.connectOverCDP(endpoint);
+  const context = browser.contexts()[0];
+  if (!context) throw new Error("cdp-default-context-missing");
+  await resetAttachedBrowser(context, endpoint);
+  try {
+    await use(context);
+  } finally {
+    // 004/T169: what the worker recorded about its native port closing during this test, printed
+    // before the next test's reset wipes it. The agent build has no console of its own, and the
+    // family's intermittent reds are a port that closes while its host is still alive.
+    await printBridgeDisconnects(endpoint);
+    // The owner's browser stays open; only this attachment ends. (A browser the test itself closed
+    // leaves a dead connection here, which has nothing left to end.)
+    await browser.close().catch(() => undefined);
+  }
+}
+
 export const test = base.extend<PackagedFixtures>({
   extensionContext: async ({}, use) => {
     if (cdpEndpoint) {
-      attachedBuildCheck ??= assertNoForeignAgentServers().then(() => assertAttachedBuildIsCurrent(cdpEndpoint));
-      await attachedBuildCheck;
-      const browser = await chromium.connectOverCDP(cdpEndpoint);
-      const context = browser.contexts()[0];
-      if (!context) throw new Error("cdp-default-context-missing");
-      await resetAttachedBrowser(context, cdpEndpoint);
-      try {
-        await use(context);
-      } finally {
-        // 004/T169: what the worker recorded about its native port closing during this test, printed
-        // before the next test's reset wipes it. The agent build has no console of its own, and the
-        // family's intermittent reds are a port that closes while its host is still alive.
-        await printBridgeDisconnects(cdpEndpoint);
-        // The owner's browser stays open; only this attachment ends.
-        await browser.close();
-      }
+      await withAttachedContext(cdpEndpoint, use);
       return;
     }
     const context = await chromium.launchPersistentContext("", {
@@ -519,7 +571,9 @@ export const test = base.extend<PackagedFixtures>({
   extensionWorker: async ({ extensionContext }, use) => {
     if (cdpEndpoint) {
       const worker = await attachCdpWorker(extensionContext, cdpEndpoint);
-      await awaitStableBridge(worker);
+      // With two browsers the legacy `bridge.json` belongs to at most one of them, so "stable" is
+      // read from the per-browser records instead (018).
+      await (secondCdpEndpoint ? awaitStableBrowserRecord(worker) : awaitStableBridge(worker));
       await use(worker);
       return;
     }
@@ -533,6 +587,20 @@ export const test = base.extend<PackagedFixtures>({
   extensionId: async ({ extensionWorker }, use) => {
     const id = new URL(extensionWorker.url()).host;
     await use(id);
+  },
+  extensionContext2: async ({}, use) => {
+    if (!secondCdpEndpoint) {
+      throw new Error(
+        "second-browser-missing: set HALLPASS_CDP_ENDPOINTS=<first endpoint>,<second endpoint> (two attached browsers)",
+      );
+    }
+    await withAttachedContext(secondCdpEndpoint, use);
+  },
+  extensionWorker2: async ({ extensionContext2 }, use) => {
+    if (!secondCdpEndpoint) throw new Error("second-browser-missing");
+    const worker = await attachCdpWorker(extensionContext2, secondCdpEndpoint);
+    await awaitStableBrowserRecord(worker);
+    await use(worker);
   },
 });
 
@@ -556,4 +624,213 @@ export async function setTransitionTestSwitch(worker: PackagedWorker, on: boolea
     }
     await chrome.storage.local.remove("agentTransitionsTestNoLoopbackExemption");
   }, on);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * 018/T512 - what a two-browser gate needs beyond the fixtures above. Everything here reads the
+ * host's own files under the shared `LOCALAPPDATA` (the runner's) or drives a browser's DevTools
+ * endpoint; nothing imports a private module of the product.
+ * ------------------------------------------------------------------------------------------- */
+
+/** One browser's published record, reduced to what a gate can say about it. */
+export type LiveBrowserRecord = { browserId: string; relayPid: number };
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists and this user may not signal it - still a running relay.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** `hallpass\browsers\*.json` whose relay is still running: the browsers an agent could be offered. */
+export async function readLiveBrowserRecords(): Promise<LiveBrowserRecord[]> {
+  const directory = join(hostDataDirectory(), "browsers");
+  const names = await readdir(directory).catch(() => [] as string[]);
+  const live: LiveBrowserRecord[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const parsed = JSON.parse(await readFile(join(directory, name), "utf8")) as {
+        browserId?: unknown;
+        relayPid?: unknown;
+      };
+      if (typeof parsed.browserId === "string" && typeof parsed.relayPid === "number" && processAlive(parsed.relayPid)) {
+        live.push({ browserId: parsed.browserId, relayPid: parsed.relayPid });
+      }
+    } catch {
+      // A record being rewritten (temp-then-rename) or not a record: not a browser right now.
+    }
+  }
+  return live;
+}
+
+/** The remembered browser choices are per agent and outlive a test, so a gate clears them first. */
+export async function clearBrowserChoices(): Promise<void> {
+  await rm(join(hostDataDirectory(), "choices"), { recursive: true, force: true });
+}
+
+async function greetedRelayPid(worker: PackagedWorker): Promise<number | undefined> {
+  return worker
+    .evaluate(async () => {
+      const raw = await chrome.storage.session.get(["agentBridgeGreetings"]);
+      const ring = (raw.agentBridgeGreetings ?? []) as Array<{ relay?: number }>;
+      return ring[ring.length - 1]?.relay;
+    })
+    .catch(() => undefined);
+}
+
+/**
+ * The two-browser form of `awaitStableBridge`: the relay that last greeted this worker has a live
+ * per-browser record, and has had it for two seconds. Bounded, and reported rather than waited on.
+ */
+async function awaitStableBrowserRecord(worker: PackagedWorker): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  let stableSince: number | undefined;
+  let lastPid: number | undefined;
+  while (Date.now() < deadline) {
+    const pid = await greetedRelayPid(worker);
+    const published = pid !== undefined && (await readLiveBrowserRecords()).some((record) => record.relayPid === pid);
+    if (published && pid === lastPid) {
+      stableSince ??= Date.now();
+      if (Date.now() - stableSince >= 2_000) return;
+    } else {
+      stableSince = undefined;
+    }
+    lastPid = pid;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  console.log(`[browser-record-unstable] relay ${lastPid ?? "none"} did not settle within the bound; running anyway`);
+}
+
+/** The browser id this worker's relay published under - how a gate maps "browser A" to an identifier. */
+export async function browserIdOfWorker(worker: PackagedWorker, timeoutMs = 15_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pid = await greetedRelayPid(worker);
+    const record =
+      pid === undefined ? undefined : (await readLiveBrowserRecords()).find((entry) => entry.relayPid === pid);
+    if (record) return record.browserId;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("browser-id-of-worker-missing: no live per-browser record for the relay that greeted this worker");
+}
+
+/**
+ * "A browser goes away and comes back" for a gate that attached to it (018 US5, SC-131).
+ *
+ * Unloading the extension in place does not do: `runtime.reload()` on a CDP-loaded extension leaves
+ * it unloaded and `Extensions.loadUnpacked` did not bring it back on Chromium 151 (measured
+ * 2026-10-03). What does keep the profile - and so the browser's identity, which lives in the
+ * extension's `storage.local` - is closing the whole browser through CDP and starting the same
+ * executable again on the same `--user-data-dir` and port, with the extension loaded the way a
+ * launched gate loads it (`--load-extension`). The runner says how in its environment:
+ *
+ *   HALLPASS_GATE_CHROME            the browser executable (the one the gate's browsers run)
+ *   HALLPASS_GATE_PROFILE_<port>    that port's `--user-data-dir`   (e.g. HALLPASS_GATE_PROFILE_9223)
+ *   HALLPASS_GATE_CHROME_ARGS       optional, space-separated extra flags (`--no-sandbox`, `--headless=new`,
+ *                                   `--lang=en-US`, ...) so the relaunch matches the original launch
+ *
+ * The relaunched browser inherits the runner's environment, so it shares the runner's private
+ * `LOCALAPPDATA` like the original did. It is started detached and left running for the next test.
+ */
+function relaunchSettings(
+  endpoint: string,
+): { executable: string; profile: string; port: string; extraArgs: string[] } | { problem: string } {
+  const port = new URL(endpoint).port;
+  const executable = process.env.HALLPASS_GATE_CHROME;
+  const profile = process.env[`HALLPASS_GATE_PROFILE_${port}`];
+  if (!executable) return { problem: "HALLPASS_GATE_CHROME (the browser executable) is not set" };
+  if (!profile) return { problem: `HALLPASS_GATE_PROFILE_${port} (that browser's --user-data-dir) is not set` };
+  const extraArgs = (process.env.HALLPASS_GATE_CHROME_ARGS ?? "").split(/\s+/u).filter((arg) => arg.length > 0);
+  return { executable, profile, port, extraArgs };
+}
+
+/** `undefined` when a closed browser at `endpoint` can be started again; otherwise what is missing. */
+export function relaunchProblem(endpoint: string | undefined): string | undefined {
+  if (!endpoint) return "no endpoint";
+  const settings = relaunchSettings(endpoint);
+  return "problem" in settings ? settings.problem : undefined;
+}
+
+async function endpointAnswers(endpoint: string): Promise<boolean> {
+  try {
+    return (await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(2_000) })).ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Starts the browser behind `endpoint` (see above) and resolves once its DevTools endpoint answers. */
+async function launchBrowserProcess(endpoint: string): Promise<void> {
+  const settings = relaunchSettings(endpoint);
+  if ("problem" in settings) throw new Error(`browser-relaunch-unconfigured: ${settings.problem}`);
+  // A profile lock the old process still holds makes a start hand off and exit; so, a few tries.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const child = spawn(
+      settings.executable,
+      [
+        `--remote-debugging-port=${settings.port}`,
+        `--user-data-dir=${settings.profile}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--enable-unsafe-extension-debugging",
+        `--disable-extensions-except=${extensionPath}`,
+        `--load-extension=${extensionPath}`,
+        "--disable-features=LocalNetworkAccessChecks",
+        ...settings.extraArgs,
+        "about:blank",
+      ],
+      { detached: true, stdio: "ignore", env: process.env },
+    );
+    child.unref();
+    let exited = false;
+    child.once("exit", () => {
+      exited = true;
+    });
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline && !exited) {
+      if (await endpointAnswers(endpoint)) return;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (await endpointAnswers(endpoint)) return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error(`browser-relaunch-failed: ${endpoint} did not answer after three starts of ${settings.executable}`);
+}
+
+/** Closes the whole browser behind `endpoint` through CDP; resolves once its endpoint stops answering. */
+export async function closeAttachedBrowser(endpoint: string): Promise<void> {
+  // The browser may drop the socket before it answers; what matters is that the endpoint goes quiet.
+  await browserSend(endpoint, "Browser.close", {}).catch(() => undefined);
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (!(await endpointAnswers(endpoint))) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`browser-close-failed: ${endpoint} still answers 30 s after Browser.close`);
+}
+
+/** A browser started again on its old profile, attached, with no reset (a reset would clear its identity). */
+export type RelaunchedBrowser = {
+  context: BrowserContext;
+  worker: PackagedWorker;
+  /** Ends this attachment only; the browser keeps running for the next test. */
+  detach(): Promise<void>;
+};
+
+/**
+ * Starts the browser closed by `closeAttachedBrowser` again, attaches to it, and returns its context
+ * and a handle on the extension's new worker once its relay has published.
+ */
+export async function relaunchAttachedBrowser(endpoint: string): Promise<RelaunchedBrowser> {
+  await launchBrowserProcess(endpoint);
+  const browser = await chromium.connectOverCDP(endpoint);
+  const context = browser.contexts()[0];
+  if (!context) throw new Error("cdp-default-context-missing");
+  const worker = await attachCdpWorker(context, endpoint);
+  await awaitStableBrowserRecord(worker);
+  return { context, worker, detach: () => browser.close().catch(() => undefined) };
 }

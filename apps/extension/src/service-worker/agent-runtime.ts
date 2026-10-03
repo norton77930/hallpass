@@ -85,6 +85,10 @@ import { createRecorder, sessionRecordingStore, type AgentRecorder } from "./rec
 import { createWindowRestorer, sessionWindowRestoreStore } from "./window-restore.js";
 import { createViewportEmulation, sessionViewportStore } from "./viewport-emulation.js";
 import { sessionBrowserRun } from "./browser-run.js";
+import { localBrowserIdentity } from "./browser-identity.js";
+import { createBrowserChoiceController, type BrowserChoiceWaitingTick } from "./browser-choice-controller.js";
+import { normalizeBrowserName } from "../browser-name.js";
+import { defaultBrowserNames } from "@hallpass/domain";
 import { createAgentStopSignals, STEP_SEPARATOR, type AgentToolRequest } from "./agent-tools/stop.js";
 import { createAgentTabTools } from "./agent-tools/tabs.js";
 import { createAgentUpload } from "./agent-tools/upload.js";
@@ -427,6 +431,17 @@ export type AgentRuntime = {
    */
   clearUploadRoot: (root: string) => Promise<void>;
   /**
+   * The panel's rename of this browser (018 FR-268). Control characters stripped, trimmed, 1-40
+   * characters or refused; stored, then sent to the relay. The owner's path only - no agent tool
+   * reaches it.
+   */
+  renameBrowser: (name: string) => Promise<void>;
+  /**
+   * The owner's answer on the "Use this browser?" card (018 FR-274): sent back on the choose link
+   * once. False, and nothing sent, for a request that was withdrawn, expired or never raised.
+   */
+  decideBrowserChoice: (requestId: string, confirm: boolean) => boolean;
+  /**
    * The session card's Stop (006 FR-087): the session ends the way a relay-named stop ends it, and
    * its in-flight `wait` or batch answers `owner-stopped` through the stops registry it is watching.
    */
@@ -539,7 +554,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   function refreshAttention(): void {
     const next = deriveAttention({
       pairingPending,
-      promptPending: prompts.currentSession() !== undefined,
+      // 018 FR-274: the choice card is a question like any other to the person behind the icon.
+      promptPending: prompts.currentSession() !== undefined || choices.current() !== undefined,
       panelConnected: panelConnected(),
     });
     // Only on a change: the derivation runs on every prompt, every pairing event and every panel
@@ -551,7 +567,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   }
 
   /** One "still waiting", addressed and put on the wire (011 FR-148). */
-  function sendWaiting(tick: PromptWaitingTick | PairingWaitingTick): void {
+  function sendWaiting(tick: PromptWaitingTick | PairingWaitingTick | BrowserChoiceWaitingTick): void {
     bridge.sendWaiting({
       type: "prompt-waiting",
       sessionId: tick.sessionId,
@@ -647,6 +663,27 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     panelPresence: panelConnected,
     onWaiting: sendWaiting,
   });
+  /**
+   * 018 FR-274, R-273: the "Use this browser?" card, beside the pairing card rather than in the
+   * prompt slot - it holds no tool call, so it never makes another question `busy`; the panel puts
+   * it in the one question place by `raisedAt` (R-247).
+   */
+  const choices = createBrowserChoiceController({
+    send: (sessionId, requestId, decision) => bridge.sendBrowserChoiceResult(sessionId, requestId, decision),
+    onChange() {
+      refreshAttention();
+      notify();
+    },
+    panelPresence: panelConnected,
+    onWaiting: sendWaiting,
+    reportDiagnostic: reportTestDiagnostic,
+  });
+  /**
+   * The choose-only links (`hello.intent: "choose"`, R-279) this worker has been greeted by. Not
+   * sessions: nothing is registered, persisted or grouped for them; membership only lets the link
+   * carry choice frames, and goes when the link ends or the relay does.
+   */
+  const chooseLinks = new Set<string>();
   const bindings = createAgentPageBindings();
   /**
    * The two pieces of state a call can outlive a round trip with (US5): the batch the owner
@@ -679,6 +716,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       reportTestDiagnostic("agent.site-plan.read-failed");
       return false;
     }
+  }
+  /**
+   * The plan as the panel and the next proposal see it (017 review M1, FR-259/FR-260): the same
+   * agent check `sitePlanCovers` makes, so a card never shows - and a replacing proposal never
+   * marks as already approved - a plan the gate would not honour. Withdraw and the clears read
+   * the store raw: a plan stored for another agent must still be removable.
+   */
+  async function planOf(sessionId: string): Promise<Awaited<ReturnType<typeof sitePlanStore.forSession>>> {
+    const agentId = sessions.get(sessionId)?.agentId;
+    if (agentId === undefined) return undefined;
+    const plan = await sitePlanStore.forSession(sessionId);
+    return plan?.agentId === agentId ? plan : undefined;
   }
   /** A session's plan is over (it ended, or its agent was unpaired). Never throws: ending goes on. */
   async function endSitePlans(sessionIds: readonly string[]): Promise<void> {
@@ -1727,7 +1776,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     const before = await refusal();
     if (before) return before;
     // Read before the write, so the card's line says whether this replaced a plan (FR-263).
-    const earlier = await sitePlanStore.forSession(sessionId).catch(() => undefined);
+    const earlier = await planOf(sessionId).catch(() => undefined);
     // `refusal` has just seen the session live; its agent is what an unpair clears the plan by.
     const agentId = sessions.get(sessionId)?.agentId ?? "";
     try {
@@ -1758,7 +1807,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   /** `propose_sites` (017 R-248): not a batch step, and the only runner that answers `declined`. */
   const sitePlanRunner = createAgentSitePlanRunner({
     prompts,
-    activePlan: async (sessionId) => (await sitePlanStore.forSession(sessionId))?.origins,
+    activePlan: async (sessionId) => (await planOf(sessionId))?.origins,
     approve: approveSitePlan,
   });
 
@@ -1945,6 +1994,13 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
 
   /** This worker's view of which browser run it belongs to (013/R-184); read once, on first ask. */
   const browserRun = sessionBrowserRun();
+  /** Who this browser is (018 R-268): one instance, so the id is read or minted once per worker. */
+  const browserIdentity = localBrowserIdentity();
+  /**
+   * The relay's last word on the other browsers (018 `browser-peers`), for the panel's row. In
+   * memory only and dropped with the link: a count nobody has confirmed since is not one to show.
+   */
+  let browserPeers: { others: number; defaultName: string } | undefined;
 
   /**
    * The owner's upload directories, as the relay last reported them (014 FR-194).
@@ -2102,6 +2158,32 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     notify();
   }
 
+  /**
+   * "This browser" for the panel (018 FR-268, FR-279): the owner's name or the default, and how
+   * many other browsers the relay counted. Before the relay has reported peers the default is this
+   * browser's kind alone and the others are not claimed (0, so the panel shows no others row).
+   * Absent when there is no identity to name - no storage, or a read that failed.
+   */
+  async function browserProjection(): Promise<Pick<AgentPanelState, "browser">> {
+    const identity = await browserIdentity.read().catch(() => {
+      reportTestDiagnostic("agent.browser.identity-unreadable");
+      return undefined;
+    });
+    if (identity === undefined) return {};
+    const defaultName =
+      browserPeers?.defaultName ??
+      defaultBrowserNames([{ browserId: identity.browserId, kind: identity.kind, startedAt: "" }]).get(identity.browserId) ??
+      "Browser";
+    return {
+      browser: {
+        name: identity.name ?? defaultName,
+        defaultName,
+        kind: identity.kind,
+        others: browserPeers?.others ?? 0,
+      },
+    };
+  }
+
   const bridge = createAgentBridge({
     connectNative: options.connectNative ?? connectAgentNativeHost,
     ...(options.disconnectReason === undefined ? {} : { disconnectReason: options.disconnectReason }),
@@ -2121,6 +2203,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
      * the ones already running, never in place of them (D-M3-3).
      */
     onSessionAnnounced(announcement) {
+      if (announcement.intent === "choose") {
+        // 018 R-273, R-279: a choose-only link, not a session - no card, no record, no tab group,
+        // no reconciliation entry. It may only carry choice frames from here on.
+        chooseLinks.add(announcement.sessionId);
+        return;
+      }
       const known = sessions.get(announcement.sessionId);
       const helloAt = new Date().toISOString();
       if (known) {
@@ -2183,6 +2271,21 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     onPairWithdraw({ agentId, sessionId, requestId }) {
       pairing.withdraw(agentId, sessionId, requestId);
     },
+    /**
+     * 018 FR-274: "Use this browser for <agent>?". Only on a link that greeted as a choose link: an
+     * ordinary session, or one this worker never heard, cannot raise it. The name is the agent's
+     * own and is shown as inert text.
+     */
+    onBrowserChoiceRequest(request) {
+      if (!chooseLinks.has(request.sessionId)) {
+        reportTestDiagnostic("agent.browser-choice.not-a-choose-link");
+        return;
+      }
+      choices.raise(request);
+    },
+    onBrowserChoiceWithdraw({ sessionId, requestId }) {
+      choices.withdraw(sessionId, requestId);
+    },
     // 017 R-248, R-251: `propose_sites` is dispatched to `sitePlanRunner` above, so the host may send it.
     sitePlans: true,
     /**
@@ -2194,6 +2297,19 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
      * whether the screenshots it is holding for this session are still this browser's.
      */
     browserRunId: () => browserRun.id(),
+    /** 018 R-268, R-276: the identity on every ack, and its re-mint on a conflict. */
+    browserIdentity: {
+      read: () => browserIdentity.read(),
+      async remint() {
+        const reminted = await browserIdentity.remint();
+        notify();
+        return reminted;
+      },
+    },
+    onBrowserPeers(peers) {
+      browserPeers = peers;
+      notify();
+    },
     callTool: handleToolCall,
     onStop(frame) {
       if (frame.callId !== undefined) {
@@ -2241,6 +2357,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     onSessionEnded(ended) {
       // The relay saw one server's socket close. That server's session is over and no other is:
       // 003 released "the" session here, which with several live released the wrong agent's tabs.
+      if (chooseLinks.delete(ended)) {
+        // 018: a choose link ending takes its card with it; there was no session to release.
+        choices.endSession(ended);
+        return;
+      }
       if (!sessions.has(ended)) {
         reportTestDiagnostic("agent.session.end-unknown");
         return;
@@ -2252,6 +2373,14 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // Kept only when the greeting named one: a relay from before the field must not blank a
       // path its predecessor gave, which is still where the record is.
       if (recordPath !== undefined) lastRecordPath = recordPath;
+      // 018 (T515 m2): a fresh relay carries no choose links by construction. A same-browser
+      // handoff keeps the status "connected" and the superseded relay sends no session-ended, so
+      // its links and their card end here; a press now could reach nobody.
+      if (chooseLinks.size > 0 || choices.current() !== undefined) {
+        chooseLinks.clear();
+        choices.clear();
+        notify();
+      }
       // The greeting side of the T169 ring: which worker instance was greeted by which host. Two
       // instance ids greeted inside one test is the two-instances shape; one id with a new host
       // pid is a drop and re-open.
@@ -2332,6 +2461,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         // afterwards would run an effect for nobody. Both questions end here.
         prompts.cancel();
         void pairing.abandonPending();
+        // 018: the relay that counted the other browsers is gone; the next one counts again.
+        browserPeers = undefined;
+        // And the choose links it carried, with their cards: a press now could reach nobody.
+        chooseLinks.clear();
+        choices.clear();
       }
       options.onStatusChange?.(status);
       notify();
@@ -2380,7 +2514,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         // is the same after a worker restart. A session with no record yet shows none of it.
         const identity = await tabs.identity(id).catch(() => undefined);
         // 017 FR-259: the plan the card shows is the one the gate reads, from the same store.
-        const sitePlan = await sitePlanStore.forSession(id).catch(() => undefined);
+        const sitePlan = await planOf(id).catch(() => undefined);
         live.push({
           sessionId: id,
           agentId: session.agentId,
@@ -2427,6 +2561,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       const plan = prompts.currentPlan();
       // 017 R-247: the site-plan proposal awaiting the owner, present only while it is asked.
       const sitePlanQuestion = prompts.currentSitePlan();
+      // 018 FR-274: the earliest "Use this browser?" request still standing.
+      const browserChoice = choices.current();
       /**
        * The sites the owner has decided about, plus the ones the session's tabs are actually on.
        *
@@ -2505,6 +2641,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         ...(prompt ? { prompt } : {}),
         ...(plan ? { plan } : {}),
         ...(sitePlanQuestion ? { sitePlan: sitePlanQuestion } : {}),
+        ...(browserChoice ? { browserChoice } : {}),
+        ...(await browserProjection()),
         bridge: bridge.status(),
         ...(agentName === undefined ? {} : { agentName }),
         // The owner's remembered moves (014 FR-191), for the site list's own section. Always
@@ -2538,6 +2676,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       presence.onPresenceChange(() => {
         pairing.panelPresenceChanged();
         prompts.panelPresenceChanged();
+        choices.panelPresenceChanged();
         refreshAttention();
       });
     },
@@ -2705,6 +2844,26 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     async clearTransition(from: string, to: string): Promise<void> {
       await queueTransition(() => transitionStore.forget(from, to));
       notify();
+    },
+    async renameBrowser(raw: string): Promise<void> {
+      // 018 T501: the worker is the authority on the name - the panel's command only bounds its
+      // length - so what is stored and sent always fits the relay's schema.
+      const name = normalizeBrowserName(raw);
+      if (name === undefined) {
+        reportTestDiagnostic("agent.browser.rename-refused");
+        return;
+      }
+      const renamed = await browserIdentity.rename(name).catch(() => undefined);
+      if (renamed === undefined) {
+        reportTestDiagnostic("agent.browser.rename-failed");
+        return;
+      }
+      // Lost with no link, which costs nothing: the next ack carries the stored name.
+      bridge.sendBrowserName(name);
+      notify();
+    },
+    decideBrowserChoice(requestId: string, confirm: boolean): boolean {
+      return choices.decide(requestId, confirm);
     },
     async clearUploadRoot(root: string): Promise<void> {
       // Remembered before it is sent: a link that drops in this moment is exactly the case the

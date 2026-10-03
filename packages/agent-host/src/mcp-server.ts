@@ -11,11 +11,14 @@ import {
   agentNativeResponseSchema,
   agentToolArgSchemas,
   agentUploadImageRequestSchema,
+  AGENT_BROWSER_CHOICE_BOUND_MS,
   promptWaitingFrameSchema,
   AGENT_015_REASON_OUTCOMES,
+  AGENT_LINK_PROTOCOL,
   AGENT_TOOL_DESCRIPTORS,
   AGENT_UPLOAD_MAX_BASE64_CHARS,
   ATTENTION_SENTENCES,
+  BROWSER_REFUSAL_HINTS,
   INTERRUPT_HINTS,
   PAIRING_DECLINED_MARKER,
   PAIRING_REFUSAL_HINTS,
@@ -23,13 +26,28 @@ import {
   SITE_PLAN_UNAVAILABLE,
   UPLOAD_HINTS,
   isRootDirectory,
+  type AgentBrowserSummary,
   type AgentNativeResponse,
   type AgentToolName,
   type PromptWaitingFrame,
 } from "@hallpass/contracts";
-import { dialRelay, DIAL_RETRY_MS, readBridgeRecord, type RelayDial } from "./bridge-link.js";
+import { dialRelay, DIAL_RETRY_MS, type BridgeRecord, type RelayDial } from "./bridge-link.js";
 import { IMPLEMENTED_AGENT_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "./tool-offering.js";
 import { agentIdFilePath, hostDataDirectory } from "./host-paths.js";
+import { browserSummaries, listConnectedBrowsers, type ConnectedBrowser } from "./browser-directory.js";
+import { readBrowserChoice, writeBrowserChoice } from "./browser-choice-store.js";
+import {
+  BROWSER_CHOICE_BOUND_ENV,
+  BROWSER_CHOICE_HINTS,
+  BROWSER_CHOICE_PROGRESS_MESSAGE,
+  BROWSER_CHOICE_SLACK_MS,
+  canShowBrowserChoice,
+  requestBrowserChoice,
+  type BrowserChoiceRequest,
+  type ChoiceLink,
+  type ChoiceLinkHandlers,
+} from "./browser-choice-coordinator.js";
+import { resolveBrowser, type BrowserResolution } from "./resolve-browser.js";
 import { CallRouter, KEEP_ALIVE_CAP_MS } from "./router.js";
 import { createScreenshotCache, SCREENSHOT_UPLOAD_SENTENCES } from "./screenshot-cache.js";
 import { readUploadConfig, resolveUploadFiles, type UploadCandidate } from "./upload-policy.js";
@@ -524,30 +542,108 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
   });
 
   /**
-   * The browser run the cache was filled under, and whether the link has dropped since it was last
-   * confirmed (013/R-184, FR-168).
+   * One browser's link and everything this session knows only about that browser (018 R-272,
+   * FR-275, D-018-14).
    *
-   * The worker mints one id per browser start and keeps it in `chrome.storage.session`, so it
-   * survives a worker recycling and dies with the browser; it arrives on every pairing answer.
-   * These two variables are what turn that id into the retention rule: a run that came back the
-   * same means only the port went away and the pictures stay, a run that changed means the browser
-   * restarted and they go, and a worker that names no run at all leaves S1's answer standing - the
-   * pictures go with the link - because nothing else can tell those two apart.
+   * Until 018 these were singletons of the session, because a session had one browser. Each of them
+   * is a statement about *one* browser - its owner's pairing answer, what its worker can be asked,
+   * which run of it the pictures were taken under, which calls are on its socket - so carried over
+   * to another browser a pairing given in Chrome would admit calls in Edge, which is exactly what
+   * FR-275 forbids. A browser the session moves to therefore starts from nothing and asks for
+   * pairing again. One object lives for as long as the session uses that browser, across its worker
+   * recycling; it is closed when the session has moved off it and its calls are answered.
    */
-  let browserRun: string | undefined;
-  let linkDroppedSincePairing = false;
-
-  /**
-   * What the worker on the other end says it can be asked (014/R-187 §1).
-   *
-   * Read from every pairing answer, which the first call on every established link asks for and
-   * waits on (004 FR-059a), so a browser that was upgraded - or downgraded - between two calls is
-   * taken at its latest word before the call that could ask it anything. A
-   * worker that advertises nothing is a 0.5.0 extension, and the host must not send it a frame it
-   * would drop as unknown: the call would then hang on this side's bound for a question nobody was
-   * ever asked.
-   */
-  let workerFeatures = new Set<string>();
+  type BrowserLink = {
+    readonly browser: AgentBrowserSummary;
+    /** The dial loop towards this browser's relay; its target is this browser's entry alone (R-278). */
+    dial: RelayDial | undefined;
+    /** Whether this browser's relay has acknowledged the greeting on the current socket. */
+    attached: boolean;
+    /** Calls that arrived before this link was up, waiting to be told it is (T094b). */
+    readonly attachWaiters: Set<() => void>;
+    /**
+     * This link's calls alone (R-272): a drop, the worker's `stop` and the backstop's `stop` reach the
+     * calls this socket carried and no other, so a call is always ended on the browser it ran in.
+     */
+    readonly router: CallRouter;
+    /** The directory questions this link is holding, by the call each belongs to (014 FR-193). */
+    readonly uploadConsents: Map<string, (answer: UploadConsentAnswer) => void>;
+    /**
+     * The browser run the cache was filled under, and whether the link has dropped since it was last
+     * confirmed (013/R-184, FR-168).
+     *
+     * The worker mints one id per browser start and keeps it in `chrome.storage.session`, so it
+     * survives a worker recycling and dies with the browser; it arrives on every pairing answer.
+     * These two fields are what turn that id into the retention rule: a run that came back the
+     * same means only the port went away and the pictures stay, a run that changed means the browser
+     * restarted and they go, and a worker that names no run at all leaves S1's answer standing - the
+     * pictures go with the link - because nothing else can tell those two apart.
+     */
+    browserRun: string | undefined;
+    linkDroppedSincePairing: boolean;
+    /**
+     * What the worker on the other end says it can be asked (014/R-187 §1).
+     *
+     * Read from every pairing answer, which the first call on every established link asks for and
+     * waits on (004 FR-059a), so a browser that was upgraded - or downgraded - between two calls is
+     * taken at its latest word before the call that could ask it anything. A
+     * worker that advertises nothing is a 0.5.0 extension, and the host must not send it a frame it
+     * would drop as unknown: the call would then hang on this side's bound for a question nobody was
+     * ever asked.
+     */
+    workerFeatures: Set<string>;
+    pairRequested: boolean;
+    pairing: Promise<PairingOutcome> | undefined;
+    settlePairing: ((outcome: PairingOutcome) => void) | undefined;
+    /**
+     * Whether the current exchange is still waiting for the worker's answer (004/T099a).
+     *
+     * A drop keeps a *pending* exchange - its promise, its bound and whoever is awaiting it - and
+     * discards a settled one, so the next attach asks again instead of handing back an answer that
+     * was given to a link that no longer exists.
+     */
+    pairingPending: boolean;
+    /**
+     * The bound the open pairing exchange is running on, and how to lengthen it (011 FR-148).
+     *
+     * The worker is the only party that knows whether a side panel is open, so it is the only one
+     * that can say the owner needs two minutes rather than forty-five seconds. It says so in its
+     * `prompt-waiting` ticks and this adopts the larger of the two - never the smaller, because a
+     * bound the owner is already inside must not shrink under them (spec edge case).
+     */
+    pairingBoundNowMs: number;
+    extendPairingBound: ((boundMs: number) => void) | undefined;
+    /**
+     * Whether the last tick for this session's pairing said no panel was connected (011 FR-146).
+     *
+     * It is what turns the eventual `timed-out` into an answer the agent can act on: "nobody
+     * answered" plus the sentence that says the card was in a panel nobody had opened. Cleared with
+     * every fresh exchange, so a later request that the owner *could* see is not hinted at.
+     */
+    pairingPanelClosed: boolean;
+    /**
+     * The id of the open pairing exchange, and the ids of the ones this session withdrew (015 FR-216,
+     * FR-218, contracts/pairing-withdraw.md).
+     *
+     * Minted once per exchange - a re-send after a drop (T099a) is the same exchange and keeps it - so
+     * the worker can echo it and this process can tell an answer to the card in front of the owner
+     * from an answer to one it already stopped waiting on. Without it the owner's late "no" to a
+     * withdrawn card settled the next call's fresh request, which they had not seen. The withdrawn
+     * set is bounded because it only has to outlive the round trip of a card being taken down.
+     */
+    pairingRequestId: string | undefined;
+    readonly withdrawnPairingRequests: Set<string>;
+    /** The calls parked on this link's pairing exchange that asked to hear its ticks (011). */
+    readonly pairingProgress: Set<ProgressTarget>;
+    /** Calls committed to this link and not yet answered: a retiring link closes when none is left. */
+    activeCalls: number;
+    /**
+     * The session has moved to another browser (018 R-272): no new call comes here, and the link is
+     * closed once the calls it is carrying are answered - so they finish where they began (FR-276).
+     */
+    retiring: boolean;
+    closed: boolean;
+  };
 
   /**
    * The owner's upload directories, written when they answer "from now on" (014 FR-194).
@@ -560,21 +656,25 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    */
   const uploadRoots = createUploadConfigStore();
   const uploadConsentBoundMs = positiveEnv(UPLOAD_CONSENT_BOUND_ENV) ?? UPLOAD_CONSENT_BOUND_MS;
-  /** The questions this session is holding, by the call each belongs to. */
-  const uploadConsents = new Map<string, (answer: UploadConsentAnswer) => void>();
 
-  function settleUploadConsents(decision: UploadConsentAnswer["decision"]): void {
-    for (const settle of [...uploadConsents.values()]) {
+  function settleUploadConsents(link: BrowserLink, decision: UploadConsentAnswer["decision"]): void {
+    for (const settle of [...link.uploadConsents.values()]) {
       settle({ decision });
     }
   }
 
-  /** The dial loop towards the relay, started once the MCP client has said who it is. */
-  let link: RelayDial | undefined;
-  /** Whether a relay has acknowledged the greeting on the current link. */
-  let attached = false;
-  /** Calls that arrived before this session's link was up, waiting to be told it is (T094b). */
-  const attachWaiters = new Set<() => void>();
+  /**
+   * This session's links, by browser (018 R-272). At most one is not retiring, and it is the browser
+   * the session resolved to; the others are draining calls they already carry.
+   */
+  const links = new Map<string, BrowserLink>();
+  /**
+   * Which browser's link carried each answer (018 T507 M1), read where a screenshot answer is
+   * turned into a retained picture - after the call has left the routing that knew the link.
+   */
+  const answeredBy = new WeakMap<AgentNativeResponse, string>();
+  /** Set once the session is ending; nothing opens or re-resolves a link after it. */
+  let closing: Promise<void> | undefined;
   let displayName = "Unknown agent";
   let initialized = false;
   /**
@@ -587,11 +687,11 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * Tells the worker the label on the current link (016 R-204): once per `hello-ack`, and once more
    * if the label became known only after the link was already up (the roots answer is async).
    */
-  function sendSessionLabel(): void {
-    if (sessionLabel === undefined || !attached) {
+  function sendSessionLabel(link: BrowserLink): void {
+    if (sessionLabel === undefined || !link.attached || link.closed) {
       return;
     }
-    link?.send({ type: "session-label", sessionId, label: sessionLabel });
+    link.dial?.send({ type: "session-label", sessionId, label: sessionLabel });
   }
 
   /**
@@ -619,51 +719,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       )
       .then((label) => {
         sessionLabel = label;
-        sendSessionLabel();
+        for (const link of links.values()) sendSessionLabel(link);
       });
   }
-  let pairRequested = false;
-
-  let pairing: Promise<PairingOutcome> | undefined;
-  let settlePairing: ((outcome: PairingOutcome) => void) | undefined;
-  /**
-   * Whether the current exchange is still waiting for the worker's answer (004/T099a).
-   *
-   * A drop keeps a *pending* exchange - its promise, its bound and whoever is awaiting it - and
-   * discards a settled one, so the next attach asks again instead of handing back an answer that
-   * was given to a link that no longer exists.
-   */
-  let pairingPending = false;
-  /**
-   * The bound the open pairing exchange is running on, and how to lengthen it (011 FR-148).
-   *
-   * The worker is the only party that knows whether a side panel is open, so it is the only one
-   * that can say the owner needs two minutes rather than forty-five seconds. It says so in its
-   * `prompt-waiting` ticks and this adopts the larger of the two - never the smaller, because a
-   * bound the owner is already inside must not shrink under them (spec edge case).
-   */
-  let pairingBoundNowMs = pairingBoundMs;
-  let extendPairingBound: ((boundMs: number) => void) | undefined;
-  /**
-   * Whether the last tick for this session's pairing said no panel was connected (011 FR-146).
-   *
-   * It is what turns the eventual `timed-out` into an answer the agent can act on: "nobody
-   * answered" plus the sentence that says the card was in a panel nobody had opened. Cleared with
-   * every fresh exchange, so a later request that the owner *could* see is not hinted at.
-   */
-  let pairingPanelClosed = false;
-  /**
-   * The id of the open pairing exchange, and the ids of the ones this session withdrew (015 FR-216,
-   * FR-218, contracts/pairing-withdraw.md).
-   *
-   * Minted once per exchange - a re-send after a drop (T099a) is the same exchange and keeps it - so
-   * the worker can echo it and this process can tell an answer to the card in front of the owner
-   * from an answer to one it already stopped waiting on. Without it the owner's late "no" to a
-   * withdrawn card settled the next call's fresh request, which they had not seen. The withdrawn
-   * set is bounded because it only has to outlive the round trip of a card being taken down.
-   */
-  let pairingRequestId: string | undefined;
-  const withdrawnPairingRequests = new Set<string>();
   const WITHDRAWN_PAIRING_REQUESTS_KEPT = 32;
 
   /**
@@ -678,15 +736,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * still withdrawn, naming none, and nothing is remembered for a late answer to be matched against -
    * that answer is handled as 0.7.0 handled it.
    */
-  function withdrawPairing(requestId: string | undefined): void {
+  function withdrawPairing(link: BrowserLink, requestId: string | undefined): void {
     if (requestId !== undefined) {
-      withdrawnPairingRequests.add(requestId);
-      if (withdrawnPairingRequests.size > WITHDRAWN_PAIRING_REQUESTS_KEPT) {
-        const [oldest] = withdrawnPairingRequests;
-        withdrawnPairingRequests.delete(oldest!);
+      link.withdrawnPairingRequests.add(requestId);
+      if (link.withdrawnPairingRequests.size > WITHDRAWN_PAIRING_REQUESTS_KEPT) {
+        const [oldest] = link.withdrawnPairingRequests;
+        link.withdrawnPairingRequests.delete(oldest!);
       }
     }
-    const sent = link?.send({
+    const sent = link.dial?.send({
       type: "pair-withdraw",
       agentId,
       sessionId,
@@ -696,23 +754,27 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     log(sent ? "agent.pair.withdraw-sent" : "agent.pair.withdraw-unsent");
   }
 
-  const router = new CallRouter({
-    send: (frame) => {
-      // `send` is false when the link went away between the check in `callTool` and here; the
-      // router turns the throw into this call's own `bridge-lost`.
-      if (!link?.send(frame)) {
-        throw new Error("bridge-lost");
-      }
-    },
-    onTimeout: (callId) => {
-      // 003 D-M3-1: the agent has its answer, so anything the worker is still holding for this call
-      // is a question nobody is waiting on. A `stop` naming the call is how it is told.
-      log("agent.call.timed-out", callId);
-      link?.send({ type: "stop", sessionId, callId });
-    },
-  });
+  /** The router of one link: its frames go out on that link's socket and nowhere else (R-272). */
+  function routerFor(link: () => BrowserLink): CallRouter {
+    return new CallRouter({
+      send: (frame) => {
+        // `send` is false when the link went away between the check in `callTool` and here; the
+        // router turns the throw into this call's own `bridge-lost`.
+        if (!link().dial?.send(frame)) {
+          throw new Error("bridge-lost");
+        }
+      },
+      onTimeout: (callId) => {
+        // 003 D-M3-1: the agent has its answer, so anything the worker is still holding for this call
+        // is a question nobody is waiting on. A `stop` naming the call is how it is told - on the
+        // link that carried the call, which is the only worker holding anything for it (018 R-272).
+        log("agent.call.timed-out", callId);
+        link().dial?.send({ type: "stop", sessionId, callId });
+      },
+    });
+  }
 
-  function resetPairing(): void {
+  function resetPairing(link: BrowserLink): void {
     // A dropped link means the worker's answer can no longer arrive, so the next call on the new
     // link starts the pairing exchange again (004 FR-059a: the re-link itself asks nothing). The
     // *owner's* decision is durable in the extension, not here: a re-request for an already-paired
@@ -723,10 +785,10 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     // the pending promise and its bound are kept, the next attach re-sends the waiting call's
     // request, and that call settles on the answer the owner is still about to give. Only the bound
     // passing with no attach ends it, as `timed-out`.
-    pairRequested = false;
-    if (!pairingPending) {
-      pairing = undefined;
-      settlePairing = undefined;
+    link.pairRequested = false;
+    if (!link.pairingPending) {
+      link.pairing = undefined;
+      link.settlePairing = undefined;
     }
   }
 
@@ -747,17 +809,17 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * everything, which is the recycling case; a run that changed clears, which is the browser having
    * exited. Nothing here clears merely because the port went away.
    */
-  function noteBrowserRun(reported: string | undefined): void {
-    const dropped = linkDroppedSincePairing;
-    linkDroppedSincePairing = false;
+  function noteBrowserRun(link: BrowserLink, reported: string | undefined): void {
+    const dropped = link.linkDroppedSincePairing;
+    link.linkDroppedSincePairing = false;
     if (reported === undefined) {
       if (!dropped) return;
       screenshots.clear();
       log("agent.screenshots.cleared", "link-dropped-no-run");
       return;
     }
-    if (browserRun === undefined) {
-      browserRun = reported;
+    if (link.browserRun === undefined) {
+      link.browserRun = reported;
       // The session's *first* answer arrives before any picture could have been taken - a
       // screenshot needs a paired session - so there is nothing to clear unless a drop came first.
       if (!dropped) return;
@@ -765,8 +827,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       log("agent.screenshots.cleared", "browser-run-unknown");
       return;
     }
-    if (browserRun === reported) return;
-    browserRun = reported;
+    if (link.browserRun === reported) return;
+    link.browserRun = reported;
     screenshots.clear();
     log("agent.screenshots.cleared", "browser-run-changed");
   }
@@ -779,12 +841,12 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * the call that found out is retried once. `false` when no link is up to greet on, or the
    * relay did not acknowledge inside the attach bound.
    */
-  async function reopenSession(): Promise<boolean> {
-    attached = false;
-    pairRequested = false;
-    pairingPending = false;
-    pairing = undefined;
-    settlePairing = undefined;
+  async function reopenSession(link: BrowserLink): Promise<boolean> {
+    link.attached = false;
+    link.pairRequested = false;
+    link.pairingPending = false;
+    link.pairing = undefined;
+    link.settlePairing = undefined;
     /**
      * 013/R-180, site 1 of 2 as R-184 left them - the session itself ended: the worker forgot it
      * and the way on is a new one (this is not a port that dropped). A
@@ -793,14 +855,14 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
      */
     screenshots.clear();
     log("agent.session.reopening", sessionId);
-    if (!link?.greet()) {
+    if (!link.dial?.greet()) {
       return false;
     }
-    return waitForAttach();
+    return waitForAttach(link);
   }
 
-  function requestPairing(): void {
-    if (pairRequested || !attached || !initialized) {
+  function requestPairing(link: BrowserLink): void {
+    if (link.pairRequested || !link.attached || !initialized || link.closed) {
       return;
     }
     /**
@@ -811,32 +873,32 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
      * answer is settled here, in `pairing`, and re-requesting would replace it with a fresh promise
      * nothing has answered, turning the owner's yes back into a wait.
      */
-    if (pairing && !pairingPending) {
+    if (link.pairing && !link.pairingPending) {
       return;
     }
-    pairRequested = true;
+    link.pairRequested = true;
     // A re-request after a drop (T099a) reuses the exchange that is still open, so the promise the
     // waiting call holds is the one the owner's answer settles. A fresh promise here would leave
     // that call awaiting something nothing will ever resolve.
-    if (!pairingPending) {
-      pairingPending = true;
+    if (!link.pairingPending) {
+      link.pairingPending = true;
       // A new exchange starts on the product's own bound and with no knowledge of the panel; the
       // worker's ticks are what change either.
-      pairingBoundNowMs = pairingBoundMs;
-      pairingPanelClosed = false;
+      link.pairingBoundNowMs = pairingBoundMs;
+      link.pairingPanelClosed = false;
       // 015 FR-219: only a worker that advertised `pair-withdraw` is sent an id; for any other the
       // request stays the 0.7.0 shape its strict parse accepts. Decided per exchange, from the
       // features of the last answer, so a re-send after a drop (T099a) keeps what was decided.
-      const requestId = workerFeatures.has(PAIR_WITHDRAW_FEATURE) ? randomBytes(16).toString("hex") : undefined;
-      pairingRequestId = requestId;
-      pairing = new Promise<PairingOutcome>((resolve) => {
+      const requestId = link.workerFeatures.has(PAIR_WITHDRAW_FEATURE) ? randomBytes(16).toString("hex") : undefined;
+      link.pairingRequestId = requestId;
+      link.pairing = new Promise<PairingOutcome>((resolve) => {
         let done = false;
         const requestedAt = Date.now();
         const finish = (outcome: PairingOutcome): void => {
           if (done) return;
           done = true;
-          pairingPending = false;
-          extendPairingBound = undefined;
+          link.pairingPending = false;
+          link.extendPairingBound = undefined;
           clearTimeout(timer);
           resolve(outcome);
         };
@@ -852,15 +914,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
            * a `pair-result` and settles the session, which is why `requestPairing` refuses to
            * replace one.
            */
-          pairing = undefined;
-          pairRequested = false;
-          settlePairing = undefined;
+          link.pairing = undefined;
+          link.pairRequested = false;
+          link.settlePairing = undefined;
           log("agent.pair.withdrawn");
           // 015 FR-216: and the worker is told, so the card the agent was just answered about leaves
           // the owner's panel instead of waiting out the worker's own mirror of this bound.
-          withdrawPairing(requestId);
+          withdrawPairing(link, requestId);
         };
-        let timer = setTimeout(expire, pairingBoundNowMs);
+        let timer = setTimeout(expire, link.pairingBoundNowMs);
         (timer as { unref?: () => void }).unref?.();
         /**
          * 011 FR-148: the owner needs longer when the card is in a panel they have not opened.
@@ -869,31 +931,31 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * wait to the worker's bound *from the moment the card was raised* rather than from now -
          * otherwise every tick would push the ending further away and the exchange would never end.
          */
-        extendPairingBound = (requestedMs: number): void => {
+        link.extendPairingBound = (requestedMs: number): void => {
           // Never past the ceiling (review L4): a worker with a stuck card, or a frame from
           // anywhere else, must not be able to park every call on this exchange indefinitely.
           const boundMs = cappedPairingBoundMs(requestedMs);
-          if (done || boundMs <= pairingBoundNowMs) {
+          if (done || boundMs <= link.pairingBoundNowMs) {
             return;
           }
-          pairingBoundNowMs = boundMs;
+          link.pairingBoundNowMs = boundMs;
           clearTimeout(timer);
           timer = setTimeout(expire, Math.max(0, requestedAt + boundMs - Date.now()));
           (timer as { unref?: () => void }).unref?.();
           log("agent.pair.bound-extended", String(boundMs));
         };
-        settlePairing = finish;
+        link.settlePairing = finish;
       });
     }
     log("agent.pair.requested", agentId);
-    link?.send({
+    link.dial?.send({
       type: "pair-request",
       agentId,
       displayName: clampIdentity(displayName, "displayName"),
       origin: AGENT_ORIGIN,
       sessionId,
       // 015 FR-216: the exchange's own id, which the worker echoes on its answer.
-      ...(pairingRequestId === undefined ? {} : { requestId: pairingRequestId }),
+      ...(link.pairingRequestId === undefined ? {} : { requestId: link.pairingRequestId }),
     });
   }
 
@@ -906,7 +968,6 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * several calls can be parked on one pairing exchange and each is entitled to hear about it.
    */
   const callProgress = new Map<string, ProgressTarget>();
-  const pairingProgress = new Set<ProgressTarget>();
 
   function reportProgress(target: ProgressTarget, update: { progress: number; total: number; message: string }): void {
     void target.extra
@@ -924,14 +985,16 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * is connected, where to click. Pairing is the case with no call of its own: the tick lengthens
    * the exchange's bound instead, and every call parked on that exchange hears about it.
    */
-  function onPromptWaiting(frame: PromptWaitingFrame): void {
+  function onPromptWaiting(link: BrowserLink, frame: PromptWaitingFrame): void {
     if (frame.sessionId !== sessionId) {
       // The relay addresses a worker frame by its session and never broadcasts, so this is a frame
       // that should not have arrived. Acting on it would let one session hold another's call open.
       log("agent.waiting.other-session");
       return;
     }
-    router.noteWaiting(frame);
+    // This link's router only (018 R-272): a tick from one browser cannot hold open a call that
+    // runs in another, because only the router that carried a call knows its id.
+    link.router.noteWaiting(frame);
     // The worker starts ticking only for a question nobody can see (011 review M1, D-011-7), and
     // keeps ticking if the panel then comes back into sight - the keep-alive for the bound already
     // granted - with `panelConnected` true. That open-panel branch gets the neutral text: the wait,
@@ -959,23 +1022,23 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return;
     }
     if (!frame.panelConnected) {
-      pairingPanelClosed = true;
-      extendPairingBound?.(frame.boundMs);
+      link.pairingPanelClosed = true;
+      link.extendPairingBound?.(frame.boundMs);
     }
-    for (const target of pairingProgress) {
+    for (const target of link.pairingProgress) {
       reportProgress(target, update);
     }
   }
 
-  function onRelayFrame(value: unknown): void {
+  function onRelayFrame(link: BrowserLink, value: unknown): void {
     const waiting = promptWaitingFrameSchema.safeParse(value);
     if (waiting.success) {
-      onPromptWaiting(waiting.data);
+      onPromptWaiting(link, waiting.data);
       return;
     }
     const response = agentNativeResponseSchema.safeParse(value);
     if (response.success) {
-      if (!router.settle(response.data)) {
+      if (!link.router.settle(response.data)) {
         log("agent.call.unmatched");
       }
       return;
@@ -1001,7 +1064,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * applied it would settle whatever exchange is open now - a request they never saw. An
          * answer naming no request is a 0.7.0 worker's and is handled as 0.7.0 handled it (FR-219).
          */
-        if (control.data.requestId !== undefined && withdrawnPairingRequests.has(control.data.requestId)) {
+        if (control.data.requestId !== undefined && link.withdrawnPairingRequests.has(control.data.requestId)) {
           log("agent.pair.late-ignored");
           return;
         }
@@ -1011,12 +1074,12 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         // Before the answer itself: the frame is also this worker's statement about which run of
         // the browser is on the other end of the link (R-184), and whether the pictures this
         // session is holding are still that browser's is a question about the run, not the answer.
-        noteBrowserRun(control.data.browserRunId);
+        noteBrowserRun(link, control.data.browserRunId);
         // And what it can be asked beyond answering calls (014/R-187 §1). Taken from every answer,
         // not only the first: the browser on the other end can be upgraded under a live session.
         // The decline marker is about this one answer, not something the worker can be asked, so it
         // is not kept among the capabilities (FR-032a review F2).
-        workerFeatures = new Set((control.data.features ?? []).filter((feature) => feature !== PAIRING_DECLINED_MARKER));
+        link.workerFeatures = new Set((control.data.features ?? []).filter((feature) => feature !== PAIRING_DECLINED_MARKER));
         if (declined) {
           /**
            * A decline answers the request it was raised for, and only that one (FR-032a).
@@ -1028,15 +1091,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
            * exchange is cleared exactly as `expire` clears it, so the next call raises a fresh
            * card. Nothing is remembered and no cool-down applies.
            */
-          if (!pairingPending) {
+          if (!link.pairingPending) {
             log("agent.pair.decline-late");
             return;
           }
-          settlePairing?.("declined");
-          pairing = undefined;
-          pairRequested = false;
-          settlePairing = undefined;
-          pairingPending = false;
+          link.settlePairing?.("declined");
+          link.pairing = undefined;
+          link.pairRequested = false;
+          link.settlePairing = undefined;
+          link.pairingPending = false;
           /**
            * 013/R-180 for a decline. A session reaches an open exchange holding pictures only by
            * having been paired, unpaired while its link was down (so the unpair never arrived),
@@ -1056,11 +1119,11 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         // Without the reassignment the settled `timed-out` would be the answer for the rest of the
         // session, which is a refusal the owner never made.
         if (control.data.accepted) {
-          pairing = Promise.resolve<PairingOutcome>("paired");
-          settlePairing?.("paired");
+          link.pairing = Promise.resolve<PairingOutcome>("paired");
+          link.settlePairing?.("paired");
         } else {
-          pairing = Promise.resolve<PairingOutcome>("unpaired");
-          settlePairing?.("unpaired");
+          link.pairing = Promise.resolve<PairingOutcome>("unpaired");
+          link.settlePairing?.("unpaired");
           /**
            * 013/R-180, site 2 of 2 - an unpair arrives as a refusal naming this agent, and takes
            * effect immediately (FR-032). The owner withdrawing the pairing withdraws what this
@@ -1068,17 +1131,17 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
            */
           screenshots.clear();
         }
-        settlePairing = undefined;
-        pairingPending = false;
+        link.settlePairing = undefined;
+        link.pairingPending = false;
         return;
       }
       case "bridge-unavailable":
         log("agent.bridge.unavailable");
-        router.failAll("failed", "bridge-unavailable");
+        link.router.failAll("failed", "bridge-unavailable");
         return;
       case "stop":
         log("agent.stop.received");
-        router.failAll("stopped", "owner-stopped");
+        link.router.failAll("stopped", "owner-stopped");
         return;
       /**
        * The owner's answer to a directory question (014/R-187 §1).
@@ -1088,7 +1151,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
        * questions, and an answer applied to the wrong one would upload a file nobody was shown.
        */
       case "upload-consent-result": {
-        const settle = uploadConsents.get(control.data.callId);
+        const settle = link.uploadConsents.get(control.data.callId);
         if (!settle) {
           // The bound fired, or the link dropped and the call was already answered. Nothing runs.
           log("agent.upload.consent-late");
@@ -1118,19 +1181,48 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * introduced itself would ask the owner to pair with "Unknown agent". Retrying is what makes a
    * browser restart cheap: Chrome respawns the relay, this loop finds the new record within one
    * cadence, and the session is re-attached without the agent restarting anything.
+   *
+   * 018: one link per browser the session uses, opened only for the browser it resolved to. Its dial
+   * target is resolved again on every attempt (R-278 (2)) and is that browser's own directory entry
+   * or nothing - never `bridge.json`, never another browser - so a relay this session did not
+   * resolve to is never greeted and holds no session card for it.
    */
-  function startLink(): void {
-    if (link) {
-      return;
-    }
-    link = dialRelay({
+  function openLink(browser: AgentBrowserSummary): BrowserLink {
+    const link: BrowserLink = {
+      browser,
+      dial: undefined,
+      attached: false,
+      attachWaiters: new Set(),
+      router: routerFor(() => link),
+      uploadConsents: new Map(),
+      browserRun: undefined,
+      linkDroppedSincePairing: false,
+      workerFeatures: new Set(),
+      pairRequested: false,
+      pairing: undefined,
+      settlePairing: undefined,
+      pairingPending: false,
+      pairingBoundNowMs: pairingBoundMs,
+      extendPairingBound: undefined,
+      pairingPanelClosed: false,
+      pairingRequestId: undefined,
+      withdrawnPairingRequests: new Set(),
+      pairingProgress: new Set(),
+      activeCalls: 0,
+      retiring: false,
+      closed: false,
+    };
+    links.set(browser.browserId, link);
+    log("agent.browser.link-opened", browser.kind);
+    link.dial = dialRelay({
       hello: { sessionId, agentId, displayName: clampIdentity(displayName, "displayName") },
-      onFrame: onRelayFrame,
+      onFrame: (value) => onRelayFrame(link, value),
+      target: () => dialTarget(link),
       onAttached(relayPid) {
-        attached = true;
+        link.attached = true;
         log("agent.relay.attached", String(relayPid));
         // 016 R-204: the label follows every acknowledged greeting, a re-greeting included.
-        sendSessionLabel();
+        sendSessionLabel(link);
         /**
          * 004 FR-059a: connecting asks the owner nothing - only a tool call raises a pairing request.
          *
@@ -1140,15 +1232,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * its answer - which names the browser run (R-184) and the worker's capabilities (R-187) -
          * arrives before that call does anything that depends on either.
          */
-        if (pairingPending) {
-          requestPairing();
+        if (link.pairingPending) {
+          requestPairing(link);
         }
-        for (const notify of [...attachWaiters]) {
+        for (const notify of [...link.attachWaiters]) {
           notify();
         }
       },
       onDetached() {
-        attached = false;
+        link.attached = false;
         /**
          * A call already sent to the relay is answered honestly, not with `bridge-lost` (004/T162).
          *
@@ -1161,7 +1253,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * is unknown instead of implying it is safe to redo, the same distinction the effect
          * verdicts draw with `target-unconfirmed`.
          */
-        router.failAll("failed", "call-unconfirmed");
+        link.router.failAll("failed", "call-unconfirmed");
         /**
          * A question whose panel has gone (014 FR-193, S3 review the minor finding).
          *
@@ -1171,8 +1263,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * process and there is no link to carry it" - not `owner-interrupted`, which names a person
          * who did nothing here and reads to an agent as a decision rather than as a dropped socket.
          */
-        settleUploadConsents("link-lost");
-        resetPairing();
+        settleUploadConsents(link, "link-lost");
+        resetPairing(link);
         /**
          * 013/R-184 - the port going away is *not* the end of the retention (gate finding F4).
          *
@@ -1183,12 +1275,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * waits on it before reading the cache (004 FR-059a) - and `noteBrowserRun` decides there
          * whether this is the same browser coming back or a new one.
          */
-        linkDroppedSincePairing = true;
+        link.linkDroppedSincePairing = true;
         log("agent.relay.detached");
       },
       retryMs: dialRetryMs(),
       log,
     });
+    return link;
   }
 
   /**
@@ -1197,8 +1290,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * The wait is per call rather than a single shared promise because each call is answered in its
    * own right: one giving up must not settle the others' waits.
    */
-  function waitForAttach(): Promise<boolean> {
-    if (attached) {
+  function waitForAttach(link: BrowserLink): Promise<boolean> {
+    if (link.attached) {
       return Promise.resolve(true);
     }
     return new Promise<boolean>((resolve) => {
@@ -1207,13 +1300,14 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        attachWaiters.delete(notify);
+        link.attachWaiters.delete(notify);
         resolve(ok);
       };
-      const notify = (): void => finish(true);
+      // Told on attach, and when the link is closed under the wait (018), which is not an attach.
+      const notify = (): void => finish(link.attached && !link.closed);
       const timer = setTimeout(() => finish(false), attachBoundMs);
       (timer as { unref?: () => void }).unref?.();
-      attachWaiters.add(notify);
+      link.attachWaiters.add(notify);
     });
   }
 
@@ -1262,7 +1356,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
          * or not the agent was looking for it - a retained picture says how to use it, and one too
          * large to keep says so on the spot rather than on the next call.
          */
-        const issued = screenshots.issue(image.data, image.mimeType);
+        // 018 T507 M1: tagged with the browser whose link answered - which, for a picture that
+        // arrives after a `select_browser`, is the old one - so it can be uploaded only there.
+        const issued = screenshots.issue(image.data, image.mimeType, answeredBy.get(outcome));
         const carried = {
           ...rest,
           imageId: issued.imageId,
@@ -1390,14 +1486,14 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * the card is in a side panel nobody has opened. A client that ignores progress loses only the
    * message; the `timed-out` answer repeats it as a `hint`.
    */
-  async function awaitPairing(extra: ToolCallExtra | undefined): Promise<PairingOutcome> {
+  async function awaitPairing(link: BrowserLink, extra: ToolCallExtra | undefined): Promise<PairingOutcome> {
     /**
      * 004/T099a - this await outlives a dropped link on purpose. If the relay goes away while the
      * owner is deciding, the exchange is re-requested on the next attach and this promise settles
      * on their real answer; the agent is only told something went wrong if the pairing bound passes
      * with nobody answering at all.
      */
-    const exchange = pairing ?? Promise.resolve<PairingOutcome>("denied");
+    const exchange = link.pairing ?? Promise.resolve<PairingOutcome>("denied");
     const progressToken = extra?._meta?.progressToken;
     if (!extra || progressToken === undefined) {
       return exchange;
@@ -1406,15 +1502,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     const target: ProgressTarget = { extra, token: progressToken };
     // 011: the worker's pairing ticks are reported on this call's token too, for as long as it is
     // the one waiting on the exchange.
-    pairingProgress.add(target);
+    link.pairingProgress.add(target);
     const ticker = setInterval(() => {
       reportProgress(target, {
         progress: Date.now() - started,
         // Both follow what the worker's ticks said about the panel: the bound it chose, and - while
         // nobody can see the card - the sentence that says how to open it. No page-derived text
         // ever reaches a notification.
-        total: pairingBoundNowMs,
-        message: pairingPanelClosed ? ATTENTION_SENTENCES.pairing : PAIRING_PROGRESS_MESSAGE,
+        total: link.pairingBoundNowMs,
+        message: link.pairingPanelClosed ? ATTENTION_SENTENCES.pairing : PAIRING_PROGRESS_MESSAGE,
       });
     }, pairingProgressEveryMs);
     (ticker as { unref?: () => void }).unref?.();
@@ -1422,8 +1518,549 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return await exchange;
     } finally {
       clearInterval(ticker);
-      pairingProgress.delete(target);
+      link.pairingProgress.delete(target);
     }
+  }
+
+  /**
+   * The browser this session is bound to, and since when it has been missing (018 D-018-12, R-278,
+   * FR-277, D-018-8).
+   *
+   * Bound by the session's first forwarded call - or its pairing request, which is the first frame a
+   * call sends - or by `select_browser`; never by a dial, so a session that has done nothing yet
+   * follows the connected set and a second browser appearing makes it ask. Once bound, only that
+   * browser may act for this session: absent, it is waited for within the attach bound (a worker
+   * recycle retracts its record for a moment) and then refused, however many others are connected.
+   * Nothing ever moves a session to another browser except the agent selecting one.
+   */
+  let bound: AgentBrowserSummary | undefined;
+  let boundAbsentSinceMs: number | undefined;
+
+  /**
+   * Which browser issued each tab id this session was given (018 FR-276, R-272).
+   *
+   * Chrome's tab ids are small per-browser integers, so one number names different tabs in two
+   * browsers. Filled from the answers that hand tab ids out (`tabs_context`, `tabs_create`,
+   * `tabs_claim`); a call naming a tab that only another browser issued is refused before anything
+   * is sent, rather than run against whatever tab carries that number here. Element refs ride on a
+   * tab id, so they fall with it.
+   */
+  const issuedTabIds = new Map<string, Set<number>>();
+
+  /** How often a call waiting for its bound browser to come back reads the directory again. */
+  const RESOLVE_POLL_MS = 250;
+
+  /** The directory, read once, with the bound browser's presence stamped from it (R-278). */
+  async function resolveNow(): Promise<{ resolution: BrowserResolution; connected: ConnectedBrowser[] }> {
+    const connected = await listConnectedBrowsers();
+    // The remembered choice decides only for a session that is not bound (data-model "Resolution").
+    const remembered = bound === undefined ? await readBrowserChoice(agentId) : undefined;
+    noteBoundPresence(connected);
+    const resolution = resolveBrowser({
+      connected: browserSummaries(connected),
+      boundBrowserId: bound?.browserId,
+      boundBrowser: bound,
+      boundAbsentSinceMs,
+      attachGraceMs: attachBoundMs,
+      rememberedBrowserId: remembered?.browserId,
+      now: Date.now(),
+    });
+    return { resolution, connected };
+  }
+
+  /**
+   * Stamps when the bound browser left the directory, and clears the stamp when it is back (FR-277).
+   * The stamp is what turns "absent" into "absent beyond the attach bound"; every directory read
+   * makes it, so the bound counts from when the browser went, not from when a call noticed.
+   */
+  function noteBoundPresence(connected: readonly ConnectedBrowser[]): void {
+    if (bound === undefined) return;
+    const boundId = bound.browserId;
+    const here = connected.find((browser) => browser.browserId === boundId);
+    if (here === undefined) {
+      if (boundAbsentSinceMs === undefined) {
+        boundAbsentSinceMs = Date.now();
+        log("agent.browser.bound-absent");
+      }
+      return;
+    }
+    if (boundAbsentSinceMs !== undefined) {
+      log("agent.browser.bound-back");
+      boundAbsentSinceMs = undefined;
+    }
+    // The name the owner sees now, so a later refusal names the browser as it was last called.
+    [bound] = browserSummaries([here]);
+  }
+
+  function summaryOf(connected: readonly ConnectedBrowser[], browserId: string): AgentBrowserSummary {
+    const [summary] = browserSummaries(connected.filter((browser) => browser.browserId === browserId));
+    return summary ?? { browserId, name: "Browser", kind: "unknown" };
+  }
+
+  /**
+   * The browser a resolution named becomes the session's one live link: opened if there is none,
+   * kept if it was draining, and every other link retired (R-272). A retired link takes no new call
+   * and closes once the calls it carries are answered.
+   */
+  function adopt(browser: AgentBrowserSummary): BrowserLink {
+    let link = links.get(browser.browserId);
+    if (link === undefined || link.closed) {
+      link = openLink(browser);
+    } else if (link.retiring) {
+      link.retiring = false;
+      log("agent.browser.link-kept", browser.kind);
+    }
+    for (const other of [...links.values()]) {
+      if (other !== link) retire(other);
+    }
+    return link;
+  }
+
+  function retire(link: BrowserLink): void {
+    if (link.closed) return;
+    link.retiring = true;
+    closeIfDrained(link);
+  }
+
+  /**
+   * Closes a retired link once nothing is running on it (R-272). The session's `stop` goes first, as
+   * `close()` sends it, so that browser's worker ends the session there - its card and its tab group
+   * - instead of reading the socket closing as a relay restart. A pairing card still open there is
+   * withdrawn with it (015 FR-216).
+   */
+  function closeIfDrained(link: BrowserLink): void {
+    if (!link.retiring || link.closed || link.activeCalls > 0) return;
+    link.closed = true;
+    if (links.get(link.browser.browserId) === link) links.delete(link.browser.browserId);
+    if (link.pairingPending) withdrawPairing(link, link.pairingRequestId);
+    link.dial?.send({ type: "stop", sessionId });
+    void link.dial?.stop();
+    // A call still waiting for this link to attach re-resolves rather than sitting out its bound.
+    for (const notify of [...link.attachWaiters]) notify();
+    log("agent.browser.link-closed", link.browser.kind);
+  }
+
+  /**
+   * What one link may dial, resolved again on every attempt (018 R-278 (2)): its own browser's
+   * directory entry, and only while that browser is still the session's resolution. A link the
+   * session moved off - or, before binding, a browser that is no longer the answer - dials nothing.
+   */
+  async function dialTarget(link: BrowserLink): Promise<BridgeRecord | undefined> {
+    if (link.closed || link.retiring) return undefined;
+    const { resolution, connected } = await resolveNow();
+    if (link.closed || link.retiring || resolution.kind !== "use" || resolution.browserId !== link.browser.browserId) {
+      return undefined;
+    }
+    const entry = connected.find((browser) => browser.browserId === link.browser.browserId);
+    return entry === undefined
+      ? undefined
+      : {
+          port: entry.port,
+          token: entry.token,
+          relayPid: entry.relayPid,
+          startedAt: entry.connectedSince,
+          protocol: AGENT_LINK_PROTOCOL,
+        };
+  }
+
+  /**
+   * Resolution at `initialize` and whenever the connected set may have changed (018 R-278 (1)).
+   *
+   * With one browser and nothing remembered it dials that browser at once, as 0.10.0 did (SC-131).
+   * Before the session is bound it follows the directory: a second browser appearing, or the
+   * remembered browser changing, closes an idle link to a browser that is no longer the answer - it
+   * carries nothing yet, so that only removes an idle session card there. Once bound it changes
+   * nothing but the absence stamp: the bound link's own dial loop brings it back.
+   */
+  let supervising = false;
+  let supervisor: ReturnType<typeof setInterval> | undefined;
+  async function supervise(): Promise<void> {
+    if (supervising || closing !== undefined || !initialized) return;
+    supervising = true;
+    try {
+      const { resolution, connected } = await resolveNow();
+      if (closing !== undefined) return;
+      if (resolution.kind === "use") {
+        adopt(summaryOf(connected, resolution.browserId));
+      } else if (bound === undefined) {
+        for (const link of [...links.values()]) retire(link);
+      }
+    } finally {
+      supervising = false;
+    }
+  }
+
+  /** The tab ids a call names: its own, and any a batch step names (refused there anyway). */
+  function namedTabIds(args: Record<string, unknown>): number[] {
+    const named = typeof args.tabId === "number" ? [args.tabId] : [];
+    const steps: unknown[] = Array.isArray(args.steps) ? args.steps : [];
+    for (const step of steps) {
+      const stepArgs = typeof step === "object" && step !== null ? (step as { args?: unknown }).args : undefined;
+      const tabId = typeof stepArgs === "object" && stepArgs !== null ? (stepArgs as { tabId?: unknown }).tabId : undefined;
+      if (typeof tabId === "number") named.push(tabId);
+    }
+    return named;
+  }
+
+  /** FR-276: a tab id this browser never issued and another one did is not a tab here. */
+  function issuedOnlyElsewhere(browserId: string, args: Record<string, unknown>): boolean {
+    const here = issuedTabIds.get(browserId);
+    return namedTabIds(args).some(
+      (tabId) =>
+        !(here?.has(tabId) ?? false) &&
+        [...issuedTabIds].some(([issuer, ids]) => issuer !== browserId && ids.has(tabId)),
+    );
+  }
+
+  /**
+   * Records the tab ids an answer handed out, under the browser whose link carried it (FR-276).
+   *
+   * Every place a tab id reaches the agent (T507 m2): the tab tools' own answers, a `tabs_context`
+   * step inside a batch (matched to its step by position, which is what `index` is), and the tabs an
+   * effect saw open (`observed.newTabs`), standalone or as a batch step.
+   */
+  function recordIssuedTabIds(
+    browserId: string,
+    tool: AgentToolName,
+    args: Record<string, unknown>,
+    response: AgentNativeResponse,
+  ): void {
+    if (response.outcome !== "ok") {
+      return;
+    }
+    const found: number[] = [];
+    tabIdsIn(tool, response.result, found);
+    if (tool === "browser_batch") {
+      const steps: unknown[] = Array.isArray(args.steps) ? args.steps : [];
+      const results = field(response.result, "results");
+      for (const step of Array.isArray(results) ? results : []) {
+        const index = field(step, "index");
+        const stepTool = typeof index === "number" ? field(steps[index], "tool") : undefined;
+        if (field(step, "outcome") === "ok" && typeof stepTool === "string") {
+          tabIdsIn(stepTool, field(step, "result"), found);
+        }
+      }
+    }
+    if (found.length === 0) return;
+    let ids = issuedTabIds.get(browserId);
+    if (ids === undefined) {
+      ids = new Set();
+      issuedTabIds.set(browserId, ids);
+    }
+    for (const tabId of found) ids.add(tabId);
+  }
+
+  /** The tab ids one tool's result hands out: its tab rows, and the tabs an effect saw open. */
+  function tabIdsIn(tool: string, result: unknown, found: number[]): void {
+    const push = (row: unknown): void => {
+      const tabId = field(row, "tabId");
+      if (typeof tabId === "number") found.push(tabId);
+    };
+    if (tool === "tabs_context" || tool === "tabs_create" || tool === "tabs_claim") {
+      const tabs = field(result, "tabs");
+      for (const row of Array.isArray(result) ? result : Array.isArray(tabs) ? tabs : [result]) push(row);
+    }
+    const opened = field(field(result, "observed"), "newTabs");
+    for (const row of Array.isArray(opened) ? opened : []) push(row);
+  }
+
+  function field(value: unknown, key: string): unknown {
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+  }
+
+  /** FR-272's refusal: the connected list and the sentence that says to ask the person. */
+  function browserNotChosen(callId: string, browsers: AgentBrowserSummary[]): AgentNativeResponse {
+    return {
+      callId,
+      outcome: "denied",
+      reason: "browser-not-chosen",
+      refusal: { reason: "browser-not-chosen", browsers },
+      hint: BROWSER_REFUSAL_HINTS.notChosen,
+    };
+  }
+
+  type RoutedCall = { ok: true; link: BrowserLink } | { ok: false; response: AgentNativeResponse };
+
+  /**
+   * Where this call runs, decided before anything is sent anywhere (018 R-278 (3), FR-272, FR-276,
+   * FR-277). Every refusal here returns before a link is even chosen, so it puts zero frames on any
+   * browser's socket; a call that passes leaves bound to the browser it runs in (D-018-12).
+   */
+  async function routeCall(callId: string, args: Record<string, unknown>): Promise<RoutedCall> {
+    let raced = 0;
+    for (;;) {
+      // A session that is ending opens no link: `close()` has already said `stop` on every one.
+      if (closing !== undefined) {
+        return { ok: false, response: { callId, outcome: "failed", reason: "server-closing" } };
+      }
+      const { resolution, connected } = await resolveNow();
+      if (resolution.kind === "wait") {
+        // FR-277: the bound browser is absent but may be a worker recycling; it is waited for, and
+        // nothing else is tried meanwhile - the resolver ends this with a refusal at the bound.
+        await new Promise((resume) => setTimeout(resume, RESOLVE_POLL_MS));
+        continue;
+      }
+      if (resolution.kind === "refuse-not-chosen") {
+        log("agent.browser.refused", "not-chosen");
+        return { ok: false, response: browserNotChosen(callId, resolution.browsers) };
+      }
+      if (resolution.kind === "refuse-disconnected") {
+        log("agent.browser.refused", "disconnected");
+        return {
+          ok: false,
+          response: {
+            callId,
+            outcome: "denied",
+            reason: "browser-disconnected",
+            refusal: { reason: "browser-disconnected", browser: resolution.browser, browsers: resolution.browsers },
+            hint: BROWSER_REFUSAL_HINTS.disconnected(resolution.browser.name),
+          },
+        };
+      }
+      if (resolution.kind === "none") {
+        /**
+         * Two different facts, and the agent acts on them differently (004/R-111).
+         *
+         * A browser in the directory means a relay published a port and this session is simply not on
+         * it right now - the dial loop is between attempts - so the call waits for the link below.
+         * Nothing in the directory and nothing bound means no relay is running at all: Chrome is not
+         * up, or the host is not installed, nothing is coming, and that is `bridge-unavailable`.
+         */
+        return { ok: false, response: { callId, outcome: "failed", reason: "bridge-unavailable" } };
+      }
+      if (issuedOnlyElsewhere(resolution.browserId, args)) {
+        // The worker's own word for a tab this session cannot reach, so the agent's next move is
+        // the one it already knows: `tabs_context` in the browser it is on now.
+        log("agent.browser.tab-from-other-browser");
+        return { ok: false, response: { callId, outcome: "stale", reason: "tab-gone" } };
+      }
+      const link = adopt(summaryOf(connected, resolution.browserId));
+      /**
+       * 004/T094b - a browser in the directory means a link is on its way, so the call waits for it
+       * instead of racing it. FR-055: a session's first call succeeds whether or not other sessions
+       * are live, and the dial that would make it succeed is at most one cadence away. Only the bound
+       * passing with no link is `bridge-lost`; a link that drops *after* this point is answered by the
+       * router's `failAll`, which is the in-flight case and is unchanged.
+       */
+      const attached = await waitForAttach(link);
+      /**
+       * The session moved while this call waited - a select, or before binding a change in the
+       * connected set - so the link it was about to use is no longer the answer: resolve again rather
+       * than send anything on it. Bounded, because a resolution that never settles is a fault here.
+       */
+      if (link.closed || link.retiring || (bound !== undefined && bound.browserId !== link.browser.browserId)) {
+        raced += 1;
+        if (raced > 3) return { ok: false, response: { callId, outcome: "failed", reason: "bridge-lost" } };
+        continue;
+      }
+      if (!attached) {
+        return { ok: false, response: { callId, outcome: "failed", reason: "bridge-lost" } };
+      }
+      if (bound === undefined) {
+        // D-018-12: this call is the session's first to send anything, so this browser is its own
+        // for the rest of the session, a second one appearing included.
+        [bound] = browserSummaries(connected.filter((browser) => browser.browserId === link.browser.browserId));
+        bound ??= link.browser;
+        boundAbsentSinceMs = undefined;
+        log("agent.browser.bound", link.browser.kind);
+      }
+      return { ok: true, link };
+    }
+  }
+
+  /**
+   * `list_browsers` (018 FR-269): ids, names, kinds and "connected since", and which one is this
+   * session's - by the same resolver a call will use, so `current` is never a different answer from
+   * the one the next call gets. Nothing about tabs or pairings: it is answered without a pairing.
+   */
+  async function listBrowsers(): Promise<AgentNativeResponse> {
+    const { resolution, connected } = await resolveNow();
+    const current = resolution.kind === "use" ? resolution.browserId : undefined;
+    return {
+      callId: randomBytes(8).toString("hex"),
+      outcome: "ok",
+      result: {
+        browsers: connected.map(({ browserId, name, kind, connectedSince }) => ({
+          browserId,
+          name,
+          kind,
+          connectedSince,
+          current: browserId === current,
+        })),
+      },
+    };
+  }
+
+  /**
+   * `select_browser` (018 FR-270, FR-273, D-018-5, D-018-14): a connected browser becomes this
+   * session's and the agent's remembered choice. Pairing is still asked in that browser by the next
+   * call there - selecting is not consent. A browser that is not connected is refused with the list,
+   * which is the agent's next question to the person.
+   */
+  async function selectBrowser(browserId: string): Promise<AgentNativeResponse> {
+    const callId = randomBytes(8).toString("hex");
+    const connected = await listConnectedBrowsers();
+    // T507 m3: checked after the directory read, which is where `close()` can run meanwhile. A
+    // session that is ending opens no link, as `routeCall` and `supervise` hold.
+    if (closing !== undefined) {
+      return { callId, outcome: "failed", reason: "server-closing" };
+    }
+    const chosen = connected.find((browser) => browser.browserId === browserId);
+    if (chosen === undefined) {
+      log("agent.browser.select-refused", String(connected.length));
+      return browserNotChosen(callId, browserSummaries(connected));
+    }
+    const summary = summaryOf(connected, chosen.browserId);
+    const previous = bound?.browserId ?? [...links.values()].find((link) => !link.retiring && !link.closed)?.browser.browserId;
+    // D-018-12, D-018-14: selecting binds the session; the agent may move itself to a browser it is
+    // paired in there - which the next call asks for, since this link starts with no pairing.
+    bound = summary;
+    boundAbsentSinceMs = undefined;
+    if (previous !== undefined && previous !== summary.browserId) {
+      /**
+       * A switch (R-272). The pictures this session holds were taken in the other browser, and
+       * `upload_image` would put one into a page here, where the owner never let it be taken.
+       */
+      screenshots.clear();
+      log("agent.screenshots.cleared", "browser-switched");
+    }
+    // The old link drains: calls already on it finish there, then it closes (R-272, FR-276).
+    adopt(summary);
+    try {
+      await writeBrowserChoice(agentId, chosen.browserId, new Date());
+    } catch {
+      // The session's selection stands; only the next session's memory of it is lost, and an
+      // unwritable choice must not turn a selection the person asked for into a refusal.
+      log("agent.browser.choice-unsaved");
+    }
+    log("agent.browser.selected", chosen.kind);
+    return { callId, outcome: "ok", result: summary };
+  }
+
+  /**
+   * The in-browser choice's bound (018 FR-274): what the worker's card is given, and - plus the
+   * slack - how long this call waits. This tool never crosses the router, so the flat per-call
+   * backstop (`agentCallBoundMs`, 30 s) is not on its path: this is its own backstop, sized to the
+   * two minutes the owner is promised rather than to a worker call.
+   */
+  const browserChoiceBoundMs = positiveEnv(BROWSER_CHOICE_BOUND_ENV) ?? AGENT_BROWSER_CHOICE_BOUND_MS;
+  /** Numbers the derived session ids, so a superseded request's links never share an id with the next one's. */
+  let browserChoiceOrdinal = 0;
+  /** This session's open choice, if any: one at a time, and a newer request supersedes it. */
+  let activeChoice: BrowserChoiceRequest | undefined;
+
+  /**
+   * One choose-only link (018 R-279): its own dial, to this one browser's record, greeting with the
+   * derived id and `intent: "choose"`, so the worker raises the card and creates no session card,
+   * and the relay does not replace the session's own link - which a `hello` under the session's id
+   * would do. Never redialled after it drops: a drop counts as that browser not answering.
+   */
+  function openChoiceLink(browser: ConnectedBrowser, linkSessionId: string, handlers: ChoiceLinkHandlers): ChoiceLink {
+    const record: BridgeRecord = {
+      port: browser.port,
+      token: browser.token,
+      relayPid: browser.relayPid,
+      startedAt: browser.connectedSince,
+      protocol: AGENT_LINK_PROTOCOL,
+    };
+    let stopped = false;
+    const dial = dialRelay({
+      hello: { sessionId: linkSessionId, agentId, displayName: clampIdentity(displayName, "displayName"), intent: "choose" },
+      onFrame: (value) => handlers.onFrame(value),
+      target: async () => (stopped ? undefined : record),
+      onAttached: () => handlers.onAttached(),
+      onDetached: () => handlers.onDetached(),
+      retryMs: dialRetryMs(),
+      log,
+    });
+    return {
+      send: (frame) => dial.send(frame),
+      close() {
+        stopped = true;
+        // Closing the socket ends this link's session at the relay (`session-ended`), which is what
+        // takes down a card the worker still shows.
+        void dial.stop();
+      },
+    };
+  }
+
+  /**
+   * `request_browser_choice` (018 FR-274, R-273): "Use this browser for <agent>?" in every connected
+   * browser that can show it. The first confirm selects that browser exactly as `select_browser`
+   * does - binding, remembered choice, adopted link - and every other card is withdrawn; decline
+   * everywhere, or the bound, answers `{ chosen: false }` and changes nothing.
+   */
+  async function requestChoice(extra?: ToolCallExtra): Promise<AgentNativeResponse> {
+    const callId = randomBytes(8).toString("hex");
+    const connected = await listConnectedBrowsers();
+    if (closing !== undefined) {
+      return { callId, outcome: "failed", reason: "server-closing" };
+    }
+    // A second request of the same session replaces the first: its cards come down before new ones go up.
+    activeChoice?.supersede();
+    // R-279: from the record's `features` (the worker's ack), so a new host beside an old extension
+    // skips that browser instead of greeting its relay with a field it would refuse.
+    const capable = connected.filter(canShowBrowserChoice);
+    if (capable.length === 0) {
+      log("agent.browser-choice.none-capable", String(connected.length));
+      return { callId, outcome: "ok", result: { chosen: false }, hint: BROWSER_CHOICE_HINTS.noneCapable };
+    }
+    browserChoiceOrdinal += 1;
+    const linkSessionId = `${sessionId}~choose~${browserChoiceOrdinal}`;
+    const byId = new Map(capable.map((browser) => [browser.browserId, browser]));
+    const waitMs = browserChoiceBoundMs + BROWSER_CHOICE_SLACK_MS;
+    const request = requestBrowserChoice({
+      browsers: browserSummaries(capable),
+      linkSessionId,
+      requestId: randomBytes(16).toString("hex"),
+      agentName: clampIdentity(displayName, "displayName"),
+      boundMs: browserChoiceBoundMs,
+      waitMs,
+      // A browser whose relay never acknowledges within the attach bound is not answering.
+      attachWaitMs: attachBoundMs,
+      open: (browser, handlers) => openChoiceLink(byId.get(browser.browserId)!, linkSessionId, handlers),
+      log,
+    });
+    activeChoice = request;
+    /**
+     * Progress while the owner decides, as `awaitPairing` reports it (R-112, 011): same cadence, and
+     * only for a client that sent a token - MCP forbids progress without one. A client whose request
+     * timeout restarts on progress (the SDK's default is 60 s) is otherwise cut off inside the two
+     * minutes the owner is given.
+     */
+    const progressToken = extra?._meta?.progressToken;
+    const started = Date.now();
+    const ticker =
+      extra === undefined || progressToken === undefined
+        ? undefined
+        : setInterval(() => {
+            reportProgress(
+              { extra, token: progressToken },
+              { progress: Date.now() - started, total: waitMs, message: BROWSER_CHOICE_PROGRESS_MESSAGE },
+            );
+          }, pairingProgressEveryMs);
+    (ticker as { unref?: () => void } | undefined)?.unref?.();
+    let outcome: Awaited<BrowserChoiceRequest["result"]>;
+    try {
+      outcome = await request.result;
+    } finally {
+      clearInterval(ticker);
+    }
+    if (activeChoice === request) activeChoice = undefined;
+    if (outcome.kind !== "confirmed") {
+      // US3 AS4 (T515 m3): the card waited behind a closed panel, so the agent is told how the owner
+      // opens it - as an unanswered pairing is. The choice is a card to answer, which is the
+      // `consent` sentence's case (contracts `ATTENTION_SENTENCES`), and what its ticks are shown as.
+      return {
+        callId,
+        outcome: "ok",
+        result: { chosen: false },
+        ...(outcome.panelClosed ? { hint: ATTENTION_SENTENCES.consent } : {}),
+      };
+    }
+    // The owner's confirm is a selection; `selectBrowser` re-reads the directory, so a browser that
+    // left in the meantime is refused with the list rather than bound in its absence.
+    return { ...(await selectBrowser(outcome.browser.browserId)), callId };
   }
 
   async function callTool(
@@ -1431,15 +2068,29 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     args: Record<string, unknown>,
     extra?: ToolCallExtra,
   ): Promise<AgentNativeResponse> {
-    const first = await placeCall(tool, args, extra);
-    if (first.reason !== "session-ended") {
-      return first;
+    // 018 R-273: answered here, before `placeCall` - no link, no pairing, no browser refusal. They
+    // are how an agent gets out of "several browsers, none chosen", so nothing may stand in front.
+    if (tool === "list_browsers") {
+      return listBrowsers();
+    }
+    if (tool === "select_browser") {
+      return selectBrowser(typeof args.browserId === "string" ? args.browserId : "");
+    }
+    if (tool === "request_browser_choice") {
+      return requestChoice(extra);
+    }
+    const first = await routeAndPlace(tool, args, extra);
+    // Not on a browser the session has moved off (018 R-272): re-greeting it would register the
+    // session there again, and the retry would run in the selected browser anyway.
+    if (first.response.reason !== "session-ended" || first.link === undefined || first.link.retiring || first.link.closed) {
+      return first.response;
     }
     // Once, never a loop: a worker that says it again after a fresh greeting is answered as it said.
-    if (!(await reopenSession())) {
-      return first;
+    // On the link whose worker forgot the session, which is the only one it is news to.
+    if (!(await reopenSession(first.link))) {
+      return first.response;
     }
-    return placeCall(tool, args, extra);
+    return (await routeAndPlace(tool, args, extra)).response;
   }
 
   /**
@@ -1455,18 +2106,24 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * worker that cannot answer would hold the call for the whole bound and then refuse it anyway.
    */
   function askUploadConsent(callId: string, files: readonly UploadCandidate[]): Promise<UploadConsentAnswer> {
-    if (!workerFeatures.has(UPLOAD_CONSENT_FEATURE)) {
+    // 018 R-272: asked in the browser this call runs in - its worker's features, its panel - and in
+    // no other. A call with no link is one that never got that far, so nothing can carry the question.
+    const link = callLinks.get(callId);
+    if (link === undefined) {
+      return Promise.resolve({ decision: "link-lost" });
+    }
+    if (!link.workerFeatures.has(UPLOAD_CONSENT_FEATURE)) {
       log("agent.upload.consent-unsupported");
       return Promise.resolve({ decision: "unavailable" });
     }
-    if (!link?.send({ type: "upload-consent-request", sessionId, callId, files: [...files] })) {
+    if (!link.dial?.send({ type: "upload-consent-request", sessionId, callId, files: [...files] })) {
       return Promise.resolve({ decision: "link-lost" });
     }
     log("agent.upload.consent-asked", String(files.length));
     return new Promise<UploadConsentAnswer>((resolve) => {
       const finish = (answer: UploadConsentAnswer): void => {
         clearTimeout(timer);
-        uploadConsents.delete(callId);
+        link.uploadConsents.delete(callId);
         resolve(answer);
       };
       const timer = setTimeout(() => {
@@ -1476,7 +2133,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         finish({ decision: "timed-out" });
       }, uploadConsentBoundMs);
       (timer as { unref?: () => void }).unref?.();
-      uploadConsents.set(callId, finish);
+      link.uploadConsents.set(callId, finish);
     });
   }
 
@@ -1672,7 +2329,9 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return refuse({ callId, outcome: "failed", reason: "invalid-arguments" });
     }
     const { imageId, ref, coordinate, filename, tabId: target } = request.data;
-    const held = screenshots.take(imageId);
+    // 018 T507 M1: asked for by the browser this call runs in; a picture another browser took is an
+    // id never issued here. No link at all names no browser, which no tagged picture matches.
+    const held = screenshots.take(imageId, callLinks.get(callId)?.browser.browserId ?? "");
     if (held.kind === "unknown") {
       log("agent.upload-image.refused", "unknown-image-id");
       return refuse({
@@ -1789,48 +2448,73 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     return { ok: true, args: { ...args, steps }, ...(hint === undefined ? {} : { hint }) };
   }
 
+  /**
+   * The link each call in progress runs on, by call id (018 R-272) - the key every frame about a
+   * call already carries - so the upload question, like the call itself, goes to that browser alone.
+   */
+  const callLinks = new Map<string, BrowserLink>();
+
+  /**
+   * The routing of the call before this one (FR-043, T513).
+   *
+   * Routing reads the directory, and two reads started together can finish in either order - so a
+   * call routed on its own read could reach the router ahead of one the agent sent before it, and
+   * of two calls on one tab the *first* was told `busy` while the second ran. Each call is routed
+   * once the one before it has been, which keeps them in the order they arrived, as 0.10.0 placed
+   * them. Only the routing waits: a call held by the owner (pairing, a directory question) holds
+   * nothing up behind it.
+   */
+  let routingTail: Promise<unknown> = Promise.resolve();
+
+  /**
+   * One call: routed to its browser first (018 R-278 (3)), then placed on that browser's link alone.
+   * The link is returned so a `session-ended` is reopened where it was said.
+   */
+  async function routeAndPlace(
+    tool: AgentToolName,
+    args: Record<string, unknown>,
+    extra?: ToolCallExtra,
+  ): Promise<{ response: AgentNativeResponse; link?: BrowserLink }> {
+    const callId = randomBytes(8).toString("hex");
+    const routing = routingTail.then(() => routeCall(callId, args));
+    routingTail = routing.catch(() => undefined);
+    const routed = await routing;
+    if (!routed.ok) {
+      return { response: routed.response };
+    }
+    const { link } = routed;
+    // Counted until answered, so a switch away from this browser closes the link only after this
+    // call has finished on it (R-272).
+    link.activeCalls += 1;
+    callLinks.set(callId, link);
+    try {
+      const response = await placeCall(link, callId, tool, args, extra);
+      recordIssuedTabIds(link.browser.browserId, tool, args, response);
+      answeredBy.set(response, link.browser.browserId);
+      return { response, link };
+    } finally {
+      callLinks.delete(callId);
+      link.activeCalls -= 1;
+      closeIfDrained(link);
+    }
+  }
+
   async function placeCall(
+    link: BrowserLink,
+    callId: string,
     tool: AgentToolName,
     args: Record<string, unknown>,
     extra?: ToolCallExtra,
   ): Promise<AgentNativeResponse> {
-    const callId = randomBytes(8).toString("hex");
-    if (!attached) {
-      /**
-       * Two different facts, and the agent acts on them differently (004/R-111).
-       *
-       * A record on disk means a relay published a port and this session is simply not on it right
-       * now - the browser restarted, the socket dropped, the dial loop is between attempts - so the
-       * link is coming and the call waits for it (T094b) rather than being failed in a race it
-       * never had to lose. No record at all means no relay ever ran: Chrome is not up, or the host
-       * is not installed, nothing is coming, and that is
-       * `bridge-unavailable`. 003 answered `bridge-unavailable` to a second agent session whose
-       * record had been overwritten (the owner's E1); with one writer that state no longer exists,
-       * and the code that reported it now says only what it says.
-       */
-      const record = await readBridgeRecord();
-      if (!record) {
-        return { callId, outcome: "failed", reason: "bridge-unavailable" };
-      }
-      /**
-       * 004/T094b - a record means a link is on its way, so the call waits for it instead of
-       * racing it. FR-055: a session's first call succeeds whether or not other sessions are live,
-       * and the dial that would make it succeed is at most one cadence away. Only the bound passing
-       * with no link is `bridge-lost`; a link that drops *after* this point is answered by the
-       * router's `failAll`, which is the in-flight case and is unchanged.
-       */
-      if (!(await waitForAttach())) {
-        return { callId, outcome: "failed", reason: "bridge-lost" };
-      }
-    }
     // The one place a pairing request is raised (004 FR-059a): the first call of a session, the
     // first after a link dropped (which discarded the answer given on the old one), and the next
     // after the bound withdrew one (FR-059) - the owner was away for the last call, not for the
     // session. A no-op while an exchange is open or answered. Every call waits on the answer below
     // before it touches anything the answer decides: the screenshot cache (R-184) and what the
-    // worker can be asked (R-187).
-    requestPairing();
-    const pairingOutcome = await awaitPairing(extra);
+    // worker can be asked (R-187). 018 FR-275: the exchange is this browser's own; a pairing given
+    // in another browser answers nothing here.
+    requestPairing(link);
+    const pairingOutcome = await awaitPairing(link, extra);
     if (pairingOutcome !== "paired") {
       return {
         callId,
@@ -1839,7 +2523,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         reason: pairingOutcome === "timed-out" ? "not-paired: no answer" : "not-paired",
         // 011 FR-146: nobody answered *because the card was in a panel nobody had opened*, which
         // is the one case where there is something the person can do about it.
-        ...(pairingOutcome === "timed-out" && pairingPanelClosed ? { hint: ATTENTION_SENTENCES.pairing } : {}),
+        ...(pairingOutcome === "timed-out" && link.pairingPanelClosed ? { hint: ATTENTION_SENTENCES.pairing } : {}),
         // 003 FR-032a: the same `not-paired`, and what the agent may do next - which for a
         // decline and an unpair are opposite instructions.
         ...(pairingOutcome === "declined" ? { hint: PAIRING_REFUSAL_HINTS.declined } : {}),
@@ -1877,7 +2561,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
        * worker that never advertised `site-plan` is answered here - checked rather than discovered,
        * as `askUploadConsent` checks `upload-consent` - and is sent nothing: no card, no grant.
        */
-      if (tool === "propose_sites" && !workerFeatures.has(SITE_PLAN_FEATURE)) {
+      if (tool === "propose_sites" && !link.workerFeatures.has(SITE_PLAN_FEATURE)) {
         log("agent.site-plan.unsupported");
         return { callId, outcome: "unavailable", ...SITE_PLAN_UNAVAILABLE };
       }
@@ -1902,7 +2586,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       // the router's one-call-per-tab rule is keyed by (FR-043). A tool that names no tab concerns no
       // page and does not contend with anything.
       const tabId = typeof args.tabId === "number" ? args.tabId : undefined;
-      const response = await router.call({
+      const response = await link.router.call({
         callId,
         // 004 S1: every call frame names its session now, so the relay can route several servers'
         // calls through one worker. The session id is the one the server already minted at
@@ -1928,21 +2612,26 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     log("agent.mcp.initialized", displayName);
     deriveSessionLabel();
     // The link is dialled now, because the greeting carries the client's name; the owner is asked
-    // nothing until a tool call needs the pairing (004 FR-059a).
-    startLink();
+    // nothing until a tool call needs the pairing (004 FR-059a). 018 R-278 (1): dialled only to the
+    // browser this session resolves to, and resolved again on the dial cadence until it is bound.
+    void supervise();
+    supervisor = setInterval(() => void supervise(), dialRetryMs());
+    (supervisor as { unref?: () => void }).unref?.();
   };
 
   await server.connect(new StdioServerTransport());
-
-  let closing: Promise<void> | undefined;
 
   return {
     close(): Promise<void> {
       // Every exit path leads here - stdin closing, a signal, a test - and the announcement below
       // must be made once. A second caller waits on the first rather than sending a second `stop`.
       closing ??= (async () => {
-        router.failAll("failed", "server-closing");
-        if (link) {
+        clearInterval(supervisor);
+        // 018 FR-274: an open in-browser choice ends with the session; its cards are withdrawn.
+        activeChoice?.supersede();
+        for (const link of links.values()) link.router.failAll("failed", "server-closing");
+        for (const link of [...links.values()]) {
+          link.closed = true;
           /**
            * The one frame that says the *agent session* is over (M4 Part A).
            *
@@ -1954,11 +2643,11 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
            * 015 FR-216: an exchange still open is withdrawn first, so the card leaves the panel with
            * the session rather than outliving the agent that raised it.
            */
-          if (pairingPending) {
-            withdrawPairing(pairingRequestId);
+          if (link.pairingPending) {
+            withdrawPairing(link, link.pairingRequestId);
           }
-          link.send({ type: "stop", sessionId });
-          await link.stop();
+          link.dial?.send({ type: "stop", sessionId });
+          await link.dial?.stop();
         }
         await server.close();
       })();

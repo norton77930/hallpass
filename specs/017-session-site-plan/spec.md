@@ -268,3 +268,10 @@ on A raises its card.
 - Wildcards, subdomain or registrable-domain matching.
 - Remembering a plan across sessions or browser restarts; a settings page (D-014-3).
 - Changing what page JavaScript or uploads require.
+
+## Change Log
+
+| Date | Change | Origin |
+| --- | --- | --- |
+| 2026-10-03 | Reading recorded, no FR text changed: FR-251/FR-259's "lists every site" is shown in the owner's script when an origin has an internationalised label - the panel renders `https://例え.jp (xn--r8jz45g.jp)`, Unicode first and the ASCII host always beside it, so a look-alike label cannot pass as a familiar name; a label that does not decode cleanly (or decodes to control, format or space characters) is shown as the ASCII origin alone. Display only: the stored plan, the gate and every panel command keep the canonical ASCII origin. The same rule covers the per-action consent card, the plan card, activity lines and the site and transition lists. | 017 coverage follow-up, code review 2026-10-03 |
+| 2026-10-03 | Reading recorded, no FR text changed: FR-259/FR-260 read the session's plan the way FR-254 admits under it - only while the session still belongs to the agent the plan was approved for; a session id re-announced by another agent shows no plan and marks nothing already approved. Unticked sites on the card survive the card leaving and regaining the question slot (R-247). | 017 coverage follow-ups (review M1) |

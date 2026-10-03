@@ -16,7 +16,7 @@ export const SERVER_NAME = "hallpass";
  * (`AGENT_EXTENSION_VERSION`). A contract test pins the two together - an extension and the host it
  * talks to are one release, and a client asking who it is talking to must not be told otherwise.
  */
-export const SERVER_VERSION = "0.10.0";
+export const SERVER_VERSION = "0.11.0";
 
 /**
  * The tools this host will actually carry to a worker, as opposed to the tools the contract
@@ -77,15 +77,28 @@ export const IMPLEMENTED_AGENT_TOOL_NAMES: ReadonlySet<AgentToolName> = new Set<
    * host (`mcp-server.ts`) and sent nothing.
    */
   "propose_sites",
+  /**
+   * 018/S4a (R-273): answered by the host from the browser records and the choice store, before
+   * anything crosses a link - always offered, no pairing, exempt from the browser refusal, because
+   * they are how an agent answers "several browsers, none chosen".
+   */
+  "list_browsers",
+  "select_browser",
+  /**
+   * 018/S5 (FR-274, R-273): host-answered as well - the requesting server holds the two-minute
+   * race across the browsers (`browser-choice-coordinator.ts`); a browser whose worker did not
+   * advertise the card is skipped, so the tool is offered whatever extension is on the other side.
+   */
+  "request_browser_choice",
 ]);
 
 /**
  * The tools the contract describes on purpose before anything answers them.
  *
  * Declared by 008 S1, which closes the shapes a slice ahead of the runners; S3 took `gif_recorder`
- * off this list and S4 took `dialog` off it, so it is empty again - which is the state it should
- * spend most of its life in. Naming the list rather than deleting it keeps the host's test honest:
- * "described but not implemented" stays a state somebody decides, and a descriptor that is in
- * neither list is a tool half-added by accident.
+ * off this list and S4 took `dialog` off it; 018 S4a and S5 took the browser tools off it, so it is
+ * empty again - which is the state it should spend most of its life in. Naming the list rather than
+ * deleting it keeps the host's test honest: "described but not implemented" stays a state somebody
+ * decides, and a descriptor that is in neither list is a tool half-added by accident.
  */
 export const PENDING_AGENT_TOOL_NAMES: ReadonlySet<AgentToolName> = new Set<AgentToolName>([]);

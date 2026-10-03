@@ -297,6 +297,70 @@ describe("dialRelay", () => {
     expect(links).toHaveLength(1);
   });
 
+  /**
+   * 018 R-278 (2): with a target, every attempt dials what the target names right now - the
+   * resolved browser's own entry - and never "whatever bridge.json says". No target, no dial.
+   */
+  it("dials the record its target names on each attempt, never bridge.json", async () => {
+    const { connect, links, wait, steps } = harness();
+    await writeBridgeRecord(record({ port: 41_111, token: "b".repeat(64) }), env);
+    const targets: Array<AgentBridgeRecord | undefined> = [undefined, record({ port: 42_222, token: "c".repeat(64) })];
+    const dialled: number[] = [];
+    steps.push(() => undefined);
+
+    const dial = dialRelay({
+      hello: HELLO,
+      onFrame: () => undefined,
+      connect: (target, handlers) => {
+        dialled.push(target.port);
+        return connect(target, handlers);
+      },
+      wait,
+      env,
+      isAlive: () => true,
+      target: async () => targets.shift(),
+    });
+    const link = await waitFor(() => links[0]);
+    await dial.stop();
+
+    expect(dialled).toEqual([42_222]);
+    expect(link.sent).toEqual([
+      { type: "hello", ...HELLO, token: "c".repeat(64), protocol: AGENT_LINK_PROTOCOL },
+    ]);
+  });
+
+  /**
+   * 018 R-272: a link stopped while its connect is still in flight greets nobody. The session has
+   * moved off that browser; a late greeting would register it there again.
+   */
+  it("sends no greeting on a connection that completes after stop", async () => {
+    const { connect, links, wait } = harness();
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const dial = dialRelay({
+      hello: HELLO,
+      onFrame: () => undefined,
+      connect: async (target, handlers) => {
+        await held;
+        return connect(target, handlers);
+      },
+      wait,
+      env,
+      isAlive: () => true,
+      target: async () => record(),
+    });
+    await new Promise((resume) => setTimeout(resume, 20));
+    const stopped = dial.stop();
+    release();
+    await stopped;
+    const link = await waitFor(() => links[0]);
+    await new Promise((resume) => setTimeout(resume, 20));
+
+    expect(link.sent).toEqual([]);
+  });
+
   it("treats a record that does not parse as no relay at all", async () => {
     const { connect, links, waits, wait, steps } = harness();
     await writeFile(bridgeFilePath(env), "half-writ", "utf8");

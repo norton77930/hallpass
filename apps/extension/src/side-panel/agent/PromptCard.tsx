@@ -3,13 +3,15 @@ import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
+import { displayOrigin } from "./display-origin.js";
 import { SitePlanCard } from "./SitePlanCard.js";
 
 /**
  * The one pending question, on top of whatever else is on screen (006 FR-084, FR-085, D-006-6).
  *
- * Four cards share this place and at most one is shown: the pairing request, the `ask` consent,
- * the plan a batch states under `follow-a-plan`, and (017) a session's site-plan proposal. They are shown in arrival order (FR-085): the
+ * Five cards share this place and at most one is shown: the pairing request, the `ask` consent,
+ * the plan a batch states under `follow-a-plan`, (017) a session's site-plan proposal, and (018) an
+ * agent asking whether this is the browser to use. They are shown in arrival order (FR-085): the
  * worker dates each question, and the earliest is on top until it is answered. A projection with
  * no dates - a 004 worker - falls back to pairing first, then the consent, then the plan. The
  * card is a non-modal dialog: the page under it stays readable, because the owner may need the
@@ -17,15 +19,19 @@ import { SitePlanCard } from "./SitePlanCard.js";
  */
 
 /** Which question is on top: the earliest dated one, undated ones in fixed order. */
+type QuestionKind = "pairing" | "consent" | "plan" | "site-plan" | "browser-choice";
+
 export function questionOnTop(
-  state: Pick<AgentPanelState, "pending" | "prompt" | "plan" | "sitePlan">,
-): "pairing" | "consent" | "plan" | "site-plan" | undefined {
-  const candidates: Array<{ kind: "pairing" | "consent" | "plan" | "site-plan"; at: string | undefined }> = [];
+  state: Pick<AgentPanelState, "pending" | "prompt" | "plan" | "sitePlan" | "browserChoice">,
+): QuestionKind | undefined {
+  const candidates: Array<{ kind: QuestionKind; at: string | undefined }> = [];
   if (state.pending) candidates.push({ kind: "pairing", at: state.pending.requestedAt });
   if (state.prompt) candidates.push({ kind: "consent", at: state.prompt.raisedAt });
   if (state.plan) candidates.push({ kind: "plan", at: state.plan.raisedAt });
   // 017 R-247: a session's site-plan proposal is one more question in the same slot.
   if (state.sitePlan) candidates.push({ kind: "site-plan", at: state.sitePlan.raisedAt });
+  // 018 FR-274: and so is an agent asking whether this is the browser to use.
+  if (state.browserChoice) candidates.push({ kind: "browser-choice", at: state.browserChoice.raisedAt });
   const stamp = (at: string | undefined): number => {
     const parsed = at === undefined ? Number.NaN : Date.parse(at);
     // An undated question sorts first, which is the fixed precedence for a projection with none.
@@ -95,13 +101,19 @@ export function PromptCard(props: {
   send: SendCommand;
 }): ReactElement | null {
   const t = (key: string): string => lookup(key, props.locale);
-  const { pending, prompt, plan, sitePlan } = props.state;
+  const { pending, prompt, plan, sitePlan, browserChoice } = props.state;
   /**
    * The steps of the plan on screen that the owner has struck out, by position. Panel-local because
    * striking a step out is not a decision until Approve is pressed, and keyed by the plan so a
    * second plan never inherits the exclusions of the one before it.
    */
   const [excluded, setExcluded] = useState<{ planId: string; steps: number[] }>({ planId: "", steps: [] });
+  /**
+   * 017 follow-up: the origins of the site-plan proposal on screen that the owner has unticked. Held
+   * here, not in the card, because an earlier question can take the one slot (R-247) and unmount the
+   * card; keyed by the proposal so a second one starts all ticked.
+   */
+  const [unticked, setUnticked] = useState<{ proposalId: string; origins: string[] }>({ proposalId: "", origins: [] });
   const onTop = questionOnTop(props.state);
 
   /**
@@ -119,7 +131,9 @@ export function PromptCard(props: {
           ? plan?.planId
           : onTop === "site-plan"
             ? sitePlan?.proposalId
-            : undefined;
+            : onTop === "browser-choice"
+              ? browserChoice?.requestId
+              : undefined;
   useEffect(() => {
     cardRef.current?.querySelector<HTMLElement>("button, input, select")?.focus();
   }, [onTop, questionId]);
@@ -223,8 +237,8 @@ export function PromptCard(props: {
         {/* Both origins, as inert text: they are the question, and neither is a page's own word. */}
         <p>
           {t("agent.prompt.transition")
-            .replace("{from}", () => moved.from)
-            .replace("{to}", () => moved.to)}
+            .replace("{from}", () => displayOrigin(moved.from))
+            .replace("{to}", () => displayOrigin(moved.to))}
         </p>
         <div className="agent-prompt-actions">
           <button type="button" className="agent-primary" onClick={() => answer(true)}>
@@ -336,7 +350,7 @@ export function PromptCard(props: {
           {prompt.kind === "dialog-accept"
             ? t("agent.prompt.dialogAccept").replace("{agent}", () => props.promptAgent)
             : prompt.kind === "beforeunload-force"
-              ? t("agent.prompt.beforeunloadForce").replace("{site}", () => prompt.site)
+              ? t("agent.prompt.beforeunloadForce").replace("{site}", () => displayOrigin(prompt.site))
               : t("agent.consentBody")
                   .replace("{agent}", () => props.promptAgent)
                   .replace(
@@ -350,7 +364,7 @@ export function PromptCard(props: {
                           : UPLOAD_DELIVERY_SUMMARY_KEYS[prompt.delivery],
                       ),
                   )
-                  .replace("{site}", () => prompt.site)}
+                  .replace("{site}", () => displayOrigin(prompt.site))}
         </p>
         {/*
           The page's own words, quoted (D-008-5): the one page-authored string this panel shows,
@@ -415,7 +429,7 @@ export function PromptCard(props: {
     return (
       <section ref={cardRef} role="dialog" aria-modal="false" aria-labelledby="agent-prompt-title" className="agent-prompt" data-prompt="plan">
         <h2 id="agent-prompt-title">{t("agent.planTitle")}</h2>
-        <p>{t("agent.planSite").replace("{site}", () => plan.site)}</p>
+        <p>{t("agent.planSite").replace("{site}", () => displayOrigin(plan.site))}</p>
         <ol>
           {plan.steps.map((step, index) => (
             <li key={`${plan.planId}-${index}`}>
@@ -462,7 +476,43 @@ export function PromptCard(props: {
         locale={props.locale}
         send={props.send}
         cardRef={cardRef}
+        unticked={unticked}
+        setUnticked={setUnticked}
       />
+    );
+  }
+
+  /**
+   * 018 FR-274: "Use this browser for <agent>?", structured as the pairing card. The agent's name is
+   * its own stated name and this browser's is the one the owner sees in the "This browser" row, so
+   * they know which window they are answering in; both are inert text. The worker sends the answer.
+   */
+  if (browserChoice && onTop === "browser-choice") {
+    const answer = (confirm: boolean): void => {
+      props.send({ type: "ui.agent.browser-choice-decide", payload: { requestId: browserChoice.requestId, confirm } });
+    };
+    const browserName = props.state.browser?.name;
+    return (
+      <section
+        ref={cardRef}
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="agent-prompt-title"
+        className="agent-prompt"
+        data-prompt="browser-choice"
+      >
+        <h2 id="agent-prompt-title">{t("agent.browserChoice.title").replace("{agent}", () => browserChoice.agentName)}</h2>
+        {browserName === undefined ? null : <p>{t("agent.browser.this").replace("{name}", () => browserName)}</p>}
+        <p>{t("agent.browserChoice.body")}</p>
+        <div className="agent-prompt-actions">
+          <button type="button" className="agent-primary" onClick={() => answer(true)}>
+            {t("agent.browserChoice.confirm")}
+          </button>
+          <button type="button" onClick={() => answer(false)}>
+            {t("agent.browserChoice.decline")}
+          </button>
+        </div>
+      </section>
     );
   }
 
