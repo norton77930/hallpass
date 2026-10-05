@@ -2036,7 +2036,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         : setInterval(() => {
             reportProgress(
               { extra, token: progressToken },
-              { progress: Date.now() - started, total: waitMs, message: BROWSER_CHOICE_PROGRESS_MESSAGE },
+              {
+                progress: Date.now() - started,
+                total: waitMs,
+                // As pairing's ticks switch to its sentence once the panel is known closed: read
+                // live, so the first tick after a worker's closed-panel tick already says where to click.
+                message: request.panelClosed() ? ATTENTION_SENTENCES.choice : BROWSER_CHOICE_PROGRESS_MESSAGE,
+              },
             );
           }, pairingProgressEveryMs);
     (ticker as { unref?: () => void } | undefined)?.unref?.();
@@ -2049,13 +2055,14 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     if (activeChoice === request) activeChoice = undefined;
     if (outcome.kind !== "confirmed") {
       // US3 AS4 (T515 m3): the card waited behind a closed panel, so the agent is told how the owner
-      // opens it - as an unanswered pairing is. The choice is a card to answer, which is the
-      // `consent` sentence's case (contracts `ATTENTION_SENTENCES`), and what its ticks are shown as.
+      // opens it - as an unanswered pairing is. The sentence is the choice's own (contracts
+      // `ATTENTION_SENTENCES.choice`: it names no consent card and no one browser), the same one its
+      // ticks were shown as.
       return {
         callId,
         outcome: "ok",
         result: { chosen: false },
-        ...(outcome.panelClosed ? { hint: ATTENTION_SENTENCES.consent } : {}),
+        ...(outcome.panelClosed ? { hint: ATTENTION_SENTENCES.choice } : {}),
       };
     }
     // The owner's confirm is a selection; `selectBrowser` re-reads the directory, so a browser that

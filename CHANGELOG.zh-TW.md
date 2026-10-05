@@ -3,6 +3,11 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.11.2 — 2026-10-05
+
+- **選瀏覽器時側欄沒開，會直接告訴你**:`request_browser_choice` 等待中、某個瀏覽器的側欄沒打開時,agent 的進度文字會請你在要用的瀏覽器打開側欄並在那裡確認；沒人回答而結束時也是這一句。不再借用寫著 Chrome 的同意卡句子。
+- **`uninstall.ps1` 會還原每一個瀏覽器**:把備份的主機放回去時，除了 Chrome 與 Chromium,也會替 Edge 與 Brave 重新登記。
+
 ## 0.11.1 — 2026-10-04
 
 - **瀏覽器找不到 `node` 時，主機也能啟動**：從終端機開的瀏覽器，有時交給主機的環境變數 `PATH` 找不到 Node.js,

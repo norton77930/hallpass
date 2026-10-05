@@ -5,6 +5,17 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.11.2 — 2026-10-05
+
+**Small fixes.**
+
+- **Choosing a browser behind a closed side panel says so.** While `request_browser_choice` waits and a
+  browser's side panel is closed, the agent's progress text now tells you to open the panel in the
+  browser you want and confirm there, and an unanswered request ends with the same sentence. It no
+  longer borrows the consent-card sentence, which named Chrome.
+- **`uninstall.ps1` restores every browser.** When it puts a backed-up host back, it now re-registers
+  it for Edge and Brave too, not only Chrome and Chromium.
+
 ## 0.11.1 — 2026-10-04
 
 **Reliability fixes.**

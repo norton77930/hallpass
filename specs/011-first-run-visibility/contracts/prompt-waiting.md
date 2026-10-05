@@ -43,6 +43,11 @@ carries it as today's `{reason, hint}` JSON so the agent can relay it.
 | --- | --- |
 | pairing | Hallpass is waiting for you to accept the pairing in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.<br>Hallpass 正在等你在 Chrome 側欄接受配對,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。 |
 | ask / plan / dialog / diagnostics | Hallpass is waiting for your answer to a consent card in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.<br>Hallpass 正在等你回答側欄裡的同意卡,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。 |
+| browser-choice (018, added 2026-10-04) | Hallpass is waiting for you to choose which browser to use, and the side panel that asks is closed. In the browser you want, click the Hallpass icon in the toolbar or press Alt+A, then confirm there.<br>Hallpass 正在等你選擇要用哪個瀏覽器,但詢問的側欄沒有打開。請在你要用的瀏覽器點工具列的 Hallpass 圖示或按 Alt+A,然後在那裡確認。 |
+
+The browser-choice sentence names no consent card and no one browser, because the choice spans every
+browser running Hallpass. `request_browser_choice` reports it as its progress text once any browser
+ticked with its panel closed, and as the `hint` of a `{chosen: false}` answer in that case.
 
 Invariant: no page content, no tool arguments, no session id in the sentences (FR-151).
 

@@ -98,8 +98,10 @@ describe("T283 prompt-waiting", () => {
   it("says where to click in both languages, and says nothing else", () => {
     const sentences = contractExport<Record<string, string>>("ATTENTION_SENTENCES");
 
-    expect(Object.keys(sentences).sort()).toEqual(["consent", "pairing"]);
+    expect(Object.keys(sentences).sort()).toEqual(["choice", "consent", "pairing"]);
     for (const [kind, sentence] of Object.entries(sentences)) {
+      // Each travels as a `hint` on a strict frame, so each must fit the hint bound (400).
+      expect(sentence.length, `${kind} fits the hint bound`).toBeLessThanOrEqual(400);
       const lines = sentence.split("\n");
       // One line each, English first: the agent relays the whole thing, and the person reads the
       // line they can read.
@@ -113,5 +115,9 @@ describe("T283 prompt-waiting", () => {
     }
     expect(sentences.pairing).toContain("pairing");
     expect(sentences.consent).toContain("consent card");
+    // The choice spans browsers: it names none of them, and no consent card.
+    expect(sentences.choice).toContain("which browser");
+    expect(sentences.choice).not.toContain("Chrome");
+    expect(sentences.choice).not.toContain("consent card");
   });
 });

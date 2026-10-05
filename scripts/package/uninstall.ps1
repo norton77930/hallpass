@@ -29,9 +29,13 @@ $dataDir      = Join-Path $env:LOCALAPPDATA "hallpass"
 $manifestPath = Join-Path $dataDir "com.hallpass.host.json"
 $launcherPath = Join-Path $dataDir "native-host.cmd"
 $configPath   = Join-Path $dataDir "config.json"
+# 還原備份時要重新指回的登錄值:安裝程式登記的每一個瀏覽器都要列在這裡(與 install\windows.ts 的
+# NATIVE_MESSAGING_ROOTS 同一份清單,contract 測試會核對)。
 $registryKeys = @(
   "HKCU\Software\Google\Chrome\NativeMessagingHosts\com.hallpass.host",
-  "HKCU\Software\Chromium\NativeMessagingHosts\com.hallpass.host"
+  "HKCU\Software\Chromium\NativeMessagingHosts\com.hallpass.host",
+  "HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.hallpass.host",
+  "HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.hallpass.host"
 )
 
 if (-not (Test-Path -LiteralPath $installer)) {

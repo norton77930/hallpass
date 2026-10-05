@@ -3290,14 +3290,21 @@ export type AgentPromptKind = (typeof AGENT_PROMPT_KINDS)[number];
 /**
  * What the agent says to the person when the panel that holds their question is closed (011 R-164).
  *
- * Two fixed strings, English line then zh-TW line, and no third party in the sentence: no page
+ * Three fixed strings, English line then zh-TW line, and no third party in the sentence: no page
  * text, no tool arguments, no session id (FR-151), so there is nothing to template and no `{` in
- * them. They live in the contracts package because three parties have to say the same words - the
- * worker that raises the question, the host that relays it as progress and as a `timed-out` hint,
- * and the tests that assert what the person was told.
+ * them. Each travels as a `hint` (at most 400 characters) and as progress text. They live in the
+ * contracts package because three parties have to say the same words - the worker that raises the
+ * question, the host that relays it as progress and as a `timed-out` hint, and the tests that
+ * assert what the person was told.
  *
  * `consent` covers ask, plan, dialog and diagnostics: the person is being asked to answer a card,
  * and which card it is is on the card, not in a sentence read from a terminal.
+ *
+ * `choice` (018 US3 AS4, T515 m3 follow-up) has a sentence of its own because the consent one would
+ * be wrong for it twice over: it speaks of a consent card, where this is a question about which
+ * browser to use, and it says "Chrome's side panel", where the choice spans every connected
+ * browser (Chrome, Edge, Brave) and the person must open the panel in the one they want. So it
+ * names no card and no browser, and says where the answer is given: in the browser they pick.
  */
 export const ATTENTION_SENTENCES = {
   pairing:
@@ -3306,6 +3313,9 @@ export const ATTENTION_SENTENCES = {
   consent:
     "Hallpass is waiting for your answer to a consent card in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.\n" +
     "Hallpass 正在等你回答側欄裡的同意卡,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。",
+  choice:
+    "Hallpass is waiting for you to choose which browser to use, and the side panel that asks is closed. In the browser you want, click the Hallpass icon in the toolbar or press Alt+A, then confirm there.\n" +
+    "Hallpass 正在等你選擇要用哪個瀏覽器,但詢問的側欄沒有打開。請在你要用的瀏覽器點工具列的 Hallpass 圖示或按 Alt+A,然後在那裡確認。",
 } as const;
 
 /**
