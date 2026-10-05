@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AGENT_EXTENSION_VERSION } from "../../apps/extension/src/build-config.js";
+import { NATIVE_MESSAGING_ROOTS, nativeMessagingKey } from "../../packages/agent-host/src/install/windows.js";
 import {
   bundleHost,
   HOST_ENTRIES,
@@ -129,7 +130,7 @@ describe("QA package 0.2.0 zip (only when a full run has produced one)", () => {
   });
 
   it.skipIf(!built)("stamps one version into the zip name, VERSION and the packed manifest", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.11.1");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.11.2");
     expect(readZipEntry(zipPath, "VERSION").trim()).toBe(AGENT_EXTENSION_VERSION);
     const manifest = JSON.parse(readZipEntry(zipPath, "extension/manifest.json")) as { version?: string };
     expect(manifest.version).toBe(AGENT_EXTENSION_VERSION);
@@ -169,5 +170,18 @@ describe("QA package PowerShell scripts (T204)", () => {
     expect(script).toContain("-Purge");
     expect(script).toContain("config.json");
     expect(script).toContain("chrome://extensions");
+  });
+
+  /**
+   * Restoring a backed-up installation points every browser the installer registers back at it
+   * (0.11.1 review follow-up). The list was written when only Chrome and Chromium were registered;
+   * since 010 the installer also writes Edge and Brave, and a restore that skipped them left those
+   * two browsers with no host at all after an uninstall.
+   */
+  it("uninstall.ps1 restores the registration of every browser the installer registers", async () => {
+    const script = await readFile(resolve(assetsDir, "uninstall.ps1"), "utf8");
+    for (const { root } of NATIVE_MESSAGING_ROOTS) {
+      expect(script, `uninstall.ps1 does not restore ${root}`).toContain(`"${nativeMessagingKey(root)}"`);
+    }
   });
 });

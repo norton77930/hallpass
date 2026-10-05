@@ -1,8 +1,9 @@
 # Hallpass(瀏覽器代理橋接)— 操作手冊(維護者版)
 
-2026-10-02 · 適用於 **Hallpass 0.10.0**(34 個 MCP 工具、side panel 三態、錄製 GIF 與對話框、
+2026-10-05 · 適用於 **Hallpass 0.11.2**(37 個 MCP 工具、side panel 三態、錄製 GIF 與對話框、
 中斷、跳站確認、上傳資料夾詢問、0.7.0 的配對與提示修正、0.8.0 的「答案要誠實」、0.9.0 的「看得懂的面板」,
-以及 0.10.0 的「工作階段的網站計畫」)。
+0.10.0 的「工作階段的網站計畫」、0.11.0 的「好幾個瀏覽器同時服務,由你決定 agent 用哪一個」,
+以及 0.11.1、0.11.2 的可靠性修正)。
 
 > 這份是中文的維護者手冊。英文的 README 是公開入口;開發從 <https://github.com/norton77930/hallpass> 繼續。
 這份文件寫給**要開始用 AI(Claude Code)操作自己瀏覽器的人**;開發與測試的細節在
@@ -23,7 +24,8 @@ Claude Code ──stdio──▶ mcp-server.js ──loopback──▶ relay(nat
 
 ## 1. 安裝(做一次)
 
-> **不想碰 repo?用安裝包。**`npm run package` 會產出 `release/hallpass-<版本>.zip`(擴充功能資料夾 + 自足的
+> **不想碰 repo?用安裝包。**`npm run package` 會產出 `release/hallpass-<版本>.zip`(目前是 `hallpass-0.11.2.zip`,
+> 也可以從 release v0.11.2 下載;擴充功能資料夾 + 自足的
 > host + `install.ps1` / `uninstall.ps1` + README)。解壓後跑 `install.ps1`,照它印出的路徑載入擴充功能、把 server
 > 定義貼進你用的 MCP client(README 有 Claude Code / Claude Desktop / Codex CLI / Cursor 四種的位置)。只需要 Node 24,
 > 不需要 npm、不需要 build。下面 1.2–1.4 是從 repo 安裝的方式。
@@ -31,8 +33,9 @@ Claude Code ──stdio──▶ mcp-server.js ──loopback──▶ relay(nat
 ### 1.1 前置
 - Windows 11、**Node 24**(`node -v`)、npm。
 - **Chrome**——你平常用的那個就可以(正式版 Chrome 152 驗收過)。安裝程式會在四個登錄位置註冊 native host:
-  `Google\Chrome`、`Chromium`、`Microsoft\Edge`、`BraveSoftware\Brave-Browser`;其中只有 Chrome 跑過驗收,
-  Edge 與 Brave 只註冊、未實機驗證(公開 repo issue #2)。
+  `Google\Chrome`、`Chromium`、`Microsoft\Edge`、`BraveSoftware\Brave-Browser`;其中 Chrome 跑過完整驗收,
+  Edge 在 2026-10-03 實機驗證過(公開 repo issue #2 有紀錄),Brave 只註冊、未實機驗證。
+  好幾個瀏覽器可以同時裝,見 §9.9。
   想把 agent 的登入狀態和日常瀏覽分開,才用專用 profile:`chrome.exe --user-data-dir=D:\chrome-agent-profile`。
   `--remote-debugging-port=9222` 只有跑自動測試才需要,日常使用**不要**加。
 - **Claude Code** 已安裝且可登入(`claude --version`)。
@@ -47,7 +50,9 @@ npm run build:extension:agent      # 產出 apps\extension\dist\agent(不是 dis
 npm run agent-host:install         # 寫入 %LOCALAPPDATA%\hallpass\ 與 HKCU 的 NativeMessagingHosts 登錄
 ```
 `agent-host:install` 寫的 host manifest 直接指向這個 repo 的 `packages\agent-host\dist`,
-所以**之後重新 build 不需要重新安裝**;搬移 repo 才需要。
+所以**之後重新 build 不需要重新安裝**;搬移 repo 才需要。0.11.1 起,安裝時寫入的啟動器
+(`%LOCALAPPDATA%\hallpass\native-host.cmd`)用**安裝當時那個 Node.js 的完整路徑**執行主機,那個檔案不見時
+才改用 `PATH` 上的 `node`;所以換了 Node 版本或版本管理工具之後,也要重跑 `npm run agent-host:install`(見 §9.10)。
 
 ### 1.3 載入擴充功能
 1. Chrome 開 `chrome://extensions`,右上角開啟「開發人員模式」。
@@ -98,6 +103,9 @@ claude mcp list        # 應看到 hallpass
 
 ![0.9.0 的側欄（淺色）：同意卡、狀態列、兩張工作階段卡片](../media/016-panel-zh-TW-light.png)
 
+**這個瀏覽器**（0.11.0）：狀態列下面一行「這個瀏覽器：{名稱}」，旁邊「重新命名」（1–40 字）；還有其他瀏覽器
+在執行 Hallpass 時再一行「另有 N 個瀏覽器已連線」，只寫數量、不寫是哪些（見 §9.9）。
+
 **狀態列**只寫連線狀態和工作階段數，不寫任何 agent 的名字；產品名稱只在瀏覽器的側欄標題出現一次。
 **更多選項**裡列出每一個配對過的 agent（用它的顯示名稱），各自有一個「解除配對」，只解除那一個。
 
@@ -116,6 +124,8 @@ claude mcp list        # 應看到 hallpass
     這個狀態優先於「正在操作」。
   - 「待命中 · 上次動作：{時間}」：時間是「剛剛」、「12 分鐘前」或「1 小時 5 分鐘前」，側欄開著時每分鐘更新。
 - **左側顏色條**：這個工作階段的顏色，和它在分頁列上的 `Hallpass` 群組同一色（見 §9.6）。
+- **網站計畫**（0.10.0）：你核准過這個工作階段的網站計畫時，卡片多一行「網站計畫：{n} 個網站」，可以展開看清單，
+  旁邊有「撤回網站計畫」（見 §9.7）。
 - **技術資訊**（收合）：「工作階段 ID：…」，回報問題時用；卡片其他地方不會出現這個 ID。
 - **按鈕**只出現做得到的，「結束工作階段」永遠在最左邊、位置不會跳：
   - **結束工作階段**：一直都在。那個工作階段結束，agent 那端的呼叫會收到 `owner-stopped`；它的分頁留著、
@@ -153,6 +163,7 @@ claude mcp list        # 應看到 hallpass
   ```json
   { "uploadRoots": ["D:\\agent-uploads"] }
   ```
+  (0.6.0 起清單以外的檔案會當下詢問你,見 §9.3;0.8.0 起 `browser_batch` 裡也能上傳,見 §9.5。)
 - **下載**:頁面觸發的下載照常落在 Chrome 的下載資料夾;agent 用 `downloads_context` /
   `wait download-complete` 得知檔名與狀態,然後用自己的檔案工具讀。擴充功能不會啟動、開啟、移動或刪除任何下載。
 - **表單值**:agent 讀得到欄位目前的值;密碼、hidden、以及 autocomplete 標為密碼 / 一次性驗證碼 /
@@ -174,12 +185,14 @@ claude mcp list        # 應看到 hallpass
 4. **截圖會閃一下**:`screenshot` 要切到那個分頁擷取再切回來,屬正常。
 5. **多個 Claude Code 同時用同一個 Chrome 可以**:每個 session 各自一個分頁群組,互不搶分頁;
    別人持有的分頁對它是「not-yours」。
-6. **Chrome 關掉 = 橋接結束**:relay 是 Chrome 啟動的,Chrome 退出它就結束;agent 下一通呼叫會回
+6. **好幾個瀏覽器同時裝也可以**(0.11.0):每一個都在服務;agent 第一次會先被要求問你用哪一個,選了就記住。
+   配對與網站授權各瀏覽器分開,在一個瀏覽器允許的不會讓它在另一個做任何事(見 §9.9)。
+7. **Chrome 關掉 = 橋接結束**:relay 是 Chrome 啟動的,Chrome 退出它就結束;agent 下一通呼叫會回
    `bridge-lost`,重開 Chrome 後自動恢復(10 秒內),不用重啟 Claude Code。
-7. **重新 build 之後要重載擴充功能**(`chrome://extensions` → 重新載入);host 端不用重裝。
-8. **側欄語言**跟 Chrome 介面語言:`zh-TW` 顯示中文,其他一律英文。
-9. **一次只回答一張提示卡**;卡片上有 agent 名稱與網站,確認是你預期的那一個再按。
-10. **不要在敏感頁面按「這個網站以後都允許」**——那是持久設定(存在 `storage.local`),
+8. **重新 build 之後要重載擴充功能**(`chrome://extensions` → 重新載入);host 端不用重裝。
+9. **側欄語言**跟 Chrome 介面語言:`zh-TW` 顯示中文,其他一律英文。
+10. **一次只回答一張提示卡**;卡片上有 agent 名稱與網站,確認是你預期的那一個再按。
+11. **不要在敏感頁面按「這個網站以後都允許」**——那是持久設定(存在 `storage.local`),
     要收回去側欄清單按「撤銷」。
 
 ## 6. 給 AI 的指令範例
@@ -194,36 +207,62 @@ claude mcp list        # 應看到 hallpass
 - 多分頁:「開兩個分頁分別打開 A 站和 B 站,比較兩邊的標題。」
 
 agent 回報 `not-yours` / `held-by-session` 表示那個分頁不是它的(你的或別的 session 的);要它用
-`tabs_claim` 拿走沒人持有的分頁,或自己 `tabs_create`。
+`tabs_claim` 拿走沒人持有的分頁,或自己 `tabs_create`。點擊後開出來的新分頁也一樣不屬於它
+(0.8.0 起答案會寫 `held: false`),要先 `tabs_claim`。
 
 ## 7. 疑難排解
 
 | 現象 | 先看 | 處理 |
 |---|---|---|
 | 側欄「還沒有 agent 連上」,但 Claude Code 已呼叫 | `claude mcp list` 有沒有 `hallpass`;擴充功能 ID 是否正確;`%LOCALAPPDATA%\hallpass\bridge.json` 是否存在 | 沒安裝就 `npm run agent-host:install`;ID 不對就重新載入 `dist\agent` |
+| 側欄一直「還沒有 agent 連上」,`relay.log` 沒有新紀錄 | 主機一啟動就結束(多半是瀏覽器的環境找不到 `node`) | 0.11.1 起重新安裝主機即可(見 §9.10);舊版可從有正常 `PATH` 的地方重開瀏覽器 |
 | 側欄「和本機 agent 的連線中斷了」 | 展開「技術資訊」看最後斷線原因;`%LOCALAPPDATA%\hallpass\relay.log` | 通常自己恢復;沒有就按「重新檢查連線」,再不行重啟 Claude Code |
 | 呼叫回 `not-paired` | 配對卡有沒有在時限內按(所在視窗開著側欄 45 秒;沒開時 2 分鐘,圖示有紅色「!」) | 再叫一次,按「允許配對」 |
 | 呼叫回 `bridge-lost` | Chrome 是否關了 | 開 Chrome,10 秒內自動恢復 |
 | 點擊/輸入回 `input-unavailable` | 是否按了偵錯橫幅的「取消」 | 停止 session 後重來,別按取消 |
 | 呼叫回 `denied` + `restricted-page` | 目標是 `chrome://` 之類 | 換一般網頁 |
-| 呼叫回 `stale` | 頁面正在載入或已換頁 | 讓 agent 先 `wait` 或重新 `read_page` |
+| 呼叫回 `stale` | 頁面已經被換掉(`stale-reference`)或分頁已經不在(`tab-gone`) | 讓 agent 先 `wait` 或重新 `read_page` |
+| 呼叫回 `failed` + `page-not-responding`(0.8.0) | 頁面 10 秒沒回應;輸入可能已經生效 | 先截圖或讀頁面看狀態,再決定要不要重送;卡住的分頁可以關掉重開(見 §9.5) |
 | 上傳回 `upload-not-allowed` | `config.json` 的 `uploadRoots` | 把目錄加進去 |
 | 診斷工具回 `denied` | 側欄該站的「診斷」勾選 | 勾起來 |
+| `propose_sites` 回 `unavailable`(0.10.0) | 擴充功能是不是還是舊版 | `chrome://extensions` 重新載入擴充功能(見 §9.7) |
+| 呼叫回 `browser-not-chosen`(0.11.0) | 是不是有兩個以上的瀏覽器在執行 Hallpass,而這個 agent 還沒選過(或記住的那個沒開);答案裡列著每個瀏覽器的名稱與 id | 告訴 agent 用哪一個(它會 `select_browser`),或叫它 `request_browser_choice` 讓你在瀏覽器裡按(見 §9.9) |
+| 呼叫回 `browser-disconnected`(0.11.0) | 這個 session 正在用的瀏覽器是不是關了 | 重開那個瀏覽器,或告訴 agent 改用另一個 |
+| 清單上有「Browser」或「Browser (older Hallpass)」(0.11.0) | 那個瀏覽器的擴充功能還沒重新載入,或還在用升級前啟動的主機 | 到那個瀏覽器的 `chrome://extensions` 重新載入;後者重開瀏覽器 |
 
-日誌:relay 與 host 只記穩定代碼(`relay.started / superseded / unowned / chrome.closed`、
-`agent.call.completed …`),不記頁面內容;放心附在回報裡。
+日誌:relay 與 host 只記穩定代碼(`relay.started / superseded / unowned / chrome.closed`,0.10.0 的
+`relay.standby / relay.owned` 在 0.11.0 已隨待命機制拿掉;還有 `agent.call.completed …`),不記頁面內容;放心附在回報裡。
 
 ## 8. 更新與移除
 
+- **升級到 0.11.2(從 0.3.0 之後的任何版本)**:名稱、路徑、MCP server 名稱(`hallpass`)都沒變,只有兩步,
+  先後順序都可以:
+  1. **重新安裝主機**(這一版主機有改,主機與擴充功能的版本要一致)。安裝包使用者從 release v0.11.2
+     (<https://github.com/norton77930/hallpass/releases/tag/v0.11.2>)下載 `hallpass-0.11.2.zip`,解壓縮到原本的
+     資料夾(蓋掉 `extension\`、`host\`、兩個 `.ps1` 和 README),重新執行 `install.ps1`;從 repo 安裝的人先
+     `npm run build`,再跑 `npm run agent-host:install`。選瀏覽器時的側欄提醒句(0.11.2)、主機啟動器用完整路徑找 Node.js(0.11.1)、多瀏覽器選擇(0.11.0)、
+     網站計畫(0.10.0)、工作階段卡片上的專案名稱(0.9.0)、batch 裡上傳檔案與配對卡片自動收回(0.8.0),
+     都需要新版的主機。已經開著的 MCP client(例如升級前就開著的 Claude Code 工作階段)要關掉重開一次,
+     才會用到新的主機;沒重開的,卡片標題會一直是開始時間。
+  2. `chrome://extensions` → 對這個擴充功能按**重新載入**;裝了 Hallpass 的瀏覽器有好幾個時,每一個都要重新載入
+     (沒重新載入的會以「Browser」列出,也跳不出選擇卡)。
+
+  升級途中主機和擴充功能的版本可以不同:只做了其中一步時,就照前一版的方式運作,不會出錯(見 §9.10、§9.9、
+  §9.7、§9.6 與 §9.5 的升級提醒)。從 0.10.x 或更早升上來的話,0.11.0 的多瀏覽器選擇也一起生效;從 0.8.0 或更早
+  升上來的話,0.9.0 的「看得懂的面板」也一起生效;從 0.7.0 或更早升上來的話,0.8.0 的「答案要誠實」也一起生效;
+  從 0.6.0 或更早升上來的話,0.7.0 的「連線時不跳卡片、『忽略』只拒絕一次」也一起生效。配對、網站模式和
+  `config.json` 都留著。還在 0.2.0 或更早的話,先照下一條做。
 - **從 0.2.0 升級到 0.3.0(改名)**:MCP server 改叫 `hallpass`、host 改叫 `com.hallpass.host`、資料夾改為
   `%LOCALAPPDATA%\hallpass\`。安裝包使用者照 `scripts/package/README.md` §2.1 的四步;從 repo 安裝的人重跑
   `npm run agent-host:install`(它會移除舊註冊並印出來)、`claude mcp remove poc-browser`、再 `claude mcp add hallpass …`、
   重新載入擴充功能。配對與站點模式都留著(擴充功能 ID 不變);上傳白名單要在新的 `config.json` 重填。
 
-- **更新程式碼**:`git pull`(或取得新檔)→ `npx tsc -b` → `npm run build:extension:agent` →
-  `chrome://extensions` 重新載入。host 指向 repo 的 dist,自動生效;Claude Code 下一次啟動 server 用新的。
+- **更新程式碼**:`git pull`(或取得新檔)→ `npm run build`(= `npx tsc -b` + 擴充功能)→
+  `chrome://extensions` 重新載入。host 指向 repo 的 dist,自動生效(註冊本身不用重做;版本說明要求重裝主機時,
+  例如 0.11.0、0.11.1,照上面跑 `npm run agent-host:install`);Claude Code 下一次啟動 server 用新的。
 - **移除**:`npm run agent-host:uninstall`(刪 `%LOCALAPPDATA%\hallpass` 與登錄鍵)、
-  `claude mcp remove hallpass`、在 `chrome://extensions` 移除擴充功能。
+  `claude mcp remove hallpass`、在 `chrome://extensions` 移除擴充功能。安裝包的 `uninstall.ps1` 遇到安裝前留下的
+  備份(`.bak`)時會把它放回去並重新註冊,Chrome、Chromium、Edge 與 Brave 四個登錄位置都會重新指回。
 - **從 0.1.x 升級**:安裝包使用者把新 zip 蓋進同一個資料夾 → 重跑 `install.ps1` → 重新載入擴充功能;
   Chrome 會問一次 `offscreen` 權限,配對、站點模式、`config.json` 都留著(`scripts/package/README.md`
   §2.1 與 QA 指南是同一份說明,已用 `tests/acceptance/upgrade-proof.mjs` + `upgrade-host-proof.ps1` 驗過)。
@@ -399,26 +438,116 @@ session 繼續,問題留著等下一次呼叫)。要**離開**的呼叫不會被
 > **升級提醒**：請**重新安裝主機**（`npm run agent-host:install`，安裝包使用者是 `install.ps1`），
 > 並到 `chrome://extensions` **重新載入**擴充功能，先後順序都可以。專案名稱是新主機送的：
 > 主機還是 0.8.0 時，卡片標題寫開始時間（「Claude Code · 14:02 開始」），其他都一樣；
+> 重裝主機前就開著的 Claude Code 工作階段也一樣，關掉重開才會出現資料夾名稱；
 > 0.9.0 主機配 0.8.0 擴充功能時，新的訊息會被舊擴充功能略過，照 0.8.0 的方式運作。連結協定版本不變（仍是 2）。
 
 ## 9.7 0.10.0：工作階段的網站計畫（工具數 33 → 34）
 
 新工具 `propose_sites`（017）：一個任務要跨好幾個網站時，agent 先列出要用的網站（1 – 10 個完整來源，
 協定 + 主機 + 連接埠）和用途，也可以附上預定步驟。側欄出現一張「agent 想在這些網站上工作」的卡片，
-每個網站一個勾選框（預設全勾），並提醒網頁可能會誘使 agent 要求更多權限。
+每個網站一個勾選框（預設全勾），並提醒網頁可能會誘使 agent 要求更多權限——只核准這個任務本來就該用到的網站。
 
 - **只有你能核准**：按「核准勾選的網站」才算數；agent、MCP server、主機傳什麼都無法替你核准。按「拒絕」就什麼都不給。
-- **核准了什麼**：只限這一個工作階段、只限勾選的網站——點擊、輸入、按鍵、捲動、hover、拖曳、填表、
+- **核准了什麼**：只限這一個工作階段（這一個 agent）、只限勾選的網站——點擊、輸入、按鍵、捲動、hover、拖曳、填表、
   對話框按「確定」，以及 `browser_batch` 裡的同樣步驟，都不再每次跳同意卡；設成 `follow-a-plan` 的網站也不再跳計畫卡。
 - **照樣會問**：`evaluate`（執行頁面 JavaScript）、上傳檔案、頁面把分頁帶到你沒決定過的網站（§9.3 的跳站確認）。
   清單以外的網站、其他工作階段，行為完全不變；設成 `skip-checks` 的網站本來就不問。
-- **什麼時候失效**：工作階段結束、你解除配對這個 agent、瀏覽器關閉，或你在工作階段卡片上按「撤回網站計畫」。
+- **什麼時候失效**：工作階段結束、你解除配對這個 agent、瀏覽器關閉（重開不會恢復），或你在工作階段卡片上按「撤回網站計畫」。
   「中斷這一步」和 service worker 重啟不會讓它失效。它**不會**寫進網站清單。
 - **卡片與紀錄**：工作階段卡片顯示「網站計畫：{n} 個網站」，可以展開看清單；核准、取代、撤回、結束都會在活動紀錄留一行。
   計畫進行中 agent 再提一次，新卡片會標出哪些「已核准」，核准就取代舊的，拒絕則保留舊的。
 
 > **升級提醒**：主機和擴充功能都要 0.10.0。擴充功能還是舊版時，`propose_sites` 會回答「unavailable」並提示重新載入擴充功能，
 > 不跳卡片、不核准任何東西。
+
+## 9.8 0.10.0：兩個瀏覽器不再互搶連線
+
+> **0.11.0 起已被取代**：下面的「一個服務、一個待命」只適用於 0.10.0。0.11.0 讓每個瀏覽器同時服務、由你選 agent
+> 用哪一個，待命機制與 `bridge-owner.json` 的待命判斷都拿掉了，見 §9.9。這一節留著，給還在 0.10.0 的人排查。
+
+同一台電腦上兩個瀏覽器（例如 Chrome 和 Edge）都裝了 Hallpass 時，兩邊各自會啟動一個 relay。以前後啟動的 relay
+會接手 `bridge.json`，兩個 relay 大約每 7 秒互搶一次，兩邊的 agent 呼叫都逾時。0.10.0 起：先開始服務的 relay
+繼續服務，另一個瀏覽器的 relay 待命。
+
+- **怎麼判斷誰在服務**：擴充功能回給 relay 的確認（relay-ack）帶著這次瀏覽器執行的 `browserRunId`；正在服務的
+  relay 在 `bridge.json` 旁邊另外寫一個 `%LOCALAPPDATA%\hallpass\bridge-owner.json`（`{relayPid, browserRunId}`）。
+  新的 relay 只有在記錄裡的 relay 程序還活著、而且它的連接埠有回應時才待命；記錄過期（程序已經不在、或連接埠
+  沒回應）就照常接手。
+- **你會看到什麼**：待命那個瀏覽器的側欄說「另一個瀏覽器正在服務你的 agent」；relay 日誌寫 `relay.standby`，
+  服務中的寫 `relay.owned`。
+- **換瀏覽器**：關掉正在服務的那個，待命的會自動接手（實測約 3 秒），agent 下一通呼叫就到新的瀏覽器；
+  不用重啟 Claude Code。
+- 兩個瀏覽器都要 0.10.0 的擴充功能（主機也要 0.10.0）。
+
+> **已知的後續項目**：待命的瀏覽器大約每 5–7 秒會重新啟動一次 host，`relay.log` 會一直多出 `relay.started` /
+> `relay.standby` 這類行。這不影響服務中的瀏覽器，也不影響 agent 呼叫；只是日誌比較吵。不用時把那個瀏覽器關掉即可。
+
+> **排查**：兩個瀏覽器都開著、agent 卻一直逾時：先看 `bridge-owner.json` 的 `relayPid` 是不是還在跑（工作管理員），
+> 再看 `relay.log` 最後幾行是 `relay.owned` 還是兩個 relay 反覆 `relay.started` / `relay.superseded`；後者通常表示
+> 有一邊還是舊版擴充功能或舊主機，兩邊都重新載入、重裝主機。
+
+## 9.9 0.11.0：好幾個瀏覽器同時服務，由你決定 agent 用哪一個（工具數 34 → 37）
+
+018 的主題：同一台電腦上好幾個瀏覽器（或同一個瀏覽器的好幾個 profile）都裝了 Hallpass 時，每一個都同時在服務，
+不再有人要等另一個關掉。只有一個瀏覽器時，agent 那端什麼都沒變。
+
+**agent 怎麼選瀏覽器**
+
+| 工具 | 做什麼 | 備註 |
+|---|---|---|
+| `list_browsers {}` | 列出這台電腦上執行 Hallpass 的瀏覽器：`browserId`、名稱、種類、連上的時間、哪一個是目前的 | 不必配對；不列分頁或任何頁面資訊 |
+| `select_browser {browserId}` | 為這個 session 選一個已連線的瀏覽器，並替這個 agent 記住 | 在那個瀏覽器還沒配對時，下一通呼叫照常跳配對卡；沒連線的 id 回 `browser-not-chosen` 附清單 |
+| `request_browser_choice {}` | 每個能顯示的瀏覽器側欄都跳出「要讓 {agent} 使用這個瀏覽器嗎？」；先按「使用這個瀏覽器」的那一個就被選中 | 每個都按「不是這個」或 120 秒沒人回答：回 `{chosen:false}`，原本的選擇不變；舊版擴充功能的瀏覽器跳過 |
+
+- **Hallpass 絕不替你挑**：兩個以上的瀏覽器在服務、這個 agent 還沒選過時，第一通瀏覽器工具回 `browser-not-chosen`，
+  附每個瀏覽器的 id 與名稱，提示 agent 去問使用者。
+- **選擇記在 agent 上**：存在 `%LOCALAPPDATA%\hallpass\choices\`，同一個 agent 之後的 session 都用它；那個瀏覽器
+  沒開時，呼叫回 `browser-not-chosen`，不會自動換到別的瀏覽器。session 開始呼叫之後就綁在那個瀏覽器上，它中途
+  關掉就回 `browser-disconnected`。
+- **同意是各瀏覽器分開的**：配對、網站模式、網站計畫、跳站與上傳的決定都在各自的瀏覽器裡；一個瀏覽器的核准
+  從來不會讓 agent 在另一個做任何事。截圖的 `imageId` 也記著是在哪個瀏覽器拍的，不能拿到另一個瀏覽器上傳。
+
+**側欄與名稱**
+
+- 每個 profile 第一次執行時產生自己的瀏覽器 id（存在那個 profile 的擴充功能儲存區），之後一直用同一個。
+- 預設名稱就是瀏覽器種類：Chrome、Edge、Brave、Chromium；同一種有兩個時，第二個叫「Chrome 2」。在側欄
+  「這個瀏覽器：{名稱}」旁按「重新命名」改成好認的名字（1–40 字），agent 的清單立刻跟著變。
+- 其他瀏覽器只顯示數量（「另有 1 個瀏覽器已連線」），不顯示它們的名稱或狀態。
+
+**底下怎麼接（給排查用）**
+
+- 每個瀏覽器的 relay 只寫自己那一份 `%LOCALAPPDATA%\hallpass\browsers\<browserId>.json`（埠、token、名稱、種類）；
+  `mcp-server.js` 在初始化、每次撥號、每通呼叫時決定用哪一個瀏覽器，只撥那一個的埠——路由就是「接哪一條 socket」，
+  relay 裡沒有新的政策。
+- 舊的 `bridge.json` 仍由其中一個 relay 寫，給還沒重開的舊版 MCP server 用。0.10.0 的待命（relay-standby）已經拿掉。
+  連結協定仍是第 2 版。
+- 升級途中：沒重新載入的擴充功能，清單上叫「Browser」、跳不出選擇卡；還在用升級前主機的瀏覽器叫
+  「Browser (older Hallpass)」，重開瀏覽器即可。兩種都還能用，各算一個瀏覽器。
+
+**同一版的其他修正（017 後續）**
+
+- 點擊或拖曳的座標上找不到東西（`target-not-located`）時，答案提示先截圖或改用 `ref`，不要猜座標。
+- 網站計畫卡上取消勾選的網站，被別的問題卡暫時佔走卡位再交回時不會重設。
+- 國際化網域在卡上顯示成 Unicode，旁邊附 ASCII（punycode）寫法。
+- 工作階段卡只對核准它的那個 agent 顯示網站計畫。
+
+> **升級提醒**：重新安裝主機，並在每一個裝了 Hallpass 的瀏覽器重新載入擴充功能；已經開著的 MCP client
+> 要關掉重開才會拿到這三個新工具。
+
+## 9.10 0.11.1：可靠性修正（工具數不變仍是 37）
+
+- **瀏覽器找不到 `node` 時，主機也能啟動**：主機啟動器（`%LOCALAPPDATA%\hallpass\native-host.cmd`）改用安裝時
+  那個 Node.js 的**完整路徑**執行，找不到那個檔案才改用 `PATH` 上的 `node`。起因：從終端機開的瀏覽器，交給主機的
+  環境裡 `PATH` 有時找不到 Node.js，主機一啟動就結束，側欄只顯示沒有 agent 連線。所以在重新安裝主機之前，
+  主機會一直用安裝當時的 Node.js；換 Node 版本或換版本管理工具之後，要重跑 `npm run agent-host:install`
+  （安裝包使用者是 `install.ps1`）。
+- **Microsoft Edge：`tabs_create` 之後馬上 `navigate` 不再逾時**：新分頁還沒開始載入自己的頁面時，Edge 會丟掉
+  第二次導覽；現在 `navigate` 會先等新分頁載入第一個頁面（最多 5 秒，算在原本 25 秒的時限內）。等待期間分頁
+  被關掉，回 `stale / tab-gone`。
+- **撤回的配對請求，卡片會從側欄消失**，即使瀏覽器的擴充功能儲存區回應很慢也一樣。
+
+> **升級提醒**：**重新安裝主機**（新的啟動器是安裝時寫入的；`npm run agent-host:install`，安裝包使用者是
+> `install.ps1`），再到 `chrome://extensions` **重新載入**擴充功能。
 
 ## 10. 跑驗收(工程)
 
@@ -444,6 +573,25 @@ session 繼續,問題留著等下一次呼叫)。要**離開**的呼叫不會被
   下載相關的 journey 會先把瀏覽器的下載行為改回 `default`:Playwright 會把它附著的瀏覽器的每個下載
   改名成 GUID 丟進自己的 artifacts 目錄,那樣就證不了「檔案用 agent 要的名字存下來」。
   對話框的 journey 收尾一定要把對話框關掉——沒人回答的原生對話框會讓下一次 `connectOverCDP` 卡住。
+- **0.8.0 的驗收**(`specs/015-honest-answers/coverage.md`,Chromium 151 附著模式):`npm test` 1507 通過、
+  `npm run test:contract` 249 / 249;新 gate `agent-press-outcomes`、`agent-false-stale`(20 輪)、`agent-downloads`、
+  `agent-batch-upload` 3 / 3、`agent-pairing-withdraw` 2 / 2 全綠;`npm run package` 產出 `release/hallpass-0.8.0.zip`。
+  正式版 Chrome 153 / Edge 的實機跑留給 owner。
+- **0.9.0 的驗收**(`specs/016-readable-panel/coverage.md`):`npm test` 1585 通過、`npm run test:contract` 256、
+  snapshot 654;新 gate `agent-panel-016` 全綠,側欄截圖 zh-TW 與 en-US 兩種語系都拍了。owner 檢查後的兩個小修正
+  (卡片第二行不重複開始時間、上傳資料夾說明)之後 `npm test` 1587 通過;正式版 Chrome 154 上全部 `agent-*` gate
+  62 通過 / 2 依設計跳過 / 0 失敗(第一輪會撞到 20 分鐘的總上限,沒跑到的 spec 再補跑)。0.9.0 已在公開 repo 發布
+  (tag v0.9.0,release 附 `hallpass-0.9.0.zip`)。
+- **0.10.0 的驗收**(`specs/017-session-site-plan/coverage.md`):新 gate 4 / 4 全綠,全部 `agent-*` 回歸 66 通過 / 0 失敗;
+  正式版 Chrome 154 上 gate 4 / 4、驗收探針 S17(三個網站的任務,agent 應該只提一次計畫)通過。兩個瀏覽器的待命與
+  接手在實機上驗過。release 附 `hallpass-0.10.0.zip`(v0.10.0)。
+- **0.11.0 的驗收**(`specs/018-multi-browser-selection/coverage.md`):`npm test` 1871 通過、`npm run test:contract`
+  293 / 293(含 zip);兩個瀏覽器的 gate `agent-multi-browser` 8 / 8(附著模式用 `HALLPASS_CDP_ENDPOINTS` 同時接兩個
+  Chromium);全部 `agent-*` 回歸(T513)完成;驗收探針 S18(兩個瀏覽器,agent 選使用者指名的那個)通過。Edge 實機
+  驗證(010)也在這一輪補上。三次審查(架構、安全、最終)的發現全部套用。release 附 `hallpass-0.11.0.zip`(v0.11.0)。
+- **0.11.1 的驗收**:`npm test` 1881 通過、contract 293 / 293(含 zip);Edge 154 實機:新分頁導覽 12 / 12(修前 6 / 12)、
+  `agent-transitions` 1 / 1、`agent-pairing-withdraw` 2 / 2;啟動器在「`PATH` 只有瀏覽器資料夾」的環境實測舊版失敗、
+  新版成功;兩次審查通過。release 附 `hallpass-0.11.1.zip`(v0.11.1)。
 
 ## 11. 工作方式(踩過兩次就停)
 
@@ -456,3 +604,4 @@ owner 2026-09-18 的規則,008 全程適用,寫在這裡是因為它省下的時
 ---
 
 開發從 2026-09-19 起在公開 repo 繼續:<https://github.com/norton77930/hallpass>。原私有 repo 只作存檔。
+本手冊適用 Hallpass 0.11.2(2026-10-05)。

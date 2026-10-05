@@ -88,6 +88,12 @@ export type BrowserChoiceOutcome =
 
 export type BrowserChoiceRequest = {
   readonly result: Promise<BrowserChoiceOutcome>;
+  /**
+   * Whether, right now, a browser that did not say no has ticked that its side panel is closed
+   * while its card waits (T515 m3 follow-up): what picks the attention sentence over the neutral
+   * progress text for the ticks the requesting call reports while it waits.
+   */
+  panelClosed(): boolean;
   /** A newer request of the same session, or the session ending: every card still up is withdrawn. */
   supersede(): void;
 };
@@ -236,6 +242,7 @@ export function requestBrowserChoice(options: {
 
   return {
     result,
+    panelClosed: unseenBehindClosedPanel,
     supersede() {
       settle(notChosen("superseded"));
     },

@@ -48,7 +48,10 @@ Final code review of S2/S3/S5/S6/0.11.0: pass with fixes; M1, m1–m4, m6 fixed 
 Follow-ups (not in scope): the legacy `bridge.json` entry still judges liveness by pid only
 (transitional, 0.10.x relays); the progress text during `request_browser_choice` stays neutral after a
 panel-closed tick (only the final reply carries the attention sentence); a choice-specific attention
-sentence (today the consent one is reused).
+sentence (today the consent one is reused). The last two are done (2026-10-04): `ATTENTION_SENTENCES`
+has a `choice` sentence (011 contracts/prompt-waiting.md), used as the progress text once a browser
+ticked with its panel closed and as the not-chosen hint. The `bridge.json` one is left as it is: only
+0.10.x relays write that entry, and they are gone once their browsers restart on 0.11.x.
 
 Still open for release: T513 single-browser `agent-*` regression on this branch (needs the owner's OK
 for the Chromium host-key redirect), probe S18 (owner), `npm run package` for the 0.11.0 zip.

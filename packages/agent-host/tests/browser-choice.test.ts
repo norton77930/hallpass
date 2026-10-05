@@ -360,7 +360,30 @@ describe("018 S5 request_browser_choice", () => {
     const result = await client.callTool("request_browser_choice");
 
     expect(result.isError, result.text).toBe(false);
-    expect(result.json).toEqual({ chosen: false, hint: ATTENTION_SENTENCES.consent });
+    // The choice's own sentence (T515 m3 follow-up): it names no consent card and no one browser.
+    expect(result.json).toEqual({ chosen: false, hint: ATTENTION_SENTENCES.choice });
+  });
+
+  it("switches the progress text to the choice sentence once the worker ticks that its panel is closed", async () => {
+    await chrome(true, { decision: "ignore", panelClosed: true });
+    client = await start({
+      HALLPASS_AGENT_BROWSER_CHOICE_BOUND_MS: "1500",
+      HALLPASS_AGENT_PAIRING_PROGRESS_MS: "150",
+    });
+    await pause(300);
+    const seen: Array<{ progress: number; total?: number; message?: string }> = [];
+
+    const result = await client.callTool(
+      "request_browser_choice",
+      {},
+      { onProgress: (update) => seen.push(update), timeoutMs: 600, resetTimeoutOnProgress: true },
+    );
+
+    expect(result.json).toEqual({ chosen: false, hint: ATTENTION_SENTENCES.choice });
+    expect(seen.length).toBeGreaterThanOrEqual(3);
+    // The stand-in ticks as soon as it is asked, so by the first progress tick the panel is known
+    // closed: every tick says where to click, none is the neutral "still waiting".
+    expect(seen.every((update) => update.message === ATTENTION_SENTENCES.choice)).toBe(true);
   });
 
   it("answers at once with a hint when no connected browser can show the card, sending nothing", async () => {

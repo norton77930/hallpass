@@ -52,9 +52,9 @@ describe("T239 the product's identity is Hallpass", () => {
     expect(zhMessages["extActionTitle.agent"]).toContain("Hallpass");
   });
 
-  it("advertises the MCP server as hallpass at version 0.11.1, the same version the extension carries", () => {
+  it("advertises the MCP server as hallpass at version 0.11.2, the same version the extension carries", () => {
     expect(SERVER_NAME).toBe("hallpass");
-    expect(SERVER_VERSION).toBe("0.11.1");
+    expect(SERVER_VERSION).toBe("0.11.2");
     expect(AGENT_EXTENSION_VERSION).toBe(SERVER_VERSION);
   });
 

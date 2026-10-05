@@ -16,7 +16,7 @@ export const SERVER_NAME = "hallpass";
  * (`AGENT_EXTENSION_VERSION`). A contract test pins the two together - an extension and the host it
  * talks to are one release, and a client asking who it is talking to must not be told otherwise.
  */
-export const SERVER_VERSION = "0.11.1";
+export const SERVER_VERSION = "0.11.2";
 
 /**
  * The tools this host will actually carry to a worker, as opposed to the tools the contract
