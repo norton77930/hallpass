@@ -409,7 +409,11 @@ describe("dialRelay", () => {
       env,
       log: (code, detail) => logs.push(detail === undefined ? code : `${code} ${detail}`),
     });
-    await new Promise((tick) => setTimeout(tick, 20));
+    // Wait for the line itself, not a fixed beat: the first read of the record can lag under load.
+    await waitFor(
+      () => logs.find((line) => line.startsWith("agent.dial.protocol-mismatch")),
+      "the protocol-mismatch log line",
+    );
     await dial.stop();
 
     expect(dialled).toBe(0);

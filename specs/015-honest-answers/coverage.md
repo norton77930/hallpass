@@ -31,7 +31,8 @@ profile and LOCALAPPDATA), `HALLPASS_LOCALE=en-US`.
 - **Review follow-ups not taken in 015** (T402 review): F2 keyboard dispatch is not raced with a JS
   dialog (a keydown that opens `alert` answers page-not-responding, the retry then answers the
   dialog); F3 a hung `mousePressed` leaves no `mouseReleased` (deliberate, unpinned by a test); F4
-  the bound is per dispatch, not per call. S4 review: `reopenSession` leaves an old pairing timer
+  the bound is per dispatch, not per call (done 2026-10-11: one 25 s input budget per call and per batch
+  step, spec change log). S4 review: `reopenSession` leaves an old pairing timer
   (harmless, pre-existing).
 
 ## Final verification (T429)

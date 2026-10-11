@@ -545,3 +545,14 @@ the contracts under `contracts/` carry the detail.
   what they had allowed.
 - **FR-195's old-host clause is amended** (S4, R-190): see the requirement itself. An old host
   cannot say anything new, so the reinstall note is documentation.
+- **The site is checked again just before input or a picture leaves** (2026-10-11). The site mode is
+  decided once per call, but a gesture then waits for the agent's cursor to reach its point, and a
+  picture brings the tab forward first. A page that started moving to another site inside that wait
+  would have been given the press, or photographed, before the transition question could ask anyone.
+  So immediately before the first input event of a click (single, double, triple or right), hover,
+  drag (before its press only, never mid-drag) or position wheel - from `computer` and inside
+  `browser_batch` too - and immediately before a `computer screenshot` or `screenshot` capture, the
+  tab's address is read once more. If the committed origin is not the one the call was decided on (a
+  screenshot: the one the tab was on when the call started), or a navigation to another origin is
+  already pending, nothing is sent or captured, and the call answers `stale / stale-context` with a
+  hint saying so and that the next call on the tab asks the owner if that site needs it.

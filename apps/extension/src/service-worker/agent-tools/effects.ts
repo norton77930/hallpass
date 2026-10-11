@@ -1,5 +1,7 @@
 import {
   AGENT_015_REASON_OUTCOMES,
+  AGENT_CALL_TIMEOUT_MS,
+  AGENT_CALL_TIMEOUT_SLACK_MS,
   agentToolArgSchemas,
   isAgentEffectTool,
   type AgentEffectObservation,
@@ -39,6 +41,7 @@ import {
   type AgentKeyboardInput,
   type AgentPointerInput,
   type CursorSender,
+  type InputBudget,
   type PointerButton,
 } from "./input.js";
 import {
@@ -66,6 +69,13 @@ import { findOnTab, resolveRef, type AgentTarget } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
+import {
+  isSiteMovedBeforeDispatch,
+  readTabAddress,
+  siteMovedAnswer,
+  stillOnOrigin,
+  type ReadTabAddress,
+} from "./site-recheck.js";
 
 /**
  * The effect tools (003/T028, FR-040..FR-043).
@@ -232,6 +242,11 @@ export type AgentEffectDeps = {
    */
   tabUrl?: (tabId: number) => Promise<string | undefined>;
   /**
+   * Where a tab is and where it is going, read once immediately before a gesture's first event and
+   * before a picture (014 change log 2026-10-11). Defaults to `chrome.tabs.get`.
+   */
+  tabAddress?: ReadTabAddress;
+  /**
    * The session's download records started since a moment (015/T405, T406). Absent means this
    * runner cannot see downloads, and a press reports none - never "none happened" on its behalf:
    * without it `observedForMs` would claim a silence nobody observed, so it is wired wherever the
@@ -267,6 +282,33 @@ const DEFAULT_SETTLE_MS = 400;
  * a map in this worker's memory, never the page.
  */
 const DIALOG_RACE_POLL_MS = 25;
+
+/**
+ * One tool call's input budget, all its `Input.*` dispatches together (015 review F4).
+ *
+ * The host gives a call whose arguments state no duration `AGENT_CALL_TIMEOUT_MS` (30 s) and then
+ * answers `timed-out / no-answer` itself (contracts `agentCallBoundMs`, host `CallRouter`); a
+ * `browser_batch` is given the sum of its steps' own bounds, so a step - which reaches this runner
+ * as a call of its own - gets the same 30 s, and the budget is per call and per step alike. The
+ * budget ends `AGENT_CALL_TIMEOUT_SLACK_MS` (5 s) before that, measured from when this runner
+ * received the call: room for the verification and the answer's trip back after the last dispatch.
+ *
+ * It only ever fires on slow dispatches: the longest input a call may carry is 2,000 typed
+ * characters (contracts `maxTextEntryChars`), 4,004 key events with `replace`, so spending 25 s on
+ * it takes a renderer averaging over 6 ms per event - and 30 s of it was already the host's no-answer.
+ */
+const INPUT_CALL_BUDGET_MS = AGENT_CALL_TIMEOUT_MS - AGENT_CALL_TIMEOUT_SLACK_MS;
+
+/**
+ * What the first dispatch of a call is always given, however much of the budget went before it.
+ *
+ * A consent prompt can hold a call for its 25 s bound (or two minutes behind a closed panel, the host
+ * extending its own wait meanwhile), and resolving the target may take a content deadline or two.
+ * Input that reaches the renderer at all is then bounded from its first dispatch by this much: what a
+ * prompt answered at its bound leaves before the host's 30 s, and never "spent" before anything was
+ * sent - an input that never left is not one that "may have taken effect".
+ */
+const INPUT_BUDGET_FLOOR_MS = 5_000;
 
 type EffectPlan = {
   capability: RuntimeAction;
@@ -1146,11 +1188,16 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       });
   const confirmPoint = deps.confirm ?? createTargetConfirmer();
   const confirmFocus = deps.confirmFocus ?? createFocusConfirmer();
+  // The input budget of the call delivering on each tab (015 review F4). One call per tab is in
+  // flight (FR-043), and a batch runs its steps one after another, so a tab has at most one.
+  const inputBudgets = new Map<number, InputBudget>();
+  const budgetOf = (tabId: number): InputBudget | undefined => inputBudgets.get(tabId);
   const pointer: AgentPointerInput = createPointerInput({
     attachments: deps.attachments,
     ...(deps.cursor ? { cursor: deps.cursor } : {}),
+    budget: budgetOf,
   });
-  const keyboard: AgentKeyboardInput = createKeyboardInput({ attachments: deps.attachments });
+  const keyboard: AgentKeyboardInput = createKeyboardInput({ attachments: deps.attachments, budget: budgetOf });
   const sleep =
     deps.sleep ??
     ((ms: number) =>
@@ -1161,6 +1208,36 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   const now = deps.now ?? (() => Date.now());
   const watchTabCreated = deps.watchTabCreated ?? watchChromeTabCreated;
   const readTabUrl = deps.tabUrl ?? chromeTabUrl;
+  const readAddress = deps.tabAddress ?? readTabAddress;
+
+  /**
+   * The check a delivery runs at its last moment (014 change log 2026-10-11): is the tab still on
+   * the site this call's gate decided about - the binding's - with no navigation elsewhere pending.
+   */
+  function onGatedSite(binding: AgentPageBinding): () => Promise<boolean> {
+    return () => stillOnOrigin(binding.tabId, binding.site, readAddress);
+  }
+
+  /**
+   * The same check, then the delivery marker (014 FR-181, 008/R-136; review S1-F1).
+   *
+   * The marker says "from here on the page may have been given something", and the ring a recorded
+   * frame draws is read from it. Both are true only once the check has let the gesture go: a press
+   * the check refused sent nothing, so an interrupt during it answers "nothing was delivered" and
+   * no ring is drawn for it.
+   */
+  function onGatedSiteThenDelivered(
+    binding: AgentPageBinding,
+    callId: string,
+    delivery: Parameters<NonNullable<AgentEffectDeps["onDelivered"]>>[1],
+  ): () => Promise<boolean> {
+    const check = onGatedSite(binding);
+    return async () => {
+      if (!(await check())) return false;
+      deps.onDelivered?.(callId, delivery);
+      return true;
+    };
+  }
 
   /** A tab's address for the observation; any failure to read it is "not known", never a throw. */
   async function tabUrlOf(tabId: number): Promise<string | undefined> {
@@ -1270,9 +1347,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   }
 
   /** One picture of a tab, region or whole, through the `screenshot` tool's own lookup. */
-  async function photograph(tabId: number, region?: CaptureRegion) {
+  async function photograph(tabId: number, region?: CaptureRegion, beforeCapture?: () => Promise<boolean>) {
     return photographTab(
-      { tabId, ...(region === undefined ? {} : { region }) },
+      {
+        tabId,
+        ...(region === undefined ? {} : { region }),
+        ...(beforeCapture === undefined ? {} : { beforeCapture }),
+      },
       {
         ...(deps.capture ? { capture: deps.capture } : {}),
         ...(deps.listTabs ? { listTabs: deps.listTabs } : {}),
@@ -1649,10 +1730,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (fromRect.frame?.sessionId !== toRect.frame?.sessionId) {
         return answer(callId, "failed", "cross-frame-drag");
       }
-      // Both ends, for the path a recorded frame draws (008/FR-105); a no-op when nothing records.
-      deps.onDelivered?.(callId, { from: centreOf(fromRect), to: centreOf(toRect) });
+      // Both ends, for the path a recorded frame draws (008/FR-105), once the check let it go.
       await pointer.drag(binding.tabId, centreOf(fromRect), centreOf(toRect), {
         ...(fromRect.frame?.sessionId === undefined ? {} : { sessionId: fromRect.frame.sessionId }),
+        beforeDispatch: onGatedSiteThenDelivered(binding, callId, { from: centreOf(fromRect), to: centreOf(toRect) }),
       });
       // Whether it moved is measured, not assumed: the dragged element's box is asked for again
       // and compared with the one the gesture started from. This locate verifies; it must not
@@ -1674,8 +1755,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     const target = await at(args.target as AgentTarget | undefined);
     if (!target.ok) return target.response;
     const point = centreOf(target.rect);
-    // The one place the point a click or a hover was aimed at exists (008/FR-105, R-136).
-    deps.onDelivered?.(callId, { point });
+    // The one place the point a click or a hover was aimed at exists (008/FR-105, R-136); it is
+    // told once the gesture's last check has let it go.
+    const deliveredAt = onGatedSiteThenDelivered(binding, callId, { point });
     // The one thing this worker can see for itself about a hover: the page gave the element a box
     // with area, so there was something at that point to hover.
     const targetVisible = target.rect.width > 0 && target.rect.height > 0;
@@ -1683,6 +1765,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     if (tool === "hover") {
       await pointer.hover(binding.tabId, point, {
         ...(target.rect.frame?.sessionId === undefined ? {} : { sessionId: target.rect.frame.sessionId }),
+        beforeDispatch: deliveredAt,
       });
       // 004/T150: hover's entire purpose is to change what is under the pointer, so this worker's
       // own rect arithmetic (`targetVisible` above, kept as it was before the hover) is not evidence
@@ -1768,6 +1851,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
           button: gesture.button,
           clickCount: gesture.clickCount,
           ...(target.rect.frame?.sessionId === undefined ? {} : { sessionId: target.rect.frame.sessionId }),
+          beforeDispatch: deliveredAt,
         }),
       );
       if ("dialog" in delivery) {
@@ -1859,14 +1943,15 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
        * The pointer family writes it with the point it measured, for the ring a recorded frame
        * draws; here there is no point worth drawing - the click is how a caret is placed, not the
        * action the owner asked for - so the record carries nothing and says only what it is for:
-       * from this line on, an interrupt cannot honestly say the page was given nothing.
+       * from the moment the check lets the click go, an interrupt cannot honestly say the page was
+       * given nothing (review S1-F1: not before - a click the check refused gave it nothing).
        */
-      deps.onDelivered?.(callId, {});
       const focusing = await racedDelivery(beforeKeys(), () =>
         pointer.click(binding.tabId, centreOf(target.rect), {
           button: "left",
           clickCount: 1,
           ...(sessionId === undefined ? {} : { sessionId }),
+          beforeDispatch: onGatedSiteThenDelivered(binding, callId, {}),
         }),
       );
       if (focusing !== undefined) return focusing;
@@ -2042,8 +2127,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     const action = String(args.action);
 
     if (action === "screenshot") {
-      const photo = await photograph(binding.tabId);
+      const photo = await photograph(binding.tabId, undefined, onGatedSite(binding));
       if (!photo.ok) {
+        if (photo.reason === "site-moved") return siteMovedAnswer(callId);
         // The attachment's refusal in the attachment's own words (012/S2c F2), exactly as every
         // other action in this file answers one.
         if (photo.reason === "input-unavailable") return inputUnavailable(callId, photo.unavailableReason);
@@ -2091,8 +2177,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * is the line after which an interrupt cannot honestly say the page was given nothing. It
      * carries no point: the ring a recorded frame draws belongs to the gesture families that
      * measured a target's box, and `computer` was aimed by the agent rather than measured here.
+     *
+     * An action with a point starts with a pointer gesture, whose last check writes the marker once
+     * it lets the gesture go (review S1-F1); keys sent to whatever has focus have no such check, so
+     * theirs is written here.
      */
-    deps.onDelivered?.(callId, {});
+    if (point === undefined) deps.onDelivered?.(callId, {});
 
     // 015/T406: the four position clicks are presses like any other and report what they caused.
     // Nothing located the point's element, so there is no role to call it a link by: a position
@@ -2106,6 +2196,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         point,
         pointer,
         keyboard,
+        beforeDispatch: onGatedSiteThenDelivered(binding, callId, {}),
       });
       return await verifyDelivered(
         callId,
@@ -2140,6 +2231,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
   async function runEffect(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId, tool } = request;
+    // Where this call's input budget is measured from (015 review F4): as near the host's own start
+    // of its per-call wait as this runner can see.
+    const receivedAt = now();
     const context = deps.context.forCall(request.sessionId, callId);
     const parsed = agentToolArgSchemas[tool].safeParse(request.args);
     if (!parsed.success) {
@@ -2252,8 +2346,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
 
     if (tool === "computer") {
-      const delivered = await answeringInputDeadline(
-        callId,
+      const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
         runPosition(args, position.point, context, binding, callId),
       );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
@@ -2264,8 +2357,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // Browser-level from here (004/T121, T123). The gate has already decided, and the refs are
       // resolved inside, so the order every effect keeps - own, bind, gate, resolve, act, verify -
       // is the same one whichever way the input is delivered.
-      const delivered = await answeringInputDeadline(
-        callId,
+      const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
         isPointerTool(tool)
           ? deliverPointer(tool, args, context, binding, callId)
           : deliverKeyboard(tool, args, context, binding, callId),
@@ -2369,14 +2461,30 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
    * as a binding that hit the deadline, but not its "retry" - the input was delivered and may have
    * taken effect (review F1), so the hint sends the agent to look first. Anything else a delivery
    * throws goes on exactly as before.
+   *
+   * The delivery runs under the call's one input budget (review F4, `INPUT_CALL_BUDGET_MS`): spent,
+   * it ends the call the same way and in the same words as a single dispatch that timed out.
    */
   async function answeringInputDeadline(
     callId: string,
-    delivery: Promise<AgentNativeResponse>,
+    tabId: number,
+    receivedAt: number,
+    deliver: () => Promise<AgentNativeResponse>,
   ): Promise<AgentNativeResponse> {
+    let deadline: number | undefined;
+    const budget: InputBudget = {
+      remainingMs() {
+        // Fixed at the first dispatch, so whatever went before it never leaves it less than the floor.
+        deadline ??= Math.max(receivedAt + INPUT_CALL_BUDGET_MS, now() + INPUT_BUDGET_FLOOR_MS);
+        return deadline - now();
+      },
+    };
+    inputBudgets.set(tabId, budget);
     try {
-      return await delivery;
+      return await deliver();
     } catch (error) {
+      // 014 change log 2026-10-11: the gesture's last check found the tab elsewhere and sent nothing.
+      if (isSiteMovedBeforeDispatch(error)) return siteMovedAnswer(callId);
       if (!isInputDispatchDeadline(error)) throw error;
       return {
         callId,
@@ -2384,6 +2492,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         reason: "page-not-responding",
         hint: INPUT_NOT_ANSWERED_HINT,
       };
+    } finally {
+      if (inputBudgets.get(tabId) === budget) inputBudgets.delete(tabId);
     }
   }
 

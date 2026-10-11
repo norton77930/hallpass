@@ -427,3 +427,10 @@ are recorded on the issue.
 | D-015-3 uploads in a batch | FR-210 – FR-215 | SC-112, SC-114 (review) |
 | D-015-4 pairing withdrawal | FR-216 – FR-219 | SC-113 |
 | Close-out | FR-220 – FR-222 | SC-114, SC-115 |
+
+## Change Log
+
+| Date | Change | Origin |
+| --- | --- | --- |
+| 2026-10-11 | The host's withdrawal (FR-216) and the worker's own expiry take the pairing card down in memory and tell the panel and the icon at once, instead of queueing behind other pairing work; nothing is written, so a `storage.local` that stops answering can no longer keep the card up. A worker restart still rereads the paired list from storage. | 018 T513 follow-up (`specs/018-multi-browser-selection/coverage.md`) |
+| 2026-10-11 | One input budget per tool call, and per `browser_batch` step (each reaches the worker as a call of its own, and the host bounds each step at the flat 30 s): every `Input.*` dispatch is bounded by the smaller of 10 s and what is left of 25 s from receipt (the host's 30 s `AGENT_CALL_TIMEOUT_MS` minus its 5 s slack), the first dispatch always given at least 5 s. Spent, nothing more is sent and the call answers `failed / page-not-responding` with the FR-206 hint, instead of a call of several slow dispatches running into the host's `timed-out / no-answer`. | 015 review F4 (`coverage.md`) |

@@ -25,6 +25,28 @@ describe("002 T074a description matching, English", () => {
     expect(matchDescription("thing", { role: "combobox", label: "Colour" })).toBe(true);
   });
 
+  /**
+   * A site search with suggestions is an `<input role="combobox">`: the collector names its role
+   * `combobox`, and "search box" is what a person calls it. A `<select>` is also a combobox but is
+   * not typed into, so it keeps the combobox words alone.
+   */
+  it("names an input-type combobox by the text-entry words too, and a select by the combobox words only", () => {
+    const searchInput = { role: "combobox", label: "Search", tagName: "INPUT" };
+    expect(matchDescription("search box", searchInput)).toBe(true);
+    expect(matchDescription("search field", searchInput)).toBe(true);
+    expect(matchDescription("search combobox", searchInput)).toBe(true);
+    expect(matchDescription("search dropdown", searchInput)).toBe(true);
+
+    const colourSelect = { role: "combobox", label: "Search", tagName: "SELECT" };
+    expect(matchDescription("search box", colourSelect)).toBe(false);
+    expect(matchDescription("search field", colourSelect)).toBe(false);
+    expect(matchDescription("search dropdown", colourSelect)).toBe(true);
+    // Without the tag nothing is assumed: the role alone decides, as it always did.
+    expect(matchDescription("search box", { role: "combobox", label: "Search" })).toBe(false);
+    // And a real text field is still a text field.
+    expect(matchDescription("search box", { role: "textbox", label: "Search", tagName: "INPUT" })).toBe(true);
+  });
+
   it("drops words that carry no meaning, and falls back to them when they were all there was", () => {
     expect(matchDescription("the Safe Action button", { role: "button", text: "Safe action" })).toBe(true);
     // The noise-word edge T074a removes: a control whose whole label is a noise word was

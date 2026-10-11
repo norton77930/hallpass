@@ -3,6 +3,7 @@ import type { AgentDownloadRecord, AgentNativeRequest } from "@hallpass/contract
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentTabTools } from "../src/service-worker/agent-tools/tabs.js";
 import { createAgentTabManager } from "../src/service-worker/agent-tab-manager.js";
+import { ownershipRefusal } from "../src/service-worker/agent-tools/ownership.js";
 
 /**
  * 003/T041 — the tab tools (US4, FR-044..FR-046).
@@ -957,6 +958,124 @@ describe("T041 agent tab tools", () => {
       { tabId: 1, url: "https://owner.test/", title: "The owner's page", active: true, windowId: 900, holder: "none" },
       { tabId: 50, url: "chrome://settings/", title: "Settings", active: false, windowId: 900, holder: "none" },
     ]);
+  });
+
+  /**
+   * 004 change log 2026-10-11 — a tab outside the session's group is not the session's.
+   *
+   * Moving a tab out of the agent's group is the owner taking it back, and that holds from the very
+   * next check, not from the next `tabs_context`. Chrome's own record of the tab's group is read at
+   * the check, so a worker that restarted and heard no event cannot keep it held either.
+   */
+  describe("the owner taking a tab back by moving it out of the group (2026-10-11)", () => {
+    const groupOf = (tabId: number) => fake.tabs.find((tab) => tab.id === tabId)?.groupId;
+
+    it("refuses the next close and click on a tab moved out of the group, and closes nothing", async () => {
+      const tools = build();
+      const created = await tools.run(call("tabs_create", {}));
+      const { tabId } = created.result as { tabId: number };
+      const tab = fake.tabs.find((candidate) => candidate.id === tabId);
+      tab!.groupId = UNGROUPED;
+
+      const closed = await tools.run(call("tabs_close", { tabId }));
+
+      expect(closed).toMatchObject({ outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } });
+      expect(closed.hint).toMatch(/Nothing was closed/);
+      expect(closed.hint).toMatch(/tabs_create/);
+      expect(fake.removed).toEqual([]);
+      expect(fake.tabs.some((candidate) => candidate.id === tabId)).toBe(true);
+      // A click asks the same guard (effects.ts) and answers through the same refusal.
+      const clicked = ownershipRefusal("call-2", (await manager.ownership(SESSION, tabId)) as never);
+      expect(clicked).toMatchObject({ outcome: "denied", reason: "not-yours" });
+      // And a worker that restarted - a fresh manager over the same session storage - agrees.
+      await expect(createAgentTabManager().ownership(SESSION, tabId)).resolves.toMatchObject({ state: "not-yours" });
+    });
+
+    it("says in tabs_context that the group is gone, what that means, and how to get a tab again", async () => {
+      const tools = build();
+      const first = (await tools.run(call("tabs_create", {}))).result as { tabId: number };
+      const second = (await tools.run(call("tabs_create", {}))).result as { tabId: number };
+      // The owner ungroups the agent's group: Chrome removes the group, the tabs stay open.
+      for (const tab of fake.tabs) if (tab.id === first.tabId || tab.id === second.tabId) tab.groupId = UNGROUPED;
+
+      const listed = await tools.run(call("tabs_context", {}));
+
+      expect(listed.outcome).toBe("ok");
+      expect((listed.result as Array<{ tabId: number; holder: unknown }>).filter((tab) => tab.holder !== "none")).toEqual([]);
+      expect(listed.hint).toMatch(/tab group is gone/);
+      expect(listed.hint).toMatch(/still be open/);
+      expect(listed.hint).toMatch(/tabs_create/);
+      expect(listed.hint).toMatch(/tabs_claim/);
+      expect(listed.hint!.length).toBeLessThanOrEqual(400);
+      // Said once: the next listing has nothing new to report.
+      expect((await tools.run(call("tabs_context", {}))).hint).toBeUndefined();
+    });
+
+    it("still reports, at the next tabs_context, a tab a tool's check found moved out", async () => {
+      const tools = build();
+      const kept = (await tools.run(call("tabs_create", {}))).result as { tabId: number };
+      const moved = (await tools.run(call("tabs_create", {}))).result as { tabId: number };
+      fake.tabs.find((tab) => tab.id === moved.tabId)!.groupId = UNGROUPED;
+      await tools.run(call("tabs_close", { tabId: moved.tabId }));
+
+      const listed = await tools.run(call("tabs_context", {}));
+
+      expect(listed.hint).toMatch(new RegExp(`moved tab ${moved.tabId} out of your tab group`));
+      expect(listed.hint).not.toMatch(/group is gone/);
+      await expect(manager.ownership(SESSION, kept.tabId)).resolves.toEqual({ state: "this" });
+    });
+
+    it("does not report as moved out a tab the session claimed back before the next tabs_context", async () => {
+      const tools = build();
+      const moved = { tabId: 1 };
+      await tools.run(call("tabs_create", {}));
+      expect((await tools.run(call("tabs_claim", { tabId: moved.tabId }))).outcome).toBe("ok");
+      fake.tabs.find((tab) => tab.id === moved.tabId)!.groupId = UNGROUPED;
+      expect((await tools.run(call("tabs_close", { tabId: moved.tabId }))).reason).toBe("not-yours");
+      expect((await tools.run(call("tabs_claim", { tabId: moved.tabId }))).outcome).toBe("ok");
+
+      const listed = await tools.run(call("tabs_context", {}));
+
+      expect(listed.hint ?? "").not.toMatch(/moved tab/);
+      expect(listed.hint ?? "").not.toMatch(/group is gone/);
+      await expect(manager.context(SESSION)).resolves.not.toHaveProperty("takenBack");
+      await expect(manager.ownership(SESSION, moved.tabId)).resolves.toEqual({ state: "this" });
+    });
+
+    it("lets another session's moved-out tab go for that session, and tells this one only not-yours", async () => {
+      const tools = build();
+      await manager.claim("session-b", 1);
+      fake.tabs.find((tab) => tab.id === 1)!.groupId = UNGROUPED;
+
+      const refused = await tools.run(call("tabs_close", { tabId: 1 }));
+
+      expect(refused).toMatchObject({ outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } });
+      expect(JSON.stringify(refused)).not.toMatch(/session-b/);
+      expect(refused.hint ?? "").not.toMatch(/\b1\b/);
+      expect(fake.removed).toEqual([]);
+      // The holder lost it too: no lease is left on it, and its own next tabs_context says so.
+      expect((await manager.leases()).some((lease) => lease.tabId === 1)).toBe(false);
+      await expect(manager.ownership("session-b", 1)).resolves.toEqual({ state: "not-yours" });
+      await expect(manager.context("session-b")).resolves.toMatchObject({ takenBack: [1] });
+      // And this session was told nothing about it.
+      await expect(manager.context(SESSION)).resolves.not.toHaveProperty("takenBack");
+    });
+
+    it("keeps a just-created, a just-claimed and a regrouped tab held", async () => {
+      const tools = build();
+      const created = (await tools.run(call("tabs_create", {}))).result as { tabId: number };
+      await expect(manager.ownership(SESSION, created.tabId)).resolves.toEqual({ state: "this" });
+      await tools.run(call("tabs_claim", { tabId: 1 }));
+      await expect(manager.ownership(SESSION, 1)).resolves.toEqual({ state: "this" });
+      expect(groupOf(1)).toBe(groupOf(created.tabId));
+
+      // Every tab closed, then a new one: a fresh group is opened, and its tab is held.
+      await tools.run(call("tabs_close", { tabId: created.tabId }));
+      await tools.run(call("tabs_close", { tabId: 1 }));
+      const again = (await tools.run(call("tabs_create", {}))).result as { tabId: number };
+      await expect(manager.ownership(SESSION, again.tabId)).resolves.toEqual({ state: "this" });
+      expect((await tools.run(call("tabs_context", {}))).hint).toBeUndefined();
+    });
   });
 
   it("resizes the window holding the tab and reports the size it got", async () => {

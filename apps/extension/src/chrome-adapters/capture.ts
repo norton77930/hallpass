@@ -71,7 +71,48 @@ export type CaptureDeps = {
   measure?: (dataUrl: string) => Promise<CaptureFrame | undefined>;
   /** Only the protocol path uses it; a visible-tab capture attaches no debugger (012/FR-158). */
   send?: CaptureSend;
+  /**
+   * Resolves once the page has painted a frame since it was brought forward. Bounded and allowed to
+   * fail by `captureTab`; absent, the page is asked through the path's own channel.
+   */
+  awaitFrame?: (tabId: number) => Promise<void>;
 };
+
+/** The longest a background tab's picture waits for its first fresh frame (2026-10-11). */
+export const FRESH_FRAME_CAP_MS = 300;
+
+/** Two animation frames: the first is scheduled before the next paint, the second after it. */
+const TWO_FRAMES_SOURCE =
+  "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))";
+
+function twoFramesInPage(): Promise<boolean> {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))));
+}
+
+/** The visible-tab path attaches no debugger (012/FR-158), so the page is asked by script. */
+async function awaitFrameWithScripting(tabId: number): Promise<void> {
+  await chrome.scripting.executeScript({ target: { tabId }, world: "ISOLATED", func: twoFramesInPage });
+}
+
+/**
+ * Waits - at most `FRESH_FRAME_CAP_MS` - for the brought-forward tab to paint. Never refuses: no
+ * frame in time, or no way to ask, is the picture this adapter took before the wait existed.
+ */
+async function waitForFreshFrame(wait: () => Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(wait),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, FRESH_FRAME_CAP_MS);
+      }),
+    ]);
+  } catch {
+    // Proceeds with the capture.
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 function base64Of(dataUrl: string): string {
   const comma = dataUrl.indexOf(",");
@@ -341,6 +382,19 @@ export async function captureTab(
     await activate(input.tabId);
   }
   try {
+    if (!input.isActive) {
+      // Right after activation the surface may still be the one the tab was last painted with
+      // (2026-10-11): one fresh frame first, through the channel the path already uses.
+      const send = path.kind === "protocol" ? deps.send : undefined;
+      const awaitFrame =
+        deps.awaitFrame ??
+        (send
+          ? async (tabId: number) => {
+              await send(tabId, "Runtime.evaluate", { expression: TWO_FRAMES_SOURCE, awaitPromise: true });
+            }
+          : awaitFrameWithScripting);
+      await waitForFreshFrame(() => awaitFrame(input.tabId));
+    }
     if (path.kind === "protocol" && deps.send) {
       const data = await captureThroughProtocol({
         send: deps.send,

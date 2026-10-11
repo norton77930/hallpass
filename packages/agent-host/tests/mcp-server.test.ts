@@ -329,6 +329,56 @@ describe("T012 agent MCP server", () => {
     expect(result.json).toEqual([{ tabId: 7, url: "https://late.test/" }]);
   });
 
+  /**
+   * 014 FR-186 for a result that is a list: `tabs_context` can say the session's tab group is gone.
+   * The list stays one JSON document in the first block, and the sentence is a second block, so a
+   * client that parses the first block is undisturbed and a person-facing client still gets it.
+   */
+  describe("a hint beside a successful answer", () => {
+    const hint = "The tab group is gone; the tabs below were moved out of it.";
+    const tabs = [{ tabId: 7, url: "https://late.test/" }];
+
+    it("rides a list result as a second text block, the first unchanged", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: { tabs_context: { callId: "", outcome: "ok", result: tabs, hint } },
+      });
+
+      const result = await client.callTool("tabs_context");
+
+      expect(result.isError, result.text).toBe(false);
+      expect(result.textBlocks).toEqual([JSON.stringify(tabs), `Hint: ${hint}`]);
+    });
+
+    it("merges into an object result and sends no second block", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: { tabs_context: { callId: "", outcome: "ok", result: { tabs }, hint } },
+      });
+
+      const result = await client.callTool("tabs_context");
+
+      expect(result.textBlocks).toEqual([JSON.stringify({ tabs, hint })]);
+    });
+
+    it("sends a list with no hint as the one block it always was", async () => {
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: { tabs_context: { callId: "", outcome: "ok", result: tabs } },
+      });
+
+      const result = await client.callTool("tabs_context");
+
+      expect(result.textBlocks).toEqual([JSON.stringify(tabs)]);
+    });
+  });
+
   it("fails a call with no record at once rather than waiting out the bound (T094b)", async () => {
     client = await startMcpClient({
       env: { LOCALAPPDATA: dataDir, HALLPASS_AGENT_ATTACH_TIMEOUT_MS: "5000" },

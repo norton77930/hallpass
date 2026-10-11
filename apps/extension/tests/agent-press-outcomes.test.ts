@@ -571,6 +571,96 @@ describe("T402 an input dispatch the page does not answer", () => {
 });
 
 /**
+ * 015 review F4 — one input budget per call (spec change log 2026-10-11).
+ *
+ * The 10 s bound above is per dispatch. A call that sends several - move, press, release; a key
+ * repeated; text typed - against a renderer that answers each one slowly but inside 10 s ran past
+ * the host's 30 s per-call wait, and the agent got the host's `timed-out / no-answer` instead of
+ * page-not-responding. Each call now has one budget its dispatches share.
+ */
+describe("F4 one input budget per call", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    installChrome();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const NOT_RESPONDING = { outcome: "failed", reason: "page-not-responding", hint: INPUT_NOT_ANSWERED_HINT };
+  /** Each matching dispatch answers after this long: slow, but well inside the per-dispatch 10 s. */
+  const SLOW_MS = 9_000;
+
+  function slow(matches: (method: string) => boolean, ms = SLOW_MS) {
+    return (method: string) =>
+      matches(method) ? new Promise<Record<string, unknown>>((resolve) => setTimeout(() => resolve({}), ms)) : undefined;
+  }
+
+  function track(runner: { run(request: AgentNativeRequest): Promise<AgentNativeResponse> }, call: AgentNativeRequest) {
+    const state: { response: AgentNativeResponse | undefined } = { response: undefined };
+    void runner.run(call).then((answer) => {
+      state.response = answer;
+    });
+    return state;
+  }
+
+  it("a click whose three dispatches each take 9 s answers page-not-responding when the budget is spent", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+    browser.hooks.hold = slow((method) => method === "Input.dispatchMouseEvent");
+
+    const call = track(runner, request("click"));
+    await vi.advanceTimersByTimeAsync(24_500);
+    expect(call.response).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(call.response).toEqual({ callId: "call-click", ...NOT_RESPONDING });
+    const sentAtAnswer = browser.sent.length;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(browser.sent.length).toBe(sentAtAnswer);
+    expect(browser.listeners.size).toBe(0);
+  });
+
+  it("a repeated key whose fourth dispatch would start past the budget never sends it", async () => {
+    const { runner, browser } = await harness();
+    browser.hooks.hold = slow((method) => method === "Input.dispatchKeyEvent");
+
+    const call = track(runner, request("key", { key: "ArrowDown", repeat: 2 }));
+    await vi.advanceTimersByTimeAsync(26_000);
+
+    expect(call.response).toEqual({ callId: "call-key", ...NOT_RESPONDING });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(browser.sent.filter((method) => method === "Input.dispatchKeyEvent")).toHaveLength(3);
+  });
+
+  it("the budget belongs to one call: the next call on the tab gets its own", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+    // 3 x 8 s = 24 s: inside one budget, and twice that would not fit in one.
+    browser.hooks.hold = slow((method) => method === "Input.dispatchMouseEvent", 8_000);
+
+    for (const callId of ["first", "second"]) {
+      const call = track(runner, { ...request("click"), callId });
+      await vi.advanceTimersByTimeAsync(24_000 + SETTLE_MS + 1_000);
+      expect(call.response?.outcome).toBe("ok");
+    }
+  });
+
+  it("the longest text typed at a healthy pace is not cut off", async () => {
+    const { runner, browser } = await harness();
+    // 2,000 characters (the contract's cap) is 4,000 key events; at 5 ms each that is 20 s of honest
+    // typing, which the budget must let finish.
+    browser.hooks.hold = slow((method) => method === "Input.dispatchKeyEvent", 5);
+
+    const call = track(runner, request("type", { text: "a".repeat(2_000), mode: "insert" }));
+    await vi.advanceTimersByTimeAsync(20_000 + SETTLE_MS + 1_000);
+
+    expect(call.response?.outcome).toBe("ok");
+  });
+});
+
+/**
  * 016/T447 — a keystroke that opens a dialog (FR-242, R-208, 015 review F2).
  *
  * `Input.dispatchKeyEvent` / `Input.insertText` wait for the renderer the way a mouse event does, so

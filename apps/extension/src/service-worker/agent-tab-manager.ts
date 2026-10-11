@@ -56,7 +56,7 @@ export type TabLease = { tabId: number; sessionId: string; kind: "agent" | "owne
 export type TabOwnership =
   | { state: "this" }
   | { state: "held-by-session"; sessionId: string }
-  | { state: "not-yours" }
+  | { state: "not-yours"; takenBack?: true }
   | { state: "gone" };
 
 /** What `claim` answers; the refusals are the contract's own words (`agentRefusalSchema`). */
@@ -70,6 +70,13 @@ export type AgentTabContext = {
   tabs: AgentTab[];
   /** Tabs this session had that the browser no longer has, reported once (FR-044). */
   gone: number[];
+  /**
+   * The part of `gone` that is still open: the owner moved it out of the session's group, which
+   * hands it back to them (004 change log 2026-10-11). Present only when there is one.
+   */
+  takenBack?: number[];
+  /** The session holds no tab of its group any more: the group is gone. Present only when true. */
+  groupGone?: true;
 };
 
 /**
@@ -94,6 +101,13 @@ type SessionRecord = {
   colourIndex?: number;
   /** The folder the session's host reported (016 FR-226). Remote input: stored, shown, never logged. */
   label?: string;
+  /**
+   * Tabs the owner took back that a tool's ownership check noticed first (004 change log
+   * 2026-10-11). Kept until the next `tabs_context` says so, then cleared: reported once, like `gone`.
+   */
+  takenBack?: number[];
+  /** With `takenBack`: that check also found the session holding no tab of its group any more. */
+  groupLost?: true;
 };
 
 /** What a card needs to say which session it is (016 data-model "Session record"). */
@@ -330,6 +344,13 @@ export type AgentTabHooks = {
   onTabJoined?: (sessionId: string, tabId: number) => void;
   onTabLeft?: (sessionId: string, tabId: number) => void;
   /**
+   * A tab the owner took back by moving it out of the session's group, still open (004 change log
+   * 2026-10-11, review S2-F1). Told after `onTabLeft`, for everything else a `tabs_release` hands
+   * back with the tab - its debugger, emulation, dialog policy and refs - because no tool call names
+   * this tab again to do it.
+   */
+  onTabTakenBack?: (sessionId: string, tabId: number) => void;
+  /**
    * The session's record is gone (005/T178, FR-080). Told after the tabs are, for whatever else was
    * kept per session and has to go with it - the download ring is the one such thing today.
    */
@@ -437,50 +458,110 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
     return groupId;
   }
 
+  /**
+   * Lets go of tabs the session no longer has (004 change log 2026-10-11): `closed` ones the browser
+   * no longer has, `takenBack` ones the owner moved out of the session's group. Both lose their lease
+   * and leave the record. A tab taken back is still open, so the hook is told it left - its
+   * indicator goes - exactly as a release tells it. `remember` keeps the taken-back ones on the
+   * record for the next `tabs_context` to report, when the caller is not that call. The caller holds
+   * the queue. Answers whether the session was left holding no tab of its group.
+   */
+  async function letGo(
+    sessions: Record<string, SessionRecord>,
+    sessionId: string,
+    closed: number[],
+    takenBack: number[],
+    remember: boolean,
+  ): Promise<boolean> {
+    const lost = [...closed, ...takenBack];
+    const record = sessions[sessionId];
+    let leftGroup = false;
+    if (record) {
+      const kept = record.tabIds.filter((tabId) => !lost.includes(tabId));
+      const pruned: SessionRecord = { ...record, tabIds: kept };
+      // None of its tabs is in its group any more (T444 F1/F2): the group is withdrawn below.
+      leftGroup = record.groupId !== undefined && kept.length === 0 && record.tabIds.length > 0;
+      if (leftGroup) delete pruned.groupId;
+      // The indicator's control has nowhere to go until the session acts on another tab, as on a release.
+      if (record.mainTabId !== undefined && lost.includes(record.mainTabId)) delete pruned.mainTabId;
+      if (remember && takenBack.length > 0) {
+        const earlier = record.takenBack ?? [];
+        pruned.takenBack = [...earlier, ...takenBack.filter((tabId) => !earlier.includes(tabId))];
+        if (leftGroup) pruned.groupLost = true;
+      }
+      sessions[sessionId] = pruned;
+      await writeSessions(sessions);
+    }
+    // A tab the owner closed takes its lease with it (data-model TabLease): the lease names a tab
+    // that no longer exists, and leaving it behind would refuse the *next* tab Chrome gives that id
+    // to. A tab moved out of the group is the owner's again, and a lease left on it would let the
+    // agent go on driving a tab the owner took away. Only this session's leases are touched.
+    const leases = await readLeases();
+    const dropped: number[] = [];
+    for (const tabId of lost) {
+      if (leases[String(tabId)]?.sessionId === sessionId) {
+        delete leases[String(tabId)];
+        dropped.push(tabId);
+      }
+    }
+    if (dropped.length > 0) await writeLeases(leases);
+    for (const tabId of takenBack) {
+      if (!dropped.includes(tabId)) continue;
+      hooks.onTabLeft?.(sessionId, tabId);
+      hooks.onTabTakenBack?.(sessionId, tabId);
+    }
+    if (leftGroup) await leaveGroup(sessionId, record?.groupId as number);
+    return leftGroup;
+  }
+
   async function contextFor(sessionId: string): Promise<AgentTabContext> {
     const sessions = await readSessions();
     const record = sessions[sessionId];
-    if (!record || record.groupId === undefined || record.tabIds.length === 0) {
+    if (!record) {
       return { tabs: [], gone: [] };
+    }
+    // What a tool's ownership check already let go of (2026-10-11): reported here once, then cleared.
+    // Less any the session has claimed back since (review S2-F2): those are held, not taken back.
+    const noticed = (record.takenBack ?? []).filter((tabId) => !record.tabIds.includes(tabId));
+    const groupLost = record.groupLost === true;
+    const current: SessionRecord = { ...record };
+    if (record.takenBack !== undefined || groupLost) {
+      delete current.takenBack;
+      delete current.groupLost;
+      sessions[sessionId] = current;
+      await writeSessions(sessions);
+    }
+    const reported = (tabs: AgentTab[], gone: number[], takenBack: number[], groupGone: boolean): AgentTabContext => {
+      const back = [...noticed, ...takenBack];
+      return {
+        tabs,
+        gone: [...noticed, ...gone],
+        ...(back.length > 0 ? { takenBack: back } : {}),
+        ...(groupGone || groupLost ? { groupGone: true as const } : {}),
+      };
+    };
+    if (current.groupId === undefined || current.tabIds.length === 0) {
+      return reported([], [], [], false);
     }
     const live = await queryTabSnapshots();
     const byId = new Map(live.map((tab) => [tab.id, tab]));
     const tabs: AgentTab[] = [];
     const gone: number[] = [];
-    const kept: number[] = [];
-    for (const tabId of record.tabIds) {
+    const closed: number[] = [];
+    const takenBack: number[] = [];
+    for (const tabId of current.tabIds) {
       const tab = byId.get(tabId);
       // Both halves of the check matter: a tab Chrome no longer has is gone, and a tab the owner
       // dragged out of the group is no longer the session's, even though the tab still exists.
-      if (!tab || tab.groupId !== record.groupId) {
+      if (!tab || tab.groupId !== current.groupId) {
         gone.push(tabId);
+        (tab ? takenBack : closed).push(tabId);
         continue;
       }
-      kept.push(tabId);
       tabs.push({ tabId: tab.id, url: tab.url, title: tab.title, active: tab.active });
     }
-    // None of its tabs is in its group any more (T444 F1/F2): the group is withdrawn below.
-    const leftGroup = gone.length > 0 && kept.length === 0;
-    if (gone.length > 0) {
-      const pruned: SessionRecord = { ...record, tabIds: kept };
-      if (leftGroup) delete pruned.groupId;
-      sessions[sessionId] = pruned;
-      await writeSessions(sessions);
-      // A tab the owner closed takes its lease with it (data-model TabLease): the lease names a tab
-      // that no longer exists, and leaving it behind would refuse the *next* tab Chrome gives that
-      // id to. Only this session's leases are touched; the others are about live tabs.
-      const leases = await readLeases();
-      let dropped = false;
-      for (const tabId of gone) {
-        if (leases[String(tabId)]?.sessionId === sessionId) {
-          delete leases[String(tabId)];
-          dropped = true;
-        }
-      }
-      if (dropped) await writeLeases(leases);
-    }
-    if (leftGroup) await leaveGroup(sessionId, record.groupId);
-    return { tabs, gone };
+    const leftGroup = gone.length > 0 && (await letGo(sessions, sessionId, closed, takenBack, false));
+    return reported(tabs, gone, takenBack, leftGroup);
   }
 
   return {
@@ -500,6 +581,21 @@ export function createAgentTabManager(hooks: AgentTabHooks = {}): AgentTabManage
           // The owner's own tab, or one every session has let go of. Not a refusal about somebody
           // else: it is the tab a `tabs_claim` would take (R-117).
           return { state: "not-yours" } as const;
+        }
+        /**
+         * The lease is not the whole fact (004 change log 2026-10-11): a tab outside its holder's
+         * group is one the owner took back by moving it out. Chrome's record of the group is read
+         * here, at the check, rather than trusted to an event a restarted worker never heard. The
+         * paths that (re)establish membership - `adopt`, `claim`, a group opened afresh - group the
+         * tab before they write the lease, inside this same queue, so none of them is seen halfway.
+         */
+        const sessions = await readSessions();
+        const holderGroup = sessions[lease.sessionId]?.groupId;
+        if (holderGroup !== undefined && tab.groupId !== holderGroup) {
+          await letGo(sessions, lease.sessionId, [], [tabId], true);
+          return lease.sessionId === sessionId
+            ? ({ state: "not-yours", takenBack: true } as const)
+            : ({ state: "not-yours" } as const);
         }
         return lease.sessionId === sessionId
           ? ({ state: "this" } as const)

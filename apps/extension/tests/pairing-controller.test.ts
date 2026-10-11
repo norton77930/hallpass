@@ -513,4 +513,43 @@ describe("018 T513 follow-up: the card does not wait on storage", () => {
     expect(projections.at(-1)?.pending).toBeUndefined();
     expect(controller.waitingSessions("agent-1")).toBe(0);
   });
+
+  /**
+   * 2026-10-11 (015 change log): the write was skipped, but the withdrawal still queued behind
+   * whatever was ahead of it - here a re-read raised by `storage.onChanged`, after storage stopped
+   * answering reads as well. The card is taken down in memory and announced first.
+   */
+  it("takes the card down on the host's withdrawal while storage never answers a read or a write", async () => {
+    const projections: PairingState[] = [];
+    let stalled = false;
+    let announce: (() => void) | undefined;
+    const never = <T,>(): Promise<T> => new Promise<T>(() => undefined);
+    const controller = createPairingController({
+      read: () => (stalled ? never<PairingState>() : Promise.resolve(EMPTY_PAIRING_STATE)),
+      write: () => never<void>(),
+      now: () => AT,
+      onChange: (state) => projections.push(state),
+      watch: (onExternalChange) => {
+        announce = onExternalChange;
+      },
+    });
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+
+    void controller.decidePairing({ ...CLAUDE, sessionId: "s-1", requestId: "r-1" });
+    await settle();
+    expect(projections.at(-1)?.pending).toEqual(CLAUDE);
+
+    // Storage stops answering, and a change event queues a re-read that never comes back.
+    stalled = true;
+    announce?.();
+    await settle();
+
+    controller.withdraw("agent-1", "s-1", "r-1");
+    await settle();
+
+    expect(projections.at(-1)?.pending).toBeUndefined();
+    expect(controller.waitingSessions("agent-1")).toBe(0);
+  });
 });

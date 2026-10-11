@@ -744,6 +744,45 @@ describe("T189 owner controls from the panel and the projection they read", () =
     expect(storedSessions(fake)["session-a"]?.tabIds).toEqual([7]);
   });
 
+  /**
+   * 004 change log 2026-10-11, review S2-F1: a tab the owner dragged out of the session's group is
+   * handed back exactly as a `tabs_release` hands it back - its debugger goes with the lease, found
+   * either by a tool's ownership check or by `tabs_context`.
+   */
+  it("lets go of the debugger on a tab the owner moved out of the group, at the refused call", async () => {
+    const port = fakePort();
+    const runtime = await twoSessions(port);
+    await runtime.setSiteMode("https://agent.test", "ask");
+    await runtime.setDiagnostics("https://agent.test", true);
+    port.emit({ callId: "console-b", sessionId: "session-b", tool: "read_console", args: { tabId: 8 } });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+    expect(fake.debugger.attached).toEqual([8]);
+    fake.tabs.find((tab) => tab.id === 8)!.groupId = -1;
+
+    port.emit({ callId: "read-b", sessionId: "session-b", tool: "get_page_text", args: { tabId: 8 } });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(4));
+
+    expect(port.sent[3]).toMatchObject({ callId: "read-b", outcome: "denied", reason: "not-yours" });
+    await vi.waitFor(() => expect(fake.debugger.detached).toEqual([8]));
+    expect(fake.lowered).toContain(8);
+  });
+
+  it("lets go of the debugger on a tab tabs_context finds moved out of the group", async () => {
+    const port = fakePort();
+    const runtime = await twoSessions(port);
+    await runtime.setSiteMode("https://agent.test", "ask");
+    await runtime.setDiagnostics("https://agent.test", true);
+    port.emit({ callId: "console-b", sessionId: "session-b", tool: "read_console", args: { tabId: 8 } });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+    fake.tabs.find((tab) => tab.id === 8)!.groupId = -1;
+
+    port.emit({ callId: "context-b", sessionId: "session-b", tool: "tabs_context", args: {} });
+    await vi.waitFor(() => expect(port.sent).toHaveLength(4));
+
+    expect(port.sent[3]).toMatchObject({ callId: "context-b", outcome: "ok" });
+    await vi.waitFor(() => expect(fake.debugger.detached).toEqual([8]));
+  });
+
   it("clears one site's stored decision so the default applies and the row is gone", async () => {
     const port = fakePort();
     const runtime = await pairedRuntime(port);

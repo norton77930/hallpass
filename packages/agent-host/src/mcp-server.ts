@@ -1382,18 +1382,23 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
        * somewhere nobody decided about, and the answer has to say so *and* report the click
        * honestly. It is merged into the result object rather than sent as a second text block,
        * because a second block would make the whole answer stop parsing as one JSON document for
-       * every client that reads it as one. A result that is not an object - an array from
-       * `tabs_context`, nothing at all - carries no hint: those are the calls that name no tab.
+       * every client that reads it as one. A list - the answer of `tabs_context`, which can say its
+       * tab group is gone - has no object to merge into, so there the hint is a second text block,
+       * `Hint: <sentence>`, and the first block stays exactly the list's own JSON document. With no
+       * hint the answer is the one block it always was.
        */
       const result = outcome.result ?? [];
-      const carriesHint =
-        outcome.hint !== undefined && typeof result === "object" && result !== null && !Array.isArray(result);
+      const isObject = typeof result === "object" && result !== null && !Array.isArray(result);
+      const merged = outcome.hint !== undefined && isObject;
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(carriesHint ? { ...(result as Record<string, unknown>), hint: outcome.hint } : result),
+            text: JSON.stringify(merged ? { ...(result as Record<string, unknown>), hint: outcome.hint } : result),
           },
+          ...(outcome.hint !== undefined && Array.isArray(result)
+            ? [{ type: "text" as const, text: `Hint: ${outcome.hint}` }]
+            : []),
         ],
       };
     }

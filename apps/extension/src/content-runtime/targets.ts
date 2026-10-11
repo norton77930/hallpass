@@ -559,7 +559,9 @@ export function resolveDescription(
   for (const record of registry.records(documentEpoch)) {
     if (!stillShown(record)) continue;
     // The wait baseline (`visibleText`) is deliberately not offered: it is not a name.
-    if (!matchDescription(description, { role: record.role, label: record.label, text: record.text })) {
+    // The tag only tells an `<input role="combobox">` (typed into) from a `<select>` (chosen from).
+    const candidate = { role: record.role, label: record.label, text: record.text, tagName: record.target?.tagName };
+    if (!matchDescription(description, candidate)) {
       continue;
     }
     matched.push({

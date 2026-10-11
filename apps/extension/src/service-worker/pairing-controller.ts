@@ -478,7 +478,7 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     }
     // Nobody is being asked any more, so nothing may still be shown: `ignore` is the transition
     // that takes the card down without deciding anything, and the panel and the icon follow it.
-    void enqueue(() => apply({ type: "ignore", agentId })).catch(() => undefined);
+    takeDownCard(agentId);
     // Including a session that was never given a clock of its own (no session id): the card it was
     // waiting on is gone, and an unresolved waiter here would answer the *next* card's question.
     waiting = waiting.filter((waiter) => waiter.agentId !== agentId);
@@ -506,9 +506,27 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     expireWaiting(agentId, sessionId);
   }
 
+  /**
+   * The card goes now, from memory, without queueing (015 change log 2026-10-11). `ignore` changes
+   * only `pending`, which storage never holds, so there is nothing to write - but queued, the card
+   * still waited on whatever was ahead of it, and measured on 2026-10-03 that was a `storage.local`
+   * that had stopped answering: the host had let the agent go and the card stayed up. A card this
+   * worker is not showing has nothing to take down here, and goes through the queue as before.
+   */
+  function takeDownCard(agentId: string): void {
+    if (loaded?.pending?.agentId !== agentId) {
+      void enqueue(() => apply({ type: "ignore", agentId })).catch(() => undefined);
+      return;
+    }
+    const next = reducePairing(loaded, { type: "ignore", agentId });
+    loaded = next;
+    syncWaiting(next);
+    deps.onChange?.(next);
+  }
+
   async function apply(event: PairingEvent): Promise<PairingState> {
     const current = await load();
-    const next = reducePairing(current, event);
+    let next = reducePairing(current, event);
     if (next === current) {
       // The reducer answers with the same state for the transitions that change nothing - a paired
       // agent reconnecting, a second session joining a prompt. Writing and announcing those would
@@ -528,7 +546,14 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     // nothing and cost the card: measured on 2026-10-03, `storage.local` stopped answering a
     // second after the request, the withdrawal's write never completed, and the card stayed up
     // after the host had already let the agent go. An accept or an unpair still waits.
-    if (!samePaired(current.paired, next.paired)) await deps.write(next);
+    if (!samePaired(current.paired, next.paired)) {
+      await deps.write(next);
+      // The card may have been taken down from memory while the write was out (`takeDownCard`):
+      // the prompt this transition carried over is that one, and it is not put back.
+      if (loaded !== current && loaded?.pending === undefined && next.pending === current.pending) {
+        next = { paired: next.paired };
+      }
+    }
     loaded = next;
     syncWaiting(next);
     deps.onChange?.(next);
