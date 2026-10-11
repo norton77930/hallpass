@@ -9,6 +9,7 @@ import { CONTENT_OPERATION_DEADLINE_MS } from "../src/service-worker/content-bro
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
+import type { PageExecutionOutcome } from "../src/service-worker/page-ports.js";
 
 /**
  * 015/T404 — what a press reports it caused (FR-200 – FR-202, contracts/press-outcomes.md, R-198).
@@ -135,6 +136,8 @@ async function harness(
     after?: "same" | "replaced";
     /** The worker's own dialog map, as the runtime would expose it (016/T447). */
     currentDialog?: (tabId: number) => CurrentDialog | undefined;
+    /** The in-page executor `scroll` and `form_input` run through. */
+    execute?: () => Promise<PageExecutionOutcome>;
   } = {},
 ) {
   const browser = fakeBrowser();
@@ -162,6 +165,7 @@ async function harness(
     tabUrl: async (tabId) => browser.urls.get(tabId),
     downloads: { createdSince: browser.createdSince },
     ...(options.currentDialog === undefined ? {} : { currentDialog: options.currentDialog }),
+    ...(options.execute === undefined ? {} : { execute: options.execute }),
   });
   return { runner, browser };
 }
@@ -621,6 +625,43 @@ describe("F4 one input budget per call", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(browser.sent.length).toBe(sentAtAnswer);
     expect(browser.listeners.size).toBe(0);
+  });
+
+  /**
+   * 015 change log 2026-10-12: `scroll` and `form_input` run inside the page, outside the `Input.*`
+   * budget, as a chain of round trips each bounded at 10 s on its own (probe, injection, probe, the
+   * action; then a re-probe for `form_input`). Chained, those pass the host's 30 s; the call's time
+   * bounds the chain as it bounds input.
+   */
+  it("an in-page scroll whose round trips add up past the budget answers page-not-responding when it is spent", async () => {
+    const scrolled = {
+      ok: true,
+      effect: "scrolled",
+      scrollTop: 80,
+      targetVisibility: "not-applicable",
+    } as PageExecutionOutcome;
+    const { runner } = await harness({
+      execute: () => new Promise((resolve) => setTimeout(() => resolve(scrolled), 28_000)),
+    });
+
+    const call = track(runner, request("scroll", { direction: "down" }));
+    await vi.advanceTimersByTimeAsync(24_500);
+    expect(call.response).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
+  });
+
+  it("a dispatch the budget cut short is not told the page was silent for 10 s", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+    browser.hooks.hold = slow((method) => method === "Input.dispatchMouseEvent");
+
+    // 9 s + 9 s, then the release is given the 7 s left: the page was silent for 7 s, not 10.
+    const call = track(runner, request("click"));
+    await vi.advanceTimersByTimeAsync(26_000);
+
+    expect(call.response?.reason).toBe("page-not-responding");
+    expect((call.response as { hint?: string }).hint).not.toMatch(/10 s/);
   });
 
   it("a repeated key whose fourth dispatch would start past the budget never sends it", async () => {

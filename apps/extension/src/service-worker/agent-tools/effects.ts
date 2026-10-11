@@ -304,9 +304,13 @@ const INPUT_CALL_BUDGET_MS = AGENT_CALL_TIMEOUT_MS - AGENT_CALL_TIMEOUT_SLACK_MS
  *
  * A consent prompt can hold a call for its 25 s bound (or two minutes behind a closed panel, the host
  * extending its own wait meanwhile), and resolving the target may take a content deadline or two.
- * Input that reaches the renderer at all is then bounded from its first dispatch by this much: what a
- * prompt answered at its bound leaves before the host's 30 s, and never "spent" before anything was
- * sent - an input that never left is not one that "may have taken effect".
+ * Input that reaches the renderer at all is then bounded from its first dispatch by this much, and is
+ * never "spent" before anything was sent - an input that never left is not one that "may have taken
+ * effect". It is the room the host's 30 s leaves past the budget's own end, not a promise to answer
+ * first: an owner who answers in the last moments of the 25 s prompt bound, plus resolving the target
+ * and the cursor's 250 ms arrival, can put the first dispatch past `receivedAt` + 25 s, and a renderer
+ * that then hangs may still meet the host's `timed-out / no-answer` - the answer every call gave
+ * before F4, not a new one. The same holds for the in-page effects bounded the same way.
  */
 const INPUT_BUDGET_FLOOR_MS = 5_000;
 
@@ -1957,6 +1961,23 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (focusing !== undefined) return focusing;
     }
 
+    /**
+     * The last word before the first key (014 change log 2026-10-12).
+     *
+     * A named target was reached by a click whose own check already asked whether the tab is still
+     * on the decided site, and the keys follow it as one gesture (as a drag's release follows its
+     * press); the marker is written again here, which is the same fact. Keys sent to whatever has
+     * focus have no gesture before them, so they ask the same question themselves: a tab that left
+     * the site while the call waited - on a consent card, say - is given nothing, and no marker.
+     */
+    const keysMayLeave: () => Promise<boolean> =
+      named === undefined
+        ? onGatedSiteThenDelivered(binding, callId, {})
+        : async () => {
+            deps.onDelivered?.(callId, {});
+            return true;
+          };
+
     if (tool === "type") {
       const text = String(args.text ?? "");
       // 004/T159 (second review): T146 asked whether the clicked target kept focus, but only after
@@ -2001,7 +2022,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         documentChanged: false,
         ...(focusRetained === undefined ? {} : { focusRetained }),
       } as Extract<PageExecutionOutcome, { ok: true }>;
-      deps.onDelivered?.(callId, {});
+      if (!(await keysMayLeave())) return siteMovedAnswer(callId);
       const dialogAnswer = await racedDelivery(typed, () =>
         keyboard.type(binding.tabId, text, {
           replace: args.mode !== "insert",
@@ -2013,7 +2034,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
 
     const key = String(args.key ?? "");
-    deps.onDelivered?.(callId, {});
+    if (!(await keysMayLeave())) return siteMovedAnswer(callId);
     const pressedDialog = await racedDelivery(beforeKeys(), () =>
       keyboard.press(binding.tabId, key, {
         ...(Array.isArray(args.modifiers) ? { modifiers: args.modifiers as string[] } : {}),
@@ -2179,10 +2200,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * measured a target's box, and `computer` was aimed by the agent rather than measured here.
      *
      * An action with a point starts with a pointer gesture, whose last check writes the marker once
-     * it lets the gesture go (review S1-F1); keys sent to whatever has focus have no such check, so
-     * theirs is written here.
+     * it lets the gesture go (review S1-F1). Keys sent to whatever has focus (`type`/`key` without a
+     * point) have no gesture before them, so the same check runs here, immediately before them, and
+     * a tab that left the site is given nothing (014 change log 2026-10-12).
      */
-    if (point === undefined) deps.onDelivered?.(callId, {});
+    if (point === undefined && !(await onGatedSiteThenDelivered(binding, callId, {})())) {
+      return siteMovedAnswer(callId);
+    }
 
     // 015/T406: the four position clicks are presses like any other and report what they caused.
     // Nothing located the point's element, so there is no role to call it a link by: a position
@@ -2380,80 +2404,120 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      */
     deps.onDelivered?.(callId, {});
 
-    let last: Extract<PageExecutionOutcome, { ok: true }> | undefined;
-    for (let attempt = 0; attempt < planned.plan.repeat; attempt += 1) {
-      let outcome: PageExecutionOutcome;
-      try {
-        outcome = await execute({
-          taskId: context.taskId,
-          operationId: context.operationId,
-          runtimeEpochId: context.runtimeEpochId,
-          capability: planned.plan.capability,
-          arguments: planned.plan.args,
-          documentEpoch: binding.documentEpoch,
-          canonicalOrigin: binding.canonicalOrigin,
-          nonce: context.nonce,
-          expectedTabId: binding.tabId,
-          // Decision 3: the owner's per-site consent has already decided this call, so the page's
-          // classification refusals are skipped. Nothing else is.
-          policy: "trusted-agent",
-          tab: binding.tabId,
-        });
-      } catch (error) {
-        // The executor threw *after* the effect may have begun, which is the one case where nothing
-        // was observed at all. It is never reported as success.
-        deps.reportDiagnostic?.("agent.effect.execute-uncertain");
-        return answer(callId, "failed", error instanceof Error ? error.message : "execute-failed");
+    return answeringInPageDeadline(callId, receivedAt, async () => {
+      let last: Extract<PageExecutionOutcome, { ok: true }> | undefined;
+      for (let attempt = 0; attempt < planned.plan.repeat; attempt += 1) {
+        let outcome: PageExecutionOutcome;
+        try {
+          outcome = await execute({
+            taskId: context.taskId,
+            operationId: context.operationId,
+            runtimeEpochId: context.runtimeEpochId,
+            capability: planned.plan.capability,
+            arguments: planned.plan.args,
+            documentEpoch: binding.documentEpoch,
+            canonicalOrigin: binding.canonicalOrigin,
+            nonce: context.nonce,
+            expectedTabId: binding.tabId,
+            // Decision 3: the owner's per-site consent has already decided this call, so the page's
+            // classification refusals are skipped. Nothing else is.
+            policy: "trusted-agent",
+            tab: binding.tabId,
+          });
+        } catch (error) {
+          // The executor threw *after* the effect may have begun, which is the one case where nothing
+          // was observed at all. It is never reported as success.
+          deps.reportDiagnostic?.("agent.effect.execute-uncertain");
+          return answer(callId, "failed", error instanceof Error ? error.message : "execute-failed");
+        }
+        if (!outcome.ok) {
+          const mapped = refusalOutcome(outcome.reason);
+          return answer(callId, mapped.outcome, mapped.reason);
+        }
+        last = outcome;
+        if (outcome.documentChanged === true) break;
       }
-      if (!outcome.ok) {
-        const mapped = refusalOutcome(outcome.reason);
-        return answer(callId, mapped.outcome, mapped.reason);
-      }
-      last = outcome;
-      if (outcome.documentChanged === true) break;
-    }
-    if (!last) return answer(callId, "failed", "nothing-executed");
+      if (!last) return answer(callId, "failed", "nothing-executed");
 
-    const dialogBefore = deps.currentDialog?.(binding.tabId);
-    const verifying = verifyPageEffect({
-      executed: last,
-      effect: { documentChanged: last.documentChanged === true },
-      capability: planned.plan.capability,
-      tabId: binding.tabId,
-      documentEpoch: binding.documentEpoch,
-      canonicalOrigin: binding.canonicalOrigin,
-      taskId: context.taskId,
-      operationId: `verify-${callId}`,
-      runtimeEpochId: context.runtimeEpochId,
-      nonce: context.nonce,
-      settleMs,
-      probe,
-      tab: binding.tabId,
-    });
-    // The same race the browser-level path runs (008/FR-111): a page holding a dialog open answers
-    // no verification at all, so the dialog ends the wait and is what this call reports.
-    const raced = await racingDialog(binding.tabId, dialogBefore, verifying);
-    if ("dialog" in raced) {
-      const unverified = observationOf(last, "target-unconfirmed");
-      if (unverified !== undefined) {
-        deps.onEffect?.(request.sessionId, binding.tabId);
-        return { callId, outcome: "ok", result: { observed: unverified, dialog: raced.dialog } };
+      const dialogBefore = deps.currentDialog?.(binding.tabId);
+      const verifying = verifyPageEffect({
+        executed: last,
+        effect: { documentChanged: last.documentChanged === true },
+        capability: planned.plan.capability,
+        tabId: binding.tabId,
+        documentEpoch: binding.documentEpoch,
+        canonicalOrigin: binding.canonicalOrigin,
+        taskId: context.taskId,
+        operationId: `verify-${callId}`,
+        runtimeEpochId: context.runtimeEpochId,
+        nonce: context.nonce,
+        settleMs,
+        probe,
+        tab: binding.tabId,
+      });
+      // The same race the browser-level path runs (008/FR-111): a page holding a dialog open answers
+      // no verification at all, so the dialog ends the wait and is what this call reports.
+      const raced = await racingDialog(binding.tabId, dialogBefore, verifying);
+      if ("dialog" in raced) {
+        const unverified = observationOf(last, "target-unconfirmed");
+        if (unverified !== undefined) {
+          deps.onEffect?.(request.sessionId, binding.tabId);
+          return { callId, outcome: "ok", result: { observed: unverified, dialog: raced.dialog } };
+        }
+        return answer(callId, "failed", "unreadable-evidence");
       }
-      return answer(callId, "failed", "unreadable-evidence");
+      const verdict = raced.done;
+      if (verdict !== "verified") {
+        // The document moved under the effect, or the effect's own evidence says it did not land.
+        // Every handle bound to that document is gone with it.
+        deps.bindings.invalidate(binding.tabId);
+      }
+      // A dialog that arrived just as the verification finished is still this effect's news.
+      const current = deps.currentDialog?.(binding.tabId);
+      const raised = current && current.id !== dialogBefore?.id ? current : undefined;
+      const observed = observationOf(last, verdict);
+      if (!observed) return answer(callId, "failed", "unreadable-evidence");
+      deps.onEffect?.(request.sessionId, binding.tabId);
+      return { callId, outcome: "ok", result: { observed, ...(raised === undefined ? {} : { dialog: raised }) } };
+    });
+  }
+
+  /** The call's time ran out with input in the page (015/T402, FR-206, review F1, F4). */
+  function inputNotAnswered(callId: string): AgentNativeResponse {
+    return {
+      callId,
+      outcome: AGENT_015_REASON_OUTCOMES["page-not-responding"],
+      reason: "page-not-responding",
+      hint: INPUT_NOT_ANSWERED_HINT,
+    };
+  }
+
+  /**
+   * `scroll` and `form_input` under the call's time (015 change log 2026-10-12).
+   *
+   * They run inside the page rather than through `Input.*`, as a chain of round trips each bounded at
+   * the 10 s content deadline on its own - probe, an injection and a second probe when the runtime is
+   * gone, the action, and for `form_input` a re-probe after the settle wait. Chained, or after a
+   * consent prompt held the call, that passed the host's 30 s and the agent was told the host's
+   * `timed-out / no-answer`. So the chain gets the deadline the input budget has - the same end, the
+   * same floor - and answers as a spent budget does when it passes. The page's late answer is read
+   * by nobody; what it did is the "may have taken effect" the hint says.
+   */
+  async function answeringInPageDeadline(
+    callId: string,
+    receivedAt: number,
+    deliver: () => Promise<AgentNativeResponse>,
+  ): Promise<AgentNativeResponse> {
+    const deadline = Math.max(receivedAt + INPUT_CALL_BUDGET_MS, now() + INPUT_BUDGET_FLOOR_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const spent = new Promise<AgentNativeResponse>((resolve) => {
+      timer = setTimeout(() => resolve(inputNotAnswered(callId)), Math.max(0, deadline - now()));
+    });
+    try {
+      return await Promise.race([deliver(), spent]);
+    } finally {
+      clearTimeout(timer);
     }
-    const verdict = raced.done;
-    if (verdict !== "verified") {
-      // The document moved under the effect, or the effect's own evidence says it did not land.
-      // Every handle bound to that document is gone with it.
-      deps.bindings.invalidate(binding.tabId);
-    }
-    // A dialog that arrived just as the verification finished is still this effect's news.
-    const current = deps.currentDialog?.(binding.tabId);
-    const raised = current && current.id !== dialogBefore?.id ? current : undefined;
-    const observed = observationOf(last, verdict);
-    if (!observed) return answer(callId, "failed", "unreadable-evidence");
-    deps.onEffect?.(request.sessionId, binding.tabId);
-    return { callId, outcome: "ok", result: { observed, ...(raised === undefined ? {} : { dialog: raised }) } };
   }
 
   /**
@@ -2486,12 +2550,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // 014 change log 2026-10-11: the gesture's last check found the tab elsewhere and sent nothing.
       if (isSiteMovedBeforeDispatch(error)) return siteMovedAnswer(callId);
       if (!isInputDispatchDeadline(error)) throw error;
-      return {
-        callId,
-        outcome: AGENT_015_REASON_OUTCOMES["page-not-responding"],
-        reason: "page-not-responding",
-        hint: INPUT_NOT_ANSWERED_HINT,
-      };
+      return inputNotAnswered(callId);
     } finally {
       if (inputBudgets.get(tabId) === budget) inputBudgets.delete(tabId);
     }

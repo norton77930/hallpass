@@ -5,6 +5,20 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.12.1 — 2026-10-12
+
+**Keys and in-page actions follow the same rules as presses.**
+
+- **Keys typed into whatever has focus check the site too.** `type` and `key` without a target, and
+  `computer` key or type actions without a point, now check the tab's site right before the first
+  key, as a click already does. If the tab has moved to another site, or has begun loading one, no
+  key is sent and the agent is told so.
+- **In-page scrolls and form fills answer within the call's time.** A `scroll` or `form_input` on a
+  page that keeps stalling now answers `page-not-responding` within the call's 25 s budget, instead
+  of running past the host's wait and coming back with no answer.
+- **The page-not-responding hint no longer names a fixed wait.** It says the page did not answer the
+  input in time, which is true whichever limit ended the wait.
+
 ## 0.12.0 — 2026-10-11
 
 **The site is checked again right before a press or a screenshot.**
