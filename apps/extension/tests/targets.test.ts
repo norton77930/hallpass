@@ -171,6 +171,29 @@ describe("002 US5 description resolution", () => {
     return registry;
   }
 
+  it("finds an input-type combobox by the text-entry words, which a select does not answer to", () => {
+    const registry = new TargetRegistry();
+    const issue = (targetHandle: string, tagName: string, label: string) =>
+      registry.issue({
+        targetHandle,
+        snapshotId: "snap-1",
+        documentEpoch: EPOCH,
+        role: "combobox",
+        label,
+        element: liveElement({}, tagName),
+        target: { tagName },
+      });
+    issue("t_suggest", "INPUT", "Search");
+    issue("t_choose", "SELECT", "Sort");
+
+    expect(resolveDescription(registry, EPOCH, "search box", 5)).toEqual({
+      ok: true,
+      outcome: "resolved",
+      candidates: [{ targetHandle: "t_suggest" }],
+    });
+    expect(resolveDescription(registry, EPOCH, "sort box", 5)).toEqual({ ok: true, outcome: "no-match" });
+  });
+
   it("resolves a description that names one element, carrying the handle and nothing else", () => {
     const registry = registryWith([
       { handle: "t_search", role: "textbox", label: "Search", element: liveElement({}, "INPUT") },

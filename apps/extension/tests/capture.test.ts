@@ -4,6 +4,7 @@ import {
   captureThroughProtocol,
   cropRect,
   decideCapturePath,
+  FRESH_FRAME_CAP_MS,
 } from "../src/chrome-adapters/capture.js";
 
 /**
@@ -190,5 +191,77 @@ describe("T310 capture geometry", () => {
     );
 
     expect(image).toEqual({ data: "aVZCT1J3MEtHZ28=", cropped: false, scale: 1 });
+  });
+});
+
+/**
+ * A background tab brought forward is photographed after one fresh frame (2026-10-11). Right after
+ * activation the surface may still be the one the tab was last painted with, so the capture waits -
+ * at most `FRESH_FRAME_CAP_MS` - for the page to paint; a tab already in front does not wait.
+ */
+describe("a background tab's picture waits for a paint", () => {
+  it("waits for a frame between bringing the tab forward and taking the picture", async () => {
+    const steps: string[] = [];
+    await captureTab(
+      { tabId: 7, windowId: 9, isActive: false, restoreTabId: 1 },
+      {
+        activateTab: async (tabId) => void steps.push(`activate ${tabId}`),
+        awaitFrame: async (tabId) => void steps.push(`frame ${tabId}`),
+        captureVisibleTab: async () => (steps.push("capture"), "data:image/png;base64,QUJD"),
+        measure: async () => undefined,
+      },
+    );
+    expect(steps).toEqual(["activate 7", "frame 7", "capture", "activate 1"]);
+  });
+
+  it("does not wait for a tab already in front", async () => {
+    const steps: string[] = [];
+    await captureTab(
+      { tabId: 7, windowId: 9, isActive: true },
+      {
+        activateTab: async (tabId) => void steps.push(`activate ${tabId}`),
+        awaitFrame: async (tabId) => void steps.push(`frame ${tabId}`),
+        captureVisibleTab: async () => (steps.push("capture"), "data:image/png;base64,QUJD"),
+        measure: async () => undefined,
+      },
+    );
+    expect(steps).toEqual(["capture"]);
+  });
+
+  it("takes the picture anyway when no frame comes, or the wait fails", async () => {
+    for (const awaitFrame of [() => new Promise<void>(() => undefined), async () => Promise.reject(new Error("no page"))]) {
+      const started = Date.now();
+      const image = await captureTab(
+        { tabId: 7, windowId: 9, isActive: false },
+        {
+          activateTab: async () => undefined,
+          awaitFrame,
+          captureVisibleTab: async () => "data:image/png;base64,QUJD",
+          measure: async () => undefined,
+        },
+      );
+      expect(image.data).toBe("QUJD");
+      expect(Date.now() - started).toBeLessThan(FRESH_FRAME_CAP_MS + 500);
+    }
+  });
+
+  it("asks the page for its frame over the attachment on the protocol path", async () => {
+    const sent: string[] = [];
+    await captureTab(
+      { tabId: 7, windowId: 9, isActive: false, path: decideCapturePath(FRAME, undefined, 1) },
+      {
+        activateTab: async () => void sent.push("activate"),
+        send: async (_tabId, method, params) => {
+          sent.push(method);
+          if (method === "Runtime.evaluate") {
+            expect(params).toMatchObject({ awaitPromise: true });
+            expect(String(params?.["expression"])).toContain("requestAnimationFrame");
+          }
+          return method === "Page.captureScreenshot" ? { data: "QUJD" } : {};
+        },
+        measure: async () => undefined,
+      },
+    );
+    expect(sent).toEqual(["activate", "Runtime.evaluate", "Page.getLayoutMetrics", "Page.captureScreenshot"]);
   });
 });

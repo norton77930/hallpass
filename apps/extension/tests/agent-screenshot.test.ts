@@ -286,6 +286,8 @@ describe("T035 agent screenshot", () => {
       region: { x: 100, y: 200, width: 300, height: 100 },
     });
     expect(sent).toEqual([
+      // The tab was brought forward, so one fresh frame is waited for first (2026-10-11).
+      { method: "Runtime.evaluate", params: expect.objectContaining({ awaitPromise: true }) },
       // R-174: the clip is in document coordinates, so where the viewport sits is asked for first.
       { method: "Page.getLayoutMetrics" },
       {

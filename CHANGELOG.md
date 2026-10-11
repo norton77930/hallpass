@@ -5,6 +5,26 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.12.0 — 2026-10-11
+
+**The site is checked again right before a press or a screenshot.**
+
+- **Checked again after the cursor arrives.** A click, hover, scroll or drag checks the tab's site once
+  more after the cursor has glided into place and before the button goes down; a screenshot checks it
+  right before the capture. If the tab has moved to another site, or has begun loading one, nothing
+  is sent or captured and the agent is told so; the next call on that tab asks you if that site needs
+  your decision.
+- **A tab you drag out of the agent's group is yours again.** The session stops holding it at once,
+  and `tabs_context` / `tabs_close` tell the agent which tabs were taken back or whose group is gone,
+  and that closing the group closed nothing outside it.
+- **One time budget per call.** A click or key press whose page keeps stalling now answers
+  `page-not-responding` within 25 s, instead of running past the host's wait and coming back with no
+  answer. Each `browser_batch` step has its own budget.
+- **Smaller fixes.** A screenshot of a background tab waits for one paint, so it no longer shows a
+  stale frame; a pairing card the host withdraws leaves at once even when browser storage is slow;
+  an input that works as a combobox now matches a description such as "search box"; the hint on
+  `tabs_context` reaches the agent.
+
 ## 0.11.2 — 2026-10-05
 
 **Small fixes.**

@@ -27,6 +27,8 @@ export type ToolCallResult = {
   isError: boolean;
   /** The concatenated text blocks; tool results are JSON in a text block. */
   text: string;
+  /** The text blocks one by one, for the few answers whose block count is the contract. */
+  textBlocks: string[];
   /** The parsed text, when it is JSON - which it is for every tool but `screenshot`. */
   json: unknown;
   /** Image blocks, as MCP carries them. `screenshot` is the one tool that answers with these. */
@@ -148,10 +150,10 @@ export async function startMcpClient(options: StartMcpClientOptions = {}): Promi
         isError?: boolean;
         content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
       };
-      const text = (result.content ?? [])
+      const textBlocks = (result.content ?? [])
         .filter((block) => block.type === "text")
-        .map((block) => block.text ?? "")
-        .join("");
+        .map((block) => block.text ?? "");
+      const text = textBlocks.join("");
       let json: unknown;
       try {
         json = JSON.parse(text);
@@ -161,7 +163,7 @@ export async function startMcpClient(options: StartMcpClientOptions = {}): Promi
       const images = (result.content ?? [])
         .filter((block) => block.type === "image")
         .map((block) => ({ data: block.data ?? "", mimeType: block.mimeType ?? "" }));
-      return { isError: result.isError === true, text, json, images };
+      return { isError: result.isError === true, text, textBlocks, json, images };
     },
     async listToolNames() {
       const listed = (await client.listTools()) as { tools: Array<{ name: string }> };

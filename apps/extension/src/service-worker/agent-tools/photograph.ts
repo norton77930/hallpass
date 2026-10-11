@@ -73,6 +73,8 @@ export type CaptureFrameFacts = {
 export type PhotographOutcome =
   | { ok: true; image: CapturedImage; frame?: CaptureFrame }
   | { ok: false; reason: "tab-gone" | "capture-refused" }
+  /** The pre-capture check said the tab is no longer on the call's site; nothing was captured. */
+  | { ok: false; reason: "site-moved" }
   | { ok: false; reason: "input-unavailable"; unavailableReason: InputUnavailableReason };
 
 /** The frame, asked for before anything is photographed so a region can be refused against it. */
@@ -93,6 +95,12 @@ export async function photographTab(
     scale?: number;
     /** Already resolved by the caller that had to refuse a region against it; resolved here if not. */
     facts?: CaptureFrameFacts;
+    /**
+     * Asked immediately before the capture (014 change log 2026-10-11): `false` takes no picture.
+     * After the attachment is claimed and before the tab is brought forward, so a refused picture
+     * costs the owner no flicker of their window either.
+     */
+    beforeCapture?: () => Promise<boolean>;
   },
   deps: PhotographDeps = {},
 ): Promise<PhotographOutcome> {
@@ -113,6 +121,7 @@ export async function photographTab(
       return { ok: false, reason: "input-unavailable", unavailableReason: attached.unavailableReason };
     }
   }
+  if (input.beforeCapture && !(await input.beforeCapture())) return { ok: false, reason: "site-moved" };
   // Whoever the window is showing right now, so it is showing them again afterwards.
   const displaced = tabs.find((candidate) => candidate.windowId === tab.windowId && candidate.active);
   try {

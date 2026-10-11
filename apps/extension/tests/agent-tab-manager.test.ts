@@ -479,7 +479,13 @@ describe("T016 agent tab manager", () => {
       fake.tabs[0]!.groupId = groupId;
       for (const tab of fake.tabs) if (tab.id === 2 || tab.id === 3) tab.groupId = UNGROUPED;
 
-      await expect(manager.context("session-a")).resolves.toEqual({ tabs: [], gone: [2, 3] });
+      // 004 change log 2026-10-11: still open, so taken back rather than closed, and the group is gone.
+      await expect(manager.context("session-a")).resolves.toEqual({
+        tabs: [],
+        gone: [2, 3],
+        takenBack: [2, 3],
+        groupGone: true,
+      });
       stops.begin("call-1", "session-a");
       await settle();
 
@@ -494,7 +500,7 @@ describe("T016 agent tab manager", () => {
       fake.tabs = fake.tabs.filter((tab) => tab.id !== 2);
 
       // The withdrawal is refused - the group went with its last tab - and that is not a failure.
-      await expect(manager.context("session-a")).resolves.toEqual({ tabs: [], gone: [2] });
+      await expect(manager.context("session-a")).resolves.toEqual({ tabs: [], gone: [2], groupGone: true });
       stops.begin("call-1", "session-a");
       await settle();
 

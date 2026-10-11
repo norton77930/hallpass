@@ -28,7 +28,7 @@ import type { AgentSessionContexts } from "./context.js";
 import type { BeforeunloadOutcome } from "./dialogs.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { inputUnavailable } from "./input.js";
-import { ownershipRefusal } from "./ownership.js";
+import { nothingClosed, ownershipRefusal, tabsContextHint } from "./ownership.js";
 import type { AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import type { AgentToolRequest } from "./stop.js";
@@ -457,7 +457,9 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
        * The session's own record is reconciled on the way past: a tab the owner closed is dropped
        * from it and its lease with it, which is the bookkeeping 003 did on this call (FR-044).
        */
-      await deps.tabs.context(sessionId);
+      const reconciled = await deps.tabs.context(sessionId);
+      // 2026-10-11: tabs the owner took back are not silently missing from the session's hold.
+      const hint = tabsContextHint(reconciled);
       const [live, leases] = await Promise.all([queryTabSnapshots(), deps.tabs.leases()]);
       const holders = new Map(leases.map((lease) => [lease.tabId, lease.sessionId]));
       const tabs: AgentTabView[] = live.map((tab) => {
@@ -471,7 +473,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
           holder: holder === undefined ? "none" : holder === sessionId ? "this" : { sessionId: holder },
         };
       });
-      return { callId, outcome: "ok", result: tabs };
+      return { callId, outcome: "ok", result: tabs, ...(hint === undefined ? {} : { hint }) };
     }
 
     if (tool === "tabs_create") {
@@ -534,7 +536,10 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
 
     const ownership = await deps.tabs.ownership(sessionId, tabId);
     if (ownership.state !== "this") {
-      return ownershipRefusal(callId, ownership);
+      const refused = ownershipRefusal(callId, ownership);
+      // A close refused because the tab was taken back or is gone says so plainly (2026-10-11).
+      const nothingToClose = ownership.state === "gone" || (ownership.state === "not-yours" && ownership.takenBack);
+      return tool === "tabs_close" && nothingToClose ? nothingClosed(refused) : refused;
     }
 
     if (tool === "tabs_release") {

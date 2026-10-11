@@ -626,6 +626,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // the manager is inside its own queue here, and the restorer asks it questions of its own.
       void windowRestorer.onTabLeft(sessionId).catch(() => reportTestDiagnostic("agent.window.restore-failed"));
     },
+    // Taken back by the owner rather than released by a tool (review S2-F1): the same release, once.
+    onTabTakenBack: (_sessionId, tabId) => {
+      bindings.invalidate(tabId);
+      releaseTabState(tabId);
+    },
     // The session's download records go with its tabs (005/FR-080): the ring is kept per session
     // and there is no session left for it to be about.
     onSessionEnded: (sessionId) => {
@@ -883,6 +888,34 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * resized is usually not the worker that restores.
    */
   const windowRestores = sessionWindowRestoreStore();
+  /**
+   * Everything a tab handed back to the owner takes with it besides the lease: one path for a
+   * `tabs_release`, a close, and a tab the owner took back by moving it out of the session's group
+   * (004 change log 2026-10-11, review S2-F1).
+   */
+  function releaseTabState(tabId: number): void {
+    // The lease is over, so every holder is: the diagnostics buffers go with their grant, and the
+    // attachment an effect made for this tab goes with the tab (004/T121, R-113).
+    void diagnostics.release(tabId).catch(() => undefined);
+    // And what this session knew about where that tab had been (014 data-model): the owner has
+    // their tab back, and its history with an agent is not something to keep a record of.
+    void queueTransition(() => transitionStore.forgetTab(tabId));
+    void attachments
+      .release(tabId)
+      // And the size this session laid the page out at (012/S2c F5) - *after* the release, never
+      // beside it: the release hook reads that very record to know what to clear, so a record
+      // forgotten first would leave the page emulated on a tab the owner has back. What this
+      // catches is the tab that was closed rather than handed back, where there is nothing to
+      // clear and the record would otherwise outlive the tab id Chrome will hand out again.
+      .then(() => viewportEmulation.forget(tabId))
+      .catch(() => undefined);
+    // And what a read said about that tab's refs (008/T221): a handle means nothing without the
+    // document that minted it, and this worker has no business remembering either.
+    actions.forget(tabId);
+    // Nor what the page had open on it (008/T226): a dialog on a tab nobody holds is the owner's
+    // own browsing, and a `force` policy that outlived the lease would be worse than stale.
+    dialogs.forget(tabId);
+  }
   const tabTools = createAgentTabTools({
     context: toolContexts,
     tabs,
@@ -928,29 +961,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           await transitionStore.save(sessionId, tabId, rest);
         }),
     },
-    onTabReleased: (tabId) => {
-      // The lease is over, so every holder is: the diagnostics buffers go with their grant, and the
-      // attachment an effect made for this tab goes with the tab (004/T121, R-113).
-      void diagnostics.release(tabId).catch(() => undefined);
-      // And what this session knew about where that tab had been (014 data-model): the owner has
-      // their tab back, and its history with an agent is not something to keep a record of.
-      void queueTransition(() => transitionStore.forgetTab(tabId));
-      void attachments
-        .release(tabId)
-        // And the size this session laid the page out at (012/S2c F5) - *after* the release, never
-        // beside it: the release hook reads that very record to know what to clear, so a record
-        // forgotten first would leave the page emulated on a tab the owner has back. What this
-        // catches is the tab that was closed rather than handed back, where there is nothing to
-        // clear and the record would otherwise outlive the tab id Chrome will hand out again.
-        .then(() => viewportEmulation.forget(tabId))
-        .catch(() => undefined);
-      // And what a read said about that tab's refs (008/T221): a handle means nothing without the
-      // document that minted it, and this worker has no business remembering either.
-      actions.forget(tabId);
-      // Nor what the page had open on it (008/T226): a dialog on a tab nobody holds is the owner's
-      // own browsing, and a `force` policy that outlived the lease would be worse than stale.
-      dialogs.forget(tabId);
-    },
+    onTabReleased: releaseTabState,
     // A navigation to a url the browser downloads ends on the record that appears for it (005/US2).
     downloads: { list: (session) => downloads.list(session) },
     // 008/FR-115: a page with unsaved work is not left unless the owner said so. The policy is

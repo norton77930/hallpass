@@ -1,6 +1,7 @@
 import type { AgentNativeResponse, AgentRefusal } from "@hallpass/contracts";
 import { createChromeDebuggerAdapter, type DebuggerAdapter } from "../../chrome-adapters/debugger.js";
 import { CONTENT_OPERATION_DEADLINE_MS } from "../content-broker.js";
+import { SiteMovedBeforeDispatch } from "./site-recheck.js";
 
 /**
  * The debugger attachment two things share, and one consent that is not shared (004/T119, T125b,
@@ -530,6 +531,17 @@ export function isInputDispatchDeadline(error: unknown): error is InputDispatchD
 }
 
 /**
+ * The time one tool call's input may still take, all dispatches together (015 review F4).
+ *
+ * Asked before every dispatch: each is bounded by the smaller of the per-dispatch content deadline
+ * and what is left here, and none is sent once nothing is. The effect runner owns the clock; a tab
+ * with no budget open (nothing delivering for a call) is bounded per dispatch only, as before.
+ */
+export type InputBudget = { remainingMs(): number };
+
+export type InputBudgetLookup = (tabId: number) => InputBudget | undefined;
+
+/**
  * Every `Input.*` command the agent's pointer and keyboard send goes through here (015/T402).
  *
  * `Input.dispatchMouseEvent` and `Input.dispatchKeyEvent` return only once the renderer has handled
@@ -551,11 +563,18 @@ function dispatchInput(
   method: `Input.${string}`,
   params: Record<string, unknown>,
   sessionId?: string,
+  budget?: InputBudgetLookup,
 ): Promise<Record<string, unknown>> {
+  // 015 review F4: the call's own budget, shared by every dispatch it sends. Spent means nothing
+  // more leaves - the gesture so far is what the page was given - and the call answers as a timed
+  // out dispatch does.
+  const leftMs = budget?.(tabId)?.remainingMs();
+  if (leftMs !== undefined && leftMs <= 0) return Promise.reject(new InputDispatchDeadline(method));
+  const boundMs = leftMs === undefined ? CONTENT_OPERATION_DEADLINE_MS : Math.min(CONTENT_OPERATION_DEADLINE_MS, leftMs);
   return new Promise((resolve, reject) => {
     // Sent before the clock starts, so a send that throws at once leaves no timer behind.
     const sent = attachments.send(tabId, method, params, sessionId);
-    const timer = setTimeout(() => reject(new InputDispatchDeadline(method)), CONTENT_OPERATION_DEADLINE_MS);
+    const timer = setTimeout(() => reject(new InputDispatchDeadline(method)), boundMs);
     sent.then(
       (value) => {
         clearTimeout(timer);
@@ -607,30 +626,47 @@ const DRAG_TRAVEL_CAP_MS = 60;
  */
 export type PointerDestination = { sessionId?: string };
 
+/**
+ * The last word before a gesture's first event leaves (014 change log 2026-10-11).
+ *
+ * Asked once, after the cursor has arrived and before anything is dispatched - the moment the
+ * site-mode decision is oldest. `false` means nothing is dispatched and the gesture rejects with
+ * `SiteMovedBeforeDispatch`. A drag asks before its press only: once the button is down, stopping
+ * half-way would leave the page holding a press nobody releases.
+ */
+export type PointerDispatchCheck = { beforeDispatch?: () => Promise<boolean> };
+
 export type AgentPointerInput = {
   /** The move alone, which is what a hover *is* (G6). */
-  hover(tabId: number, point: PointerPoint, destination?: PointerDestination): Promise<void>;
+  hover(tabId: number, point: PointerPoint, destination?: PointerDestination & PointerDispatchCheck): Promise<void>;
   /** Move to the point, press, release - in that order and at that point. */
   click(
     tabId: number,
     point: PointerPoint,
-    options?: { button?: PointerButton; clickCount?: number } & PointerDestination,
+    options?: { button?: PointerButton; clickCount?: number } & PointerDestination & PointerDispatchCheck,
   ): Promise<void>;
   /** A wheel at the point, so the page scrolls whatever is under the pointer. */
   scroll(
     tabId: number,
     point: PointerPoint,
     delta: { deltaX: number; deltaY: number },
-    destination?: PointerDestination,
+    destination?: PointerDestination & PointerDispatchCheck,
   ): Promise<void>;
   /** Move, press, move, release: the drag a person's hand makes. */
-  drag(tabId: number, from: PointerPoint, to: PointerPoint, destination?: PointerDestination): Promise<void>;
+  drag(
+    tabId: number,
+    from: PointerPoint,
+    to: PointerPoint,
+    destination?: PointerDestination & PointerDispatchCheck,
+  ): Promise<void>;
 };
 
 export type AgentPointerInputDeps = {
   attachments: AgentInputAttachments;
   /** Absent means nothing is drawn; the delivery is unchanged either way. */
   cursor?: CursorSender;
+  /** The call's input budget on the tab (015 review F4); absent bounds each dispatch alone. */
+  budget?: InputBudgetLookup;
 };
 
 /** The one message name the page's own cursor listens for; settles when the page has answered. */
@@ -679,7 +715,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
   const cursor = deps.cursor ?? sendCursorMessage;
 
   async function mouse(tabId: number, params: Record<string, unknown>, sessionId?: string): Promise<void> {
-    await dispatchInput(deps.attachments, tabId, "Input.dispatchMouseEvent", params, sessionId);
+    await dispatchInput(deps.attachments, tabId, "Input.dispatchMouseEvent", params, sessionId, deps.budget);
   }
 
   async function move(
@@ -729,20 +765,28 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
    * events are dispatched. Nothing hides it after - it stays where the gesture left it until the
    * next one moves it or the tab leaves the session.
    */
-  async function sequence(tabId: number, at: PointerPoint, run: () => Promise<void>): Promise<void> {
+  async function sequence(
+    tabId: number,
+    at: PointerPoint,
+    check: PointerDispatchCheck,
+    run: () => Promise<void>,
+  ): Promise<void> {
     await arrive(tabId, at, CURSOR_ARRIVAL_CAP_MS);
+    // After the glide, before the first event (014 change log 2026-10-11): the wait above is the
+    // window a page can leave the site in, so the question is asked at its far end.
+    if (check.beforeDispatch && !(await check.beforeDispatch())) throw new SiteMovedBeforeDispatch();
     await run();
   }
 
   return {
     async hover(tabId, point, destination = {}) {
-      await sequence(tabId, point, () => move(tabId, point, undefined, destination.sessionId));
+      await sequence(tabId, point, destination, () => move(tabId, point, undefined, destination.sessionId));
     },
     async click(tabId, point, options = {}) {
       const button = options.button ?? "left";
       const clickCount = options.clickCount ?? 1;
       const sessionId = options.sessionId;
-      await sequence(tabId, point, async () => {
+      await sequence(tabId, point, options, async () => {
         await move(tabId, point, undefined, sessionId);
         await mouse(tabId, { type: "mousePressed", x: point.x, y: point.y, button, clickCount }, sessionId);
         await mouse(tabId, { type: "mouseReleased", x: point.x, y: point.y, button, clickCount }, sessionId);
@@ -750,7 +794,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
     },
     async scroll(tabId, point, delta, destination = {}) {
       const sessionId = destination.sessionId;
-      await sequence(tabId, point, async () => {
+      await sequence(tabId, point, destination, async () => {
         await move(tabId, point, undefined, sessionId);
         await mouse(
           tabId,
@@ -768,7 +812,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
     },
     async drag(tabId, from, to, destination = {}) {
       const sessionId = destination.sessionId;
-      await sequence(tabId, from, async () => {
+      await sequence(tabId, from, destination, async () => {
         await move(tabId, from, undefined, sessionId);
         await mouse(
           tabId,
@@ -901,7 +945,11 @@ export type AgentKeyboardInput = {
   ): Promise<void>;
 };
 
-export type AgentKeyboardInputDeps = { attachments: AgentInputAttachments };
+export type AgentKeyboardInputDeps = {
+  attachments: AgentInputAttachments;
+  /** As the pointer's (015 review F4). */
+  budget?: InputBudgetLookup;
+};
 
 /**
  * Keyboard input as the reference delivers it (004/T123, US5, G7, R-113, FR-064).
@@ -946,8 +994,16 @@ export function createKeyboardInput(deps: AgentKeyboardInputDeps): AgentKeyboard
         ...(options.commands === undefined ? {} : { commands: options.commands }),
       },
       options.sessionId,
+      deps.budget,
     );
-    await dispatchInput(deps.attachments, tabId, "Input.dispatchKeyEvent", { ...base, type: "keyUp" }, options.sessionId);
+    await dispatchInput(
+      deps.attachments,
+      tabId,
+      "Input.dispatchKeyEvent",
+      { ...base, type: "keyUp" },
+      options.sessionId,
+      deps.budget,
+    );
   }
 
   return {
@@ -967,7 +1023,7 @@ export function createKeyboardInput(deps: AgentKeyboardInputDeps): AgentKeyboard
       for (const character of [...text]) {
         const layout = US_LAYOUT.get(character);
         if (layout === undefined) {
-          await dispatchInput(deps.attachments, tabId, "Input.insertText", { text: character }, sessionId);
+          await dispatchInput(deps.attachments, tabId, "Input.insertText", { text: character }, sessionId, deps.budget);
           continue;
         }
         await stroke(tabId, character, layout, {

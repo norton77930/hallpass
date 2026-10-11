@@ -30,7 +30,16 @@ export type DescriptionCandidate = {
   label?: string | undefined;
   /** A button's visible text, which is one of its names. Never any other element's text. */
   text?: string | undefined;
+  /**
+   * The element's tag, when the caller knows it. It is not a name and is never matched against; it
+   * only says whether a `combobox` is typed into (an `<input role="combobox">`, such as a search
+   * field that suggests) or only chosen from (a `<select>`), which decides which kind words apply.
+   */
+  tagName?: string | undefined;
 };
+
+/** Tags a person types into; a combobox on one of them is also called by the text-entry words. */
+const TEXT_ENTRY_TAGS: ReadonlySet<string> = new Set(["INPUT", "TEXTAREA"]);
 
 export const NOISE_WORDS: ReadonlySet<string> = new Set([
   "the", "a", "an", "to", "on", "in", "of", "at", "this", "that", "please", "click", "press", "type",
@@ -321,9 +330,12 @@ export function matchDescription(description: string, candidate: DescriptionCand
       .map((token) => token.value),
   );
   const role = (candidate.role ?? "").toLowerCase();
+  // An input-type combobox is both a combobox and a text field; a select is only the former.
+  const typedInto = role === "combobox" && TEXT_ENTRY_TAGS.has((candidate.tagName ?? "").toUpperCase());
   const kindWords = [
     ...(ROLE_WORDS[role] ?? []),
     ...(ROLE_WORDS_ZH_TW[role] ?? []),
+    ...(typedInto ? [...(ROLE_WORDS.textbox ?? []), ...(ROLE_WORDS_ZH_TW.textbox ?? [])] : []),
     ...ANY_ROLE_WORDS,
     ...ANY_ROLE_WORDS_ZH_TW,
   ];

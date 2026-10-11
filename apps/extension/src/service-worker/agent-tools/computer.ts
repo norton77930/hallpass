@@ -1,6 +1,6 @@
 import type { AgentNativeResponse } from "@hallpass/contracts";
 import type { CaptureRegion } from "../../chrome-adapters/capture.js";
-import type { AgentKeyboardInput, AgentPointerInput } from "./input.js";
+import type { AgentKeyboardInput, AgentPointerInput, PointerDispatchCheck } from "./input.js";
 
 /**
  * Acting by position (004/T139, US7, FR-069, FR-070, R-120).
@@ -153,6 +153,8 @@ export type PositionDelivery = {
   keyboard: AgentKeyboardInput;
   /** How `wait` waits. Injected so a test does not have to spend the time the agent asked for. */
   sleep?: (ms: number) => Promise<void>;
+  /** Asked before each gesture's first event (014 change log 2026-10-11); see `PointerDispatchCheck`. */
+  beforeDispatch?: PointerDispatchCheck["beforeDispatch"];
 };
 
 /**
@@ -165,10 +167,11 @@ export type PositionDelivery = {
  */
 export async function deliverPosition(input: PositionDelivery): Promise<PositionEffect> {
   const { tabId, action, args, point, pointer, keyboard } = input;
+  const check: PointerDispatchCheck = input.beforeDispatch ? { beforeDispatch: input.beforeDispatch } : {};
 
   const click = POSITION_CLICKS[action as keyof typeof POSITION_CLICKS];
   if (click) {
-    await pointer.click(tabId, point!, { button: click.button, clickCount: click.clickCount });
+    await pointer.click(tabId, point!, { button: click.button, clickCount: click.clickCount, ...check });
     return {
       capability: click.capability,
       evidence: { effect: click.effect, clicks: click.clickCount, documentChanged: false },
@@ -180,12 +183,12 @@ export async function deliverPosition(input: PositionDelivery): Promise<Position
     // "bring this into view", and this one means "turn the wheel here" - two different gestures
     // that happen to share a word.
     const amount = Number(args.amount ?? 0);
-    await pointer.scroll(tabId, point!, { deltaX: 0, deltaY: amount * POSITION_WHEEL_CLICK_PX });
+    await pointer.scroll(tabId, point!, { deltaX: 0, deltaY: amount * POSITION_WHEEL_CLICK_PX }, check);
     return { capability: "browser.scroll", evidence: { effect: "scrolled", documentChanged: false } };
   }
 
   if (point) {
-    await pointer.click(tabId, point, { button: "left", clickCount: 1 });
+    await pointer.click(tabId, point, { button: "left", clickCount: 1, ...check });
   }
 
   if (action === "type") {

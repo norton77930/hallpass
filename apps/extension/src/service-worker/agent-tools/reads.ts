@@ -31,6 +31,13 @@ import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings }
 import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { captureFrameFacts, photographTab, type PhotographDeps } from "./photograph.js";
+import {
+  committedOrigin,
+  readTabAddress,
+  siteMovedAnswer,
+  stillOnOrigin,
+  type ReadTabAddress,
+} from "./site-recheck.js";
 
 /**
  * The read tools (003/T034, T036, US2, FR-036..FR-039).
@@ -78,6 +85,11 @@ export type AgentReadDeps = {
   ensureAttached?: PhotographDeps["ensureAttached"];
   /** Which documents a tab is made of (004/US4): the scripting API's all-frames execution. */
   enumerateFrames?: typeof enumerateTabFrames;
+  /**
+   * Where a tab is and where it is going (014 change log 2026-10-11): read when a screenshot starts
+   * and again immediately before its capture. Defaults to `chrome.tabs.get`.
+   */
+  tabAddress?: ReadTabAddress;
   /**
    * What a `read_page` answered, for whoever needs to know later what the page said about a ref
    * (008/T221, FR-106): the recording's labels ask this, because the page - not the worker - is what
@@ -478,6 +490,14 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     region: CaptureRegion | undefined,
     scale: number,
   ): Promise<AgentNativeResponse> {
+    /**
+     * The site the picture is of (014 change log 2026-10-11). A read has no gate and no binding, so
+     * the reference is the site the tab is on as the call starts - after the runtime's transition
+     * question has had its say - and the capture is refused if the tab has left it, or has begun to,
+     * by the time the picture would be taken. A tab on no keyable origin has nothing to compare.
+     */
+    const readAddress = deps.tabAddress ?? readTabAddress;
+    const startedOn = await committedOrigin(tabId, readAddress);
     // Before anything is photographed, because the frame is what a region is judged against and a
     // refused region must not have cost the owner a tab flicker (012/FR-164).
     const facts = await captureFrameFacts(tabId, photographDeps);
@@ -489,10 +509,17 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       return answer(callId, "failed", `region-outside-viewport (frame ${facts.frame.width}x${facts.frame.height})`);
     }
     const photograph = await photographTab(
-      { tabId, scale, facts, ...(region === undefined ? {} : { region }) },
+      {
+        tabId,
+        scale,
+        facts,
+        ...(region === undefined ? {} : { region }),
+        ...(startedOn === undefined ? {} : { beforeCapture: () => stillOnOrigin(tabId, startedOn, readAddress) }),
+      },
       photographDeps,
     );
     if (!photograph.ok) {
+      if (photograph.reason === "site-moved") return siteMovedAnswer(callId);
       // The attachment's own refusal keeps the attachment's words (012/S2c F2): `not-readable`
       // would say the page cannot be photographed, when what happened is that Chrome will not let
       // this session debug the tab the emulation lives on.
