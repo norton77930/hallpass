@@ -54,9 +54,12 @@ export const PAGE_NOT_RESPONDING_HINT =
  * and its handler may have run - a submit may have gone - so "retry" would be the wrong advice. The
  * sentence says the input may have taken effect and sends the agent to look before it sends it again,
  * the same line 014 draws between an interrupted step that may have taken effect and one that did not.
+ *
+ * It names no wait (015 change log 2026-10-12): the call's one budget (review F4) can end a dispatch,
+ * or an in-page effect's round trips, well before 10 s, so "in time" is the only length it can state.
  */
 export const INPUT_NOT_ANSWERED_HINT =
-  "The input reached the page, which then did not answer for 10 s; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again.";
+  "The page did not answer the input in time; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again.";
 
 /**
  * A binding failure as the agent is told it (015/FR-205, FR-206). One mapping for every tool that

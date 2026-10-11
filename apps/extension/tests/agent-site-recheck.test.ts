@@ -30,11 +30,12 @@ const ELSEWHERE = "https://elsewhere.test/landing";
 
 type Address = { url: string; pendingUrl?: string };
 
-function fakeBrowser() {
+function fakeBrowser(onAcquire?: (address: Address) => void) {
   const address: Address = { url: PAGE_URL };
   const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
   const attachments = {
     async acquire() {
+      onAcquire?.(address);
       return { ok: true as const };
     },
     async drop() {},
@@ -97,8 +98,9 @@ async function effectsHarness(
   onCursor: (address: Address) => void,
   onListTabs?: (address: Address) => void,
   onDelivered?: (callId: string) => void,
+  onAcquire?: (address: Address) => void,
 ) {
-  const browser = fakeBrowser();
+  const browser = fakeBrowser(onAcquire);
   installChrome(browser.address);
   const siteModes = createSiteModeStore();
   await siteModes.set(SITE, { mode: "skip-checks" });
@@ -138,6 +140,8 @@ function request(tool: string, args: Record<string, unknown>): AgentNativeReques
 }
 
 const presses = (sent: Array<{ method: string }>) => sent.filter((command) => command.method === "Input.dispatchMouseEvent");
+const keystrokes = (sent: Array<{ method: string }>) =>
+  sent.filter((command) => command.method === "Input.dispatchKeyEvent" || command.method === "Input.insertText");
 
 const SITE_MOVED = {
   callId: expect.any(String),
@@ -233,6 +237,65 @@ describe("014 re-check of the site before delivery (2026-10-11)", () => {
       await stayed.runner.run(request(tool, args));
       // `type` marks again before its keys; the marker is a set, so once or twice is the same fact.
       expect([...new Set(delivered)], `${tool} marked nothing for a gesture that left`).toEqual([`call-${tool}`]);
+    }
+  });
+
+  /**
+   * 014 change log 2026-10-12: keys sent to whatever has focus - `type` and `key` without a target,
+   * `computer` `type`/`key` without a point - have no gesture before them whose check could stand in
+   * the way, so they ask the same question themselves, before the first key. The tab moves when the
+   * input attachment is taken: after the gate for the keyboard tools, and before any key for all
+   * three - the window a call parked on a consent card spends.
+   */
+  it("keys sent to whatever has focus go nowhere once the tab has left the site, and mark nothing", async () => {
+    const cases = [
+      ["type", { text: "ab", mode: "replace" }],
+      ["key", { key: "Enter" }],
+      ["computer", { action: "key", key: "Enter" }],
+      ["computer", { action: "type", text: "ab" }],
+    ] as const;
+    const moves: Array<[string, (address: Address) => void]> = [
+      ["committed", (address) => void (address.url = ELSEWHERE)],
+      ["pending", (address) => void (address.pendingUrl = ELSEWHERE)],
+    ];
+    for (const [tool, args] of cases) {
+      for (const [how, move] of moves) {
+        const delivered: string[] = [];
+        const { runner, browser } = await effectsHarness(
+          () => undefined,
+          undefined,
+          (callId) => delivered.push(callId),
+          move,
+        );
+
+        const response = await runner.run(request(tool, args));
+
+        expect(response, `${tool} ${JSON.stringify(args)} (${how})`).toEqual({ ...SITE_MOVED, callId: `call-${tool}` });
+        expect(keystrokes(browser.sent), `${tool} sent keys (${how})`).toEqual([]);
+        expect(delivered, `${tool} marked a delivery (${how})`).toEqual([]);
+      }
+    }
+  });
+
+  it("keys sent to whatever has focus still leave when the tab stayed on the site", async () => {
+    for (const [tool, args] of [
+      ["type", { text: "ab", mode: "insert" }],
+      ["key", { key: "Enter" }],
+      ["computer", { action: "key", key: "Enter" }],
+    ] as const) {
+      const delivered: string[] = [];
+      const { runner, browser } = await effectsHarness(
+        () => undefined,
+        undefined,
+        (callId) => delivered.push(callId),
+        (address) => void (address.pendingUrl = `${SITE}/next`),
+      );
+
+      const response = await runner.run(request(tool, args));
+
+      expect(response.outcome, `${tool} answered`).toBe("ok");
+      expect(keystrokes(browser.sent).length, `${tool} sent no keys`).toBeGreaterThan(0);
+      expect([...new Set(delivered)]).toEqual([`call-${tool}`]);
     }
   });
 

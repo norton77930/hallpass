@@ -556,3 +556,13 @@ the contracts under `contracts/` carry the detail.
   screenshot: the one the tab was on when the call started), or a navigation to another origin is
   already pending, nothing is sent or captured, and the call answers `stale / stale-context` with a
   hint saying so and that the next call on the tab asks the owner if that site needs it.
+- **Keys sent to whatever has focus are checked too** (2026-10-12, review of the 2026-10-11 change).
+  `type` and `key` without a target, and `computer` `type` / `key` without a point, have no pointer
+  gesture before them, so they had no such check: a tab that moved to another site while the call
+  waited - on a consent card, say - received the keys. They now ask the same question immediately
+  before the first key, and a tab no longer on the decided site (committed elsewhere, or with a
+  navigation elsewhere pending) is sent no key, gets no delivery marker, and the call answers the
+  same `stale / stale-context` and hint. A keyboard call with a target is checked once, by the click
+  that places the caret, and its keys follow that click as one gesture. Known and unchanged (S1-F2):
+  a standalone `screenshot` of a tab that had no origin a decision could be keyed by when the call
+  started is not origin-checked before its capture.

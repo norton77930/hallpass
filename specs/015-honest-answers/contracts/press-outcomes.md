@@ -40,7 +40,7 @@ Rules:
 Emitted when the page binding's probe hits the content deadline. Also emitted (T402, R-197) when a press or keystroke's CDP input dispatch is not answered within the same deadline; the input was delivered and may have taken effect, so that answer carries a different hint:
 
 ```text
-{ outcome: "failed", reason: "page-not-responding", hint: "The input reached the page, which then did not answer for 10 s; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again." }
+{ outcome: "failed", reason: "page-not-responding", hint: "The page did not answer the input in time; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again." }
 ```
 
 `stale` remains only for

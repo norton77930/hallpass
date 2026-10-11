@@ -26,7 +26,7 @@ entries; more are summarised by the hint.
 | Tab does not exist | `stale` | `tab-gone` | — (existing) |
 | Page the extension may not act on | `not-actionable` | existing reasons | — |
 | Probe did not answer within the content deadline (10 s) | `failed` | `page-not-responding` | "The page did not answer for 10 s; it is still open. Retry the call, or take a screenshot to see its state." |
-| A press or keystroke whose input dispatch was not answered within 10 s (T402) | `failed` | `page-not-responding` | "The input reached the page, which then did not answer for 10 s; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again." |
+| A press or keystroke whose input dispatch was not answered within 10 s (T402), or within the call's input budget (change log 2026-10-11/12) | `failed` | `page-not-responding` | "The page did not answer the input in time; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again." |
 | Reference minted on a replaced document | `stale` | `stale-reference` | existing |
 
 ## Download ring (per session, `storage.session["agentDownloads"][sessionId]`)

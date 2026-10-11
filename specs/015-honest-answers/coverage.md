@@ -32,7 +32,10 @@ profile and LOCALAPPDATA), `HALLPASS_LOCALE=en-US`.
   dialog (a keydown that opens `alert` answers page-not-responding, the retry then answers the
   dialog); F3 a hung `mousePressed` leaves no `mouseReleased` (deliberate, unpinned by a test); F4
   the bound is per dispatch, not per call (done 2026-10-11: one 25 s input budget per call and per batch
-  step, spec change log). S4 review: `reopenSession` leaves an old pairing timer
+  step, spec change log; 2026-10-12: `scroll` / `form_input` end at the same deadline and the hint
+  names no fixed wait - tests "an in-page scroll whose round trips add up past the budget…" and "a
+  dispatch the budget cut short is not told the page was silent for 10 s" in
+  `apps/extension/tests/agent-press-outcomes.test.ts`). S4 review: `reopenSession` leaves an old pairing timer
   (harmless, pre-existing).
 
 ## Final verification (T429)

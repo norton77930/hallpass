@@ -250,7 +250,7 @@ test.describe("015 press outcomes", () => {
       expect(busy.json).toMatchObject({
         outcome: "failed",
         reason: "page-not-responding",
-        hint: "The input reached the page, which then did not answer for 10 s; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again.",
+        hint: "The page did not answer the input in time; it is still open and the input may have taken effect. Take a screenshot or read the page before sending it again.",
       });
       expect(elapsed, `answered after ${elapsed} ms`).toBeLessThan(13_000);
 
