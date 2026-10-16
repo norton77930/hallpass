@@ -7,6 +7,7 @@ import {
 import { deliverImageOnTab, setFilesOnTab } from "../content-broker.js";
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
+import { toPicturePoint, toViewportPoint, type ScreenshotSpaces } from "./coordinate-space.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
@@ -54,6 +55,11 @@ export type AgentUploadDeps = {
   deliverImage?: typeof deliverImageOnTab;
   /** 004/T160: which frame owns `ref`, when it names one. Overridable the way `setFiles` is. */
   discoverFrame?: typeof discoverRefFrame;
+  /**
+   * Each tab's latest whole-viewport picture space (012 change log 2026-10-17, R-280): a drop
+   * `coordinate` is read off that picture, so it is mapped back into the frame's pixels.
+   */
+  screenshotSpaces?: ScreenshotSpaces;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -241,7 +247,12 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     // A ref goes to the frame that minted it (004/T160, as `file_upload`); a point goes to the top
     // frame, which does its own one-level descent into a frame it can read (FR-171).
     const frame = "ref" in args.target ? await discoverFrame(context, binding, args.target.ref) : undefined;
-    const target = "ref" in args.target ? { handle: args.target.ref } : { point: args.target.coordinate };
+    // A drop point is in the latest picture's pixels; the page resolves it in the frame's (R-280).
+    const space = "ref" in args.target ? undefined : await deps.screenshotSpaces?.get(binding.tabId).catch(() => undefined);
+    const target =
+      "ref" in args.target
+        ? { handle: args.target.ref }
+        : { point: toViewportPoint(args.target.coordinate, space) };
 
     let result: Awaited<ReturnType<typeof deliverImageOnTab>>;
     try {
@@ -273,7 +284,12 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
         result.reason.startsWith("point-outside-viewport") ||
         result.reason === "not-reachable"
       ) {
-        return answer(callId, "not-actionable", result.reason);
+        // The size named is the one the agent aims in: the picture's, when one set the space.
+        const reason =
+          space && result.reason.startsWith("point-outside-viewport")
+            ? `point-outside-viewport (screenshot ${space.image.width}x${space.image.height})`
+            : result.reason;
+        return answer(callId, "not-actionable", reason);
       }
       return answer(callId, "failed", result.reason);
     }
@@ -283,7 +299,9 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       result: {
         delivery: result.delivery,
         file: result.file,
-        ...(result.point ? { point: result.point } : {}),
+        // Where the events landed, in the space the agent gave its point in (R-280 follow-up): the
+        // page measures it in CSS pixels, and the agent's own point was read off its picture.
+        ...(result.point ? { point: toPicturePoint(result.point, space) } : {}),
       },
     };
   }

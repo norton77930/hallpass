@@ -211,3 +211,56 @@ behaviour in between.
 untouched, `captureVisibleTab` 813×799 (window at display DPR), protocol capture 2 560×1 440;
 DPR 2 clip 300×100 → 600×200, scale 0.5 → 300×100; R-174 reproduced (clip at document y = 1 000 is
 what the scrolled viewport shows). Gate on 153: 7/7 (`gate-chrome153-run2`).
+
+## R-280 — The pixels a point is read in (2026-10-17, defect fix)
+
+**Observed**: on the owner's display (device pixel ratio 1.25, large monitor) an agent that read a
+point off a whole-viewport `screenshot` and clicked it (`computer`, or a point target) missed, while
+ref-based clicks landed. The visible-tab path returned the whole viewport exactly as captured — at
+the display's density, 1 484×884 for an 1 187×707 page — and points are resolved by
+`elementFromPoint` in CSS pixels; the `computer` description even said the two were the same. A
+model client also shrinks an image past about 1 568 pixels on its long edge or 1.15 million pixels
+in all before the model sees it, so a large viewport put the agent's pixels in a third space.
+
+**Decision**:
+
+- Size: a whole-viewport picture is drawn at `viewportPictureSize(frame, scale)` — the frame's CSS
+  size times `min(1, 1568 / long edge, sqrt(1 150 000 / area))`, times `scale`, rounded down when it
+  shrinks. Visible-tab: one canvas pass from the captured image (none when it is already within a
+  pixel of that size). Emulated: the whole-viewport `clip` carries the fitted factor as its scale,
+  and a surface that still comes back larger is resized in the worker. Unknown frame: the image's
+  own pixels are fitted. Regions keep R-171's native density.
+- Space: after each whole-viewport picture the agent receives, the tab's `{ frame, image }` is
+  written to `chrome.storage.session` (`agentScreenshotSpaces`, bounded to the 64 most recently
+  pictured tabs by a counter stored on each entry, since key order sorts tab ids numerically and is
+  not kept by storage; tab ids are not reused in a browser run). An emulated whole-viewport picture
+  that cannot be measured answers the fitted size its clip asked for. A picture whose frame is unknown clears it. A region,
+  or a picture refused as too large, leaves it.
+- Mapping: one function (`toViewportPoint`) maps `round(point × frame / image)` per axis, applied
+  once when a call starts — to `computer`'s `x`/`y`, every `target` point, `drag`'s `from`/`to`
+  and `upload_image`'s `coordinate` — before resolution and the viewport check. No stored space
+  passes the point through. A refusal names the picture's size when a space exists.
+- `scale` multiplies on top of the fit, and points are read in the picture as returned; the
+  too-large hint is computed relative to the scale used.
+
+**Follow-up (same day)**:
+
+- Region: `toViewportRegion` maps the region's top-left and far corner through `toViewportPoint`
+  and takes the size as their difference (minimum 1), so a region ending on the picture's edge ends
+  on the frame's rather than one rounded pixel past it. It is mapped before the outside check
+  (refused as `region-outside-viewport (screenshot WxH)` when a space exists) and before the crop;
+  the answer echoes the region as asked; a region shot still does not write the space.
+- Invalidation: the viewport emulation reports `onFrameChanged(tabId)` after a successful set and
+  after any clear that removed an emulation (reset and every release path); the runtime forgets
+  that tab's space. `resize_window` forgets the space of every tab in the resized window.
+- `upload_image`'s result `point` is mapped back with the inverse (`toPicturePoint`), so the answer
+  speaks the agent's space.
+
+**Alternatives**: (a) keep device pixels and tell the agent the ratio — every agent would have to do
+arithmetic it has already shown it does not do; (b) map on the host — the host does not know the
+frame, and the batch path never passes through a host-side point; (c) keep pictures in CSS pixels
+without fitting — fixes the DPR case but not the client-side shrink on large viewports.
+
+**Behaviour this matches**: the observable behaviour of the reference extension (whole-viewport
+picture normalised to CSS size then fitted; a later point scaled by viewport over picture size;
+no stored size passes it through), described here in our own words and implemented independently.

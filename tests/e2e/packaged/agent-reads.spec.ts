@@ -233,10 +233,9 @@ test.describe("agent reads", () => {
 
       const full = pngSize(whole.images[0]?.data ?? "");
       const smaller = pngSize(half.images[0]?.data ?? "");
-      expect(smaller).toEqual({
-        width: Math.max(Math.round(full.width * 0.5), 1),
-        height: Math.max(Math.round(full.height * 0.5), 1),
-      });
+      // Half of the page-sized picture, give or take the one pixel a shrink rounds down (R-280).
+      expect(Math.abs(smaller.width - full.width * 0.5), `half ${smaller.width}x${smaller.height} of ${full.width}x${full.height}`).toBeLessThanOrEqual(1);
+      expect(Math.abs(smaller.height - full.height * 0.5)).toBeLessThanOrEqual(1);
 
       await live.callTool("tabs_close", { tabId });
     } finally {

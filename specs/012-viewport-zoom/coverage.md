@@ -18,6 +18,7 @@
 | FR-164 region outside the frame refused | `region-outside-viewport (frame WxH)` | agent-screenshot.test (no capture call) | #5 | |
 | FR-165 descriptions steer | R-172 text | agent-tools-012-descriptions.contract (3) | | s12: Sonnet chose `viewport`, never `resize_window` |
 | FR-166 no new permission | manifest unchanged | snapshot / manifest contract | | |
+| Change log 2026-10-17 (R-280) whole-viewport picture in CSS pixels, fitted; points read in it | `viewportPictureSize`, `toViewportPoint`, per-tab space in storage.session | capture.test (DPR 1.25 → 1 187×707; 2 560×1 440 → 1 429×804; unknown frame; protocol clip), coordinate-space.test (mapping, every point-taking arg, store survives a new worker), computer.test (click/refusal/pass-through), agent-effects.test (click, drag, scroll point targets), agent-screenshot.test (space written; region and too-large leave it; hint relative to scale), agent-upload.test (drop coordinate + refusal size + result point in picture pixels), agent-tools-012.contract (descriptions); follow-up: coordinate-space.test (region mapping, inverse point), agent-screenshot.test (region mapped before check and crop; refusal in picture size), viewport-emulation.test (frame-changed on set / reset / release, not on refusal or no-op), agent-navigation.test (resize drops every tab's space in the window) | owed: live run on the owner's DPR 1.25 display | |
 
 ## Success criteria
 

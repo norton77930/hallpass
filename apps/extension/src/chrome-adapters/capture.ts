@@ -23,6 +23,11 @@
  * picture of the window), so an emulated tab is photographed over the debugger attachment the
  * emulation already holds. The choice is `decideCapturePath`, which is pure so the table is a
  * test rather than a branch nobody can see.
+ *
+ * **And the whole viewport is in the frame's pixels** (012 change log 2026-10-17, R-280). The agent
+ * reads its points off this picture and the page resolves them in CSS pixels, so a whole-viewport
+ * picture is drawn at the frame's CSS size, fitted under `viewportPictureSize`'s budget, on both
+ * paths. Regions keep their native density.
  */
 
 export type CaptureRegion = { x: number; y: number; width: number; height: number };
@@ -148,6 +153,45 @@ export function decideCapturePath(
   };
 }
 
+/**
+ * The longest edge, and the most pixels, a whole-viewport picture is handed back at (012 change
+ * log 2026-10-17, R-280).
+ *
+ * A model client shrinks any image past roughly these sizes before the model sees it, and a picture
+ * shrunk somewhere the worker cannot see is a picture whose pixels no longer say where anything is.
+ * Fitting it here means the size in the answer is the size the agent looked at, which is the size
+ * its coordinates come back in.
+ */
+export const SCREENSHOT_MAX_EDGE_PX = 1568;
+export const SCREENSHOT_MAX_AREA_PX = 1_150_000;
+
+/**
+ * The size a whole-viewport picture of `base` is handed back at (012 change log 2026-10-17, R-280).
+ *
+ * `base` is the frame's CSS size - the pixels every coordinate is resolved in - or, when nobody
+ * could say what the frame is, the image's own. It is fitted under the edge and area budget with its
+ * shape kept, and the agent's `scale` (FR-162) applies on top. Rounded down whenever it shrinks, so
+ * the budget is a ceiling rather than a target that rounding can step over.
+ */
+export function viewportPictureSize(base: CaptureFrame, scale: number): CaptureFrame {
+  const fit = Math.min(
+    1,
+    SCREENSHOT_MAX_EDGE_PX / Math.max(base.width, base.height, 1),
+    Math.sqrt(SCREENSHOT_MAX_AREA_PX / Math.max(base.width * base.height, 1)),
+  );
+  const factor = fit * scale;
+  if (factor >= 1) return { width: base.width, height: base.height };
+  return {
+    width: Math.max(Math.floor(base.width * factor), 1),
+    height: Math.max(Math.floor(base.height * factor), 1),
+  };
+}
+
+/** Within a rounded pixel: a picture that close to its size is not worth re-encoding. */
+function sameSize(a: CaptureFrame, b: CaptureFrame): boolean {
+  return Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1;
+}
+
 /** The source rectangle of one crop, in image pixels, and the size it is drawn out at. */
 export type CropRect = {
   x: number;
@@ -168,6 +212,10 @@ export type CropRect = {
  * The rectangle is clamped into the picture because a region the frame contains can still run past
  * the image by a rounded pixel; a region the *frame* does not contain is refused a layer up, where
  * the agent can be told the frame it should have aimed at.
+ *
+ * With no region the whole picture is the source and it is drawn out at `viewportPictureSize`: the
+ * frame's CSS size (the image's own when the frame is unknown), fitted and scaled (2026-10-17). A
+ * region keeps 012's native density.
  */
 export function cropRect(
   frame: CaptureFrame | undefined,
@@ -188,6 +236,10 @@ export function cropRect(
   const y = Math.min(Math.max(asked.y, 0), image.height);
   const width = Math.max(Math.min(asked.width, image.width - x), 0);
   const height = Math.max(Math.min(asked.height, image.height - y), 0);
+  if (!region) {
+    const out = viewportPictureSize(frame && frame.width > 0 && frame.height > 0 ? frame : image, scale);
+    return { x, y, width, height, outWidth: out.width, outHeight: out.height };
+  }
   return {
     x,
     y,
@@ -396,30 +448,54 @@ export async function captureTab(
       await waitForFreshFrame(() => awaitFrame(input.tabId));
     }
     if (path.kind === "protocol" && deps.send) {
+      // A whole viewport is asked for at its fitted size, so the browser does the shrinking
+      // (2026-10-17); a region keeps the scale it was asked at (012 native density).
+      const clipFrame = { width: path.clip.width, height: path.clip.height };
+      const target = input.region ? undefined : viewportPictureSize(clipFrame, path.scale);
       const data = await captureThroughProtocol({
         send: deps.send,
         tabId: input.tabId,
         clip: path.clip,
-        scale: path.scale,
+        scale: target ? target.width / Math.max(clipFrame.width, 1) : path.scale,
       });
       const size = await measure(data);
+      if (target && size && !sameSize(size, target)) {
+        // A surface at a density the emulation did not state: brought to the fitted size here.
+        const resized = await crop(`data:image/png;base64,${data}`, { frame: clipFrame, scale: path.scale });
+        if (resized) {
+          return { data: resized.data, cropped: false, scale: path.scale, width: resized.width, height: resized.height };
+        }
+      }
+      // A whole viewport that could not be measured is the size the clip asked for (review minor,
+      // R-280): the browser draws a clip at exactly that, and an absent size would leave the
+      // agent's points unmapped against a picture that was shrunk. A region keeps saying nothing.
+      const answered = size ?? target;
       return {
         data,
         // The clip *is* the region, applied by the browser: there is no partial answer here.
         cropped: input.region !== undefined,
         scale: path.scale,
-        ...(size === undefined ? {} : { width: size.width, height: size.height }),
+        ...(answered === undefined ? {} : { width: answered.width, height: answered.height }),
       };
     }
     const dataUrl = await capture(input.windowId);
-    if (!input.region && scale === 1) {
-      const size = await measure(dataUrl);
-      return {
-        data: base64Of(dataUrl),
-        cropped: false,
-        scale: 1,
-        ...(size === undefined ? {} : { width: size.width, height: size.height }),
-      };
+    let measured: CaptureFrame | undefined;
+    if (!input.region) {
+      // The whole viewport, in the frame's CSS pixels and under the size budget (2026-10-17). A
+      // picture that already is that size - a DPR 1 display, an ordinary window - goes back as it
+      // was taken rather than through a canvas that would only re-encode it.
+      measured = await measure(dataUrl);
+      const base = input.frame ?? measured;
+      const target = base === undefined ? undefined : viewportPictureSize(base, scale);
+      if (measured && target && sameSize(measured, target)) {
+        return {
+          data: base64Of(dataUrl),
+          cropped: false,
+          scale,
+          width: measured.width,
+          height: measured.height,
+        };
+      }
     }
     const cropped = await crop(dataUrl, {
       ...(input.frame === undefined ? {} : { frame: input.frame }),
@@ -428,7 +504,12 @@ export async function captureTab(
     });
     return cropped === undefined
       ? // No canvas: the whole viewport, at the size it was taken, and both facts said out loud.
-        { data: base64Of(dataUrl), cropped: false, scale: 1 }
+        {
+          data: base64Of(dataUrl),
+          cropped: false,
+          scale: 1,
+          ...(measured === undefined ? {} : { width: measured.width, height: measured.height }),
+        }
       : {
           data: cropped.data,
           cropped: input.region !== undefined,

@@ -25,6 +25,7 @@ import { siteOfUrl, type SiteModeStore } from "../site-mode-store.js";
 import type { WindowRestoreRecord } from "../window-restore.js";
 import type { ViewportEmulation } from "../viewport-emulation.js";
 import type { AgentSessionContexts } from "./context.js";
+import type { ScreenshotSpaces } from "./coordinate-space.js";
 import type { BeforeunloadOutcome } from "./dialogs.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { inputUnavailable } from "./input.js";
@@ -123,6 +124,13 @@ export type AgentTabToolDeps = {
    * tabs rather than about this call.
    */
   windowRestores?: { remember(record: WindowRestoreRecord): Promise<void> };
+  /**
+   * Each tab's latest-picture coordinate space (012 change log 2026-10-17 follow-up, R-280).
+   *
+   * Write-only from here, and only to forget: a window resize changes the frame of every tab in
+   * that window, so a ratio measured against the old frame would put the next point elsewhere.
+   */
+  screenshotSpaces?: Pick<ScreenshotSpaces, "remember">;
   /**
    * The emulated viewport `viewport` puts on a tab and takes off again (012/US1, FR-156, FR-159).
    *
@@ -631,6 +639,15 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
         width: args.width as number,
         height: args.height as number,
       });
+      // Every tab in the window now has a different frame (R-280 follow-up): their pictures'
+      // coordinate spaces go, whichever session's they were. Best effort - the resize stands.
+      if (deps.screenshotSpaces) {
+        const spaces = deps.screenshotSpaces;
+        const inWindow = (await queryTabSnapshots().catch(() => [])).filter(
+          (candidate) => candidate.windowId === tab.windowId,
+        );
+        await Promise.all(inWindow.map((candidate) => spaces.remember(candidate.id, undefined).catch(() => undefined)));
+      }
       // The window was taken out of a state the owner had put it in, so that a size could be
       // honoured at all (003 FR-045). That is remembered here - the one call that knows it happened
       // - and given back when the session lets the window go (008 FR-118, FR-120).

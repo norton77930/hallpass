@@ -1089,6 +1089,25 @@ describe("T041 agent tab tools", () => {
   });
 
   /**
+   * 012 change log 2026-10-17 follow-up (R-280): a window resize changes the frame of every tab in
+   * that window, so each one's latest-picture coordinate space is dropped rather than applied at a
+   * stale ratio - and a refused resize changes nothing.
+   */
+  it("drops the picture space of every tab in the resized window", async () => {
+    const forgotten: Array<{ tabId: number; space: unknown }> = [];
+    const tools = build(60, {
+      screenshotSpaces: { remember: async (tabId, space) => void forgotten.push({ tabId, space }) },
+    });
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+
+    await tools.run(call("resize_window", { tabId, width: 2000, height: 700 }));
+
+    expect(forgotten.map((entry) => entry.tabId).sort((a, b) => a - b)).toEqual([1, tabId, 50].sort((a, b) => a - b));
+    expect(forgotten.every((entry) => entry.space === undefined)).toBe(true);
+  });
+
+  /**
    * The panel's site list is built from the sites the session's tabs are on, so a tab tool that
    * changed which tabs those are without saying so would leave the owner unable to decide about a
    * page the agent is already sitting on (FR-042).

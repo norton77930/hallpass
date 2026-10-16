@@ -285,3 +285,42 @@ called.
 | Region capture with scale (other reference) | FR-162 to FR-164 |
 | Zoom as magnification beyond native density | Not in either reference; not built |
 | Window restore after resize | Already shipped (008 FR-118 to FR-120); D-012-4 |
+
+## Change log
+
+- **2026-10-17 — A whole-viewport picture is in the page's pixels, and points are read in it**
+  (R-280; a defect fix that changes FR-158 and FR-162). On a display at device pixel ratio 1.25, a
+  whole-viewport `screenshot` came back at the display's density (1 484×884 for an 1 187×707
+  page) while every point a tool takes is resolved in CSS pixels, so a click aimed at something
+  read off the picture landed 25 % right of and below it; a large viewport was also shrunk again
+  by the agent's client, putting the agent's pixels in a third space. Settled:
+  - A whole-viewport picture (the `screenshot` tool without `region`, and `computer`'s
+    `screenshot`; visible-tab and emulated paths alike) is handed back at the frame's CSS size,
+    fitted with its shape kept under 1 568 pixels on the long edge and 1 150 000 pixels in all,
+    then times `scale`. With no known frame the image's own pixels are fitted the same way.
+    `width`/`height`/`frame` stay in the answer.
+  - After each whole-viewport picture the tab remembers its frame and its size
+    (`chrome.storage.session`, so a worker eviction between picture and click keeps it). A region
+    picture, and a picture refused as too large, leave it as it was.
+  - Every point the agent sends (`computer`'s `x`/`y`; the target of `click`, `right_click`,
+    `double_click`, `triple_click`, `hover`, `type`, `key` and `scroll`; both ends of `drag`;
+    `upload_image`'s drop `coordinate`) is mapped once, per axis, as
+    `round(point × frame / picture)` before it is resolved or checked against the viewport. A tab
+    with no picture yet passes the point through unchanged. A point off the viewport is refused
+    naming the picture's size when one exists.
+  - **FR-162 amended**: `scale` still shrinks the returned image, but the points that follow are
+    read in the picture as returned (scaled), not in the unscaled frame. The too-large refusal's
+    hint is relative to the scale that was used.
+  - Same day, follow-up (**FR-163/FR-164 amended**): a `screenshot` `region` is read off the same
+    picture and mapped into the frame before the outside check and the native-density crop (its
+    far corner is mapped as a point, so a region ending on the picture's edge ends on the frame's;
+    never under one pixel). A region off the picture is refused naming the picture's size; the
+    answer echoes the region as asked; the region shot still does not change the stored space.
+  - Same day, follow-up: the stored space is dropped whenever our own tools change the frame - a
+    `viewport` set, a reset or a release that clears an emulation (that tab), and `resize_window`
+    (every tab in that window) - so a stale ratio is never applied; points are CSS pixels again
+    until the next whole screenshot.
+  - Same day, follow-up: `upload_image`'s result `point` is reported in the picture's pixels, the
+    space the agent gave its `coordinate` in.
+  - Unchanged: the gate, the owner's summary and a stated plan see the arguments the agent wrote,
+    and only delivery uses the mapped point.

@@ -95,6 +95,7 @@ import { createAgentUpload } from "./agent-tools/upload.js";
 import { createAgentWait } from "./agent-tools/wait.js";
 import { createAgentSitePlanRunner, type AgentSitePlanApproval } from "./agent-tools/site-plan.js";
 import { createSitePlanStore, SITE_PLAN_NOT_RECORDED, type SessionSitePlan } from "./site-plan-store.js";
+import { createScreenshotSpaceStore } from "./screenshot-space-store.js";
 
 /**
  * The agent path's composition root (003/T013, T018).
@@ -703,6 +704,13 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    */
   const sitePlanStore = createSitePlanStore();
   /**
+   * Each tab's latest whole-viewport picture space (012 change log 2026-10-17, R-280): written by
+   * the two screenshots, read by every runner that takes a point, so a point read off a fitted
+   * picture lands where it was read. `chrome.storage.session`, so an eviction between the picture
+   * and the click does not put the click back in the wrong pixels; this runtime is its only writer.
+   */
+  const screenshotSpaces = createScreenshotSpaceStore();
+  /**
    * The gate's input (017 R-245): does *this session's* plan name the site the runner is about to
    * decide on - the tab's current top-level origin, as `siteOfUrl` keys the site modes. A plan
    * that cannot be read covers nothing.
@@ -922,6 +930,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     bindings,
     // What `resize_window` had to un-maximise, so the release can give it back (008/FR-118).
     windowRestores,
+    // A resize changes every tab's frame in that window, so their picture spaces go (R-280).
+    screenshotSpaces,
     /**
      * The emulated viewport `viewport` puts on a tab (012/US1, FR-156).
      *
@@ -994,6 +1004,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // And the attachment itself when an eviction took this worker's record of it (012/S2c F2): the
     // holder claimed is the emulation's own, which is the one that is already owed to this tab.
     ensureAttached: (tabId) => attachments.acquire(tabId, "viewport"),
+    screenshotSpaces,
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -1063,6 +1074,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         outcome,
         ...(size === undefined ? {} : { message: `${size.width}x${size.height}` }),
       }),
+    // A set, reset or release changes the frame the tab's latest picture was measured against
+    // (R-280 follow-up): that picture's coordinate space goes, so no stale ratio is applied.
+    onFrameChanged: (tabId) => screenshotSpaces.remember(tabId, undefined),
     reportDiagnostic: reportTestDiagnostic,
   });
   // R-167: Chrome keeps both the emulation and the attachment across an MV3 eviction, and what the
@@ -1191,6 +1205,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // The same record the `screenshot` tool reads (012/T311): `computer`'s own picture and the crop
     // the owner is shown are of the emulated viewport when there is one, not of the window.
     currentViewport: (tabId) => viewportEmulation.current(tabId),
+    // The same per-tab picture space the `screenshot` tool writes (R-280): every point is mapped
+    // through it once, and `computer`'s own screenshot writes it too.
+    screenshotSpaces,
     // Where the gesture actually landed, for the ring a recorded frame draws (008/R-136). The
     // coordinate is the runner's own measurement of the target's box; the decorator that builds the
     // label has no way to compute it and must not guess one.
@@ -1226,6 +1243,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     tabOwnership: (session, tabId) => tabs.ownership(session, tabId),
     statedPlan: (site) => plans.get(site),
     onAdmitted: (site, step) => plans.admit(site, step),
+    screenshotSpaces,
     reportDiagnostic: reportTestDiagnostic,
   });
 
