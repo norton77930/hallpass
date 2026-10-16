@@ -5,6 +5,23 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.12.2 — 2026-10-17
+
+**A point read off a screenshot is where the click lands.**
+
+- **Screenshots and points share one pixel space.** A whole-viewport screenshot used to come back
+  at the display's own density (1 484 pixels wide for a 1 187-pixel page on a 125 % display), while
+  a point the agent acted at was taken as page (CSS) pixels — so a click aimed off the picture
+  landed off-target, often on a neighbouring element or outside the page. A whole-viewport
+  screenshot now comes back at page size, fitted to at most 1 568 pixels on its long edge and
+  about 1.15 megapixels, and every point the agent gives afterwards (`computer`, the point form of
+  `click` and the other pointer tools, `drag`, `scroll`, `upload_image`'s drop point, and a
+  screenshot's `region`) is read in that picture's pixels and converted to the page's.
+- **Until the first screenshot, points are page pixels as before.** Resizing the window or setting
+  or resetting a `viewport` drops the conversion until the next whole-viewport screenshot.
+- **Region screenshots keep their full detail.** A `region` is still cropped at the display's own
+  density.
+
 ## 0.12.1 — 2026-10-12
 
 **Keys and in-page actions follow the same rules as presses.**

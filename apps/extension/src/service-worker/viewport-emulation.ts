@@ -130,6 +130,12 @@ export type ViewportEmulationDeps = {
   attachments: Pick<AgentInputAttachments, "acquire" | "drop" | "send" | "attached">;
   /** The card's line about it (FR-159); the panel writes the sentence from the outcome and size. */
   onActivity?(sessionId: string, outcome: "set" | "cleared", size?: ViewportSize): void;
+  /**
+   * The tab's CSS frame changed under it: a size was applied, or an emulation was cleared on a
+   * reset or a release (012 change log 2026-10-17 follow-up, R-280). Whatever was measured against
+   * the old frame - the latest picture's coordinate space - is stale from here.
+   */
+  onFrameChanged?(tabId: number): void | Promise<void>;
   reportDiagnostic?(code: string): void;
 };
 
@@ -194,6 +200,15 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
     }
   }
 
+  /** Told, never trusted to answer: a listener that fails must not fail the size change itself. */
+  async function frameChanged(tabId: number): Promise<void> {
+    try {
+      await deps.onFrameChanged?.(tabId);
+    } catch {
+      // The size change stands; a stale space is the listener's own loss.
+    }
+  }
+
   /** What one `clear` did: nothing to do, the attachment refused, or the page has its size back. */
   type ClearResult =
     | { state: "nothing" }
@@ -251,6 +266,8 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
     }
     await deps.store.forget(tabId).catch(() => undefined);
     if (borrowed !== undefined) await deps.attachments.drop(tabId, "viewport").catch(() => undefined);
+    // Reset and release alike: the page is no longer laid out at the size it was photographed at.
+    await frameChanged(tabId);
     return { state: "done", record, borrowed: borrowed !== undefined, ...(real === undefined ? {} : { real }) };
   }
 
@@ -265,6 +282,7 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
         return { ok: false, unavailableReason: "restricted-page" };
       }
       await deps.store.remember({ tabId, sessionId, width: size.width, height: size.height, setAt: Date.now() });
+      await frameChanged(tabId);
       deps.onActivity?.(sessionId, "set", size);
       return { ok: true };
     },

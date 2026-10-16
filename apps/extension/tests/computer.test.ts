@@ -7,6 +7,7 @@ import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
+import { createScreenshotSpaceStore } from "../src/service-worker/screenshot-space-store.js";
 
 /**
  * 004/T138 — acting by position (US7, FR-069, FR-070, R-120).
@@ -271,7 +272,9 @@ describe("T138 acting by position", () => {
         params: {
           format: "png",
           fromSurface: true,
-          clip: { x: 0, y: 0, width: 2560, height: 1440, scale: 1 },
+          // 2026-10-17 (R-280): the whole viewport is asked for fitted under the size budget,
+          // 1 429 pixels wide, rather than at the emulated 2 560.
+          clip: { x: 0, y: 0, width: 2560, height: 1440, scale: 1429 / 2560 },
         },
       },
     ]);
@@ -387,5 +390,78 @@ describe("T138 acting by position", () => {
     expect(prompts.decide(prompt!.promptId, false)).toBe(true);
     expect((await pending).outcome).toBe("denied");
     expect(mouse(commands)).toEqual([]);
+  });
+});
+
+/**
+ * A point read off the latest picture lands where it was read (012 change log 2026-10-17, R-280).
+ *
+ * A 2 560x1 440 viewport is handed back fitted (1 429x804 here), so a point the agent reads off it
+ * is in the picture's pixels; the click must land at that point scaled back into the frame, through
+ * the one mapping every point-taking tool shares.
+ */
+describe("computer aims in the latest picture's pixels", () => {
+  const FITTED = { width: 1429, height: 804 };
+  const EMULATED = { width: 2560, height: 1440 };
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function spaced() {
+    const items: Record<string, unknown> = {};
+    const screenshotSpaces = createScreenshotSpaceStore({
+      session: {
+        async get(keys: string[]) {
+          return Object.fromEntries(keys.filter((key) => key in items).map((key) => [key, items[key]]));
+        },
+        async set(values: Record<string, unknown>) {
+          Object.assign(items, values);
+        },
+      },
+    });
+    return harness({
+      capture: captureTab,
+      captureDeps: { activateTab: async () => undefined, measure: async () => FITTED },
+      currentViewport: async () => EMULATED,
+      screenshotSpaces,
+    });
+  }
+
+  it("clicks at the picture's point scaled back into the frame", async () => {
+    const { runner, siteModes, commands } = spaced();
+    await allowed(siteModes);
+
+    const shot = await runner.run(request({ action: "screenshot" }));
+    expect(shot.result).toMatchObject({ width: 1429, height: 804, frame: EMULATED });
+    await runner.run(request({ action: "left_click", x: 500, y: 300 }));
+
+    const x = Math.round((500 * 2560) / 1429);
+    const y = Math.round((300 * 1440) / 804);
+    expect(mouse(commands).find((event) => event.type === "mousePressed")).toMatchObject({ x, y });
+  });
+
+  it("refuses a point off the picture naming the picture's size", async () => {
+    const { runner, siteModes, commands } = spaced();
+    await allowed(siteModes);
+
+    await runner.run(request({ action: "screenshot" }));
+    const response = await runner.run(request({ action: "left_click", x: 1500, y: 100 }));
+
+    expect((response as { refusal?: unknown }).refusal).toEqual({ reason: "outside-viewport", ...FITTED });
+    expect(mouse(commands)).toEqual([]);
+  });
+
+  it("leaves a point alone when the tab has no picture yet", async () => {
+    const { runner, siteModes, commands } = spaced();
+    await allowed(siteModes);
+
+    await runner.run(request({ action: "scroll", x: 40, y: 60, amount: 1 }));
+
+    expect(mouse(commands).find((event) => event.type === "mouseWheel")).toMatchObject({ x: 40, y: 60 });
   });
 });

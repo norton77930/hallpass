@@ -1533,3 +1533,64 @@ describe("T149 OOPIF session resolver", () => {
     expect(cleared).toEqual([{ tabId: TAB, frameId: FRAME }]);
   });
 });
+
+/**
+ * A point target is in the latest picture's pixels (012 change log 2026-10-17, R-280).
+ *
+ * The ref tools take a point as well as a ref, and an agent reads that point off the same picture
+ * it aims `computer` by. So the page is asked about the point scaled back into the frame - the one
+ * mapping `computer` uses - and a tab with no picture yet is asked about the point as written.
+ */
+describe("a point target lands where it was read off the picture", () => {
+  const SPACE = { frame: { width: 2560, height: 1440 }, image: { width: 1429, height: 804 } };
+  const at = (x: number, y: number) => ({ x: Math.round((x * 2560) / 1429), y: Math.round((y * 1440) / 804) });
+  let fake: ReturnType<typeof installChrome>;
+
+  beforeEach(() => {
+    fake = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function spaced(space: typeof SPACE | undefined) {
+    return harness({ screenshotSpaces: { get: async () => space, remember: async () => undefined } });
+  }
+
+  function asked(): Array<Record<string, unknown>> {
+    return fake.sent
+      .filter((entry) => entry.type === "content.resolve-point" && entry.payload.targetHandle === undefined)
+      .map((entry) => ({ x: entry.payload.x, y: entry.payload.y }));
+  }
+
+  it("asks the page about a click's point in the frame's pixels", async () => {
+    const { runner, siteModes } = spaced(SPACE);
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { x: 500, y: 300 } } }));
+
+    expect(asked()[0]).toEqual(at(500, 300));
+  });
+
+  it("maps both ends of a drag and a scroll's target", async () => {
+    const { runner, siteModes } = spaced(SPACE);
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    await runner.run(dragRequest({ args: { tabId: AGENT_TAB, from: { x: 100, y: 50 }, to: { x: 700, y: 400 } } }));
+    await runner.run(
+      clickRequest({ callId: "call-2", tool: "scroll", args: { tabId: AGENT_TAB, target: { x: 10, y: 20 } } }),
+    );
+
+    expect(asked()).toEqual([at(100, 50), at(700, 400), at(10, 20)]);
+  });
+
+  it("asks about the point as written when the tab has no picture", async () => {
+    const { runner, siteModes } = spaced(undefined);
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { x: 500, y: 300 } } }));
+
+    expect(asked()[0]).toEqual({ x: 500, y: 300 });
+  });
+});

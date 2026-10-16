@@ -85,6 +85,27 @@ describe("T303 the picture's scale and its measurements", () => {
     expect(screenshot).toMatch(/refused/);
   });
 
+  /**
+   * 012 change log 2026-10-17 (R-280): a point is read in the pixels of the latest whole-viewport
+   * screenshot of the tab, and every tool that takes one has to say so - an agent that aims by
+   * picture would otherwise go on assuming CSS pixels on a page whose picture was fitted.
+   */
+  it("says on every point-taking tool which picture's pixels a point is in", () => {
+    const descriptors = contractExport<ReadonlyArray<{ name: string; description: string }>>(
+      "AGENT_TOOL_DESCRIPTORS",
+    );
+    const describe = (name: string) => descriptors.find((entry) => entry.name === name)?.description ?? "";
+
+    for (const name of ["computer", "click", "right_click", "double_click", "triple_click", "hover", "drag", "scroll", "upload_image"]) {
+      expect(describe(name), name).toContain("latest whole-viewport screenshot");
+    }
+    expect(describe("screenshot")).toContain("1568");
+    // 2026-10-17 follow-up: a region is read off the same picture, and the moments that drop it say so.
+    expect(describe("screenshot")).toContain("so is `region`");
+    expect(describe("screenshot")).toContain("`viewport`");
+    expect(describe("computer")).not.toContain("the same ones a screenshot shows you");
+  });
+
 
   it("takes a scale between a tenth and the whole, and nothing outside it", () => {
     const screenshot = args("screenshot");

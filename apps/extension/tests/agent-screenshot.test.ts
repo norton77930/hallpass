@@ -4,6 +4,7 @@ import { captureTab } from "../src/chrome-adapters/capture.js";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads, SCREENSHOT_MAX_BASE64_CHARS } from "../src/service-worker/agent-tools/reads.js";
+import { toViewportRegion } from "../src/service-worker/agent-tools/coordinate-space.js";
 
 /**
  * 003/T035 — `screenshot` (US2, FR-039).
@@ -46,6 +47,7 @@ function harness(input: {
   sendOverAttachment?: Parameters<typeof createAgentReads>[0]["sendOverAttachment"];
   tabSize?: Parameters<typeof createAgentReads>[0]["tabSize"];
   ensureAttached?: Parameters<typeof createAgentReads>[0]["ensureAttached"];
+  screenshotSpaces?: Parameters<typeof createAgentReads>[0]["screenshotSpaces"];
 }) {
   const listTabs = vi.fn(async () => tabs(input.agentActive ?? false));
   const diagnostics: string[] = [];
@@ -62,6 +64,7 @@ function harness(input: {
     ...(input.currentViewport ? { currentViewport: input.currentViewport } : {}),
     ...(input.sendOverAttachment ? { sendOverAttachment: input.sendOverAttachment } : {}),
     ...(input.ensureAttached ? { ensureAttached: input.ensureAttached } : {}),
+    ...(input.screenshotSpaces ? { screenshotSpaces: input.screenshotSpaces } : {}),
   });
   return { runner, diagnostics };
 }
@@ -248,6 +251,26 @@ describe("T035 agent screenshot", () => {
     });
   });
 
+  /**
+   * 012 change log 2026-10-17 (R-280): the scale multiplies the size the picture already came out
+   * at, so a picture still too large at 0.5 needs less than 0.5 - the hint is relative to the
+   * scale that was used, not to 1.
+   */
+  it("names a scale below the one that was already too large", async () => {
+    const huge = "A".repeat(SCREENSHOT_MAX_BASE64_CHARS * 2);
+    const { runner } = harness({
+      captureDeps: {
+        captureVisibleTab: async () => `data:image/png;base64,${huge}`,
+        activateTab: async () => undefined,
+        crop: async () => ({ data: huge, width: 593, height: 353 }),
+      },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB, scale: 0.5 }));
+
+    expect(response.reason).toBe("screenshot-too-large; retry with scale ≤ 0.3");
+  });
+
   it("photographs an emulated tab over its attachment and answers in the emulated frame", async () => {
     const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
     const { runner } = harness({
@@ -389,5 +412,114 @@ describe("T035 agent screenshot", () => {
 
     expect(response).toEqual({ callId: "call-1", outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } });
     expect(captured).toEqual([]);
+  });
+});
+
+/**
+ * The whole-viewport picture is the one the agent aims by (012 change log 2026-10-17, R-280).
+ *
+ * At DPR 1.25 the display hands back 1 484x884 for this 1 187x707 page; the answer is 1 187x707,
+ * and the tab remembers that size against the frame so a point read off it is mapped back. A region
+ * is a close-up and changes nothing; a picture the agent never received changes nothing either.
+ */
+describe("a whole-viewport picture sets the tab's coordinate space", () => {
+  const DEVICE = { width: 1484, height: 884 };
+
+  beforeEach(() => {
+    (globalThis as { chrome?: unknown }).chrome = {};
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function spaces() {
+    const remembered: Array<{ tabId: number; space: unknown }> = [];
+    return {
+      remembered,
+      store: {
+        get: async () => undefined,
+        remember: async (tabId: number, space: unknown) => void remembered.push({ tabId, space }),
+      } as NonNullable<Parameters<typeof createAgentReads>[0]["screenshotSpaces"]>,
+    };
+  }
+
+  it("answers a DPR 1.25 capture at the frame's size and remembers it", async () => {
+    const { remembered, store } = spaces();
+    const { runner } = harness({
+      screenshotSpaces: store,
+      captureDeps: {
+        captureVisibleTab: async () => PNG,
+        activateTab: async () => undefined,
+        measure: async () => DEVICE,
+        crop: async (_url, cropRequest) => {
+          expect(cropRequest).toEqual({ frame: FRAME, scale: 1 });
+          return { data: "Y3NzLXNpemVk", width: 1187, height: 707 };
+        },
+      },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response.result).toMatchObject({ width: 1187, height: 707, frame: FRAME, coverage: "viewport" });
+    expect(remembered).toEqual([{ tabId: AGENT_TAB, space: { frame: FRAME, image: { width: 1187, height: 707 } } }]);
+  });
+
+  /**
+   * 2026-10-17 follow-up: a region is read off the same picture a point is, so it is mapped into
+   * the frame before it is checked and cropped; a region off the picture is refused naming the
+   * picture's size. The answer echoes the region as the agent asked it.
+   */
+  it("crops a region read off a fitted picture at the matching place in the frame", async () => {
+    const large = { width: 2560, height: 1440 };
+    const space = { frame: large, image: { width: 1429, height: 804 } };
+    const requests: unknown[] = [];
+    const captured: number[] = [];
+    const { runner } = harness({
+      tabSize: async () => large,
+      screenshotSpaces: { get: async () => space, remember: async () => undefined },
+      captureDeps: {
+        captureVisibleTab: async (windowId) => (captured.push(windowId), PNG),
+        activateTab: async () => undefined,
+        crop: async (_url, cropRequest) => {
+          requests.push(cropRequest);
+          return { data: "cmVnaW9u", width: 358, height: 179 };
+        },
+      },
+    });
+    const asked = { x: 100, y: 50, width: 200, height: 100 };
+
+    const response = await runner.run(request({ tabId: AGENT_TAB, region: asked }));
+
+    expect(requests).toEqual([{ frame: large, region: toViewportRegion(asked, space), scale: 1 }]);
+    expect(response.result).toMatchObject({ coverage: "region", region: asked });
+
+    const outside = await runner.run(request({ tabId: AGENT_TAB, region: { x: 1400, y: 0, width: 100, height: 100 } }));
+    expect(outside).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "region-outside-viewport (screenshot 1429x804)",
+    });
+    expect(captured).toHaveLength(1);
+  });
+
+  it("leaves the space alone for a region, and for a picture too large to send", async () => {
+    const { remembered, store } = spaces();
+    const huge = "A".repeat(SCREENSHOT_MAX_BASE64_CHARS * 2);
+    const { runner } = harness({
+      screenshotSpaces: store,
+      captureDeps: {
+        captureVisibleTab: async () => `data:image/png;base64,${huge}`,
+        activateTab: async () => undefined,
+        measure: async () => FRAME,
+        crop: async () => ({ data: "cmVnaW9u", width: 125, height: 63 }),
+      },
+    });
+
+    expect(
+      (await runner.run(request({ tabId: AGENT_TAB, region: { x: 4, y: 8, width: 100, height: 50 } }))).outcome,
+    ).toBe("ok");
+    expect((await runner.run(request({ tabId: AGENT_TAB }))).reason).toMatch(/^screenshot-too-large/);
+    expect(remembered).toEqual([]);
   });
 });

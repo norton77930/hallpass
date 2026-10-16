@@ -5,6 +5,10 @@ import {
   cropRect,
   decideCapturePath,
   FRESH_FRAME_CAP_MS,
+  SCREENSHOT_MAX_AREA_PX,
+  SCREENSHOT_MAX_EDGE_PX,
+  viewportPictureSize,
+  type CropRequest,
 } from "../src/chrome-adapters/capture.js";
 
 /**
@@ -46,14 +50,16 @@ describe("T310 capture geometry", () => {
     expect(cropRect(FRAME, IMAGE, { x: 0, y: 0, width: 1, height: 1 }, 0.1).outWidth).toBe(1);
   });
 
-  it("scales the whole picture when no region was asked for", () => {
+  it("scales the whole picture when no region was asked for, from the frame's own pixels", () => {
+    // 2026-10-17: a whole-viewport picture is drawn out at the frame's CSS size before the scale
+    // applies, so half of it is half of 1 187x707 - not half of the display's 1 484x884.
     expect(cropRect(FRAME, IMAGE, undefined, 0.5)).toEqual({
       x: 0,
       y: 0,
       width: 1484,
       height: 884,
-      outWidth: 742,
-      outHeight: 442,
+      outWidth: 593,
+      outHeight: 353,
     });
   });
 
@@ -263,5 +269,153 @@ describe("a background tab's picture waits for a paint", () => {
       },
     );
     expect(sent).toEqual(["activate", "Runtime.evaluate", "Page.getLayoutMetrics", "Page.captureScreenshot"]);
+  });
+});
+
+/**
+ * A whole-viewport picture is in the page's own pixels (012 change log 2026-10-17, R-280).
+ *
+ * Every coordinate an agent sends back is read off a picture, and the page resolves it in CSS
+ * pixels. A picture at the display's density (1 484 wide for an 1 187-wide page at DPR 1.25) put
+ * every click 25 % right of and below where it was aimed. So the whole viewport comes back at the
+ * frame's CSS size, fitted under the size a model is shown without being shrunk again, and the
+ * agent's coordinates are mapped back from whatever size it ended up at.
+ */
+describe("a whole-viewport picture comes back in the frame's pixels", () => {
+  /** A crop that does the arithmetic the real canvas pass does, for a picture of `source`'s size. */
+  function cropOf(source: { width: number; height: number }) {
+    return async (_dataUrl: string, request: CropRequest) => {
+      const rect = cropRect(request.frame, source, request.region, request.scale);
+      return { data: "UkVTSVpFRA==", width: rect.outWidth, height: rect.outHeight };
+    };
+  }
+
+  it("returns a DPR 1.25 capture of an 1 187x707 frame at 1 187x707", async () => {
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME },
+      { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => IMAGE, crop: cropOf(IMAGE) },
+    );
+
+    expect(image).toEqual({ data: "UkVTSVpFRA==", cropped: false, scale: 1, width: 1187, height: 707 });
+    // The whole picture is the source, drawn out at the frame's size.
+    expect(cropRect(FRAME, IMAGE, undefined, 1)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1484,
+      height: 884,
+      outWidth: 1187,
+      outHeight: 707,
+    });
+  });
+
+  it("keeps a picture that is already the frame's size exactly as it was taken", async () => {
+    let cropped = false;
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME },
+      {
+        captureVisibleTab: async () => "data:image/png;base64,QUJD",
+        measure: async () => FRAME,
+        crop: async () => ((cropped = true), undefined),
+      },
+    );
+
+    expect(image).toEqual({ data: "QUJD", cropped: false, scale: 1, width: 1187, height: 707 });
+    expect(cropped).toBe(false);
+  });
+
+  it("fits a 2 560x1 440 frame under the long-edge and area budget, keeping its shape", () => {
+    const size = viewportPictureSize({ width: 2560, height: 1440 }, 1);
+
+    expect(size).toEqual({ width: 1429, height: 804 });
+    expect(Math.max(size.width, size.height)).toBeLessThanOrEqual(SCREENSHOT_MAX_EDGE_PX);
+    expect(size.width * size.height).toBeLessThanOrEqual(SCREENSHOT_MAX_AREA_PX);
+    expect(Math.abs(size.width / size.height - 2560 / 1440)).toBeLessThan(0.01);
+    // A frame that already fits is left at its own size; the scale still applies on top.
+    expect(viewportPictureSize(FRAME, 1)).toEqual(FRAME);
+    expect(viewportPictureSize(FRAME, 0.5)).toEqual({ width: 593, height: 353 });
+  });
+
+  it("fits a large DPR 1 capture the same way", async () => {
+    const large = { width: 2560, height: 1440 };
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: large },
+      { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => large, crop: cropOf(large) },
+    );
+
+    expect(image).toMatchObject({ cropped: false, scale: 1, width: 1429, height: 804 });
+  });
+
+  it("caps the image's own pixels when nobody could say what frame it is of", () => {
+    const rect = cropRect(undefined, { width: 3000, height: 2000 }, undefined, 1);
+
+    expect({ outWidth: rect.outWidth, outHeight: rect.outHeight }).toEqual({ outWidth: 1313, outHeight: 875 });
+    // A small picture with no frame is the old behaviour: its own pixels, untouched.
+    expect(cropRect(undefined, FRAME, undefined, 1)).toMatchObject({ outWidth: 1187, outHeight: 707 });
+  });
+
+  it("asks the protocol for a fitted picture of a large emulated viewport", async () => {
+    const sent: Array<Record<string, unknown> | undefined> = [];
+    const image = await captureTab(
+      {
+        tabId: 7,
+        windowId: 9,
+        isActive: true,
+        frame: { width: 2560, height: 1440 },
+        path: decideCapturePath({ width: 2560, height: 1440 }, undefined, 1),
+      },
+      {
+        send: async (_tabId, method, params) => {
+          if (method === "Page.captureScreenshot") sent.push(params);
+          return method === "Page.captureScreenshot" ? { data: "QUJD" } : {};
+        },
+        measure: async () => ({ width: 1430, height: 804 }),
+      },
+    );
+
+    const clip = (sent[0]?.["clip"] ?? {}) as { width: number; height: number; scale: number };
+    expect({ width: clip.width, height: clip.height }).toEqual({ width: 2560, height: 1440 });
+    expect(Math.round(clip.width * clip.scale)).toBeLessThanOrEqual(1430);
+    expect(Math.round(clip.height * clip.scale)).toBeLessThanOrEqual(805);
+    // The answer says the scale the agent asked for, and the size the picture actually is.
+    expect(image).toEqual({ data: "QUJD", cropped: false, scale: 1, width: 1430, height: 804 });
+  });
+
+  /** Review minors: the two other branches of a fitted protocol picture. */
+  const EMULATED_LARGE = { width: 2560, height: 1440 };
+
+  function protocolCapture(deps: Pick<NonNullable<Parameters<typeof captureTab>[1]>, "measure" | "crop">) {
+    return captureTab(
+      {
+        tabId: 7,
+        windowId: 9,
+        isActive: true,
+        frame: EMULATED_LARGE,
+        path: decideCapturePath(EMULATED_LARGE, undefined, 1),
+      },
+      { send: async (_tabId, method) => (method === "Page.captureScreenshot" ? { data: "QUJD" } : {}), ...deps },
+    );
+  }
+
+  it("answers the size it asked the browser for when the picture cannot be measured", async () => {
+    // A fitted clip was asked for; an unmeasured answer is still that picture, and leaving the size
+    // out would leave the agent's later points unmapped against a picture that was shrunk.
+    const image = await protocolCapture({ measure: async () => undefined });
+
+    expect(image).toEqual({ data: "QUJD", cropped: false, scale: 1, width: 1429, height: 804 });
+  });
+
+  it("brings a surface that came back larger than asked down to the fitted size", async () => {
+    const requests: CropRequest[] = [];
+    const image = await protocolCapture({
+      measure: async () => ({ width: 2560, height: 1440 }),
+      crop: async (dataUrl, request) => {
+        expect(dataUrl).toBe("data:image/png;base64,QUJD");
+        requests.push(request);
+        return { data: "Zml0dGVk", width: 1429, height: 804 };
+      },
+    });
+
+    expect(requests).toEqual([{ frame: EMULATED_LARGE, scale: 1 }]);
+    expect(image).toEqual({ data: "Zml0dGVk", cropped: false, scale: 1, width: 1429, height: 804 });
   });
 });

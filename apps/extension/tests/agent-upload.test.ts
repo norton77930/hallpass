@@ -440,6 +440,53 @@ describe("T334 agent upload_image", () => {
     });
   });
 
+  /**
+   * 012 change log 2026-10-17 (R-280): the drop point is read off the latest picture like any
+   * other, so it is mapped back into the frame's pixels; a point off the viewport is refused naming
+   * the picture's size, the one the agent aims in.
+   */
+  it("drops at the picture's point scaled back into the frame, and refuses in the picture's size", async () => {
+    const space = { frame: { width: 2560, height: 1440 }, image: { width: 1429, height: 804 } };
+    const deliverImage = vi.fn(async () => ({ ok: false as const, reason: "point-outside-viewport (frame 2560x1440)" }));
+    const { runner, siteModes } = imageHarness({
+      screenshotSpaces: { get: async () => space, remember: async () => undefined },
+      deliverImage: deliverImage as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["deliverImage"]>,
+    });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(imageRequest({ coordinate: { x: 500, y: 300 } }));
+
+    expect(deliverImage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { point: { x: Math.round((500 * 2560) / 1429), y: Math.round((300 * 1440) / 804) } },
+      }),
+    );
+    expect(response).toEqual({
+      callId: "call-2",
+      outcome: "not-actionable",
+      reason: "point-outside-viewport (screenshot 1429x804)",
+    });
+  });
+
+  it("reports where the drop landed in the picture's pixels, the space the agent gave the point in", async () => {
+    const space = { frame: { width: 2560, height: 1440 }, image: { width: 1429, height: 804 } };
+    const deliverImage = vi.fn(async () => ({
+      ok: true as const,
+      delivery: "drop" as const,
+      file: { name: "screenshot.png", size: 8 },
+      point: { x: 896, y: 537 },
+    }));
+    const { runner, siteModes } = imageHarness({
+      screenshotSpaces: { get: async () => space, remember: async () => undefined },
+      deliverImage: deliverImage as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["deliverImage"]>,
+    });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(imageRequest({ coordinate: { x: 500, y: 300 } }));
+
+    expect(response.result).toMatchObject({ point: { x: 500, y: 300 } });
+  });
+
   it("maps what the page answered onto the tool's outcomes", async () => {
     for (const [reason, outcome] of [
       ["stale-target", "stale"],

@@ -210,9 +210,11 @@ const agentRefSchema = z.string().min(1).max(256);
 const agentFrameLabelSchema = z.string().min(1).max(32);
 
 /**
- * A viewport coordinate, in CSS pixels, as the page currently renders. It is turned into a ref by
- * `content.resolve-point` before anything acts on it, so a point and a ref have exactly the same
- * lifetime and the same one definition of stale.
+ * A viewport coordinate, in the pixels of the latest whole-viewport screenshot of the tab - the
+ * page's CSS pixels when that picture was not shrunk to fit, and passed through as CSS pixels when
+ * there is none (012 change log 2026-10-17, R-280). The worker maps it into CSS pixels, then turns
+ * it into a ref by `content.resolve-point` before anything acts on it, so a point and a ref have
+ * exactly the same lifetime and the same one definition of stale.
  */
 const agentPointSchema = z.strictObject({
   x: z.number().finite(),
@@ -419,7 +421,8 @@ const AGENT_COMPUTER_POSITION_ACTIONS = [
 const AGENT_COMPUTER_POSITIONLESS_ACTIONS = ["screenshot", "wait"] as const satisfies readonly AgentComputerAction[];
 
 /**
- * A top-level viewport coordinate in CSS pixels (data-model PositionAction).
+ * A top-level viewport coordinate (data-model PositionAction), in the pixels of the latest
+ * whole-viewport screenshot of the tab; the worker maps it into CSS pixels (R-280).
  *
  * Top-level, always: an element inside a frame is turned into one of these by the worker's own
  * frame-offset cache, because browser-level input has no notion of a frame. A point outside the
@@ -1090,13 +1093,21 @@ export const agentScreenshotResultSchema = z.strictObject({
    * pair is what makes the density readable at all: `width / frame.width` is the device pixel
    * ratio the capture happened at, and without it an agent measuring a 1 484-pixel picture of an
    * 1 187-pixel page has no way to know which number its coordinates are in.
+   *
+   * Since 2026-10-17 (R-280) a whole-viewport picture is handed back at `frame`'s CSS size, fitted
+   * under 1 568 pixels on its long edge and 1.15 million in all, then times `scale`; a region keeps
+   * the device density above. The points the agent sends back are in this picture's `width` x
+   * `height`, and the worker maps them into `frame`.
    */
   width: z.number().int().positive().optional(),
   height: z.number().int().positive().optional(),
   scale: z.number().min(AGENT_SCREENSHOT_MIN_SCALE).max(1).optional(),
   frame: z.strictObject({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
   coverage: z.enum(["viewport", "region"]).optional(),
-  /** Echoed when one was asked for, in the CSS pixels of `frame` it was asked in. */
+  /**
+   * Echoed when one was asked for, exactly as asked: in the pixels of the latest whole-viewport
+   * picture of the tab, or of `frame` when there was none (R-280 follow-up).
+   */
   region: z
     .strictObject({
       x: z.number().int().nonnegative(),
@@ -1654,7 +1665,10 @@ const agentUploadImageShape = {
   imageId: agentImageIdSchema,
   /** A `<input type="file">` or any other element, named the way every other target is (R-106). */
   ref: agentRefSchema.optional(),
-  /** A drop point in the top-level viewport's CSS pixels, for a page that takes dragged files. */
+  /**
+   * A drop point in the top-level viewport, for a page that takes dragged files - in the pixels of
+   * the latest whole-viewport screenshot of the tab, like every other point (R-280).
+   */
   coordinate: agentPointSchema.optional(),
   filename: agentFileNameSchema.default("screenshot.png"),
 };
@@ -1696,7 +1710,8 @@ export const agentUploadImageArgsSchema = z.strictObject({
  *
  * `name`/`size` are read from the `<input>` on the input path, which is the evidence FR-040's rule
  * asks for; a drop has nothing to read back, so they are echoed from the delivered `File` and the
- * point the events landed at rides with them.
+ * point the events landed at rides with them - in the same pixels the agent gave its `coordinate`
+ * in, the latest whole-viewport picture's (R-280 follow-up).
  */
 export const agentUploadImageResultSchema = z.strictObject({
   delivery: z.enum(["input", "drop"]),
@@ -2101,8 +2116,17 @@ export type AgentToolDescriptor = {
   inputShape: Record<string, z.ZodType>;
 };
 
+/**
+ * The space a point is in, said once and repeated on every tool that takes one (012 change log
+ * 2026-10-17, R-280): the pixels of the latest whole-viewport screenshot of that tab.
+ */
+const POINT_SPACE_NOTE =
+  "A point {x, y} is in the pixels of the latest whole-viewport screenshot of that tab (the page's CSS " +
+  "pixels when that picture was not shrunk to fit); with no screenshot yet it is taken as CSS pixels.";
+
 const POINTER_NOTE =
-  "The target is a ref from `find`, or a viewport point {x, y} which the page resolves to an element.";
+  "The target is a ref from `find`, or a viewport point {x, y} which the page resolves to an element. " +
+  POINT_SPACE_NOTE;
 
 /**
  * What an agent has to know before it moves a tab (014 FR-186, contracts/transitions.md).
@@ -2239,10 +2263,14 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Returns a PNG of one of this session's tabs as an image. The browser can only photograph the tab that is " +
       "active in its window, so if yours is not, it is brought to the front for the capture and the previously " +
-      "active tab is put back afterwards. `region` crops the result to a rectangle of the viewport, and is " +
-      "refused when it is not wholly inside it. `scale` (0.1 to 1) shrinks the returned image, which is how a " +
-      "picture too large for one answer is made to fit; it changes the image only - a region, and every " +
-      "coordinate you act on, stay in the unscaled viewport the answer's `frame` names. " +
+      "active tab is put back afterwards. The whole viewport comes back in the page's CSS pixels (`frame`), " +
+      "shrunk to fit when the page is large (at most 1568 pixels on the long edge and 1.15 million in all); " +
+      "`width` and `height` say the size it came out at, and every point you then send to a tool on that tab " +
+      "is read in this picture's pixels - so is `region`, a rectangle read off that picture which is cropped " +
+      "from the screen at its own density, refused with the picture's size when it is not wholly inside it, " +
+      "and does not change which picture your points are read in. Resizing the window or setting or resetting " +
+      "`viewport` on a tab makes its points CSS pixels again until the next whole screenshot. `scale` (0.1 to " +
+      "1) shrinks the returned image further, which is how a picture too large for one answer is made to fit. " +
       // 013 FR-176: the id is on the answer whether or not the agent was looking for it, so the
       // sentence that makes it usable belongs where the agent reads before it calls.
       "The answer carries an `imageId` that `upload_image` accepts for 5 minutes.",
@@ -2300,7 +2328,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Drag and drop",
     description:
       "Drags one element onto another using the HTML drag-and-drop events. Each endpoint is a ref or a point, " +
-      "and they must be different. The result says whether the dragged element actually moved.",
+      `and they must be different. The result says whether the dragged element actually moved. ${POINT_SPACE_NOTE}`,
     inputShape: agentDragShape,
   },
   {
@@ -2323,7 +2351,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     name: "scroll",
     title: "Scroll",
     description:
-      "Scrolls the viewport by a direction and amount, or brings one target into view. One or the other, never both.",
+      "Scrolls the viewport by a direction and amount, or brings one target into view. One or the other, never both. " +
+      POINT_SPACE_NOTE,
     inputShape: agentScrollShape,
   },
   {
@@ -2340,9 +2369,11 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Delivers input where a person would put the pointer: `left_click`, `right_click`, `double_click`, " +
       "`triple_click` and `scroll` at an {x, y} in the visible page, `type` and `key` to whatever has focus, " +
-      "`screenshot` for a picture to aim by, and `wait` to let the page settle. Coordinates are CSS pixels " +
-      "from the top-left of the top-level viewport, the same ones a screenshot shows you; a point outside it " +
-      "is refused with the viewport's size. Use it for what the page's structure does not describe - a " +
+      "`screenshot` for a picture to aim by, and `wait` to let the page settle. Coordinates are measured from " +
+      "the top-left of the top-level viewport in the pixels of the latest whole-viewport screenshot of that tab " +
+      "- read them straight off the picture; they are the page's CSS pixels when the picture was not shrunk to " +
+      "fit, and are taken as CSS pixels when there is no screenshot yet. A point outside it is refused with the " +
+      "size to aim within. Use it for what the page's structure does not describe - a " +
       "canvas, a drawn menu - and prefer the ref-based tools everywhere else, because they say what they " +
       "acted on. Acting at a point changes the page, so the site's mode applies as it does to a click. " +
       // 013 FR-176: the screenshot action answers the same shape the `screenshot` tool does, so it
@@ -2446,7 +2477,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "after the screenshot, so take one and upload it in the same stretch of work; after that, take a new " +
       "screenshot and quote the new id. `filename` is what the page will show, `screenshot.png` by default. " +
       "For a file of the owner's own, on their disk, use `file_upload`. Putting a file into a page changes it, " +
-      "so the site's mode applies exactly as it does to a click.",
+      `so the site's mode applies exactly as it does to a click. ${POINT_SPACE_NOTE}`,
     inputShape: agentUploadImageShape,
   },
   {

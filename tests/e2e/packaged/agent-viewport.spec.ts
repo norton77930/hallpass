@@ -96,6 +96,7 @@ test.describe("agent viewport", () => {
 
       // ============= the picture is of the emulated viewport, not of the window (R-166) =============
       const shot = await client.callTool("screenshot", { tabId });
+      let picture: { width: number; height: number };
       if (shot.isError) {
         // A 2 560x1 440 picture can exceed the frame bound, and the refusal is then obliged to name
         // the scale that would fit rather than merely saying no (FR-162).
@@ -111,21 +112,46 @@ test.describe("agent viewport", () => {
         expect(answer.scale).toBe(named);
         expect(answer.frame).toEqual({ width: 2560, height: 1440 });
         expect(answer.coverage).toBe("viewport");
-        const size = pngSize(retried.images[0]!.data);
-        expect(Math.abs(size.width - Math.round(2560 * named)), `picture ${size.width}x${size.height}`).toBeLessThanOrEqual(2);
-        expect(Math.abs(size.height - Math.round(1440 * named))).toBeLessThanOrEqual(2);
+        picture = pngSize(retried.images[0]!.data);
       } else {
         expect(shot.images).toHaveLength(1);
         const answer = shot.json as { frame: { width: number; height: number }; coverage: string };
         expect(answer.frame).toEqual({ width: 2560, height: 1440 });
         expect(answer.coverage).toBe("viewport");
-        expect(pngSize(shot.images[0]!.data)).toEqual({ width: 2560, height: 1440 });
+        picture = pngSize(shot.images[0]!.data);
       }
+      // The picture is the frame fitted to at most 1 568 px on its long edge and about 1.15 MP, its
+      // aspect kept (R-280) - never the frame's own 2 560 px, which a client would shrink unseen.
+      expect(picture.width, `picture ${picture.width}x${picture.height}`).toBeLessThanOrEqual(1568);
+      expect(picture.width * picture.height).toBeLessThanOrEqual(1_150_000);
+      expect(Math.abs(picture.height - (picture.width * 1440) / 2560)).toBeLessThanOrEqual(2);
+
+      // ============= a point read off that picture lands where the picture shows it (R-280) =============
+      // Measured by the harness in the page's own pixels and turned into the picture's, the way an
+      // agent reading the image would aim; the click is then delivered at the picture's point.
+      await setSiteModeViaPanel(panel, SITE, "skip-checks");
+      const box = await page.evaluate(() => {
+        const r = document.getElementById("wide-only")!.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      });
+      await call("computer", {
+        tabId,
+        action: "left_click",
+        x: Math.round((box.x * picture.width) / 2560),
+        y: Math.round((box.y * picture.height) / 1440),
+      });
+      await expect
+        .poll(() => page.evaluate(() => document.getElementById("wide-only")?.dataset.clicked ?? null), {
+          timeout: 15_000,
+        })
+        .toBe("1");
+      await page.evaluate(() => {
+        delete document.getElementById("wide-only")!.dataset.clicked;
+      });
 
       // ============= an element that exists only at this width can be clicked (SC-088) =============
-      // The site's mode is the owner's decision, taken through the panel's own control: the claim
-      // here is about the coordinate frame a click is delivered in, not about consent.
-      await setSiteModeViaPanel(panel, SITE, "skip-checks");
+      // The site's mode was set through the panel's own control above: the claim here is about the
+      // coordinate frame a click is delivered in, not about consent.
       const found = (await call("find", { tabId, query: "Wide only" })) as {
         outcome: string;
         matches: Array<{ ref: string }>;
@@ -280,21 +306,23 @@ test.describe("agent viewport", () => {
       const whole = await client.callTool("screenshot", { tabId });
       expect(whole.isError, whole.text).toBe(false);
       const wholeAnswer = whole.json as { width: number; height: number; frame: { width: number; height: number } };
-      const density = wholeAnswer.width / wholeAnswer.frame.width;
-      // Asserted as the relation rather than as one machine's numbers: on the DPR-2 display this
-      // step is named for, region 300x100 comes back 600x200, and on any other density it comes
-      // back at that density - what must never happen again is a crop taken in image pixels, which
-      // is this same rectangle cut 25 % small on a 1.25 display (R-166 finding 2).
-      console.log(`[T317] picture ${wholeAnswer.width}x${wholeAnswer.height} of frame ${wholeAnswer.frame.width}x${wholeAnswer.frame.height} - density ${density}`);
+      // A whole picture of a frame this small comes back at the frame's own size (R-280), so a
+      // point or region read off it is already in page pixels and the region below is taken as is.
+      expect({ width: wholeAnswer.width, height: wholeAnswer.height }).toEqual(wholeAnswer.frame);
+      // The region keeps the display's density (FR-163): on the DPR-2 display this step is named for,
+      // region 300x100 comes back 600x200, and on any other density it comes back at that density,
+      // the same factor on both axes - what must never happen again is a crop taken in image
+      // pixels, which is this same rectangle cut 25 % small on a 1.25 display (R-166 finding 2).
       const nativeRegion = await client.callTool("screenshot", {
         tabId,
         region: { x: 100, y: 200, width: 300, height: 100 },
       });
       expect(nativeRegion.isError, nativeRegion.text).toBe(false);
-      expect(pngSize(nativeRegion.images[0]!.data)).toEqual({
-        width: Math.round(300 * density),
-        height: Math.round(100 * density),
-      });
+      const regionSize = pngSize(nativeRegion.images[0]!.data);
+      const density = regionSize.width / 300;
+      console.log(`[T317] region ${regionSize.width}x${regionSize.height} of 300x100 - density ${density}`);
+      expect(density, `region ${regionSize.width}x${regionSize.height}`).toBeGreaterThan(1);
+      expect(Math.abs(regionSize.height - 100 * density)).toBeLessThanOrEqual(1);
 
       // ---- the protocol path: an emulated viewport is DPR 1, so a region is its own size ----
       // The tool always emulates at deviceScaleFactor 1, so the agent's `set` replaces the density

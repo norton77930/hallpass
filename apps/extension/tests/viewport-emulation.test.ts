@@ -392,4 +392,36 @@ describe("T305 the emulation over an attachment", () => {
     // The tab is going; a record kept for it would be owed to an attachment nobody holds.
     await expect(emulation.current(TAB)).resolves.toBeUndefined();
   });
+
+  /**
+   * 012 change log 2026-10-17 follow-up (R-280): a picture's coordinate space is a ratio between
+   * the picture and the frame, and these are the moments the frame changes under it. Each one says
+   * so, for the tab it happened to, so the stale ratio is dropped rather than applied.
+   */
+  it("says the tab's frame changed on a set, a reset and a release, and not when nothing changed", async () => {
+    const changed: number[] = [];
+    const { attachments, emulation } = build();
+    const watched = createViewportEmulation({
+      store: createViewportStore(fakeArea()),
+      attachments,
+      onFrameChanged: (tabId) => void changed.push(tabId),
+    });
+    void emulation;
+
+    await watched.set(SESSION, TAB, { width: 375, height: 812 });
+    await watched.reset(SESSION, TAB);
+    await watched.set(SESSION, TAB, { width: 375, height: 812 });
+    await watched.onBeforeRelease(TAB);
+    expect(changed).toEqual([TAB, TAB, TAB, TAB]);
+
+    // A reset of a tab nobody emulated, and a set Chrome refused, change no frame.
+    await watched.reset(SESSION, OTHER_TAB);
+    const refused = createViewportEmulation({
+      store: createViewportStore(fakeArea()),
+      attachments: fakeAttachments({ refuse: true }),
+      onFrameChanged: (tabId) => void changed.push(tabId),
+    });
+    await refused.set(SESSION, TAB, { width: 375, height: 812 });
+    expect(changed).toEqual([TAB, TAB, TAB, TAB]);
+  });
 });

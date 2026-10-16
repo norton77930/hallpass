@@ -31,6 +31,7 @@ import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings }
 import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { captureFrameFacts, photographTab, type PhotographDeps } from "./photograph.js";
+import { spaceOfPicture, toViewportRegion, type ScreenshotSpaces } from "./coordinate-space.js";
 import {
   committedOrigin,
   readTabAddress,
@@ -75,6 +76,11 @@ export type AgentReadDeps = {
   sendOverAttachment?: CaptureSend;
   /** The tab's own content area in CSS pixels: the frame when nothing emulates the tab. */
   tabSize?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /**
+   * Where each tab's latest whole-viewport picture space is kept (012 change log 2026-10-17,
+   * R-280): written here so a point the agent reads off this picture is mapped back by the effects.
+   */
+  screenshotSpaces?: ScreenshotSpaces;
   /**
    * Claims the emulation's own attachment before an emulated tab is photographed (012/S2c F2).
    *
@@ -163,9 +169,13 @@ export const SCREENSHOT_MAX_BASE64_CHARS = 700_000;
  * the payload is over by; rounded **down** to a tenth, because a hint that lands a hair over the
  * ceiling is a second refusal. It is the whole reason the refusal is worth reading: an agent told
  * "too large" learns nothing, and an agent told "retry with scale 0.5" has its next call written.
+ *
+ * Relative to the scale the picture was taken at (2026-10-17, R-280): a picture still too large at
+ * 0.5 needs less than 0.5, and a hint computed as if it had been 1 would name a scale that is no
+ * smaller than the one that just failed.
  */
-function fittingScale(length: number): number {
-  return Math.max(Math.floor(Math.sqrt(SCREENSHOT_MAX_BASE64_CHARS / length) * 10) / 10, 0.1);
+function fittingScale(length: number, usedScale: number): number {
+  return Math.max(Math.floor(usedScale * Math.sqrt(SCREENSHOT_MAX_BASE64_CHARS / length) * 10) / 10, 0.1);
 }
 
 /** Whether the rectangle is one the viewport actually contains (012/FR-164). */
@@ -501,19 +511,25 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     // Before anything is photographed, because the frame is what a region is judged against and a
     // refused region must not have cost the owner a tab flicker (012/FR-164).
     const facts = await captureFrameFacts(tabId, photographDeps);
+    // A region is read off the latest whole picture like a point is (2026-10-17 follow-up, R-280):
+    // into the frame's pixels before it is judged or cropped. No picture yet leaves it as asked.
+    const space = region ? await deps.screenshotSpaces?.get(tabId).catch(() => undefined) : undefined;
+    const framed = region ? toViewportRegion(region, space) : undefined;
     if (facts.frame === undefined) {
       deps.reportDiagnostic?.("agent.screenshot.frame-unknown");
-    } else if (region && !insideFrame(region, facts.frame)) {
+    } else if (framed && !insideFrame(framed, facts.frame)) {
       // Named, not clamped: a clamp answers `ok` with a picture of a rectangle the agent did not
-      // ask for, and the agent has no way of telling that from the one it meant.
-      return answer(callId, "failed", `region-outside-viewport (frame ${facts.frame.width}x${facts.frame.height})`);
+      // ask for, and the agent has no way of telling that from the one it meant. The size named is
+      // the one the agent aims in: the picture's, when one set the space.
+      const size = space ? `screenshot ${space.image.width}x${space.image.height}` : `frame ${facts.frame.width}x${facts.frame.height}`;
+      return answer(callId, "failed", `region-outside-viewport (${size})`);
     }
     const photograph = await photographTab(
       {
         tabId,
         scale,
         facts,
-        ...(region === undefined ? {} : { region }),
+        ...(framed === undefined ? {} : { region: framed }),
         ...(startedOn === undefined ? {} : { beforeCapture: () => stillOnOrigin(tabId, startedOn, readAddress) }),
       },
       photographDeps,
@@ -535,7 +551,18 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     const image = photograph.image;
     if (image.data.length > SCREENSHOT_MAX_BASE64_CHARS) {
       deps.reportDiagnostic?.("agent.screenshot.too-large");
-      return answer(callId, "failed", `screenshot-too-large; retry with scale ≤ ${fittingScale(image.data.length)}`);
+      return answer(
+        callId,
+        "failed",
+        `screenshot-too-large; retry with scale ≤ ${fittingScale(image.data.length, image.scale)}`,
+      );
+    }
+    if (!region) {
+      // The picture the agent will aim by from now on (R-280); a region is a close-up and leaves
+      // it as it was. Remembered only once the picture is certain to reach the agent.
+      await deps.screenshotSpaces
+        ?.remember(tabId, spaceOfPicture(image, photograph.frame))
+        .catch(() => undefined);
     }
     if (region && !image.cropped) {
       deps.reportDiagnostic?.("agent.screenshot.not-cropped");

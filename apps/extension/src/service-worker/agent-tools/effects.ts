@@ -64,6 +64,12 @@ import {
 } from "./computer.js";
 import { bindingFailureResponse, INPUT_NOT_ANSWERED_HINT, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { photographTab } from "./photograph.js";
+import {
+  spaceOfPicture,
+  toViewportArgs,
+  type ScreenshotSpace,
+  type ScreenshotSpaces,
+} from "./coordinate-space.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { findOnTab, resolveRef, type AgentTarget } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
@@ -213,6 +219,13 @@ export type AgentEffectDeps = {
    * emulation is holding that attachment open for exactly as long as it lasts.
    */
   currentViewport?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /**
+   * Each tab's latest whole-viewport picture space (012 change log 2026-10-17, R-280).
+   *
+   * Read once per call to map the agent's points into the frame's pixels (`toViewportArgs`), and
+   * written by `computer`'s own `screenshot`. Absent, every point passes through as it always has.
+   */
+  screenshotSpaces?: ScreenshotSpaces;
   /**
    * How `computer`'s `wait` waits.
    *
@@ -2080,9 +2093,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
    * a call that touches nothing.
    */
   async function preflightPosition(
+    /** Already in the frame's pixels (`toViewportArgs`); the viewport is measured in those. */
     args: Record<string, unknown>,
     binding: AgentPageBinding,
     callId: string,
+    /** The latest picture's space: a refusal names *its* size, the one the agent aims in (R-280). */
+    space: ScreenshotSpace | undefined,
   ): Promise<
     | { ok: true; point?: PositionPoint; viewport?: Viewport }
     | { ok: false; response: AgentNativeResponse }
@@ -2102,7 +2118,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     const point = positionOf(args);
     if (point && !insideViewport(point, viewport)) {
-      return { ok: false, response: outsideViewport(callId, viewport) };
+      return { ok: false, response: outsideViewport(callId, space ? space.image : viewport) };
     }
     return { ok: true, ...(point === undefined ? {} : { point }), viewport };
   }
@@ -2156,6 +2172,11 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         if (photo.reason === "input-unavailable") return inputUnavailable(callId, photo.unavailableReason);
         return answer(callId, photo.reason === "tab-gone" ? "stale" : "not-readable", photo.reason);
       }
+      // The picture the agent will aim by from now on (R-280): its size and frame are the space
+      // its next points are mapped through. One whose frame was unknown leaves nothing to map by.
+      await deps.screenshotSpaces
+        ?.remember(binding.tabId, spaceOfPicture(photo.image, photo.frame))
+        .catch(() => undefined);
       // The `screenshot` tool's own shape, so an agent that took one either way reads one answer.
       // `cropped` is false because this action never asks for a region: the field says whether a
       // requested rectangle was applied, and there was none to apply - which is also why `coverage`
@@ -2289,10 +2310,19 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         : answer(callId, found.reason === "stale" ? "stale" : "not-readable", found.reason);
     }
 
+    /**
+     * The call's points in the frame's own pixels (012 change log 2026-10-17, R-280), mapped once
+     * here from the latest whole-viewport picture of this tab, before anything resolves or refuses
+     * them. Only what is *delivered* uses them: the gate, the owner's summary and the stated plan
+     * keep the arguments the agent wrote, so a plan matches its own steps whatever the mapping is.
+     */
+    const space = await deps.screenshotSpaces?.get(tabId).catch(() => undefined);
+    const acting = toViewportArgs(tool, args, space);
+
     // Acting by position settles its address before anybody is asked about it (004/T139).
     let position: { point?: PositionPoint; viewport?: Viewport } = {};
     if (tool === "computer") {
-      const preflight = await preflightPosition(args, binding, callId);
+      const preflight = await preflightPosition(acting, binding, callId, space);
       if (!preflight.ok) return preflight.response;
       position = preflight;
     }
@@ -2371,7 +2401,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     if (tool === "computer") {
       const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
-        runPosition(args, position.point, context, binding, callId),
+        runPosition(acting, position.point, context, binding, callId),
       );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
@@ -2383,14 +2413,14 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // is the same one whichever way the input is delivered.
       const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
         isPointerTool(tool)
-          ? deliverPointer(tool, args, context, binding, callId)
-          : deliverKeyboard(tool, args, context, binding, callId),
+          ? deliverPointer(tool, acting, context, binding, callId)
+          : deliverKeyboard(tool, acting, context, binding, callId),
       );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
     }
 
-    const planned = await planEffect(tool, args, context, binding);
+    const planned = await planEffect(tool, acting, context, binding);
     if (!planned.ok) return answer(callId, planned.outcome, planned.reason);
 
     /**
