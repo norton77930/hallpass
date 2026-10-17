@@ -16,7 +16,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@hallpass/contracts": "0.0.0",
     "@hallpass/domain": "0.0.0",
     "zod": "4.4.3"
