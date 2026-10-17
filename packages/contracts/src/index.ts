@@ -148,6 +148,7 @@ export {
   agentUploadResultSchema,
   // 013: the agent's request, the worker's arguments and the page's answer for `upload_image`.
   agentUploadImageRequestSchema,
+  defaultScreenshotFileName,
   agentUploadImageArgsSchema,
   agentUploadImageResultSchema,
   AGENT_DIAGNOSTICS_MAX_LIMIT,

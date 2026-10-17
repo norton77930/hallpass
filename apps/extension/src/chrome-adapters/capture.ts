@@ -28,6 +28,13 @@
  * reads its points off this picture and the page resolves them in CSS pixels, so a whole-viewport
  * picture is drawn at the frame's CSS size, fitted under `viewportPictureSize`'s budget, on both
  * paths. Regions keep their native density.
+ *
+ * **And it leaves as a JPEG** (012 change log 2026-10-17, R-281). The fitted whole-viewport picture
+ * is encoded once more, as a JPEG at quality 0.75, from the lossless picture the paths above made;
+ * while its base64 is over the frame budget it is encoded again from that same picture, 0.05 lower
+ * each time, down to 0.10. Only the quality moves - never the pixel size - so the space the agent's
+ * points are mapped through is the one a PNG would have set. A region stays a PNG: it is a close-up
+ * the agent reads detail off, and it is small.
  */
 
 export type CaptureRegion = { x: number; y: number; width: number; height: number };
@@ -35,9 +42,27 @@ export type CaptureRegion = { x: number; y: number; width: number; height: numbe
 /** A CSS size: what a page believes it is laid out at, emulated or real. */
 export type CaptureFrame = { width: number; height: number };
 
-/** A base64 PNG, without the data-url prefix, and what it turned out to be a picture of. */
+/** What the bytes are; the answer names the type the bytes actually have (R-281). */
+export type CaptureMimeType = "image/png" | "image/jpeg";
+
+/**
+ * The largest base64 payload one native-messaging frame may carry back.
+ *
+ * The relay re-frames every message with the 1 MiB native-messaging limit (`native-frame.ts`), so a
+ * screenshot larger than that would not fail politely - it would break the link for every later
+ * call. It is also the budget a whole-viewport JPEG steps its quality down under (R-281).
+ */
+export const SCREENSHOT_MAX_BASE64_CHARS = 700_000;
+
+/** The JPEG qualities a whole-viewport picture is tried at, in hundredths: 0.75 down to 0.10. */
+const JPEG_FIRST_QUALITY = 75;
+const JPEG_QUALITY_STEP = 5;
+const JPEG_LAST_QUALITY = 10;
+
+/** A base64 image, without the data-url prefix, and what it turned out to be a picture of. */
 export type CapturedImage = {
   data: string;
+  mimeType: CaptureMimeType;
   cropped: boolean;
   /**
    * The scale that was actually applied - 1 when the worker had no canvas to apply the asked-for
@@ -81,6 +106,11 @@ export type CaptureDeps = {
    * fail by `captureTab`; absent, the page is asked through the path's own channel.
    */
   awaitFrame?: (tabId: number) => Promise<void>;
+  /**
+   * The picture (base64, any decodable type) encoded as a JPEG at `quality` (0-1), at its own pixel
+   * size; `undefined` when the worker has no canvas, and the picture then stays what it was.
+   */
+  encodeJpeg?: (base64: string, quality: number) => Promise<string | undefined>;
 };
 
 /** The longest a background tab's picture waits for its first fresh frame (2026-10-11). */
@@ -325,13 +355,60 @@ async function cropWithCanvas(dataUrl: string, request: CropRequest): Promise<Cr
       rect.outHeight,
     );
     const blob = await canvas.convertToBlob({ type: "image/png" });
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = "";
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    return { data: btoa(binary), width: rect.outWidth, height: rect.outHeight };
+    return { data: await base64OfBlob(blob), width: rect.outWidth, height: rect.outHeight };
   } catch {
     return undefined;
   }
+}
+
+async function base64OfBlob(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/** One JPEG encode of a picture at its own size, in the worker; no canvas is `undefined` (R-281). */
+async function encodeJpegWithCanvas(base64: string, quality: number): Promise<string | undefined> {
+  const globals = globalThis as { OffscreenCanvas?: typeof OffscreenCanvas };
+  if (!globals.OffscreenCanvas) return undefined;
+  try {
+    const source = await decodeImage(`data:image/png;base64,${base64}`);
+    if (!source) return undefined;
+    const canvas = new globals.OffscreenCanvas(source.width, source.height);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      source.close();
+      return undefined;
+    }
+    (context as OffscreenCanvasRenderingContext2D).drawImage(source, 0, 0);
+    source.close();
+    return await base64OfBlob(await canvas.convertToBlob({ type: "image/jpeg", quality }));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A whole-viewport picture as the JPEG it leaves as (012 change log 2026-10-17, R-281).
+ *
+ * Each step encodes the same lossless source again rather than the previous JPEG, so a low quality
+ * is one loss and not fourteen. The last step is handed back even when it is still over the budget:
+ * whether that is refused is the caller's decision, made in one place for both tools that take a
+ * whole picture. No canvas leaves the picture as it was, and says so.
+ */
+async function asViewportJpeg(
+  image: CapturedImage,
+  encode: (base64: string, quality: number) => Promise<string | undefined>,
+): Promise<CapturedImage> {
+  let encoded: string | undefined;
+  for (let hundredths = JPEG_FIRST_QUALITY; hundredths >= JPEG_LAST_QUALITY; hundredths -= JPEG_QUALITY_STEP) {
+    const attempt = await encode(image.data, hundredths / 100).catch(() => undefined);
+    if (attempt === undefined) break;
+    encoded = attempt;
+    if (attempt.length <= SCREENSHOT_MAX_BASE64_CHARS) break;
+  }
+  return encoded === undefined ? image : { ...image, data: encoded, mimeType: "image/jpeg" };
 }
 
 /**
@@ -402,25 +479,39 @@ export async function captureThroughProtocol(input: {
  * so this adapter never decides which tab the owner was on - the caller, which already listed the
  * window's tabs, knows. The displacement happens on both paths: a background tab's surface may be
  * stale, and a picture of a stale surface is a picture of what the page used to say.
+ *
+ * A whole viewport is then encoded as the JPEG it leaves as (R-281) - after the owner's tab is
+ * back, since the encode needs nothing of the window. A region is handed back as the PNG it is.
  */
-export async function captureTab(
-  input: {
-    tabId: number;
-    windowId: number;
-    /** Whether the tab is already the active one of its window; if not, it is brought forward. */
-    isActive: boolean;
-    /** The tab to put back afterwards, when one was displaced. */
-    restoreTabId?: number;
-    region?: CaptureRegion;
-    /** The CSS size the region is asked in, and that the picture is of (012/FR-163). */
-    frame?: CaptureFrame;
-    /** How much of the picture's own pixels to keep, 0.1 to 1 (012/FR-162). */
-    scale?: number;
-    /** Which capture to take; the default is the one that needs no debugger. */
-    path?: CapturePath;
-  },
-  deps: CaptureDeps = {},
-): Promise<CapturedImage> {
+export async function captureTab(input: CaptureInput, deps: CaptureDeps = {}): Promise<CapturedImage> {
+  const image = await capturePicture(input, deps);
+  return input.region || input.lossless ? image : asViewportJpeg(image, deps.encodeJpeg ?? encodeJpegWithCanvas);
+}
+
+export type CaptureInput = {
+  tabId: number;
+  windowId: number;
+  /** Whether the tab is already the active one of its window; if not, it is brought forward. */
+  isActive: boolean;
+  /** The tab to put back afterwards, when one was displaced. */
+  restoreTabId?: number;
+  region?: CaptureRegion;
+  /** The CSS size the region is asked in, and that the picture is of (012/FR-163). */
+  frame?: CaptureFrame;
+  /** How much of the picture's own pixels to keep, 0.1 to 1 (012/FR-162). */
+  scale?: number;
+  /** Which capture to take; the default is the one that needs no debugger. */
+  path?: CapturePath;
+  /**
+   * Hand a whole viewport back as the PNG it was taken as (R-281): for a caller that encodes the
+   * picture itself and is not bound by the agent's frame budget - the recorder's fallback frame.
+   */
+  lossless?: boolean;
+};
+
+/** The lossless picture, at the size the answer will have; every branch here is a PNG. */
+async function capturePicture(input: CaptureInput, deps: CaptureDeps): Promise<CapturedImage> {
+  const mimeType = "image/png" as const;
   const capture = deps.captureVisibleTab ?? captureWithChrome;
   const activate = deps.activateTab ?? activateWithChrome;
   const crop = deps.crop ?? cropWithCanvas;
@@ -463,7 +554,7 @@ export async function captureTab(
         // A surface at a density the emulation did not state: brought to the fitted size here.
         const resized = await crop(`data:image/png;base64,${data}`, { frame: clipFrame, scale: path.scale });
         if (resized) {
-          return { data: resized.data, cropped: false, scale: path.scale, width: resized.width, height: resized.height };
+          return { data: resized.data, mimeType, cropped: false, scale: path.scale, width: resized.width, height: resized.height };
         }
       }
       // A whole viewport that could not be measured is the size the clip asked for (review minor,
@@ -472,6 +563,7 @@ export async function captureTab(
       const answered = size ?? target;
       return {
         data,
+        mimeType,
         // The clip *is* the region, applied by the browser: there is no partial answer here.
         cropped: input.region !== undefined,
         scale: path.scale,
@@ -490,6 +582,7 @@ export async function captureTab(
       if (measured && target && sameSize(measured, target)) {
         return {
           data: base64Of(dataUrl),
+          mimeType,
           cropped: false,
           scale,
           width: measured.width,
@@ -506,12 +599,14 @@ export async function captureTab(
       ? // No canvas: the whole viewport, at the size it was taken, and both facts said out loud.
         {
           data: base64Of(dataUrl),
+          mimeType,
           cropped: false,
           scale: 1,
           ...(measured === undefined ? {} : { width: measured.width, height: measured.height }),
         }
       : {
           data: cropped.data,
+          mimeType,
           cropped: input.region !== undefined,
           scale,
           width: cropped.width,

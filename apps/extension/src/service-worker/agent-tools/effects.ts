@@ -63,10 +63,12 @@ import {
   type Viewport,
 } from "./computer.js";
 import { bindingFailureResponse, INPUT_NOT_ANSWERED_HINT, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
-import { photographTab } from "./photograph.js";
+import { captureFrameFacts, photographTab, screenshotTooLarge, type PhotographDeps } from "./photograph.js";
 import {
+  carriesPoint,
   spaceOfPicture,
   toViewportArgs,
+  viewportChangedReason,
   type ScreenshotSpace,
   type ScreenshotSpaces,
 } from "./coordinate-space.js";
@@ -1363,6 +1365,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
   }
 
+  /** What a tab's frame is measured from: the same facts the pictures are taken against (R-282). */
+  const frameDeps: PhotographDeps = deps.currentViewport ? { currentViewport: deps.currentViewport } : {};
+
   /** One picture of a tab, region or whole, through the `screenshot` tool's own lookup. */
   async function photograph(tabId: number, region?: CaptureRegion, beforeCapture?: () => Promise<boolean>) {
     return photographTab(
@@ -2172,6 +2177,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         if (photo.reason === "input-unavailable") return inputUnavailable(callId, photo.unavailableReason);
         return answer(callId, photo.reason === "tab-gone" ? "stale" : "not-readable", photo.reason);
       }
+      // Still over the frame budget at the lowest JPEG quality (R-281): the `screenshot` tool's own
+      // refusal, and the space is left as it was - this picture never reaches the agent.
+      const tooLarge = screenshotTooLarge(photo.image);
+      if (tooLarge !== undefined) {
+        deps.reportDiagnostic?.("agent.screenshot.too-large");
+        return answer(callId, "failed", tooLarge);
+      }
       // The picture the agent will aim by from now on (R-280): its size and frame are the space
       // its next points are mapped through. One whose frame was unknown leaves nothing to map by.
       await deps.screenshotSpaces
@@ -2187,7 +2199,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         callId,
         outcome: "ok",
         result: {
-          mimeType: "image/png",
+          mimeType: photo.image.mimeType,
           data: photo.image.data,
           cropped: false,
           ...(photo.image.width === undefined || photo.image.height === undefined
@@ -2317,6 +2329,15 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * keep the arguments the agent wrote, so a plan matches its own steps whatever the mapping is.
      */
     const space = await deps.screenshotSpaces?.get(tabId).catch(() => undefined);
+    if (space && carriesPoint(tool, args)) {
+      // The frame the picture was of must still be the frame the point lands in (R-282): a window
+      // resized or a page zoomed since would put it somewhere the agent did not look. Refused
+      // before the gate, so the owner is never asked about a point that cannot mean what it says.
+      // Measured the way the picture's frame was (emulation record, else tab size over zoom) -
+      // `computer`'s own layout metrics leave out the scrollbar, so they cannot be compared with it.
+      const changed = viewportChangedReason(space, (await captureFrameFacts(tabId, frameDeps)).frame?.width);
+      if (changed !== undefined) return answer(callId, "failed", changed);
+    }
     const acting = toViewportArgs(tool, args, space);
 
     // Acting by position settles its address before anybody is asked about it (004/T139).

@@ -138,9 +138,10 @@ test.describe("agent reads", () => {
       const shot = await live.callTool("screenshot", { tabId });
       expect(shot.isError, shot.text).toBe(false);
       expect(shot.images).toHaveLength(1);
-      expect(shot.images[0]?.mimeType).toBe("image/png");
-      // A real PNG, not an empty block: the base64 of the 8-byte PNG signature.
-      expect(shot.images[0]?.data.startsWith("iVBORw0KGgo")).toBe(true);
+      // 012 change log 2026-10-17 (R-281): a whole viewport is a JPEG.
+      expect(shot.images[0]?.mimeType).toBe("image/jpeg");
+      // A real JPEG, not an empty block: the base64 of the JPEG start-of-image marker.
+      expect(shot.images[0]?.data.startsWith("/9j/")).toBe(true);
 
       const cropped = await live.callTool("screenshot", {
         tabId,
@@ -231,8 +232,8 @@ test.describe("agent reads", () => {
       expect(half.isError, half.text).toBe(false);
       expect(half.json).toMatchObject({ scale: 0.5, coverage: "viewport", frame: wholeAnswer.frame });
 
-      const full = pngSize(whole.images[0]?.data ?? "");
-      const smaller = pngSize(half.images[0]?.data ?? "");
+      const full = imageSize(whole.images[0]?.data ?? "");
+      const smaller = imageSize(half.images[0]?.data ?? "");
       // Half of the page-sized picture, give or take the one pixel a shrink rounds down (R-280).
       expect(Math.abs(smaller.width - full.width * 0.5), `half ${smaller.width}x${smaller.height} of ${full.width}x${full.height}`).toBeLessThanOrEqual(1);
       expect(Math.abs(smaller.height - full.height * 0.5)).toBeLessThanOrEqual(1);
@@ -244,11 +245,27 @@ test.describe("agent reads", () => {
   });
 });
 
-/** The image's own pixels, from the PNG header: IHDR carries width and height at bytes 16 to 23. */
-function pngSize(base64: string): { width: number; height: number } {
-  const header = Buffer.from(base64.slice(0, 44), "base64");
-  expect(header.length, "a PNG header is 24 bytes").toBeGreaterThanOrEqual(24);
-  return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
+/**
+ * The image's own pixels (R-281: a whole viewport is a JPEG, a region a PNG). A PNG's IHDR carries
+ * width and height at bytes 16 to 23; a JPEG's start-of-frame segment carries height then width.
+ */
+function imageSize(base64: string): { width: number; height: number } {
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes[0] === 0x89) {
+    expect(bytes.length, "a PNG header is 24 bytes").toBeGreaterThanOrEqual(24);
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  expect(bytes.readUInt16BE(0), "neither a PNG nor a JPEG").toBe(0xffd8);
+  let at = 2;
+  while (at + 9 < bytes.length) {
+    const marker = bytes.readUInt16BE(at);
+    // SOF0..SOF15, less DHT (C4), JPG (C8) and DAC (CC), which share the range.
+    if (marker >= 0xffc0 && marker <= 0xffcf && ![0xffc4, 0xffc8, 0xffcc].includes(marker)) {
+      return { width: bytes.readUInt16BE(at + 7), height: bytes.readUInt16BE(at + 5) };
+    }
+    at += 2 + bytes.readUInt16BE(at + 2);
+  }
+  throw new Error("no start-of-frame segment in the JPEG");
 }
 
 /** A file the repository certainly has, as a `file://` url - one of FR-039's restricted kinds. */

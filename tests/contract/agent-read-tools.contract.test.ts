@@ -113,11 +113,13 @@ describe("T032 agent read tool contracts", () => {
     expectRejected(shot, { tabId: TAB, region: { x: 0, y: 0, width: 10 } }, "a region with no height");
   });
 
-  it("answers a screenshot as a png, and says when a region was not cropped", () => {
+  it("answers a screenshot as a png or a jpeg, and says when a region was not cropped", () => {
     const result = contractSchema("agentScreenshotResultSchema");
     expectAccepted(result, { mimeType: "image/png", data: "iVBORw0K", cropped: true }, "a cropped shot");
-    expectAccepted(result, { mimeType: "image/png", data: "iVBORw0K", cropped: false }, "a whole-viewport shot");
-    expectRejected(result, { mimeType: "image/jpeg", data: "x", cropped: false }, "a shot in another format");
+    expectAccepted(result, { mimeType: "image/png", data: "iVBORw0K", cropped: false }, "a whole-viewport png");
+    // 012 change log 2026-10-17 (R-281): a whole viewport leaves as a JPEG.
+    expectAccepted(result, { mimeType: "image/jpeg", data: "/9j/4AAQ", cropped: false }, "a whole-viewport jpeg");
+    expectRejected(result, { mimeType: "image/webp", data: "x", cropped: false }, "a shot in another format");
     expectRejected(result, { mimeType: "image/png", data: "iVBORw0K" }, "a shot that will not say");
   });
 

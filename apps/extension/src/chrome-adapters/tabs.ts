@@ -84,6 +84,22 @@ export async function tabContentSize(tabId: number): Promise<{ width: number; he
 }
 
 /**
+ * The tab's page zoom, 1 at 100 % (012 change log 2026-10-17, R-282).
+ *
+ * `tabContentSize` does not move with page zoom - a 1 187-wide tab reports 1 187 at 125 % while
+ * the page lays out 950 CSS pixels - so the page's own width is the size divided by this.
+ * `undefined` when Chrome will not say, which the caller reads as 100 %.
+ */
+export async function tabZoomFactor(tabId: number): Promise<number | undefined> {
+  try {
+    const zoom = await chrome.tabs.getZoom(tabId);
+    return typeof zoom === "number" && zoom > 0 ? zoom : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Where a tab's own loading stands: the committed address, the one it is on its way to, and
  * whether Chrome still calls it loading (010 coverage, Edge transitions).
  *

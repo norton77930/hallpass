@@ -1076,7 +1076,11 @@ const agentScreenshotArgsSchema = z.strictObject(agentScreenshotShape);
  * picture of something other than the region that was asked for.
  */
 export const agentScreenshotResultSchema = z.strictObject({
-  mimeType: z.literal("image/png"),
+  /**
+   * What the bytes are (012 change log 2026-10-17, R-281): a whole viewport is a JPEG wherever the
+   * worker could encode one, a region is a PNG. The host passes the type through unchanged.
+   */
+  mimeType: z.enum(["image/png", "image/jpeg"]),
   /** Base64, without a data-url prefix: the host puts it straight into the image block. */
   data: z.string().min(1),
   cropped: z.boolean(),
@@ -1670,8 +1674,21 @@ const agentUploadImageShape = {
    * the latest whole-viewport screenshot of the tab, like every other point (R-280).
    */
   coordinate: agentPointSchema.optional(),
-  filename: agentFileNameSchema.default("screenshot.png"),
+  /**
+   * What the page will show. Absent, the host names it after the picture's type
+   * (`defaultScreenshotFileName`, R-281): the bytes are only known where the id is resolved.
+   */
+  filename: agentFileNameSchema.optional(),
 };
+
+/**
+ * The name an `upload_image` picture gets when the agent gave none (012 change log 2026-10-17,
+ * R-281): the extension follows the type of the bytes, so a whole-viewport JPEG is not handed to a
+ * page as a `.png`.
+ */
+export function defaultScreenshotFileName(mimeType: string): string {
+  return mimeType === "image/jpeg" ? "screenshot.jpg" : "screenshot.png";
+}
 
 /**
  * The same fields with the rule the MCP input schema cannot carry: exactly one target.
@@ -2122,7 +2139,9 @@ export type AgentToolDescriptor = {
  */
 const POINT_SPACE_NOTE =
   "A point {x, y} is in the pixels of the latest whole-viewport screenshot of that tab (the page's CSS " +
-  "pixels when that picture was not shrunk to fit); with no screenshot yet it is taken as CSS pixels.";
+  "pixels when that picture was not shrunk to fit); with no screenshot yet it is taken as CSS pixels. " +
+  // 012 change log 2026-10-17 (R-282): the refusal names this, and the description says it first.
+  "If the window width or page zoom changed since that screenshot, the point is refused until you take a new one.";
 
 const POINTER_NOTE =
   "The target is a ref from `find`, or a viewport point {x, y} which the page resolves to an element. " +
@@ -2261,7 +2280,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     name: "screenshot",
     title: "Screenshot a tab",
     description:
-      "Returns a PNG of one of this session's tabs as an image. The browser can only photograph the tab that is " +
+      "Returns a picture of one of this session's tabs as an image - the whole viewport as a JPEG, a " +
+      "`region` as a PNG. The browser can only photograph the tab that is " +
       "active in its window, so if yours is not, it is brought to the front for the capture and the previously " +
       "active tab is put back afterwards. The whole viewport comes back in the page's CSS pixels (`frame`), " +
       "shrunk to fit when the page is large (at most 1568 pixels on the long edge and 1.15 million in all); " +
@@ -2475,7 +2495,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "no path, no file on disk. Name a `<input type=\"file\">` by `ref` (a hidden one works too) or a drop " +
       "`coordinate` for a page that takes dragged files; exactly one of the two. The picture is kept 5 minutes " +
       "after the screenshot, so take one and upload it in the same stretch of work; after that, take a new " +
-      "screenshot and quote the new id. `filename` is what the page will show, `screenshot.png` by default. " +
+      "screenshot and quote the new id. `filename` is what the page will show; by default `screenshot.jpg` for a " +
+      "whole-viewport screenshot (a JPEG) and `screenshot.png` for a region (a PNG). " +
       "For a file of the owner's own, on their disk, use `file_upload`. Putting a file into a page changes it, " +
       `so the site's mode applies exactly as it does to a click. ${POINT_SPACE_NOTE}`,
     inputShape: agentUploadImageShape,

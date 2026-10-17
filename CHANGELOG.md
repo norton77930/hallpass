@@ -5,6 +5,29 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.12.3 — 2026-10-18
+
+**Smaller screenshots, and a point is never read off a picture of another page width.**
+
+- **Whole-viewport screenshots are JPEG.** `screenshot` without a `region` and `computer`'s
+  `screenshot` now return `image/jpeg` at quality 0.75, the same pixel size as 0.12.2. A picture
+  still over the answer's size limit is re-encoded at 0.05 lower quality, down to 0.10, before it is
+  refused; `computer`'s screenshot now refuses an oversized picture with the same `retry with
+  scale ≤ …` hint as `screenshot` instead of failing the call. Region screenshots stay PNG at the
+  display's own density.
+- **`upload_image` names a picture after its type.** Without a `filename`, a whole-viewport
+  screenshot is uploaded as `screenshot.jpg` and a region as `screenshot.png`; a given name is kept.
+- **A point after the page changed width is refused.** When the tab's page is no longer as wide as
+  it was in the last whole-viewport screenshot (the window was resized or snapped, or the page was
+  zoomed), a point action — `computer`, the point form of the pointer tools, `drag`, `scroll`,
+  `upload_image`'s drop point, a screenshot `region` — is refused with `viewport-changed` before
+  anything happens, and the agent is told to take a new screenshot. A change in height only (an
+  info bar appearing) is not refused.
+- **Page zoom is part of the page size.** The page size a screenshot reports, and points are
+  converted through, now accounts for the tab's zoom level; on a zoomed page 0.12.2 converted
+  points through the unzoomed size.
+- The GIF recorder's fallback frames are unchanged (lossless, encoded by the recorder).
+
 ## 0.12.2 — 2026-10-17
 
 **A point read off a screenshot is where the click lands.**

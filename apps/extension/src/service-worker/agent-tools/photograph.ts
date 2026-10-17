@@ -1,13 +1,14 @@
 import {
   captureTab,
   decideCapturePath,
+  SCREENSHOT_MAX_BASE64_CHARS,
   type CaptureDeps,
   type CaptureFrame,
   type CaptureRegion,
   type CaptureSend,
   type CapturedImage,
 } from "../../chrome-adapters/capture.js";
-import { queryTabSnapshots, tabContentSize } from "../../chrome-adapters/tabs.js";
+import { queryTabSnapshots, tabContentSize, tabZoomFactor } from "../../chrome-adapters/tabs.js";
 import type { AttachmentOutcome, InputUnavailableReason } from "./input.js";
 
 /**
@@ -54,8 +55,10 @@ export type PhotographDeps = {
    * attachment's words rather than as a page that cannot be read.
    */
   ensureAttached?: (tabId: number) => Promise<AttachmentOutcome>;
-  /** The tab's own content area in CSS pixels; the frame of a tab nothing emulates. */
+  /** The tab's own content area; the frame of a tab nothing emulates, once divided by the zoom. */
   tabSize?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /** The tab's page zoom (R-282); unknown is 100 %. */
+  tabZoom?: (tabId: number) => Promise<number | undefined>;
 };
 
 /** What the picture will be of, and therefore which capture takes it. */
@@ -77,6 +80,34 @@ export type PhotographOutcome =
   | { ok: false; reason: "site-moved" }
   | { ok: false; reason: "input-unavailable"; unavailableReason: InputUnavailableReason };
 
+/**
+ * The scale that would have fitted, for the refusal to name (012/FR-162, R-171).
+ *
+ * A picture shrinks with the *area*, so the linear scale that fits is the square root of the ratio
+ * the payload is over by; rounded **down** to a tenth, because a hint that lands a hair over the
+ * ceiling is a second refusal. It is the whole reason the refusal is worth reading: an agent told
+ * "too large" learns nothing, and an agent told "retry with scale 0.5" has its next call written.
+ *
+ * Relative to the scale the picture was taken at (2026-10-17, R-280): a picture still too large at
+ * 0.5 needs less than 0.5, and a hint computed as if it had been 1 would name a scale that is no
+ * smaller than the one that just failed.
+ */
+function fittingScale(length: number, usedScale: number): number {
+  return Math.max(Math.floor(usedScale * Math.sqrt(SCREENSHOT_MAX_BASE64_CHARS / length) * 10) / 10, 0.1);
+}
+
+/**
+ * Why a picture may not be sent, or nothing (012/FR-162; R-281).
+ *
+ * One function for both tools that hand back a picture - the `screenshot` tool and the `computer`
+ * action - so a picture still over the frame budget at the lowest JPEG quality is refused with one
+ * reason, whichever tool took it, rather than sent as a frame that breaks the link.
+ */
+export function screenshotTooLarge(image: Pick<CapturedImage, "data" | "scale">): string | undefined {
+  if (image.data.length <= SCREENSHOT_MAX_BASE64_CHARS) return undefined;
+  return `screenshot-too-large; retry with scale ≤ ${fittingScale(image.data.length, image.scale)}`;
+}
+
 /** The frame, asked for before anything is photographed so a region can be refused against it. */
 export async function captureFrameFacts(tabId: number, deps: PhotographDeps = {}): Promise<CaptureFrameFacts> {
   const emulated = deps.currentViewport ? await deps.currentViewport(tabId).catch(() => undefined) : undefined;
@@ -84,7 +115,15 @@ export async function captureFrameFacts(tabId: number, deps: PhotographDeps = {}
   // business in a picture's answer (012 gate run 1 leaked the whole record as `frame`).
   if (emulated) return { frame: { width: emulated.width, height: emulated.height }, emulated: true };
   const size = await (deps.tabSize ?? tabContentSize)(tabId).catch(() => undefined);
-  return { emulated: false, ...(size === undefined ? {} : { frame: size }) };
+  if (size === undefined) return { emulated: false };
+  // The tab's size does not follow page zoom, the page's CSS width does (measured, R-282): the
+  // frame is the page's, so a picture, a crop density and a mapped point all agree under zoom.
+  const zoom = await (deps.tabZoom ?? tabZoomFactor)(tabId).catch(() => undefined);
+  if (zoom === undefined || zoom === 1) return { emulated: false, frame: size };
+  return {
+    emulated: false,
+    frame: { width: Math.round(size.width / zoom), height: Math.round(size.height / zoom) },
+  };
 }
 
 export async function photographTab(
@@ -101,6 +140,8 @@ export async function photographTab(
      * costs the owner no flicker of their window either.
      */
     beforeCapture?: () => Promise<boolean>;
+    /** The whole viewport as a PNG rather than the agent's JPEG (R-281); see `CaptureInput`. */
+    lossless?: boolean;
   },
   deps: PhotographDeps = {},
 ): Promise<PhotographOutcome> {
@@ -135,6 +176,7 @@ export async function photographTab(
         ...(facts.frame === undefined ? {} : { frame: facts.frame }),
         scale,
         path: decideCapturePath(facts.emulated ? facts.frame : undefined, input.region, scale),
+        ...(input.lossless ? { lossless: true } : {}),
       },
       {
         ...(deps.captureDeps ?? {}),

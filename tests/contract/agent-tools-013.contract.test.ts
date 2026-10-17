@@ -76,11 +76,15 @@ describe("T325 the upload_image tool", () => {
     expectRejected(request, { tabId: TAB, imageId: IMAGE, ref: REF, filename: "a\\b.png" }, "a backslash");
   });
 
-  it("names the picture `screenshot.png` when the agent does not", () => {
-    const request = contractExport<{ parse: (input: unknown) => { filename: string } }>(
+  it("names the picture after its type when the agent does not (R-281)", () => {
+    const request = contractExport<{ parse: (input: unknown) => { filename?: string } }>(
       "agentUploadImageRequestSchema",
     );
-    expect(request.parse({ tabId: TAB, imageId: IMAGE, ref: REF }).filename).toBe("screenshot.png");
+    // No default in the schema: the name follows the bytes, which only the host holding them knows.
+    expect(request.parse({ tabId: TAB, imageId: IMAGE, ref: REF }).filename).toBeUndefined();
+    const name = contractExport<(mimeType: string) => string>("defaultScreenshotFileName");
+    expect(name("image/png")).toBe("screenshot.png");
+    expect(name("image/jpeg")).toBe("screenshot.jpg");
   });
 
   it("hands the worker bytes and a target, and no id at all", () => {

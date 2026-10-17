@@ -7,7 +7,15 @@ import {
 import { deliverImageOnTab, setFilesOnTab } from "../content-broker.js";
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
-import { toPicturePoint, toViewportPoint, type ScreenshotSpaces } from "./coordinate-space.js";
+import {
+  toPicturePoint,
+  toViewportPoint,
+  viewportChangedReason,
+  type ScreenshotSpace,
+  type ScreenshotSpaces,
+} from "./coordinate-space.js";
+import { captureFrameFacts } from "./photograph.js";
+import type { CaptureFrame } from "../../chrome-adapters/capture.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
@@ -60,6 +68,11 @@ export type AgentUploadDeps = {
    * `coordinate` is read off that picture, so it is mapped back into the frame's pixels.
    */
   screenshotSpaces?: ScreenshotSpaces;
+  /**
+   * The emulated size a session gave the tab, as the pictures read it (012/T311): with the tab's
+   * own size over its zoom, the frame a drop point is checked against (R-282).
+   */
+  currentViewport?: (tabId: number) => Promise<CaptureFrame | undefined>;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -105,6 +118,8 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     tool: UploadTool,
     tabId: number,
     args: Record<string, unknown>,
+    /** Asked once the tab is bound and before the gate: a reason here refuses with nothing asked. */
+    beforeGate?: (binding: AgentPageBinding) => Promise<string | undefined>,
   ): Promise<Admitted | NotAdmitted> {
     const { callId } = request;
     const ownership = await deps.tabOwnership(request.sessionId, tabId);
@@ -116,6 +131,8 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       return { ok: false, response: bindingFailureResponse(callId, bound, "not-actionable") };
     }
     const binding = bound.binding;
+    const refused = beforeGate ? await beforeGate(binding) : undefined;
+    if (refused !== undefined) return { ok: false, response: answer(callId, "failed", refused) };
 
     const record = await deps.siteModes.get(binding.site);
     const decision = decideGate({
@@ -240,15 +257,32 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       target: { ref: string } | { coordinate: { x: number; y: number } };
       file: { name: string; type: string; bytesBase64: string };
     };
-    const admitted = await admit(request, "upload_image", args.tabId, args as unknown as Record<string, unknown>);
+    // A drop point is in the latest picture's pixels (R-280), and that picture must still be of a
+    // page this wide (R-282) - checked before the owner is asked about a point that has moved.
+    let space: ScreenshotSpace | undefined;
+    const readSpace = async (bound: AgentPageBinding): Promise<string | undefined> => {
+      if ("ref" in args.target) return undefined;
+      space = await deps.screenshotSpaces?.get(bound.tabId).catch(() => undefined);
+      if (!space) return undefined;
+      const facts = await captureFrameFacts(
+        bound.tabId,
+        deps.currentViewport ? { currentViewport: deps.currentViewport } : {},
+      );
+      return viewportChangedReason(space, facts.frame?.width);
+    };
+    const admitted = await admit(
+      request,
+      "upload_image",
+      args.tabId,
+      args as unknown as Record<string, unknown>,
+      readSpace,
+    );
     if (!admitted.ok) return admitted.response;
     const { context, binding } = admitted;
 
     // A ref goes to the frame that minted it (004/T160, as `file_upload`); a point goes to the top
     // frame, which does its own one-level descent into a frame it can read (FR-171).
     const frame = "ref" in args.target ? await discoverFrame(context, binding, args.target.ref) : undefined;
-    // A drop point is in the latest picture's pixels; the page resolves it in the frame's (R-280).
-    const space = "ref" in args.target ? undefined : await deps.screenshotSpaces?.get(binding.tabId).catch(() => undefined);
     const target =
       "ref" in args.target
         ? { handle: args.target.ref }

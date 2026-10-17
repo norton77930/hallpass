@@ -22,6 +22,7 @@ type Sent = { method: string; params?: Record<string, unknown> };
 type Fake = FrameCaptureDeps & {
   sent: Sent[];
   holders: string[];
+  photographed: Array<{ tabId: number; lossless?: boolean }>;
 };
 
 function fakeDeps(options: {
@@ -33,9 +34,11 @@ function fakeDeps(options: {
 }): Fake {
   const sent: Sent[] = [];
   const holders: string[] = [];
+  const photographed: Fake["photographed"] = [];
   return {
     sent,
     holders,
+    photographed,
     attachments: {
       acquire: async (_tabId, holder) => {
         holders.push(`acquire:${holder}`);
@@ -59,10 +62,12 @@ function fakeDeps(options: {
         return {};
       },
     },
-    photograph: async () =>
-      options.photograph === "ok"
-        ? { ok: true, image: { data: "png-bytes", cropped: false, scale: 1 } }
-        : { ok: false, reason: "capture-refused" as const },
+    photograph: async (input) => {
+      photographed.push({ tabId: input.tabId, ...(input.lossless === undefined ? {} : { lossless: input.lossless }) });
+      return options.photograph === "ok"
+        ? { ok: true, image: { data: "png-bytes", mimeType: "image/png" as const, cropped: false, scale: 1 } }
+        : { ok: false, reason: "capture-refused" as const };
+    },
     ...(options.lastViewport === undefined ? {} : { lastViewport: options.lastViewport }),
   };
 }
@@ -109,6 +114,8 @@ describe("captureFrame", () => {
     });
     // Nothing was asked of a tab that refused the attachment.
     expect(deps.sent).toEqual([]);
+    // The offscreen page encodes the frame; the agent's frame budget is no reason to degrade it first.
+    expect(deps.photographed).toEqual([{ tabId: 7, lossless: true }]);
     // The holder is dropped even on the path that never got it, so a refusal leaves no claim behind.
     expect(deps.holders).toEqual(["acquire:recording", "drop:recording"]);
   });

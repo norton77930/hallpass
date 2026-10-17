@@ -264,3 +264,72 @@ without fitting — fixes the DPR case but not the client-side shrink on large v
 **Behaviour this matches**: the observable behaviour of the reference extension (whole-viewport
 picture normalised to CSS size then fitted; a later point scaled by viewport over picture size;
 no stored size passes it through), described here in our own words and implemented independently.
+
+## R-281 — A whole-viewport picture as a JPEG, stepped down under the frame budget (2026-10-17)
+
+**Observed**: after R-280 a whole-viewport picture is at most 1 568 pixels on the long edge, but a
+busy page as a PNG of that size can still exceed the 700 000-character frame budget, and the answer
+was a refusal the agent had to act on with a smaller `scale` - a second call, and a smaller picture
+than it needed.
+
+**Decision**:
+
+- Seam: `captureTab` (capture adapter). Every path first produces the lossless picture at the size
+  R-280 settled (as captured, one canvas pass, or the protocol's fitted clip). For a whole viewport
+  that picture is then encoded once more in the worker (`OffscreenCanvas.convertToBlob`,
+  `image/jpeg`) at its own pixel size: quality 0.75, then - while the base64 is over the budget -
+  0.70, 0.65 … 0.10, each time from the same lossless source rather than from the previous JPEG,
+  so a low quality is one loss. The encode runs after the owner's tab is put back.
+- The last step is handed back even when still over; the decision to refuse is one function
+  (`screenshotTooLarge`) used by the `screenshot` tool and `computer`'s `screenshot`, so both refuse
+  with the same reason and hint. Before this, `computer`'s `screenshot` had no size check at all.
+- No canvas (no `OffscreenCanvas`) leaves the PNG and the answer says `image/png`.
+- Regions and the owner's crop stay PNG: they are small, and the agent reads detail off them. The
+  GIF recorder keeps its own protocol JPEG; its `captureVisibleTab` fallback asks for the picture
+  `lossless` and still receives the PNG, because the offscreen document encodes the frame at the
+  recording's own quality and the agent's frame budget would only degrade it (and cost up to
+  fourteen encodes) on a page busy enough to exceed it.
+- `upload_image`: the schema no longer defaults `filename`; the host, which holds the bytes and
+  their type, names an unnamed picture `screenshot.jpg` or `screenshot.png`.
+
+**Alternatives**: (a) ask `captureVisibleTab` / `Page.captureScreenshot` for JPEG directly - the
+visible-tab picture usually still needs a canvas pass for R-280's size, and stepping down would
+mean capturing again (another flicker of the owner's window) or re-encoding a JPEG; (b) keep PNG
+and only refuse - the status quo the owner chose to leave.
+
+**Behaviour this matches**: the observable behaviour of the reference extension (whole-viewport
+pictures as JPEG at 0.75, stepped down by 0.05 to 0.10 while over a size cap and never refused;
+crops as PNG), described here in our own words and implemented independently. Ours still refuses
+past 0.10, because a frame over the native-messaging limit breaks the link for every later call.
+
+## R-282 — Refusing a point whose picture is of a page of another width (2026-10-17)
+
+**Why**: R-280's per-tab space is dropped when our own tools change the frame, but not when the
+owner resizes the window or zooms the page; a point read off the old picture is then mapped through
+a ratio that no longer holds.
+
+**Measured** (scratch extension in Playwright Chromium, window 1 200×800 on the DPR 1.25 display,
+5 000 px page): `chrome.tabs.get().width` stayed 1 187 at page zoom 100 %, 125 % and 80 %, while
+`innerWidth` was 1 187 / 950 / 1 484 and `documentElement.clientWidth` 1 172 / 938 / 1 465. So the
+tab's size does not follow page zoom; the page's CSS width is the tab's size over
+`chrome.tabs.getZoom` (1 187 / 1.25 = 949.6 → 950; 1 187 / 0.8 = 1 483.75 → 1 484).
+
+**Decision**:
+
+- One measurement for both ends: `captureFrameFacts` - the emulation record when a session set a
+  viewport, else the tab's size divided by its zoom (unknown zoom is 100 %). The picture's frame is
+  this (so it now holds under page zoom, which R-280's tab-size frame did not), and the check at
+  action time is this. No page round trip: both are extension API reads. `computer`'s own
+  `Page.getLayoutMetrics` is not reused: its `clientWidth` leaves out a classic scrollbar (1 172 vs
+  1 187) and would refuse every point on a scrolling page.
+- `viewportChangedReason(space, width)`: refuse when |width − frame.width| > 1; never when there is
+  no space or no width. Height is ignored.
+- Where: the effect runner checks right after it reads the space and before preflight, the gate
+  and any prompt, for calls that carry a point (`carriesPoint`, the same places `toViewportArgs`
+  maps); `upload_image` checks after binding and before its gate; the `screenshot` tool checks a
+  `region` against the frame it measures anyway. Outcome `failed`, reason
+  `viewport-changed (screenshot of a W px wide page, now N); …`.
+
+**Alternatives**: (a) drop the space silently on a change - the agent's next point would be read as
+CSS pixels while it is still looking at a shrunk picture; (b) compare `tab.width` alone - misses page
+zoom entirely; (c) measure `innerWidth` with a script per action - a page round trip on every point.

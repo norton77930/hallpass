@@ -11,6 +11,7 @@ import {
   agentNativeResponseSchema,
   agentToolArgSchemas,
   agentUploadImageRequestSchema,
+  defaultScreenshotFileName,
   AGENT_BROWSER_CHOICE_BOUND_MS,
   promptWaitingFrameSchema,
   AGENT_015_REASON_OUTCOMES,
@@ -2367,7 +2368,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       args: {
         tabId: target,
         target: ref === undefined ? { coordinate } : { ref },
-        file: { name: filename, type: held.file.type, bytesBase64: held.file.bytesBase64 },
+        // An unnamed picture is named after the type of the bytes it is (R-281); a name the agent
+        // gave is kept as written.
+        file: {
+          name: filename ?? defaultScreenshotFileName(held.file.type),
+          type: held.file.type,
+          bytesBase64: held.file.bytesBase64,
+        },
       },
     };
   }

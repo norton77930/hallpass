@@ -1244,6 +1244,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     statedPlan: (site) => plans.get(site),
     onAdmitted: (site, step) => plans.admit(site, step),
     screenshotSpaces,
+    // The frame a drop point's picture was of, read the way the pictures read it (R-282).
+    currentViewport: (tabId) => viewportEmulation.current(tabId),
     reportDiagnostic: reportTestDiagnostic,
   });
 

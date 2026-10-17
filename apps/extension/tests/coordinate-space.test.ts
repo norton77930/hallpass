@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  carriesPoint,
   spaceOfPicture,
   toPicturePoint,
   toViewportArgs,
   toViewportPoint,
   toViewportRegion,
+  viewportChangedReason,
 } from "../src/service-worker/agent-tools/coordinate-space.js";
+import { captureFrameFacts } from "../src/service-worker/agent-tools/photograph.js";
 import {
   AGENT_SCREENSHOT_SPACES_KEY,
   createScreenshotSpaceStore,
@@ -102,6 +105,50 @@ describe("an agent's point, in the page's pixels", () => {
     expect(spaceOfPicture({ width: 1429, height: 804 }, { width: 2560, height: 1440 })).toEqual(LARGE);
     expect(spaceOfPicture({}, { width: 2560, height: 1440 })).toBeUndefined();
     expect(spaceOfPicture({ width: 1429, height: 804 }, undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * A space read against a frame that has since changed width (012 change log 2026-10-17, R-282).
+ *
+ * The owner can resize the window or zoom the page between the picture and the click; the stored
+ * ratio would then put the point somewhere else. A width more than a pixel away refuses the point;
+ * height is ignored (an infobar changes only that), and nothing to compare against never refuses.
+ */
+describe("a point read off a picture of a frame that is no longer that wide", () => {
+  it("names the change when the width moved by more than a pixel", () => {
+    const reason = viewportChangedReason(LARGE, 2048);
+    expect(reason).toBe(
+      "viewport-changed (screenshot of a 2560 px wide page, now 2048); the window width or page zoom " +
+        "changed since the last screenshot - take a new screenshot first",
+    );
+  });
+
+  it("passes a pixel of rounding, no picture, and a width nobody could measure", () => {
+    expect(viewportChangedReason(LARGE, 2561)).toBeUndefined();
+    expect(viewportChangedReason(LARGE, 2559)).toBeUndefined();
+    expect(viewportChangedReason(undefined, 900)).toBeUndefined();
+    expect(viewportChangedReason(LARGE, undefined)).toBeUndefined();
+  });
+
+  it("measures the frame in CSS pixels under page zoom, where the tab's own size does not move", async () => {
+    // Measured (R-282): a 1 187-wide tab reports 1 187 at 100 %, 125 % and 80 % zoom while the
+    // page's innerWidth is 1 187 / 950 / 1 484 - the tab's size divided by the zoom.
+    const tabSize = async () => ({ width: 1187, height: 707 });
+    expect((await captureFrameFacts(7, { tabSize, tabZoom: async () => 1.25 })).frame).toEqual({ width: 950, height: 566 });
+    expect((await captureFrameFacts(7, { tabSize, tabZoom: async () => 0.8 })).frame).toEqual({ width: 1484, height: 884 });
+    // A zoom nobody could read is 100 %, which is what the frame meant before.
+    expect((await captureFrameFacts(7, { tabSize, tabZoom: async () => undefined })).frame).toEqual({ width: 1187, height: 707 });
+  });
+
+  it("knows which calls carry a point, and which only name elements", () => {
+    expect(carriesPoint("computer", { action: "left_click", x: 1, y: 2 })).toBe(true);
+    expect(carriesPoint("computer", { action: "screenshot" })).toBe(false);
+    expect(carriesPoint("click", { target: { x: 1, y: 2 } })).toBe(true);
+    expect(carriesPoint("click", { target: { ref: "t_a" } })).toBe(false);
+    expect(carriesPoint("drag", { from: { ref: "t_a" }, to: { x: 1, y: 2 } })).toBe(true);
+    expect(carriesPoint("upload_image", { target: { coordinate: { x: 1, y: 2 } } })).toBe(true);
+    expect(carriesPoint("type", { text: "hi" })).toBe(false);
   });
 });
 

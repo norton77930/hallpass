@@ -6,6 +6,7 @@ import {
   decideCapturePath,
   FRESH_FRAME_CAP_MS,
   SCREENSHOT_MAX_AREA_PX,
+  SCREENSHOT_MAX_BASE64_CHARS,
   SCREENSHOT_MAX_EDGE_PX,
   viewportPictureSize,
   type CropRequest,
@@ -180,7 +181,7 @@ describe("T310 capture geometry", () => {
       },
     );
 
-    expect(image).toEqual({ data: "cHJvdG9jb2w=", cropped: true, scale: 0.5, width: 150, height: 50 });
+    expect(image).toEqual({ data: "cHJvdG9jb2w=", mimeType: "image/png", cropped: true, scale: 0.5, width: 150, height: 50 });
     expect(activated).toEqual([7, 1]);
   });
 
@@ -196,7 +197,7 @@ describe("T310 capture geometry", () => {
       },
     );
 
-    expect(image).toEqual({ data: "aVZCT1J3MEtHZ28=", cropped: false, scale: 1 });
+    expect(image).toEqual({ data: "aVZCT1J3MEtHZ28=", mimeType: "image/png", cropped: false, scale: 1 });
   });
 });
 
@@ -296,7 +297,7 @@ describe("a whole-viewport picture comes back in the frame's pixels", () => {
       { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => IMAGE, crop: cropOf(IMAGE) },
     );
 
-    expect(image).toEqual({ data: "UkVTSVpFRA==", cropped: false, scale: 1, width: 1187, height: 707 });
+    expect(image).toEqual({ data: "UkVTSVpFRA==", mimeType: "image/png", cropped: false, scale: 1, width: 1187, height: 707 });
     // The whole picture is the source, drawn out at the frame's size.
     expect(cropRect(FRAME, IMAGE, undefined, 1)).toEqual({
       x: 0,
@@ -319,7 +320,7 @@ describe("a whole-viewport picture comes back in the frame's pixels", () => {
       },
     );
 
-    expect(image).toEqual({ data: "QUJD", cropped: false, scale: 1, width: 1187, height: 707 });
+    expect(image).toEqual({ data: "QUJD", mimeType: "image/png", cropped: false, scale: 1, width: 1187, height: 707 });
     expect(cropped).toBe(false);
   });
 
@@ -377,7 +378,7 @@ describe("a whole-viewport picture comes back in the frame's pixels", () => {
     expect(Math.round(clip.width * clip.scale)).toBeLessThanOrEqual(1430);
     expect(Math.round(clip.height * clip.scale)).toBeLessThanOrEqual(805);
     // The answer says the scale the agent asked for, and the size the picture actually is.
-    expect(image).toEqual({ data: "QUJD", cropped: false, scale: 1, width: 1430, height: 804 });
+    expect(image).toEqual({ data: "QUJD", mimeType: "image/png", cropped: false, scale: 1, width: 1430, height: 804 });
   });
 
   /** Review minors: the two other branches of a fitted protocol picture. */
@@ -401,7 +402,7 @@ describe("a whole-viewport picture comes back in the frame's pixels", () => {
     // out would leave the agent's later points unmapped against a picture that was shrunk.
     const image = await protocolCapture({ measure: async () => undefined });
 
-    expect(image).toEqual({ data: "QUJD", cropped: false, scale: 1, width: 1429, height: 804 });
+    expect(image).toEqual({ data: "QUJD", mimeType: "image/png", cropped: false, scale: 1, width: 1429, height: 804 });
   });
 
   it("brings a surface that came back larger than asked down to the fitted size", async () => {
@@ -416,6 +417,120 @@ describe("a whole-viewport picture comes back in the frame's pixels", () => {
     });
 
     expect(requests).toEqual([{ frame: EMULATED_LARGE, scale: 1 }]);
-    expect(image).toEqual({ data: "Zml0dGVk", cropped: false, scale: 1, width: 1429, height: 804 });
+    expect(image).toEqual({ data: "Zml0dGVk", mimeType: "image/png", cropped: false, scale: 1, width: 1429, height: 804 });
+  });
+});
+
+/**
+ * A whole-viewport picture leaves as a JPEG (012 change log 2026-10-17, R-281).
+ *
+ * Quality 0.75 first; while the base64 is over the frame budget it is encoded again, from the same
+ * lossless picture, 0.05 lower each time down to 0.10. The pixel size never moves, so the space the
+ * agent's points are mapped through is the same one a PNG would have set. A region stays a PNG.
+ */
+describe("a whole-viewport picture is a JPEG, stepped down under the frame budget", () => {
+  function encoder(overUntil: number) {
+    const qualities: number[] = [];
+    const encodeJpeg = async (_png: string, quality: number) => {
+      qualities.push(quality);
+      return quality > overUntil ? "J".repeat(SCREENSHOT_MAX_BASE64_CHARS + 1) : `jpeg-${quality}`;
+    };
+    return { qualities, encodeJpeg };
+  }
+
+  it("encodes once at 0.75 when that fits", async () => {
+    const { qualities, encodeJpeg } = encoder(1);
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME },
+      { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => FRAME, encodeJpeg },
+    );
+
+    expect(qualities).toEqual([0.75]);
+    expect(image).toEqual({
+      data: "jpeg-0.75",
+      mimeType: "image/jpeg",
+      cropped: false,
+      scale: 1,
+      width: 1187,
+      height: 707,
+    });
+  });
+
+  it("re-encodes 0.05 lower while over the budget, keeping the pixel size", async () => {
+    const { qualities, encodeJpeg } = encoder(0.5);
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME },
+      { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => FRAME, encodeJpeg },
+    );
+
+    expect(qualities).toEqual([0.75, 0.7, 0.65, 0.6, 0.55, 0.5]);
+    expect(image).toMatchObject({ data: "jpeg-0.5", mimeType: "image/jpeg", width: 1187, height: 707 });
+  });
+
+  it("stops at 0.10 and hands back that picture, still over, for the caller to refuse", async () => {
+    const { qualities, encodeJpeg } = encoder(0);
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME },
+      { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => FRAME, encodeJpeg },
+    );
+
+    expect(qualities).toHaveLength(14);
+    expect(qualities.at(-1)).toBe(0.1);
+    expect(image.mimeType).toBe("image/jpeg");
+    expect(image.data.length).toBeGreaterThan(SCREENSHOT_MAX_BASE64_CHARS);
+  });
+
+  it("encodes the fitted protocol picture too", async () => {
+    const { qualities, encodeJpeg } = encoder(1);
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME, path: decideCapturePath(FRAME, undefined, 1) },
+      {
+        send: async (_tabId, method) => (method === "Page.captureScreenshot" ? { data: "QUJD" } : {}),
+        measure: async () => FRAME,
+        encodeJpeg,
+      },
+    );
+
+    expect(qualities).toEqual([0.75]);
+    expect(image).toMatchObject({ data: "jpeg-0.75", mimeType: "image/jpeg", width: 1187, height: 707 });
+  });
+
+  it("keeps a region a PNG and never encodes it", async () => {
+    const { qualities, encodeJpeg } = encoder(1);
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, region: REGION, frame: FRAME },
+      {
+        captureVisibleTab: async () => "data:image/png;base64,QUJD",
+        crop: async () => ({ data: "cmVnaW9u", width: 375, height: 125 }),
+        encodeJpeg,
+      },
+    );
+
+    expect(qualities).toEqual([]);
+    expect(image).toMatchObject({ data: "cmVnaW9u", mimeType: "image/png", cropped: true });
+  });
+
+  it("says PNG when the worker has no canvas to encode with", async () => {
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME },
+      {
+        captureVisibleTab: async () => "data:image/png;base64,QUJD",
+        measure: async () => FRAME,
+        encodeJpeg: async () => undefined,
+      },
+    );
+
+    expect(image).toMatchObject({ data: "QUJD", mimeType: "image/png" });
+  });
+
+  it("leaves a lossless picture as the PNG it is, for a caller that encodes it itself", async () => {
+    const { qualities, encodeJpeg } = encoder(1);
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, frame: FRAME, lossless: true },
+      { captureVisibleTab: async () => "data:image/png;base64,QUJD", measure: async () => FRAME, encodeJpeg },
+    );
+
+    expect(qualities).toEqual([]);
+    expect(image).toMatchObject({ data: "QUJD", mimeType: "image/png" });
   });
 });

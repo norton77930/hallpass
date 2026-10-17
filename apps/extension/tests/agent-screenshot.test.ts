@@ -113,6 +113,24 @@ describe("T035 agent screenshot", () => {
     expect(activated).toEqual([AGENT_TAB, OWNER_TAB]);
   });
 
+  it("names the type the bytes are: a whole viewport as a JPEG, a region as a PNG (R-281)", async () => {
+    const { runner } = harness({
+      captureDeps: {
+        captureVisibleTab: async () => PNG,
+        activateTab: async () => undefined,
+        measure: async () => FRAME,
+        crop: async () => ({ data: "cmVnaW9u", width: 125, height: 63 }),
+        encodeJpeg: async () => "/9j/4AAQ",
+      },
+    });
+
+    const whole = await runner.run(request({ tabId: AGENT_TAB }));
+    const region = await runner.run(request({ tabId: AGENT_TAB, region: { x: 4, y: 8, width: 100, height: 50 } }));
+
+    expect(whole.result).toMatchObject({ mimeType: "image/jpeg", data: "/9j/4AAQ" });
+    expect(region.result).toMatchObject({ mimeType: "image/png", data: "cmVnaW9u" });
+  });
+
   it("leaves the window alone when the agent's tab is already the one on screen", async () => {
     const activated: number[] = [];
     const { runner } = harness({
@@ -463,6 +481,32 @@ describe("a whole-viewport picture sets the tab's coordinate space", () => {
 
     expect(response.result).toMatchObject({ width: 1187, height: 707, frame: FRAME, coverage: "viewport" });
     expect(remembered).toEqual([{ tabId: AGENT_TAB, space: { frame: FRAME, image: { width: 1187, height: 707 } } }]);
+  });
+
+  it("refuses a region once the page is no longer as wide as the picture's, before photographing (R-282)", async () => {
+    const space = { frame: { width: 2560, height: 1440 }, image: { width: 1429, height: 804 } };
+    const captured: number[] = [];
+    const { runner } = harness({
+      tabSize: async () => ({ width: 2048, height: 1440 }),
+      screenshotSpaces: { get: async () => space, remember: async () => undefined },
+      captureDeps: {
+        captureVisibleTab: async (windowId) => (captured.push(windowId), PNG),
+        activateTab: async () => undefined,
+      },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB, region: { x: 10, y: 10, width: 100, height: 100 } }));
+
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason:
+        "viewport-changed (screenshot of a 2560 px wide page, now 2048); the window width or page zoom " +
+        "changed since the last screenshot - take a new screenshot first",
+    });
+    expect(captured).toEqual([]);
+    // A whole screenshot is how the agent gets a new space: never refused for the old one.
+    expect((await runner.run(request({ tabId: AGENT_TAB }))).outcome).toBe("ok");
   });
 
   /**
