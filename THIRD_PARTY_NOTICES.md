@@ -10,7 +10,7 @@ packages. Each is used under its own licence, reproduced in its package director
 | react | 19.2.8 | MIT | extension side panel |
 | react-dom | 19.2.8 | MIT | extension side panel |
 | zod | 4.4.3 | MIT | extension, MCP server, relay |
-| @modelcontextprotocol/sdk | 1.30.0 | MIT | MCP server |
+| @modelcontextprotocol/sdk | 1.31.0 | MIT | MCP server |
 | gifenc | 1.0.3 | MIT | extension off-screen document (GIF encoding for session recordings) |
 
 Development and test dependencies (TypeScript, Vite, Vitest, Playwright, Testing Library, omggif and
