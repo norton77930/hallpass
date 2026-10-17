@@ -112,13 +112,13 @@ test.describe("agent viewport", () => {
         expect(answer.scale).toBe(named);
         expect(answer.frame).toEqual({ width: 2560, height: 1440 });
         expect(answer.coverage).toBe("viewport");
-        picture = pngSize(retried.images[0]!.data);
+        picture = imageSize(retried.images[0]!.data);
       } else {
         expect(shot.images).toHaveLength(1);
         const answer = shot.json as { frame: { width: number; height: number }; coverage: string };
         expect(answer.frame).toEqual({ width: 2560, height: 1440 });
         expect(answer.coverage).toBe("viewport");
-        picture = pngSize(shot.images[0]!.data);
+        picture = imageSize(shot.images[0]!.data);
       }
       // The picture is the frame fitted to at most 1 568 px on its long edge and about 1.15 MP, its
       // aspect kept (R-280) - never the frame's own 2 560 px, which a client would shrink unseen.
@@ -318,7 +318,7 @@ test.describe("agent viewport", () => {
         region: { x: 100, y: 200, width: 300, height: 100 },
       });
       expect(nativeRegion.isError, nativeRegion.text).toBe(false);
-      const regionSize = pngSize(nativeRegion.images[0]!.data);
+      const regionSize = imageSize(nativeRegion.images[0]!.data);
       const density = regionSize.width / 300;
       console.log(`[T317] region ${regionSize.width}x${regionSize.height} of 300x100 - density ${density}`);
       expect(density, `region ${regionSize.width}x${regionSize.height}`).toBeGreaterThan(1);
@@ -333,7 +333,7 @@ test.describe("agent viewport", () => {
 
       const region = await client.callTool("screenshot", { tabId, region: { x: 100, y: 200, width: 300, height: 100 } });
       expect(region.isError, region.text).toBe(false);
-      expect(pngSize(region.images[0]!.data)).toEqual({ width: 300, height: 100 });
+      expect(imageSize(region.images[0]!.data)).toEqual({ width: 300, height: 100 });
       expect(region.json).toMatchObject({
         coverage: "region",
         frame: { width: 1200, height: 800 },
@@ -346,7 +346,7 @@ test.describe("agent viewport", () => {
         scale: 0.5,
       });
       expect(half.isError, half.text).toBe(false);
-      expect(pngSize(half.images[0]!.data)).toEqual({ width: 150, height: 50 });
+      expect(imageSize(half.images[0]!.data)).toEqual({ width: 150, height: 50 });
       expect(half.json).toMatchObject({ scale: 0.5 });
 
       // ---- a region the frame does not contain is refused, and the frame is named (FR-164) ----
@@ -411,11 +411,27 @@ async function layoutFacts(page: Page): Promise<{ bar: string; menuShown: boolea
   });
 }
 
-/** The image's own pixels, from the PNG header: IHDR carries width and height at bytes 16 to 23. */
-function pngSize(base64: string): { width: number; height: number } {
-  const header = Buffer.from(base64.slice(0, 44), "base64");
-  expect(header.length, "a PNG header is 24 bytes").toBeGreaterThanOrEqual(24);
-  return { width: header.readUInt32BE(16), height: header.readUInt32BE(20) };
+/**
+ * The image's own pixels (R-281: a whole viewport is a JPEG, a region a PNG). A PNG's IHDR carries
+ * width and height at bytes 16 to 23; a JPEG's start-of-frame segment carries height then width.
+ */
+function imageSize(base64: string): { width: number; height: number } {
+  const bytes = Buffer.from(base64, "base64");
+  if (bytes[0] === 0x89) {
+    expect(bytes.length, "a PNG header is 24 bytes").toBeGreaterThanOrEqual(24);
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  expect(bytes.readUInt16BE(0), "neither a PNG nor a JPEG").toBe(0xffd8);
+  let at = 2;
+  while (at + 9 < bytes.length) {
+    const marker = bytes.readUInt16BE(at);
+    // SOF0..SOF15, less DHT (C4), JPG (C8) and DAC (CC), which share the range.
+    if (marker >= 0xffc0 && marker <= 0xffcf && ![0xffc4, 0xffc8, 0xffcc].includes(marker)) {
+      return { width: bytes.readUInt16BE(at + 7), height: bytes.readUInt16BE(at + 5) };
+    }
+    at += 2 + bytes.readUInt16BE(at + 2);
+  }
+  throw new Error("no start-of-frame segment in the JPEG");
 }
 
 /** The window the tab sits in - the thing `viewport` must *not* touch (FR-157). */

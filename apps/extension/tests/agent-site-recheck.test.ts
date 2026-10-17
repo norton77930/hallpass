@@ -105,7 +105,7 @@ async function effectsHarness(
   const siteModes = createSiteModeStore();
   await siteModes.set(SITE, { mode: "skip-checks" });
   const rect: TargetRect = { x: 100, y: 40, width: 80, height: 20 };
-  const capture = vi.fn(async () => ({ data: "UE5H", cropped: false, scale: 1 }));
+  const capture = vi.fn(async () => ({ data: "UE5H", mimeType: "image/png" as const, cropped: false, scale: 1 }));
   const runner = createAgentEffects({
     context: testSessionContexts(),
     siteModes,
@@ -345,7 +345,7 @@ describe("014 re-check of the site before delivery (2026-10-11)", () => {
   it("the screenshot tool captures nothing when the page starts moving to another site before the capture", async () => {
     const address: Address = { url: PAGE_URL };
     installChrome(address);
-    const capture = vi.fn(async () => ({ data: "UE5H", cropped: false, scale: 1 }));
+    const capture = vi.fn(async () => ({ data: "UE5H", mimeType: "image/png" as const, cropped: false, scale: 1 }));
     const runner = createAgentReads({
       context: testSessionContexts(),
       bindings: createAgentPageBindings(),

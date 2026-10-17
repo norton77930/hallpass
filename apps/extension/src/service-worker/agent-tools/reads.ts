@@ -30,8 +30,13 @@ import type { AgentSessionContexts, AgentToolContext } from "./context.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
-import { captureFrameFacts, photographTab, type PhotographDeps } from "./photograph.js";
-import { spaceOfPicture, toViewportRegion, type ScreenshotSpaces } from "./coordinate-space.js";
+import { captureFrameFacts, photographTab, screenshotTooLarge, type PhotographDeps } from "./photograph.js";
+import {
+  spaceOfPicture,
+  toViewportRegion,
+  viewportChangedReason,
+  type ScreenshotSpaces,
+} from "./coordinate-space.js";
 import {
   committedOrigin,
   readTabAddress,
@@ -153,30 +158,10 @@ const INTERACTIVE_ROLES = new Set([
 ]);
 
 /**
- * The largest base64 payload one native-messaging frame may carry back.
- *
- * The relay re-frames every message with the 1 MiB native-messaging limit (`native-frame.ts`), so a
- * screenshot larger than that would not fail politely - it would break the link for every later
- * call. Refusing here keeps the failure to the one call that caused it. Raising the framing bound
- * is a protocol decision, not this tool's to make.
+ * The frame budget a screenshot answer must fit (moved to the capture adapter with R-281, where the
+ * whole-viewport JPEG steps its quality down under it); re-exported for the callers that name it here.
  */
-export const SCREENSHOT_MAX_BASE64_CHARS = 700_000;
-
-/**
- * The scale that would have fitted, for the refusal to name (012/FR-162, R-171).
- *
- * A picture shrinks with the *area*, so the linear scale that fits is the square root of the ratio
- * the payload is over by; rounded **down** to a tenth, because a hint that lands a hair over the
- * ceiling is a second refusal. It is the whole reason the refusal is worth reading: an agent told
- * "too large" learns nothing, and an agent told "retry with scale 0.5" has its next call written.
- *
- * Relative to the scale the picture was taken at (2026-10-17, R-280): a picture still too large at
- * 0.5 needs less than 0.5, and a hint computed as if it had been 1 would name a scale that is no
- * smaller than the one that just failed.
- */
-function fittingScale(length: number, usedScale: number): number {
-  return Math.max(Math.floor(usedScale * Math.sqrt(SCREENSHOT_MAX_BASE64_CHARS / length) * 10) / 10, 0.1);
-}
+export { SCREENSHOT_MAX_BASE64_CHARS } from "../../chrome-adapters/capture.js";
 
 /** Whether the rectangle is one the viewport actually contains (012/FR-164). */
 function insideFrame(region: CaptureRegion, frame: CaptureFrame): boolean {
@@ -514,6 +499,10 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     // A region is read off the latest whole picture like a point is (2026-10-17 follow-up, R-280):
     // into the frame's pixels before it is judged or cropped. No picture yet leaves it as asked.
     const space = region ? await deps.screenshotSpaces?.get(tabId).catch(() => undefined) : undefined;
+    // And only while the page is as wide as it was in that picture (R-282): the frame just measured
+    // is the one the picture's was measured as, so no further measurement is needed for it.
+    const changed = viewportChangedReason(space, facts.frame?.width);
+    if (changed !== undefined) return answer(callId, "failed", changed);
     const framed = region ? toViewportRegion(region, space) : undefined;
     if (facts.frame === undefined) {
       deps.reportDiagnostic?.("agent.screenshot.frame-unknown");
@@ -549,13 +538,10 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
         : answer(callId, "not-readable", "capture-refused");
     }
     const image = photograph.image;
-    if (image.data.length > SCREENSHOT_MAX_BASE64_CHARS) {
+    const tooLarge = screenshotTooLarge(image);
+    if (tooLarge !== undefined) {
       deps.reportDiagnostic?.("agent.screenshot.too-large");
-      return answer(
-        callId,
-        "failed",
-        `screenshot-too-large; retry with scale ≤ ${fittingScale(image.data.length, image.scale)}`,
-      );
+      return answer(callId, "failed", tooLarge);
     }
     if (!region) {
       // The picture the agent will aim by from now on (R-280); a region is a close-up and leaves
@@ -571,7 +557,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       callId,
       outcome: "ok",
       result: {
-        mimeType: "image/png",
+        // What the bytes are (R-281): a whole viewport is a JPEG wherever the worker could encode one.
+        mimeType: image.mimeType,
         data: image.data,
         cropped: image.cropped,
         ...(image.width === undefined || image.height === undefined

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
-import { captureTab } from "../src/chrome-adapters/capture.js";
+import { captureTab, SCREENSHOT_MAX_BASE64_CHARS } from "../src/chrome-adapters/capture.js";
 import { createAgentEffects } from "../src/service-worker/agent-tools/effects.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
@@ -96,7 +96,7 @@ function installChrome(): void {
 function harness(overrides: Partial<Parameters<typeof createAgentEffects>[0]> = {}) {
   const fake = fakeAttachments();
   const siteModes = createSiteModeStore();
-  const capture = vi.fn(async () => ({ data: "UE5H", cropped: true, scale: 1 }));
+  const capture = vi.fn(async () => ({ data: "UE5H", mimeType: "image/png" as const, cropped: true, scale: 1 }));
   const runner = createAgentEffects({
     context: testSessionContexts(),
     siteModes,
@@ -244,6 +244,24 @@ describe("T138 acting by position", () => {
       // size Chrome will report.
       scale: 1,
       coverage: "viewport",
+    });
+  });
+
+  it("refuses a picture still too large to send, in the screenshot tool's own words", async () => {
+    // R-281: the lowest JPEG quality can still be over the frame budget; the `screenshot` tool's
+    // refusal, scale hint included, is the one answer - never a frame that breaks the link.
+    const huge = "A".repeat(SCREENSHOT_MAX_BASE64_CHARS * 2);
+    const { runner, siteModes } = harness({
+      capture: vi.fn(async () => ({ data: huge, mimeType: "image/jpeg" as const, cropped: false, scale: 0.5 })),
+    });
+    await allowed(siteModes);
+
+    const response = await runner.run(request({ action: "screenshot" }));
+
+    expect(response).toEqual({
+      callId: "call-computer",
+      outcome: "failed",
+      reason: "screenshot-too-large; retry with scale ≤ 0.3",
     });
   });
 
@@ -412,7 +430,7 @@ describe("computer aims in the latest picture's pixels", () => {
     delete (globalThis as { chrome?: unknown }).chrome;
   });
 
-  function spaced() {
+  function spaced(currentViewport: () => Promise<{ width: number; height: number } | undefined> = async () => EMULATED) {
     const items: Record<string, unknown> = {};
     const screenshotSpaces = createScreenshotSpaceStore({
       session: {
@@ -427,10 +445,69 @@ describe("computer aims in the latest picture's pixels", () => {
     return harness({
       capture: captureTab,
       captureDeps: { activateTab: async () => undefined, measure: async () => FITTED },
-      currentViewport: async () => EMULATED,
+      currentViewport,
       screenshotSpaces,
     });
   }
+
+  /**
+   * 012 change log 2026-10-17 (R-282): the frame the picture was of is no longer the frame the
+   * point would land in - the window was resized or the page zoomed - so the point is refused before
+   * anything is asked or delivered, and the next whole screenshot is what lets it through again.
+   */
+  describe("a frame whose width changed since the picture", () => {
+    const CHANGED =
+      "viewport-changed (screenshot of a 2560 px wide page, now 2048); the window width or page zoom " +
+      "changed since the last screenshot - take a new screenshot first";
+
+    it("refuses a computer point and a point target, and delivers nothing", async () => {
+      let frame = EMULATED;
+      const { runner, siteModes, commands } = spaced(async () => frame);
+      await allowed(siteModes);
+      await runner.run(request({ action: "screenshot" }));
+      frame = { width: 2048, height: 1440 };
+
+      const computed = await runner.run(request({ action: "left_click", x: 500, y: 300 }));
+      const clicked = await runner.run({
+        callId: "call-click",
+        sessionId: "session-c1",
+        tool: "click",
+        tabId: AGENT_TAB,
+        args: { tabId: AGENT_TAB, target: { x: 500, y: 300 } },
+      });
+
+      expect(computed).toEqual({ callId: "call-computer", outcome: "failed", reason: CHANGED });
+      expect(clicked).toEqual({ callId: "call-click", outcome: "failed", reason: CHANGED });
+      expect(mouse(commands)).toEqual([]);
+    });
+
+    it("lets the point through once a new whole screenshot is taken", async () => {
+      let frame = EMULATED;
+      const { runner, siteModes, commands } = spaced(async () => frame);
+      await allowed(siteModes);
+      await runner.run(request({ action: "screenshot" }));
+      frame = { width: 2048, height: 1440 };
+      await runner.run(request({ action: "screenshot" }));
+
+      const response = await runner.run(request({ action: "left_click", x: 500, y: 300 }));
+
+      expect(response.outcome).toBe("ok");
+      expect(mouse(commands).some((event) => event.type === "mousePressed")).toBe(true);
+    });
+
+    it("ignores a height change, and a width nobody could measure", async () => {
+      let frame: { width: number; height: number } | undefined = EMULATED;
+      const { runner, siteModes } = spaced(async () => frame);
+      await allowed(siteModes);
+      await runner.run(request({ action: "screenshot" }));
+
+      frame = { width: 2560, height: 1400 };
+      expect((await runner.run(request({ action: "left_click", x: 500, y: 300 }))).outcome).toBe("ok");
+      // No emulation record and a tab Chrome will not size: 0.12.2's behaviour, not a refusal.
+      frame = undefined;
+      expect((await runner.run(request({ action: "left_click", x: 500, y: 300 }))).outcome).toBe("ok");
+    });
+  });
 
   it("clicks at the picture's point scaled back into the frame", async () => {
     const { runner, siteModes, commands } = spaced();

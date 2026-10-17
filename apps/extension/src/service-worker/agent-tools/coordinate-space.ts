@@ -111,6 +111,38 @@ export function toViewportArgs(
   return mapped;
 }
 
+/**
+ * Whether the call has a point in it to map: the same places `toViewportArgs` maps, so a call this
+ * says nothing about is one whose meaning no stored space can change.
+ */
+export function carriesPoint(tool: string, args: Record<string, unknown>): boolean {
+  if (tool === "computer" && typeof args.x === "number" && typeof args.y === "number") return true;
+  return (["target", "from", "to"] as const).some((key) => {
+    const value = args[key];
+    return isPoint(value) || (typeof value === "object" && value !== null && isPoint((value as { coordinate?: unknown }).coordinate));
+  });
+}
+
+/**
+ * Why a point read off the latest picture may no longer be aimed with it, or nothing (012 change log
+ * 2026-10-17, R-282).
+ *
+ * The owner can resize the window or zoom the page after the picture; the stored ratio would then
+ * put the point somewhere the agent did not look. Only the width is compared - the debugging
+ * infobar and bars like it change the height alone - and a pixel either way is rounding. No picture,
+ * or a current width nobody could measure, never refuses: that is what every point meant before.
+ */
+export function viewportChangedReason(
+  space: ScreenshotSpace | undefined,
+  currentWidth: number | undefined,
+): string | undefined {
+  if (!space || currentWidth === undefined || Math.abs(currentWidth - space.frame.width) <= 1) return undefined;
+  return (
+    `viewport-changed (screenshot of a ${space.frame.width} px wide page, now ${currentWidth}); ` +
+    "the window width or page zoom changed since the last screenshot - take a new screenshot first"
+  );
+}
+
 /** The part of the per-tab store a runner needs: read the space, and set or clear it. */
 export type ScreenshotSpaces = {
   get(tabId: number): Promise<ScreenshotSpace | undefined>;

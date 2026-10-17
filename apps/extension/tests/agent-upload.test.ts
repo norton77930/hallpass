@@ -468,6 +468,31 @@ describe("T334 agent upload_image", () => {
     });
   });
 
+  it("refuses a drop point once the page is no longer as wide as the picture's, before asking anyone (R-282)", async () => {
+    const space = { frame: { width: 2560, height: 1440 }, image: { width: 1429, height: 804 } };
+    const { runner, deliverImage, siteModes, prompts } = imageHarness({
+      screenshotSpaces: { get: async () => space, remember: async () => undefined },
+      currentViewport: async () => ({ width: 2048, height: 1440 }),
+    });
+    await siteModes.set(SITE, { mode: "ask" });
+    const asked = vi.spyOn(prompts, "ask");
+
+    const response = await runner.run(imageRequest({ coordinate: { x: 500, y: 300 } }));
+
+    expect(response).toEqual({
+      callId: "call-2",
+      outcome: "failed",
+      reason:
+        "viewport-changed (screenshot of a 2560 px wide page, now 2048); the window width or page zoom " +
+        "changed since the last screenshot - take a new screenshot first",
+    });
+    expect(asked).not.toHaveBeenCalled();
+    expect(deliverImage).not.toHaveBeenCalled();
+    // A ref names an element, not a place: no picture's width has anything to say about it.
+    await siteModes.set(SITE, { mode: "skip-checks" });
+    expect((await runner.run(imageRequest({ ref: "t_zone" }))).outcome).toBe("ok");
+  });
+
   it("reports where the drop landed in the picture's pixels, the space the agent gave the point in", async () => {
     const space = { frame: { width: 2560, height: 1440 }, image: { width: 1429, height: 804 } };
     const deliverImage = vi.fn(async () => ({

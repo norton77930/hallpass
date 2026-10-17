@@ -102,10 +102,10 @@ test.describe("agent upload image", () => {
 
       // ============= 1/2: the visible input =============
       const intoVisible = await call("upload_image", { tabId, imageId: shotAnswer.imageId, ref: visible.ref });
-      expect(intoVisible).toEqual({ delivery: "input", file: { name: "screenshot.png", size } });
+      expect(intoVisible).toEqual({ delivery: "input", file: { name: "screenshot.jpg", size } });
       // Read off the page's own `change` handler: the name, the decoded size, the type - and the
       // word the handler writes only when it actually ran.
-      await expect(page.locator("#report-visible")).toHaveText(`screenshot.png:${size}:image/png changed`);
+      await expect(page.locator("#report-visible")).toHaveText(`screenshot.jpg:${size}:image/jpeg changed`);
       // Both events, in order (FR-173). A page that heard only `change` is a different fact.
       expect(await page.locator("#report-visible").getAttribute("data-events")).toBe("input,change");
 
@@ -117,7 +117,7 @@ test.describe("agent upload image", () => {
         filename: "page-shot.png",
       });
       expect(intoHidden).toEqual({ delivery: "input", file: { name: "page-shot.png", size } });
-      await expect(page.locator("#report-hidden")).toHaveText(`page-shot.png:${size}:image/png changed`);
+      await expect(page.locator("#report-hidden")).toHaveText(`page-shot.png:${size}:image/jpeg changed`);
       expect(await page.locator("#report-hidden").getAttribute("data-events")).toBe("input,change");
       // The same id twice: the picture is kept for the five minutes the sentence promises, not spent
       // by the first upload (FR-168).
@@ -151,12 +151,12 @@ test.describe("agent upload image", () => {
       expect(shot.isError, shot.text).toBe(false);
       const imageId = (shot.json as { imageId: string }).imageId;
       const size = Buffer.from(shot.images[0]!.data, "base64").length;
-      const dropped = `dragenter,dragover,drop|screenshot.png:${size}:image/png`;
+      const dropped = `dragenter,dragover,drop|screenshot.jpg:${size}:image/jpeg`;
 
       // ============= 1/3: a coordinate, which is how a position-aiming agent works =============
       await reset(page);
       const atPoint = await call("upload_image", { tabId, imageId, coordinate: ZONE_CENTRE });
-      expect(atPoint).toEqual({ delivery: "drop", file: { name: "screenshot.png", size }, point: ZONE_CENTRE });
+      expect(atPoint).toEqual({ delivery: "drop", file: { name: "screenshot.jpg", size }, point: ZONE_CENTRE });
       // The three events a browser sends, in that order, sharing one file (FR-173). No `dragleave`:
       // the zone records one if it hears it, and it must not.
       await expect(page.locator("#report-zone")).toHaveText(dropped);
@@ -167,13 +167,13 @@ test.describe("agent upload image", () => {
       const atRef = await call("upload_image", { tabId, imageId, ref: zone.ref });
       // The answer says *where* it landed, which for a ref is the element's centre - the same point
       // the coordinate case named, so the two paths are shown to agree.
-      expect(atRef).toEqual({ delivery: "drop", file: { name: "screenshot.png", size }, point: ZONE_CENTRE });
+      expect(atRef).toEqual({ delivery: "drop", file: { name: "screenshot.jpg", size }, point: ZONE_CENTRE });
       await expect(page.locator("#report-zone")).toHaveText(dropped);
 
       // ============= 3/3: one level down, into a document the agent never named =============
       await reset(page);
       const inChild = await call("upload_image", { tabId, imageId, coordinate: CHILD_POINT });
-      expect(inChild).toEqual({ delivery: "drop", file: { name: "screenshot.png", size }, point: CHILD_POINT });
+      expect(inChild).toEqual({ delivery: "drop", file: { name: "screenshot.jpg", size }, point: CHILD_POINT });
       // The child's own zone heard it and said so through `postMessage`, and the parent's zone -
       // which the point passed over on its way in - heard nothing.
       await expect(page.locator("#report-child")).toHaveText(dropped);
@@ -291,8 +291,8 @@ test.describe("agent upload image", () => {
         // And the newer one is still there, which is what makes the line above eviction rather than
         // a session that simply lost both.
         const kept = await call("upload_image", { tabId, imageId: secondAnswer.imageId, ref: visible.ref });
-        expect(kept).toMatchObject({ delivery: "input", file: { name: "screenshot.png" } });
-        await expect(page.locator("#report-visible")).toContainText("screenshot.png:");
+        expect(kept).toMatchObject({ delivery: "input", file: { name: "screenshot.jpg" } });
+        await expect(page.locator("#report-visible")).toContainText("screenshot.jpg:");
 
         await call("tabs_close", { tabId });
       } finally {
@@ -364,8 +364,8 @@ test.describe("agent upload image", () => {
       await panel.clickButton(ui("agent.allowOnce"));
       const allowed = await allowedCall;
       expect(allowed.isError, allowed.text).toBe(false);
-      expect(allowed.json).toEqual({ delivery: "input", file: { name: "screenshot.png", size } });
-      await expect(page.locator("#report-visible")).toHaveText(`screenshot.png:${size}:image/png changed`);
+      expect(allowed.json).toEqual({ delivery: "input", file: { name: "screenshot.jpg", size } });
+      await expect(page.locator("#report-visible")).toHaveText(`screenshot.jpg:${size}:image/jpeg changed`);
 
       // FR-174: one line on the session's card, written from pieces by the panel - the delivery the
       // page reported decides which of the two sentences it is.
@@ -432,9 +432,9 @@ test.describe("agent upload image", () => {
         afterRestart.isError,
         `the picture did not outlive the worker: ${afterRestart.text}\nmcp-server stderr:\n${client.stderr()}`,
       ).toBe(false);
-      expect(afterRestart.json).toEqual({ delivery: "drop", file: { name: "screenshot.png", size }, point: ZONE_CENTRE });
+      expect(afterRestart.json).toEqual({ delivery: "drop", file: { name: "screenshot.jpg", size }, point: ZONE_CENTRE });
       await expect(page.locator("#report-zone")).toHaveText(
-        `dragenter,dragover,drop|screenshot.png:${size}:image/png`,
+        `dragenter,dragover,drop|screenshot.jpg:${size}:image/jpeg`,
       );
     } finally {
       await live?.close();

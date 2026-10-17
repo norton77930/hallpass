@@ -3,6 +3,14 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.12.3 — 2026-10-18
+
+- **整頁截圖改成 JPEG**:不帶 `region` 的 `screenshot` 與 `computer` 的截圖改回傳品質 0.75 的 `image/jpeg`,像素尺寸和 0.12.2 一樣。還是超過單次回應上限時，每次降 0.05 重壓，最低到 0.10,仍太大才拒絕；`computer` 的截圖現在也會像 `screenshot` 一樣回「請用 scale ≤ … 重試」,不再整個呼叫失敗。區域截圖維持 PNG、保留螢幕實際像素。
+- **`upload_image` 的預設檔名跟著圖的格式**:沒給 `filename` 時，整頁截圖叫 `screenshot.jpg`、區域截圖叫 `screenshot.png`;有給就照給的。
+- **頁面寬度變了，座標動作會被擋下**:上一張整頁截圖之後，若頁面寬度改變(調整或貼齊視窗、縮放頁面),用座標的動作(`computer`、指標工具的座標形式、`drag`、`scroll`、`upload_image` 的放下位置、截圖的 `region`)在動手前就回 `viewport-changed`,請 agent 重新截圖。只有高度改變(例如出現提示列)不會擋。
+- **頁面縮放算進頁面尺寸**:截圖回報的頁面尺寸與座標換算現在考慮分頁的縮放比例；0.12.2 在縮放過的頁面上是用未縮放的尺寸換算。
+- GIF 錄製的備援畫格不變(無損，由錄製器自己編碼)。
+
 ## 0.12.2 — 2026-10-17
 
 - **從截圖上量的座標，點下去就是那裡**:以前整頁截圖是螢幕實際像素(125% 縮放時，1187 寬的頁面截出 1484 寬),agent 給的座標卻被當成頁面(CSS)像素，照截圖點會偏掉，常點到旁邊的元素或超出頁面。現在整頁截圖以頁面尺寸回傳，最長邊不超過 1568、總面積約 115 萬像素以內；之後 agent 給的座標(`computer`、`click` 等指標工具的座標形式、`drag`、`scroll`、`upload_image` 的放下位置、截圖的 `region`)都以這張圖的像素來讀，再換回頁面座標。

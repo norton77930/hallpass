@@ -1,9 +1,9 @@
 # Hallpass(瀏覽器代理橋接)— 操作手冊(維護者版)
 
-2026-10-17 · 適用於 **Hallpass 0.12.2**(37 個 MCP 工具、side panel 三態、錄製 GIF 與對話框、
+2026-10-18 · 適用於 **Hallpass 0.12.3**(37 個 MCP 工具、side panel 三態、錄製 GIF 與對話框、
 中斷、跳站確認、上傳資料夾詢問、0.7.0 的配對與提示修正、0.8.0 的「答案要誠實」、0.9.0 的「看得懂的面板」,
 0.10.0 的「工作階段的網站計畫」、0.11.0 的「好幾個瀏覽器同時服務,由你決定 agent 用哪一個」,
-0.11.1、0.11.2 的可靠性修正,0.12.0 的「按下與截圖前再確認一次網站」,0.12.1 把同樣的確認延伸到按鍵，以及 0.12.2 讓截圖與座標使用同一套像素)。
+0.11.1、0.11.2 的可靠性修正,0.12.0 的「按下與截圖前再確認一次網站」,0.12.1 把同樣的確認延伸到按鍵，0.12.2 讓截圖與座標使用同一套像素，以及 0.12.3 的 JPEG 截圖與「頁面寬度變了就請 agent 重新截圖」)。
 
 > 這份是中文的維護者手冊。英文的 README 是公開入口;開發從 <https://github.com/norton77930/hallpass> 繼續。
 這份文件寫給**要開始用 AI(Claude Code)操作自己瀏覽器的人**;開發與測試的細節在
@@ -24,8 +24,8 @@ Claude Code ──stdio──▶ mcp-server.js ──loopback──▶ relay(nat
 
 ## 1. 安裝(做一次)
 
-> **不想碰 repo?用安裝包。**`npm run package` 會產出 `release/hallpass-<版本>.zip`(目前是 `hallpass-0.12.2.zip`,
-> 也可以從 release v0.12.2 下載;擴充功能資料夾 + 自足的
+> **不想碰 repo?用安裝包。**`npm run package` 會產出 `release/hallpass-<版本>.zip`(目前是 `hallpass-0.12.3.zip`,
+> 也可以從 release v0.12.3 下載;擴充功能資料夾 + 自足的
 > host + `install.ps1` / `uninstall.ps1` + README)。解壓後跑 `install.ps1`,照它印出的路徑載入擴充功能、把 server
 > 定義貼進你用的 MCP client(README 有 Claude Code / Claude Desktop / Codex CLI / Cursor 四種的位置)。只需要 Node 24,
 > 不需要 npm、不需要 build。下面 1.2–1.4 是從 repo 安裝的方式。
@@ -235,10 +235,10 @@ agent 回報 `not-yours` / `held-by-session` 表示那個分頁不是它的(你�
 
 ## 8. 更新與移除
 
-- **升級到 0.12.2(從 0.3.0 之後的任何版本)**:名稱、路徑、MCP server 名稱(`hallpass`)都沒變,只有兩步,
+- **升級到 0.12.3(從 0.3.0 之後的任何版本)**:名稱、路徑、MCP server 名稱(`hallpass`)都沒變,只有兩步,
   先後順序都可以:
-  1. **重新安裝主機**(這一版主機有改,主機與擴充功能的版本要一致)。安裝包使用者從 release v0.12.2
-     (<https://github.com/norton77930/hallpass/releases/tag/v0.12.2>)下載 `hallpass-0.12.2.zip`,解壓縮到原本的
+  1. **重新安裝主機**(這一版主機有改,主機與擴充功能的版本要一致)。安裝包使用者從 release v0.12.3
+     (<https://github.com/norton77930/hallpass/releases/tag/v0.12.3>)下載 `hallpass-0.12.3.zip`,解壓縮到原本的
      資料夾(蓋掉 `extension\`、`host\`、兩個 `.ps1` 和 README),重新執行 `install.ps1`;從 repo 安裝的人先
      `npm run build`,再跑 `npm run agent-host:install`。`tabs_context` 的提示文字(0.12.0)、選瀏覽器時的側欄提醒句(0.11.2)、主機啟動器用完整路徑找 Node.js(0.11.1)、多瀏覽器選擇(0.11.0)、
      網站計畫(0.10.0)、工作階段卡片上的專案名稱(0.9.0)、batch 裡上傳檔案與配對卡片自動收回(0.8.0),
@@ -309,7 +309,7 @@ Chrome DevTools 協定的畫面模擬,不是把視窗拉大拉小,因為視窗�
 放進它正在操作的頁面——不需要先存成檔案,也不會存成檔案。每一張截圖的回覆(`screenshot` 與
 `computer` 的 screenshot 動作)現在都會帶一個 `imageId`,agent 直接引用它:給 `ref` 就放進
 `<input type="file">`(頁面自己用按鈕藏起來的那種也放得進去),給 `coordinate` 就在那個點上做一次
-拖放(dragenter → dragover → drop),同源子框架往下**一層**也找得到;檔名預設 `screenshot.png`。
+拖放(dragenter → dragover → drop),同源子框架往下**一層**也找得到;檔名預設跟著圖的格式：整頁截圖 `screenshot.jpg`、局部截圖 `screenshot.png`。
 
 - **留什麼**:只有那張截圖的位元組、它的型別與拍攝時間,**只在本機 MCP server(host)的程序記憶體裡**,
   不寫磁碟、不進瀏覽器儲存、側欄也讀不到;另一個 agent 的 session 是另一個程序,拿不到你這個的 id。
@@ -604,4 +604,4 @@ owner 2026-09-18 的規則,008 全程適用,寫在這裡是因為它省下的時
 ---
 
 開發從 2026-09-19 起在公開 repo 繼續:<https://github.com/norton77930/hallpass>。原私有 repo 只作存檔。
-本手冊適用 Hallpass 0.12.2(2026-10-17)。
+本手冊適用 Hallpass 0.12.3(2026-10-18)。

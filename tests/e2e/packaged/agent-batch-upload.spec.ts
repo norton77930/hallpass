@@ -92,9 +92,9 @@ test.describe("015 uploads inside a batch", () => {
 
         // Read off the page's own handlers: each input's `change`, then the submit, which saw all three.
         await expect(page.locator("#attachment-report")).toHaveText("allowed.txt:20");
-        await expect(page.locator("#picture-report")).toHaveText(`screenshot.png:${size}:image/png`);
+        await expect(page.locator("#picture-report")).toHaveText(`screenshot.jpg:${size}:image/jpeg`);
         await expect(page.locator("#received")).toHaveText(
-          `subject=batch-typed; attachment=allowed.txt:20; picture=screenshot.png:${size}`,
+          `subject=batch-typed; attachment=allowed.txt:20; picture=screenshot.jpg:${size}`,
         );
         // Inside the owner's list, so nobody was asked.
         expect(await directoryCardUp(panel), "a file inside the owner's list raised a card").toBe(false);

@@ -1248,6 +1248,31 @@ describe("T012 agent MCP server", () => {
       });
     });
 
+    it("carries a JPEG through as a JPEG, and names an unnamed upload of it after its type (R-281)", async () => {
+      const JPEG = "/9j/4AAQSkZJRgABAQ==";
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        answers: {
+          ...SHOT,
+          screenshot: { callId: "", outcome: "ok" as const, result: { mimeType: "image/jpeg", data: JPEG, cropped: false } },
+        },
+      });
+      await worker.waitForHello();
+
+      const shot = await client.callTool("screenshot", { tabId: 3 });
+      expect(shot.images).toEqual([{ data: JPEG, mimeType: "image/jpeg" }]);
+      const { imageId } = shot.json as { imageId: string };
+
+      await client.callTool("upload_image", { tabId: 3, imageId, ref: "tgt-1" });
+      await client.callTool("upload_image", { tabId: 3, imageId, ref: "tgt-1", filename: "evidence.png" });
+
+      // No name given: the default follows the bytes. A name given is the agent's, kept as written.
+      expect(worker.requests[1]?.args).toMatchObject({ file: { name: "screenshot.jpg", type: "image/jpeg" } });
+      expect(worker.requests[2]?.args).toMatchObject({ file: { name: "evidence.png", type: "image/jpeg" } });
+    });
+
     it("refuses a call that names both a ref and a coordinate, or neither", async () => {
       client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
       worker = await startFakeAgentWorker({ env: { LOCALAPPDATA: dataDir }, pairing: "accept", answers: SHOT });

@@ -324,3 +324,39 @@ called.
     space the agent gave its `coordinate` in.
   - Unchanged: the gate, the owner's summary and a stated plan see the arguments the agent wrote,
     and only delivery uses the mapped point.
+- **2026-10-17 — A whole-viewport picture leaves as a JPEG** (R-281; owner decision; changes
+  FR-162's refusal). A whole-viewport picture that fits the size budget can still be over the
+  frame budget as a PNG, and a refused picture is a dead end until the agent tries a scale.
+  Settled:
+  - A whole-viewport picture (the `screenshot` tool without `region`, and `computer`'s
+    `screenshot`) is answered as `image/jpeg` at quality 0.75. While its base64 is over the frame
+    budget (700 000 characters) it is encoded again, from the same lossless picture, 0.05 lower,
+    down to 0.10 inclusive. Only the quality changes: the pixel size, `width`/`height` and the
+    stored space are exactly those of R-280.
+  - Still over at 0.10: refused as `screenshot-too-large; retry with scale ≤ X` by both tools, from
+    one function, with the hint relative to the scale used. A worker without a canvas answers the
+    PNG it took, and says `image/png`.
+  - A `region` picture and the owner's crop around a point stay PNG at native density; the GIF
+    recorder is unchanged.
+  - `mimeType` in every answer is the type of the bytes; the result contract accepts `image/png`
+    and `image/jpeg`; the host passes it through and keeps it with the cached picture.
+  - `upload_image` uploads a cached JPEG as `image/jpeg`; with no `filename` it is named
+    `screenshot.jpg` (`screenshot.png` for a PNG). A `filename` the agent gives is kept as written.
+- **2026-10-17 — A point is refused once the page is no longer as wide as its picture** (R-282;
+  owner decision). R-280 maps a point through the latest picture's ratio, but the owner can resize
+  the window or zoom the page after it, and the old ratio then puts the point somewhere the agent
+  did not look. Settled:
+  - When a tab has a stored space and the page's current CSS width differs from the stored frame
+    width by more than 1 px, every point the agent sends is refused before the gate and before
+    anything is delivered: `computer`'s `x`/`y`, a point `target` of the pointer, keyboard and
+    `scroll` tools, either end of `drag`, `upload_image`'s drop `coordinate`, and a `screenshot`
+    `region`. The reason says the window width or page zoom changed since the last screenshot and
+    to take a new one. A whole screenshot is never refused for it, and writes the new space.
+  - Height is not compared: the debugging infobar and bars like it change only the height.
+  - The width is measured the way the picture's frame was: the emulation record, else the tab's
+    size divided by its page zoom. **FR-158/FR-163 amended**: the frame of a tab nothing emulates
+    is that CSS width (measured: a tab's own size does not follow page zoom, the page's width does),
+    so a picture, a region's crop density and a mapped point also agree under page zoom. A width
+    that cannot be measured never refuses (0.12.2's behaviour).
+  - No stored space: unchanged, points are CSS pixels. The gate, the owner's summary and a stated
+    plan still see the arguments as the agent wrote them.

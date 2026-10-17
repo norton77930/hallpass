@@ -91,7 +91,9 @@ export async function captureFrame(tabId: number, deps: FrameCaptureDeps): Promi
     await deps.attachments.drop(tabId, "recording");
   }
   if (!viewport) return { ok: false, reason: "no-viewport" };
-  const photographed = await photograph({ tabId });
+  // Lossless: the offscreen document encodes the frame at the recording's own quality, and the
+  // agent's frame budget (R-281) has nothing to do with a frame that never crosses the native link.
+  const photographed = await photograph({ tabId, lossless: true });
   if (!photographed.ok) return { ok: false, reason: "capture-failed" };
   return {
     ok: true,
