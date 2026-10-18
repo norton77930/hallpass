@@ -10,7 +10,7 @@ import {
   resolveHandleOnTab,
   resolveSupportedTabPage,
 } from "../src/service-worker/content-broker.js";
-import { pageFailureCode, pageOutcomeCode } from "../src/service-worker/page-ports.js";
+import { isPageDeadline, pageFailureCode, pageOutcomeCode } from "../src/service-worker/page-ports.js";
 import { TEST_NONCE } from "./helpers/content-frames.js";
 
 afterEach(() => {
@@ -650,6 +650,100 @@ describe("content broker contract wiring", () => {
       // The stage code must name the action round trip: reporting a collection failure for an action
       // that may already have happened sends a reader of the diagnostics to the wrong place.
       expect(settled).toBe("content.execution");
+    });
+
+    /**
+     * 015 follow-up to the change log 2026-10-18: an in-page effect probes, and injects when nothing
+     * answers, before it sends the action. A probe or injection that hit its own deadline is the
+     * same "did not answer in time" the action round trip is, so it must stay marked as one for the
+     * effect runner to answer page-not-responding - not the bare stage code. A probe the page
+     * answered wrongly is not a deadline and keeps its old answer.
+     */
+    const executeScroll = () =>
+      executeOnActiveTab({
+        taskId: "task-execute-probe",
+        operationId: "op-execute-probe",
+        runtimeEpochId: "epoch-1",
+        nonce: TEST_NONCE,
+        expectedTabId: 7,
+        capability: "browser.scroll",
+        arguments: { mode: "viewport", direction: "down", magnitude: "small" },
+        documentEpoch: "doc-live",
+        canonicalOrigin: "https://example.test",
+      });
+    const settleMarked = async (operation: Promise<unknown>) => {
+      const outcome = operation.then(
+        () => "resolved",
+        (error: unknown) => ({ code: pageFailureCode(error), deadline: isPageDeadline(error) }),
+      );
+      const advanced = vi.advanceTimersByTimeAsync(120_000).then(() => "still-pending");
+      return Promise.race([outcome, advanced]);
+    };
+
+    it("keeps the deadline mark on an effect's probe or injection that never answered (015)", async () => {
+      vi.useFakeTimers();
+      (globalThis as { chrome?: unknown }).chrome = {
+        scripting: { async executeScript() {} },
+        tabs: {
+          async query() {
+            return [{ id: 7, url: "https://example.test/page" }];
+          },
+          sendMessage() {
+            return new Promise(() => {});
+          },
+        },
+      };
+      expect(await settleMarked(executeScroll())).toEqual({ code: "content.probe", deadline: true });
+
+      (globalThis as { chrome?: unknown }).chrome = {
+        scripting: {
+          executeScript() {
+            return new Promise(() => {});
+          },
+        },
+        tabs: {
+          async query() {
+            return [{ id: 7, url: "https://example.test/page" }];
+          },
+          async sendMessage() {
+            throw new Error("Could not establish connection. Receiving end does not exist.");
+          },
+        },
+      };
+      expect(await settleMarked(executeScroll())).toEqual({ code: "content.injection", deadline: true });
+    });
+
+    it("does not mark a probe the page answered wrongly, or an injection that failed, as a deadline", async () => {
+      vi.useFakeTimers();
+      (globalThis as { chrome?: unknown }).chrome = {
+        scripting: { async executeScript() {} },
+        tabs: {
+          async query() {
+            return [{ id: 7, url: "https://example.test/page" }];
+          },
+          async sendMessage() {
+            return { documentEpoch: "" };
+          },
+        },
+      };
+      expect(await settleMarked(executeScroll())).toEqual({ code: "content.probe", deadline: false });
+
+      (globalThis as { chrome?: unknown }).chrome = {
+        scripting: {
+          async executeScript() {
+            throw new Error("Cannot access contents of the page.");
+          },
+        },
+        tabs: {
+          async query() {
+            return [{ id: 7, url: "https://example.test/page" }];
+          },
+          async sendMessage() {
+            throw new Error("Could not establish connection. Receiving end does not exist.");
+          },
+        },
+      };
+      expect(await settleMarked(executeScroll())).toEqual({ code: "content.injection", deadline: false });
     });
   });
 });

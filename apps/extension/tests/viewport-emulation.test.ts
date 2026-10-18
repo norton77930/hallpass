@@ -75,7 +75,7 @@ function fakeAttachments(options: { attached?: number[]; refuse?: boolean } = {}
     async send(tabId: number, method: string, params?: Record<string, unknown>) {
       if (failMethods.has(method)) throw new Error(`refused ${method}`);
       commands.push({ tabId, method, ...(params ? { params } : {}) });
-      return method === "Page.getLayoutMetrics" ? { cssLayoutViewport: { clientWidth: 1187, clientHeight: 707 } } : {};
+      return {};
     },
     attached() {
       return [...attached];
@@ -192,14 +192,13 @@ describe("T305 the emulation over an attachment", () => {
     const { attachments, activity, emulation } = build();
     await emulation.set(SESSION, TAB, { width: 375, height: 812 });
 
-    // The real size is measured on the way out, while the attachment this emulation held is still
-    // there: after the clear, so it is the window's own size rather than the one being given back.
-    await expect(emulation.reset(SESSION, TAB)).resolves.toEqual({ ok: true, real: { width: 1187, height: 707 } });
+    // The reset answers that it was done and nothing else: the size it states is the capture's
+    // frame (agent-tools/tabs.ts), so the clear is the last thing sent over the attachment.
+    await expect(emulation.reset(SESSION, TAB)).resolves.toEqual({ ok: true });
 
     expect(methods(attachments.commands)).toEqual([
       "Emulation.setDeviceMetricsOverride",
       "Emulation.clearDeviceMetricsOverride",
-      "Page.getLayoutMetrics",
     ]);
     expect(attachments.holders.at(-1)).toEqual({ tabId: TAB, holder: "viewport", verb: "drop" });
     await expect(emulation.current(TAB)).resolves.toBeUndefined();
@@ -341,12 +340,12 @@ describe("T305 the emulation over an attachment", () => {
     expect(methods(attachments.commands)).toEqual([]);
   });
 
-  it("measures a tab nobody emulated when there is already an attachment on it", async () => {
+  it("sends nothing for a tab nobody emulated even when there is already an attachment on it", async () => {
     const { attachments, emulation } = build({ attached: [TAB] });
 
-    await expect(emulation.reset(SESSION, TAB)).resolves.toEqual({ ok: true, real: { width: 1187, height: 707 } });
+    await expect(emulation.reset(SESSION, TAB)).resolves.toEqual({ ok: true });
 
-    expect(methods(attachments.commands)).toEqual(["Page.getLayoutMetrics"]);
+    expect(methods(attachments.commands)).toEqual([]);
   });
 
   /**

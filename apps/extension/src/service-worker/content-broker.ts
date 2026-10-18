@@ -317,9 +317,14 @@ async function ensureContentRuntime(
     frameId?: number;
   },
 ): Promise<ContentBinding> {
+  // A stage that hit its own deadline is rethrown as the marked failure `withDeadline` raised - same
+  // stage code, so every caller classifying by code reads it as before - so an in-page effect can
+  // answer it as the page not answering in time rather than as the bare stage (015 change log
+  // 2026-10-18, R-197). Every other failure is the unmarked stage failure it always was.
   try {
     return await probeContentRuntime(page, input);
   } catch (error) {
+    if (isDeadline(error)) throw error;
     if (!isNoReceiver(error)) throw pageFailure("content.probe");
   }
   try {
@@ -327,13 +332,13 @@ async function ensureContentRuntime(
     // injection would re-run the runtime in the top document, mint a fresh epoch there and fail
     // every in-flight read on the tab as `stale-context` (004/T115).
     await withDeadline(injectContentRuntime(page.tabId, input.frameId ?? 0), "content.injection");
-  } catch {
-    throw pageFailure("content.injection");
+  } catch (error) {
+    throw isDeadline(error) ? error : pageFailure("content.injection");
   }
   try {
     return await probeContentRuntime(page, input);
-  } catch {
-    throw pageFailure("content.probe");
+  } catch (error) {
+    throw isDeadline(error) ? error : pageFailure("content.probe");
   }
 }
 

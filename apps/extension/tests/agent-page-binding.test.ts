@@ -24,9 +24,10 @@ const PAGE_URL = `${SITE}/ordinary`;
 const NOT_RESPONDING_HINT =
   "The page did not answer for 10 s; it is still open. Retry the call, or take a screenshot to see its state.";
 
-type ProbeBehaviour = "answer" | "hang" | "refuse";
+type ProbeBehaviour = "answer" | "hang" | "refuse" | "absent";
+type InjectBehaviour = "ok" | "hang" | "fail";
 
-function installChrome(state: { probe: ProbeBehaviour; tabExists: boolean }): void {
+function installChrome(state: { probe: ProbeBehaviour; tabExists: boolean; inject?: InjectBehaviour }): void {
   const local: Record<string, unknown> = {};
   (globalThis as { chrome?: unknown }).chrome = {
     runtime: { id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
@@ -42,7 +43,13 @@ function installChrome(state: { probe: ProbeBehaviour; tabExists: boolean }): vo
         },
       },
     },
-    scripting: { async executeScript() {} },
+    scripting: {
+      executeScript() {
+        if (state.inject === "hang") return new Promise(() => {});
+        if (state.inject === "fail") return Promise.reject(new Error("Cannot access contents of the page."));
+        return Promise.resolve([]);
+      },
+    },
     tabs: {
       async get(tabId: number) {
         if (!state.tabExists || tabId !== AGENT_TAB) throw new Error(`No tab with id: ${tabId}.`);
@@ -56,6 +63,9 @@ function installChrome(state: { probe: ProbeBehaviour; tabExists: boolean }): vo
         if (frame.type !== "content.probe") return Promise.reject(new Error(`unexpected frame ${frame.type}`));
         if (state.probe === "hang") return new Promise(() => {});
         if (state.probe === "refuse") return Promise.resolve({ ok: false, reason: "stale-binding" });
+        if (state.probe === "absent") {
+          return Promise.reject(new Error("Could not establish connection. Receiving end does not exist."));
+        }
         return Promise.resolve({ documentEpoch: "doc-1", canonicalOrigin: SITE });
       },
     },
@@ -112,11 +122,12 @@ function click(): AgentNativeRequest {
 }
 
 describe("T400 binding failures name their reason", () => {
-  const state = { probe: "answer" as ProbeBehaviour, tabExists: true };
+  const state = { probe: "answer" as ProbeBehaviour, tabExists: true, inject: "ok" as InjectBehaviour };
 
   beforeEach(() => {
     state.probe = "answer";
     state.tabExists = true;
+    state.inject = "ok";
     installChrome(state);
   });
 
@@ -135,6 +146,28 @@ describe("T400 binding failures name their reason", () => {
     await vi.advanceTimersByTimeAsync(10_000);
 
     expect(await pending).toEqual({ ok: false, reason: "page-not-responding" });
+  });
+
+  it("an injection that hits the content deadline is page-not-responding, not not-actionable (015)", async () => {
+    vi.useFakeTimers();
+    state.probe = "absent";
+    state.inject = "hang";
+    const bindings = createAgentPageBindings();
+    const context = testSessionContexts().forCall("session-b1", "call-1");
+
+    const pending = bindings.bind(AGENT_TAB, context);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(await pending).toEqual({ ok: false, reason: "page-not-responding" });
+  });
+
+  it("an injection the browser refused stays not-actionable", async () => {
+    state.probe = "absent";
+    state.inject = "fail";
+    const bindings = createAgentPageBindings();
+    const context = testSessionContexts().forCall("session-b1", "call-1");
+
+    expect(await bindings.bind(AGENT_TAB, context)).toEqual({ ok: false, reason: "not-actionable" });
   });
 
   it("a tab that is gone stays stale", async () => {

@@ -5,6 +5,21 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.12.5 — 2026-10-18
+
+**A page too busy to answer is reported as such, and `viewport` reset states its size on one basis.**
+
+- **A busy page before the first action answers `page-not-responding` with the retry-safe hint.**
+  When reaching the page itself (checking or injecting the in-page runtime) runs out of time
+  before any input was sent, the agent is told `page-not-responding` and that it may retry,
+  instead of failing with `content.probe` / `content.injection` or being told the input may
+  have taken effect. A timeout after an input went out still says it may have taken effect.
+- **An action that arrives after its own cancel answers `cancelled`** instead of a stale-page
+  refusal; any other late request still gets the stale refusal.
+- **`viewport` reset reports the tab's size in page pixels, the same basis as the screenshot**,
+  whether or not the page had been measured (a measured page used to come back one scrollbar
+  narrower), and no longer measures the page for it.
+
 ## 0.12.4 — 2026-10-18
 
 **An effect the agent was told did not happen stays not done, and points stay right on a zoomed,

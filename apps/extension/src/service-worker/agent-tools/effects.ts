@@ -28,7 +28,7 @@ import {
 } from "../content-broker.js";
 import type { DownloadObserver } from "../download-observer.js";
 import { verifyPageEffect } from "../effect-verification.js";
-import { isPageDeadline, type PageExecutionOutcome } from "../page-ports.js";
+import { isPageDeadline, pageFailureCode, type PageExecutionOutcome } from "../page-ports.js";
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
 import { decideGate, type StatedPlan } from "./gate.js";
@@ -2490,11 +2490,22 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
             deadlineAt: budget.deadlineAt,
           });
         } catch (error) {
+          /**
+           * A probe or injection in front of the action frame that hit its deadline (015 change log
+           * 2026-10-18): no `content.execute-action` frame was ever sent, so nothing may have taken
+           * effect and the retry-safe words are the true ones. Only on the first attempt - once one
+           * has landed, a later attempt's silence is about a page already acted on.
+           */
+          const code = pageFailureCode(error);
+          if (isPageDeadline(error) && last === undefined && (code === "content.probe" || code === "content.injection")) {
+            return bindingFailureResponse(callId, { ok: false, reason: "page-not-responding" }, "not-actionable");
+          }
           // The executor threw *after* the effect may have begun, which is the one case where nothing
           // was observed at all. It is never reported as success.
           deps.reportDiagnostic?.("agent.effect.execute-uncertain");
-          // The action frame went out and the page did not answer it in time: the same fact, and the
-          // same words, as a spent budget (015 change log 2026-10-18).
+          // The action frame was sent and the page did not answer it in time (a first-attempt probe
+          // or injection deadline was answered above): the same fact, and the same words, as a spent
+          // budget (015 change log 2026-10-18).
           if (isPageDeadline(error)) return inputNotAnswered(callId);
           return answer(callId, "failed", error instanceof Error ? error.message : "execute-failed");
         }
