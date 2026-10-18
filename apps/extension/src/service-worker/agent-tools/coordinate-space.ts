@@ -129,8 +129,13 @@ export function carriesPoint(tool: string, args: Record<string, unknown>): boole
  *
  * The owner can resize the window or zoom the page after the picture; the stored ratio would then
  * put the point somewhere the agent did not look. Only the width is compared - the debugging
- * infobar and bars like it change the height alone - and a pixel either way is rounding. No picture,
- * or a current width nobody could measure, never refuses: that is what every point meant before.
+ * infobar and bars like it change the height alone - and a pixel either way is rounding of the
+ * frame's CSS width: it is the tab's DIP width divided by the zoom and rounded the same way every
+ * time, so an unchanged tab reads the same width and the tolerance is for that one rounding. It is
+ * in CSS pixels, not DIPs: below 100 % zoom one DIP is more than a CSS pixel (about 1.5 at 67 %), so
+ * a one-DIP resize can pass - a shift of that size is smaller than a point can be aimed.
+ * No picture, or a current width nobody could measure (a zoom nobody could read included), never
+ * refuses: that is what every point meant before.
  */
 export function viewportChangedReason(
   space: ScreenshotSpace | undefined,

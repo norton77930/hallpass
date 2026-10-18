@@ -175,6 +175,15 @@ function createExtensionRuntimeSchemas(bounds: ProtocolBounds = DEFAULT_BOUNDS) 
        * remote dispatch never sets it.
        */
       policy: z.enum(["classified", "trusted-agent"]).default("classified"),
+      /**
+       * When the worker answers the caller for this effect, in epoch milliseconds (015 change log
+       * 2026-10-18). A runtime that only gets to the frame after that - it sat queued behind a page
+       * that did not answer - refuses it as `cancelled` before touching anything: the caller has
+       * already been told how the call ended. It cannot stop an action already running in the page.
+       *
+       * Optional, and absent means no deadline - every frame the archived path builds, unchanged.
+       */
+      deadlineAt: z.number().int().nonnegative().optional(),
       // The action and its arguments share one closed shape with the task channel, so an argument
       // the service could not send cannot reach the page by another route.
       payload: executeActionPayloadSchema,

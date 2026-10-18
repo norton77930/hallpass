@@ -78,6 +78,10 @@ function installChrome(): void {
     runtime: { id: "extension-1", onMessage: { addListener() {} } },
     scripting: { async executeScript() {} },
     tabs: {
+      // Page zoom (R-282): 100 %; an unreadable zoom leaves a `viewport reset` with no size to state.
+      async getZoom() {
+        return 1;
+      },
       async sendMessage(_tabId: number, message: unknown) {
         // 013: the page's own answer to a delivered picture, so a recorded `upload_image` reaches
         // the `ok` the recorder's rule is about. Everything else here is a probe.

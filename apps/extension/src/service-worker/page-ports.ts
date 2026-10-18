@@ -64,6 +64,33 @@ export function pageFailure(
   return new PageFailure(code, outcomeCode);
 }
 
+/**
+ * The failures a page round trip's own deadline raised (015/T401, FR-206, R-197).
+ *
+ * A deadline is a different fact from every other way a round trip can fail: the page is still
+ * there, its frame simply did not answer in time. The failure keeps its stage code - every caller
+ * that classifies by code reads it exactly as before - and is remembered here as well, so a caller
+ * that has to tell "did not answer" from "is not there" can, without a new failure code in the port
+ * vocabulary. Kept beside the constructor (015 change log 2026-10-18) so a stand-in for the broker
+ * raises the same marked failure the broker does.
+ */
+const deadlineFailures = new WeakSet<object>();
+
+/** A `pageFailure` that a round trip's own deadline raised. */
+export function pageDeadlineFailure(
+  code: PageFailureCode,
+  outcomeCode: PageFailureCode | "unsupported-page" = code,
+): PageFailure {
+  const failure = new PageFailure(code, outcomeCode);
+  deadlineFailures.add(failure);
+  return failure;
+}
+
+/** Whether `error` is a failure a round trip's own deadline raised, and nothing else. */
+export function isPageDeadline(error: unknown): boolean {
+  return typeof error === "object" && error !== null && deadlineFailures.has(error);
+}
+
 /** The stage a failure gave out at, for the diagnostic record. */
 export function pageFailureCode(error: unknown): PageFailureCode {
   return error instanceof PageFailure ? error.code : "content.collection";

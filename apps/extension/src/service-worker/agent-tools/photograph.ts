@@ -57,7 +57,7 @@ export type PhotographDeps = {
   ensureAttached?: (tabId: number) => Promise<AttachmentOutcome>;
   /** The tab's own content area; the frame of a tab nothing emulates, once divided by the zoom. */
   tabSize?: (tabId: number) => Promise<CaptureFrame | undefined>;
-  /** The tab's page zoom (R-282); unknown is 100 %. */
+  /** The tab's page zoom (R-282); unknown is no frame, never 100 % (2026-10-18). */
   tabZoom?: (tabId: number) => Promise<number | undefined>;
 };
 
@@ -69,6 +69,15 @@ export type CaptureFrameFacts = {
    * inventing one.
    */
   frame?: CaptureFrame;
+  /**
+   * Under emulation, the area the protocol capture takes: the emulation record, in the units a CDP
+   * `clip` is measured in (2026-10-18, measured: a 400x640 clip at 125 % shows only the top-left
+   * 80 % of a 500x800 override). The frame is that over the zoom, so the two differ by the zoom and
+   * the picture's ratio to the frame is the real one. Absent when nothing is emulated.
+   */
+  capture?: CaptureFrame;
+  /** Under emulation, the page zoom the frame was divided by: clip units per CSS pixel. */
+  zoom?: number;
   /** True when a session's `viewport set` is what the frame is: the protocol path (R-166). */
   emulated: boolean;
 };
@@ -111,18 +120,37 @@ export function screenshotTooLarge(image: Pick<CapturedImage, "data" | "scale">)
 /** The frame, asked for before anything is photographed so a region can be refused against it. */
 export async function captureFrameFacts(tabId: number, deps: PhotographDeps = {}): Promise<CaptureFrameFacts> {
   const emulated = deps.currentViewport ? await deps.currentViewport(tabId).catch(() => undefined) : undefined;
-  // Only the size: the record also names the session and the tab, and neither is the agent's
-  // business in a picture's answer (012 gate run 1 leaked the whole record as `frame`).
-  if (emulated) return { frame: { width: emulated.width, height: emulated.height }, emulated: true };
-  const size = await (deps.tabSize ?? tabContentSize)(tabId).catch(() => undefined);
+  const size = emulated ?? (await (deps.tabSize ?? tabContentSize)(tabId).catch(() => undefined));
   if (size === undefined) return { emulated: false };
-  // The tab's size does not follow page zoom, the page's CSS width does (measured, R-282): the
-  // frame is the page's, so a picture, a crop density and a mapped point all agree under zoom.
+  // Neither size follows page zoom, the page's CSS width does (measured, R-282; under emulation
+  // 2026-10-18: a 500x800 override at 125 % lays out 400x640): the frame is the page's, so a
+  // picture, a crop density and a mapped point all agree under zoom. Only the size is taken from
+  // the emulation record: it also names the session and the tab, and neither is the agent's
+  // business in a picture's answer (012 gate run 1 leaked the whole record as `frame`).
   const zoom = await (deps.tabZoom ?? tabZoomFactor)(tabId).catch(() => undefined);
-  if (zoom === undefined || zoom === 1) return { emulated: false, frame: size };
+  // A zoom nobody could read is not 100 % (2026-10-18): that would refuse a space stored at 125 %
+  // as "zoom changed", or map a picture taken blind about a quarter off. No frame is the honest
+  // answer, as for a tab nobody could size.
+  if (zoom === undefined) return { emulated: emulated !== undefined };
+  const frame =
+    zoom === 1
+      ? { width: size.width, height: size.height }
+      : { width: Math.round(size.width / zoom), height: Math.round(size.height / zoom) };
+  return emulated === undefined
+    ? { frame, emulated: false }
+    : { frame, capture: { width: size.width, height: size.height }, zoom, emulated: true };
+}
+
+/** A region in the frame's CSS pixels as a clip in the capture's units; the far edge is rounded, as a point is. */
+function scaleRegion(region: CaptureRegion, zoom: number): CaptureRegion {
+  if (zoom === 1) return region;
+  const x = Math.round(region.x * zoom);
+  const y = Math.round(region.y * zoom);
   return {
-    emulated: false,
-    frame: { width: Math.round(size.width / zoom), height: Math.round(size.height / zoom) },
+    x,
+    y,
+    width: Math.max(Math.round((region.x + region.width) * zoom) - x, 1),
+    height: Math.max(Math.round((region.y + region.height) * zoom) - y, 1),
   };
 }
 
@@ -154,6 +182,9 @@ export async function photographTab(
   }
   const facts = input.facts ?? (await captureFrameFacts(input.tabId, deps));
   const scale = input.scale ?? 1;
+  // An emulated tab whose frame could not be worked out has no picture the worker can vouch for:
+  // the window's own capture would be of the owner's page, not of the viewport the session chose.
+  if (facts.emulated && (facts.frame === undefined || facts.capture === undefined)) return { ok: false, reason: "capture-refused" };
   if (facts.emulated && deps.ensureAttached) {
     // Before the tab is brought forward: a picture that cannot be taken must not cost the owner a
     // flicker of their window first (012/S2c F2).
@@ -164,6 +195,11 @@ export async function photographTab(
   }
   if (input.beforeCapture && !(await input.beforeCapture())) return { ok: false, reason: "site-moved" };
   // Whoever the window is showing right now, so it is showing them again afterwards.
+  // A region is asked in the frame's CSS pixels; a protocol clip is in the capture's units.
+  const clipRegion =
+    facts.emulated && facts.zoom !== undefined && input.region
+      ? scaleRegion(input.region, facts.zoom)
+      : input.region;
   const displaced = tabs.find((candidate) => candidate.windowId === tab.windowId && candidate.active);
   try {
     const image = await capture(
@@ -175,7 +211,7 @@ export async function photographTab(
         ...(input.region === undefined ? {} : { region: input.region }),
         ...(facts.frame === undefined ? {} : { frame: facts.frame }),
         scale,
-        path: decideCapturePath(facts.emulated ? facts.frame : undefined, input.region, scale),
+        path: decideCapturePath(facts.emulated ? facts.capture : undefined, clipRegion, scale, facts.zoom),
         ...(input.lossless ? { lossless: true } : {}),
       },
       {

@@ -9,7 +9,7 @@ import { CONTENT_OPERATION_DEADLINE_MS } from "../src/service-worker/content-bro
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
-import type { PageExecutionOutcome } from "../src/service-worker/page-ports.js";
+import { pageDeadlineFailure, pageFailure, type PageExecutionOutcome } from "../src/service-worker/page-ports.js";
 
 /**
  * 015/T404 — what a press reports it caused (FR-200 – FR-202, contracts/press-outcomes.md, R-198).
@@ -129,6 +129,9 @@ function installChrome(): void {
   };
 }
 
+/** What the effects runner hands the in-page executor. */
+type InPageExecution = { stillAllowed?: () => boolean; deadlineAt?: number };
+
 async function harness(
   options: {
     role?: string;
@@ -137,7 +140,11 @@ async function harness(
     /** The worker's own dialog map, as the runtime would expose it (016/T447). */
     currentDialog?: (tabId: number) => CurrentDialog | undefined;
     /** The in-page executor `scroll` and `form_input` run through. */
-    execute?: () => Promise<PageExecutionOutcome>;
+    execute?: (input: InPageExecution) => Promise<PageExecutionOutcome>;
+    /** The tab the session just acted in, as the runtime is told it (004/T103a). */
+    onEffect?: (sessionId: string, tabId: number) => void;
+    /** The runner's clock, when a test needs it to step apart from the timers. */
+    now?: () => number;
   } = {},
 ) {
   const browser = fakeBrowser();
@@ -166,6 +173,8 @@ async function harness(
     downloads: { createdSince: browser.createdSince },
     ...(options.currentDialog === undefined ? {} : { currentDialog: options.currentDialog }),
     ...(options.execute === undefined ? {} : { execute: options.execute }),
+    ...(options.onEffect === undefined ? {} : { onEffect: options.onEffect }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   });
   return { runner, browser };
 }
@@ -648,6 +657,96 @@ describe("F4 one input budget per call", () => {
     await vi.advanceTimersByTimeAsync(24_500);
     expect(call.response).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
+  });
+
+  /**
+   * 015 change log 2026-10-18: one in-page round trip that hits its own 10 s content deadline is the
+   * same fact as a spent budget - the action frame was sent and the page did not answer it - so it
+   * answers in the same words, not `failed / content.execution`.
+   */
+  it("an in-page scroll whose action round trip hits its own 10 s deadline answers page-not-responding", async () => {
+    const { runner } = await harness({
+      execute: () =>
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(pageDeadlineFailure("content.execution")), CONTENT_OPERATION_DEADLINE_MS),
+        ),
+    });
+
+    const call = track(runner, request("scroll", { direction: "down" }));
+    await vi.advanceTimersByTimeAsync(CONTENT_OPERATION_DEADLINE_MS + 1);
+
+    expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
+  });
+
+  it("an in-page action failure that is not a deadline still answers failed with its stage", async () => {
+    const { runner } = await harness({ execute: () => Promise.reject(pageFailure("content.execution")) });
+
+    const call = track(runner, request("scroll", { direction: "down" }));
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(call.response).toEqual({ callId: "call-scroll", outcome: "failed", reason: "content.execution" });
+  });
+
+  /**
+   * 015 change log 2026-10-18: once the budget has answered the agent, nothing that call still holds
+   * may start an effect or report one. The executor's fence closes, and the frame carries the moment
+   * the agent was answered so a page that only gets to it later refuses it.
+   */
+  it("an in-page effect whose budget is spent is fenced off and reports no effect afterwards", async () => {
+    const scrolled = {
+      ok: true,
+      effect: "scrolled",
+      scrollTop: 80,
+      targetVisibility: "not-applicable",
+    } as PageExecutionOutcome;
+    let sent: InPageExecution | undefined;
+    const onEffect = vi.fn();
+    const { runner, browser } = await harness({
+      execute: (input) => {
+        sent = input;
+        return new Promise((resolve) => setTimeout(() => resolve(scrolled), 28_000));
+      },
+      onEffect,
+    });
+    let probes = 0;
+    browser.hooks.onProbe = () => {
+      probes += 1;
+    };
+
+    const call = track(runner, request("scroll", { direction: "down" }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sent?.stillAllowed?.()).toBe(true);
+    expect(sent?.deadlineAt).toBe(T0 + 25_000);
+
+    await vi.advanceTimersByTimeAsync(24_500);
+    expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
+    expect(sent?.stillAllowed?.()).toBe(false);
+
+    const probesAtAnswer = probes;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onEffect).not.toHaveBeenCalled();
+    expect(probes).toBe(probesAtAnswer);
+  });
+
+  /**
+   * The page refuses a frame past its `deadlineAt` as `cancelled`. That reply can reach the worker
+   * before the budget's own timer has run (a busy worker, a wall-clock step); it is still the spent
+   * budget speaking, not a Stop, and answers in the budget's words.
+   */
+  it("a late frame the page refused as cancelled answers page-not-responding even before the budget timer runs", async () => {
+    let skew = 0;
+    const { runner } = await harness({
+      now: () => Date.now() + skew,
+      execute: async () => {
+        skew = 30_000;
+        return { ok: false, reachedPage: true, reason: "cancelled" } as PageExecutionOutcome;
+      },
+    });
+
+    const call = track(runner, request("scroll", { direction: "down" }));
+    await vi.advanceTimersByTimeAsync(1);
 
     expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
   });

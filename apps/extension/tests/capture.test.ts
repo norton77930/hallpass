@@ -133,6 +133,40 @@ describe("T310 capture geometry", () => {
     });
   });
 
+  it("shifts the clip by the offset in the emulation's units, which are CSS pixels times the zoom (2026-10-18)", async () => {
+    const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const send: Parameters<typeof captureThroughProtocol>[0]["send"] = async (_tabId, method, params) => {
+      sent.push({ method, ...(params === undefined ? {} : { params }) });
+      return method === "Page.getLayoutMetrics"
+        ? { cssVisualViewport: { pageX: 80, pageY: 400 } }
+        : { data: "cHJvdG9jb2w=" };
+    };
+    const clip = { x: 0, y: 0, width: 500, height: 800 };
+
+    // Measured on Chromium 151, 500x800 override at 125 %, scrolled to 400: y 500 matches the
+    // picture with no clip, y 400 shows 100 px of blank above it.
+    await captureThroughProtocol({ send, tabId: 7, clip, scale: 1, pageScale: 1.25 });
+    expect(sent.at(-1)?.params).toEqual({
+      format: "png",
+      fromSurface: true,
+      clip: { x: 100, y: 500, width: 500, height: 800, scale: 1 },
+    });
+
+    // At zoom 1 nothing moves.
+    await captureThroughProtocol({ send, tabId: 7, clip, scale: 1 });
+    expect(sent.at(-1)?.params).toEqual({
+      format: "png",
+      fromSurface: true,
+      clip: { x: 80, y: 400, width: 500, height: 800, scale: 1 },
+    });
+  });
+
+  it("carries the zoom on the protocol path only when it is not 1", () => {
+    const record = { width: 500, height: 800 };
+    expect(decideCapturePath(record, undefined, 1, 1.25)).toMatchObject({ kind: "protocol", pageScale: 1.25 });
+    expect(decideCapturePath(record, undefined, 1, 1)).not.toHaveProperty("pageScale");
+  });
+
   it("photographs the viewport's own top-left when the page cannot be measured", async () => {
     const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
 
