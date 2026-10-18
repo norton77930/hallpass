@@ -350,8 +350,6 @@ describe("T041 agent tab tools", () => {
   }>;
   /** Set by the test that wants Chrome to refuse the attachment the emulation needs. */
   let viewportRefusal: "devtools-open" | "restricted-page" | undefined;
-  /** What a `reset` could measure of the real page; `undefined` when it could not read it. */
-  let viewportReal: { width: number; height: number } | undefined;
 
   function build(
     navigationTimeoutMs = 60,
@@ -380,8 +378,8 @@ describe("T041 agent tab tools", () => {
   }
 
   /**
-   * The viewport module as this tool uses it (012/T307): two calls, and the honest answers the
-   * real one gives - an attachment Chrome refused, and a `reset` that could not measure the page.
+   * The viewport module as this tool uses it (012/T307): two calls, and the honest answer the
+   * real one gives when Chrome refused the attachment.
    */
   function viewportModule(): Parameters<typeof createAgentTabTools>[0]["viewport"] {
     return {
@@ -392,7 +390,7 @@ describe("T041 agent tab tools", () => {
       async reset(sessionId, tabId) {
         viewportCalls.push({ verb: "reset", sessionId, tabId });
         if (viewportRefusal !== undefined) return { ok: false, unavailableReason: viewportRefusal };
-        return { ok: true, ...(viewportReal === undefined ? {} : { real: viewportReal }) };
+        return { ok: true };
       },
     };
   }
@@ -415,7 +413,6 @@ describe("T041 agent tab tools", () => {
   beforeEach(() => {
     fake = installChrome();
     viewportRefusal = undefined;
-    viewportReal = { width: 1187, height: 707 };
   });
 
   afterEach(() => {
@@ -835,27 +832,23 @@ describe("T041 agent tab tools", () => {
     expect(fake.windows[0]).toEqual({ id: 900, width: 1200, height: 900 });
   });
 
-  it("answers a reset with the page's real size, and falls back to the window when it cannot read one", async () => {
+  /**
+   * 012 (R-175, R-282): a reset answers the basis the next screenshot's frame is in - the tab's own
+   * size, innerWidth-style, over the zoom - and nothing the viewport module measured: the
+   * attachment's measurement is the layout viewport's client size, which leaves the scrollbar out.
+   */
+  it("answers a reset with the tab's own size", async () => {
     const tools = build();
     const created = await tools.run(call("tabs_create", {}));
     const { tabId } = created.result as { tabId: number };
 
     const reset = await tools.run(call("viewport", { tabId, action: "reset" }));
 
-    expect(reset).toEqual({ callId: "call-1", outcome: "ok", result: { width: 1187, height: 707, emulated: false } });
+    // The tab's own content area (012/S2c F4). The window's outer bounds are a fact about furniture:
+    // they include the browser's own chrome, and an agent told 1 200x900 for a 1 180x700 page would
+    // aim every later coordinate at the wrong place.
+    expect(reset).toEqual({ callId: "call-1", outcome: "ok", result: { width: 1180, height: 700, emulated: false } });
     expect(viewportCalls).toEqual([{ verb: "reset", sessionId: SESSION, tabId }]);
-
-    // A page that cannot be measured - no attachment, a tab that never had a viewport - still gets
-    // an answer, and it is the tab's own content area (012/S2c F4). The window's outer bounds are
-    // a fact about furniture: they include the browser's own chrome, and an agent told 1 200x900
-    // for a 1 180x700 page would aim every later coordinate at the wrong place.
-    viewportReal = undefined;
-    const unmeasured = await tools.run(call("viewport", { tabId, action: "reset" }));
-    expect(unmeasured).toEqual({
-      callId: "call-1",
-      outcome: "ok",
-      result: { width: 1180, height: 700, emulated: false },
-    });
   });
 
   /**
@@ -863,11 +856,10 @@ describe("T041 agent tab tools", () => {
    * The tab's own size does not follow page zoom, the page's CSS width does - so at 125 % a
    * 1 180-wide tab lays out 944 CSS pixels, and that is what a reset must say it is.
    */
-  it("answers an unmeasured reset in the page's CSS pixels under page zoom", async () => {
+  it("answers a reset in the page's CSS pixels under page zoom", async () => {
     const tools = build();
     const created = await tools.run(call("tabs_create", {}));
     const { tabId } = created.result as { tabId: number };
-    viewportReal = undefined;
     fake.zoom = 1.25;
 
     const reset = await tools.run(call("viewport", { tabId, action: "reset" }));
@@ -879,7 +871,6 @@ describe("T041 agent tab tools", () => {
     const tools = build();
     const created = await tools.run(call("tabs_create", {}));
     const { tabId } = created.result as { tabId: number };
-    viewportReal = undefined;
     fake.zoom = undefined;
 
     const reset = await tools.run(call("viewport", { tabId, action: "reset" }));

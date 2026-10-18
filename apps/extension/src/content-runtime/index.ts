@@ -30,6 +30,11 @@ export type ContentRuntimeContext = {
   registry: TargetRegistry;
   binding: RuntimeBinding | undefined;
   cancelledOperations: Set<string>;
+  /**
+   * The binding the last cancel ended (015). Only an action frame carrying this exact binding and a
+   * cancelled operation is answered `cancelled` rather than `stale-binding`; it never lets a frame act.
+   */
+  cancelledBinding: RuntimeBinding | undefined;
 };
 
 type NavigationHistory = {
@@ -119,6 +124,7 @@ export function createContentRuntimeContext(input?: {
     registry: new TargetRegistry(),
     binding: undefined,
     cancelledOperations: new Set<string>(),
+    cancelledBinding: undefined,
   };
 }
 
@@ -132,6 +138,7 @@ function invalidateForNavigation(context: ContentRuntimeContext, host: Navigatio
     typeof origin === "string" && origin.length > 0 ? origin : currentOrigin();
   context.registry.invalidate();
   context.cancelledOperations.clear();
+  context.cancelledBinding = undefined;
   context.binding = undefined;
 }
 
@@ -225,6 +232,7 @@ export function handleContentMessage(
     if (conversationChanged(context, message)) {
       context.registry.invalidate();
       context.cancelledOperations.clear();
+      context.cancelledBinding = undefined;
     }
     context.binding = {
       taskId: message.taskId,
@@ -236,13 +244,29 @@ export function handleContentMessage(
       canonicalOrigin: context.canonicalOrigin,
     };
   }
-  if (!bindingMatches(context, message)) return { ok: false, reason: "stale-binding" };
+  if (!bindingMatches(context, message)) {
+    // 015: an action frame for an operation this runtime cancelled, from the very binding the cancel
+    // ended, is the frame that was queued behind the cancel - it is refused as `cancelled`, which is
+    // what happened to it. Only the worker holding that binding's nonce can produce such a frame, and
+    // it still acts on nothing; every other unmatched frame learns only `stale-binding`.
+    if (
+      message.type === "content.execute-action" &&
+      context.cancelledOperations.has(message.operationId) &&
+      context.cancelledBinding?.taskId === message.taskId &&
+      context.cancelledBinding.runtimeEpochId === message.runtimeEpochId &&
+      context.cancelledBinding.nonce === message.nonce
+    ) {
+      return { ok: false, reason: "cancelled" };
+    }
+    return { ok: false, reason: "stale-binding" };
+  }
   if (message.expectedDocumentEpoch !== context.documentEpoch) {
     return { ok: false, reason: "stale-context" };
   }
   if (message.type === "content.cancel") {
     context.cancelledOperations.add(message.operationId);
     context.registry.invalidate();
+    context.cancelledBinding = context.binding;
     context.binding = undefined;
     return { ok: true, effect: "cancelled" };
   }

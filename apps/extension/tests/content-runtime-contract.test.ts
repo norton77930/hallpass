@@ -195,16 +195,22 @@ describe("content runtime wire contract", () => {
     expect(
       handleContentMessage({ ...frame("content.cancel", probe.documentEpoch, {}), operationId }),
     ).toMatchObject({ ok: true, effect: "cancelled" });
-    // A cancel ends the binding, so the frame queued behind it is refused before it acts.
-    expect(
+    const late = (overrides: Record<string, unknown>) =>
       handleContentMessage({
         ...frame("content.execute-action", probe.documentEpoch, {
           action: "browser.enter-text",
           arguments: { targetHandle: handle, text: "late", editMode: "replace" },
         }),
         operationId,
-      }),
-    ).toMatchObject({ ok: false, reason: "stale-binding" });
+        ...overrides,
+      });
+    // 015: the frame queued behind the cancel is refused before it acts, and named for what it is -
+    // `cancelled`, not the `stale-binding` the ended binding would otherwise answer.
+    expect(late({})).toEqual({ ok: false, reason: "cancelled" });
+    // The cancel still ends the binding for everything else: another operation of the same binding,
+    // and any frame carrying a nonce other than the cancelled binding's, learn only the refusal.
+    expect(late({ operationId: "operation-other" })).toEqual({ ok: false, reason: "stale-binding" });
+    expect(late({ nonce: "f".repeat(32) })).toEqual({ ok: false, reason: "stale-binding" });
     expect(input.value).toBe("start");
   });
 

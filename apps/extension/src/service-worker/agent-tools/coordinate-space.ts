@@ -131,9 +131,11 @@ export function carriesPoint(tool: string, args: Record<string, unknown>): boole
  * put the point somewhere the agent did not look. Only the width is compared - the debugging
  * infobar and bars like it change the height alone - and a pixel either way is rounding of the
  * frame's CSS width: it is the tab's DIP width divided by the zoom and rounded the same way every
- * time, so an unchanged tab reads the same width and the tolerance is for that one rounding. It is
- * in CSS pixels, not DIPs: below 100 % zoom one DIP is more than a CSS pixel (about 1.5 at 67 %), so
- * a one-DIP resize can pass - a shift of that size is smaller than a point can be aimed.
+ * time, so an unchanged tab reads the same width and is never refused. The tolerance is in CSS
+ * pixels, not DIPs, so how much resize it admits follows the zoom: above 100 % one CSS pixel is more
+ * than a DIP (1.25 at 125 %) and a one-DIP resize can pass - a shift smaller than a point can be
+ * aimed; below 100 % one DIP is more than a CSS pixel (about 1.49 at 67 %), so a one-DIP resize moves
+ * the rounded width by one or two and may be refused.
  * No picture, or a current width nobody could measure (a zoom nobody could read included), never
  * refuses: that is what every point meant before.
  */

@@ -4,6 +4,7 @@ import {
   probeActiveTab,
   resolveSupportedTabPage,
 } from "../content-broker.js";
+import { isPageDeadline } from "../page-ports.js";
 import { siteOfUrl } from "../site-mode-store.js";
 import type { AgentToolContext } from "./context.js";
 
@@ -136,7 +137,10 @@ export function createAgentPageBindings(): AgentPageBindings {
       if (!probed.ok && probed.reason === "document-replaced") {
         try {
           await injectIfSupported(tabId, page.supportInput);
-        } catch {
+        } catch (error) {
+          // 015/T401: an injection that did not finish in time is the same live page a probe that
+          // did not answer is (R-197); only an injection the browser refused is `not-actionable`.
+          if (isPageDeadline(error)) return { ok: false, reason: "page-not-responding" };
           return { ok: false, reason: "not-actionable" };
         }
         probed = await probeActiveTab(probeInput);

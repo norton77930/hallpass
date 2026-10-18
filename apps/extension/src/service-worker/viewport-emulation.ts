@@ -1,4 +1,3 @@
-import { measureViewport } from "./agent-tools/computer.js";
 import type { AgentInputAttachments, InputUnavailableReason } from "./agent-tools/input.js";
 
 /**
@@ -144,18 +143,18 @@ export type ViewportSetOutcome = { ok: true } | { ok: false; unavailableReason: 
 /**
  * What a `reset` could do (012/S2c F4).
  *
- * `real` is absent when nothing could measure the page - the tab was never emulated and nobody
- * holds an attachment on it - which is a different fact from a reset that failed: the caller then
- * answers from what the browser knows about the tab rather than refusing. A refusal is only ever
- * the attachment's, and it means the page is *still emulated*.
+ * `ok` says the page has its own size back (or never had another). It carries no size: the caller
+ * answers the next screenshot's frame, read from the browser's facts about the tab, not a
+ * measurement over the attachment. A refusal is only ever the attachment's, and it means the page
+ * is *still emulated*.
  */
 export type ViewportResetOutcome =
-  | { ok: true; real?: ViewportSize }
+  | { ok: true }
   | { ok: false; unavailableReason: InputUnavailableReason };
 
 export type ViewportEmulation = {
   set(sessionId: string, tabId: number, size: ViewportSize): Promise<ViewportSetOutcome>;
-  /** Puts the page back and answers the real size, when the attachment could still measure one. */
+  /** Puts the page back; the size to state is the caller's to read. */
   reset(sessionId: string, tabId: number): Promise<ViewportResetOutcome>;
   /** The record for a tab, for the tools that have to know which size the page is laid out at. */
   current(tabId: number): Promise<ViewportRecord | undefined>;
@@ -213,7 +212,7 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
   type ClearResult =
     | { state: "nothing" }
     | { state: "unavailable"; unavailableReason: InputUnavailableReason }
-    | { state: "done"; record: ViewportRecord; real?: ViewportSize; borrowed: boolean };
+    | { state: "done"; record: ViewportRecord; borrowed: boolean };
 
   /**
    * Gives one tab its real size back, over whichever attachment it takes (data-model `decideClear`).
@@ -224,7 +223,7 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
    */
   async function clear(
     tabId: number,
-    options: { measure: boolean; keepOnRefusal: boolean },
+    options: { keepOnRefusal: boolean },
   ): Promise<ClearResult> {
     const record = await deps.store.forTab(tabId).catch(() => undefined);
     const decision = decideClear(record, deps.attachments.attached().includes(tabId));
@@ -242,7 +241,6 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
       deps.reportDiagnostic?.("agent.viewport.clear-failed");
       return { state: "unavailable", unavailableReason: borrowed.unavailableReason };
     }
-    let real: ViewportSize | undefined;
     if (borrowed === undefined || borrowed.ok) {
       try {
         // R-176 (branded Chrome 153): a clear from a *fresh* attachment does not undo an override
@@ -250,14 +248,9 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
         // then clearing put it back every run. So a borrowed attachment takes the emulation over
         // before it gives it up; an attachment this worker already holds needs only the clear.
         if (borrowed !== undefined) await deps.attachments.send(tabId, APPLY, overrideFor(record));
+        // The clear is the last thing sent. The size a reset states is not measured here: the tool
+        // answers the next screenshot's frame, made of the same facts (agent-tools/tabs.ts, R-282).
         await deps.attachments.send(tabId, CLEAR);
-        // Measured after the clear and before the attachment goes - what comes back is then the
-        // window's own viewport, which is the only honest answer to "what size is the page now" -
-        // and only for the caller that has to answer it. A release sends the clear and nothing
-        // else: the tab is going back to the owner and nobody is waiting to be told its size.
-        if (options.measure) {
-          real = await measureViewport(tabId, (id, method, params) => deps.attachments.send(id, method, params));
-        }
       } catch {
         deps.reportDiagnostic?.("agent.viewport.clear-failed");
       }
@@ -268,7 +261,7 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
     if (borrowed !== undefined) await deps.attachments.drop(tabId, "viewport").catch(() => undefined);
     // Reset and release alike: the page is no longer laid out at the size it was photographed at.
     await frameChanged(tabId);
-    return { state: "done", record, borrowed: borrowed !== undefined, ...(real === undefined ? {} : { real }) };
+    return { state: "done", record, borrowed: borrowed !== undefined };
   }
 
   return {
@@ -287,25 +280,20 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
       return { ok: true };
     },
     async reset(sessionId, tabId) {
-      const cleared = await clear(tabId, { measure: true, keepOnRefusal: true });
+      const cleared = await clear(tabId, { keepOnRefusal: true });
       // 012/S2c F4: a refused attachment cleared nothing, so this answers the refusal rather than
       // `emulated: false` about a page that is still the size the agent gave it.
       if (cleared.state === "unavailable") return { ok: false, unavailableReason: cleared.unavailableReason };
-      if (cleared.state === "nothing") {
-        // Nothing was emulated. The page still has a size, and it is measured only if something
-        // already holds an attachment on the tab: a reset is not a reason to start debugging one.
-        const real = deps.attachments.attached().includes(tabId)
-          ? await measureViewport(tabId, (id, method, params) => deps.attachments.send(id, method, params))
-          : undefined;
-        return { ok: true, ...(real === undefined ? {} : { real }) };
-      }
+      // Nothing was emulated: the page already has its own size, and a reset is not a reason to
+      // start debugging the tab.
+      if (cleared.state === "nothing") return { ok: true };
       // The holder this emulation took is let go of here rather than inside `clear`, which also
       // runs on the release path - where the attachment is going anyway and dropping a holder
       // mid-detach would be bookkeeping about a tab nobody holds. An attachment `clear` borrowed
       // for itself has already been given back.
       if (!cleared.borrowed) await deps.attachments.drop(tabId, "viewport").catch(() => undefined);
       deps.onActivity?.(sessionId, "cleared");
-      return { ok: true, ...(cleared.real === undefined ? {} : { real: cleared.real }) };
+      return { ok: true };
     },
     current(tabId) {
       return deps.store.forTab(tabId).catch(() => undefined);
@@ -327,7 +315,7 @@ export function createViewportEmulation(deps: ViewportEmulationDeps): ViewportEm
       // The tab is going back to the owner whatever Chrome says about attaching to it, so this
       // path drops the record on a refusal as it always has: a record owed to an attachment nobody
       // holds is a promise this worker cannot keep.
-      const cleared = await clear(tabId, { measure: false, keepOnRefusal: false });
+      const cleared = await clear(tabId, { keepOnRefusal: false });
       if (cleared.state !== "done") return;
       deps.onActivity?.(cleared.record.sessionId, "cleared");
     },

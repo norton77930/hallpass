@@ -4,7 +4,11 @@ import { agentEffectObservationSchema } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentEffects, createTargetLocator, type TargetRect } from "../src/service-worker/agent-tools/effects.js";
 import type { FrameOffsets } from "../src/service-worker/agent-tools/frames.js";
-import { createAgentPageBindings, INPUT_NOT_ANSWERED_HINT } from "../src/service-worker/agent-tools/page-binding.js";
+import {
+  createAgentPageBindings,
+  INPUT_NOT_ANSWERED_HINT,
+  PAGE_NOT_RESPONDING_HINT,
+} from "../src/service-worker/agent-tools/page-binding.js";
 import { CONTENT_OPERATION_DEADLINE_MS } from "../src/service-worker/content-broker.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
@@ -145,6 +149,8 @@ async function harness(
     onEffect?: (sessionId: string, tabId: number) => void;
     /** The runner's clock, when a test needs it to step apart from the timers. */
     now?: () => number;
+    /** The runner's diagnostic sink (015: execute-uncertain is reported only when a frame went out). */
+    reportDiagnostic?: (name: string) => void;
   } = {},
 ) {
   const browser = fakeBrowser();
@@ -175,6 +181,7 @@ async function harness(
     ...(options.execute === undefined ? {} : { execute: options.execute }),
     ...(options.onEffect === undefined ? {} : { onEffect: options.onEffect }),
     ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.reportDiagnostic === undefined ? {} : { reportDiagnostic: options.reportDiagnostic }),
   });
   return { runner, browser };
 }
@@ -678,6 +685,47 @@ describe("F4 one input budget per call", () => {
     await vi.advanceTimersByTimeAsync(CONTENT_OPERATION_DEADLINE_MS + 1);
 
     expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
+  });
+
+  /**
+   * 015 change log 2026-10-18 (release 0.12.5): a probe or injection in front of the action frame
+   * that hit its deadline sent nothing to the page, so nothing may have taken effect - the retry-safe
+   * words, and no execute-uncertain record. Only the action round trip's own deadline is uncertain.
+   */
+  it.each(["content.probe", "content.injection"] as const)(
+    "an in-page scroll whose %s stage hit its deadline answers the retry-safe page-not-responding",
+    async (stage) => {
+      const reportDiagnostic = vi.fn();
+      const { runner } = await harness({
+        execute: () => Promise.reject(pageDeadlineFailure(stage)),
+        reportDiagnostic,
+      });
+
+      const call = track(runner, request("scroll", { direction: "down" }));
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(call.response).toEqual({
+        callId: "call-scroll",
+        outcome: "failed",
+        reason: "page-not-responding",
+        hint: PAGE_NOT_RESPONDING_HINT,
+      });
+      expect(reportDiagnostic).not.toHaveBeenCalled();
+    },
+  );
+
+  it("an in-page scroll whose action round trip hit its deadline keeps the input-may-have-landed words and the record", async () => {
+    const reportDiagnostic = vi.fn();
+    const { runner } = await harness({
+      execute: () => Promise.reject(pageDeadlineFailure("content.execution")),
+      reportDiagnostic,
+    });
+
+    const call = track(runner, request("scroll", { direction: "down" }));
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(call.response).toEqual({ callId: "call-scroll", ...NOT_RESPONDING });
+    expect(reportDiagnostic).toHaveBeenCalledWith("agent.effect.execute-uncertain");
   });
 
   it("an in-page action failure that is not a deadline still answers failed with its stage", async () => {

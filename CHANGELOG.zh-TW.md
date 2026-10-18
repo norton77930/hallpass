@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.12.5 — 2026-10-18
+
+- **頁面忙到來不及回應時，回答更準**:還沒送出任何輸入、光是連上頁面(檢查或注入頁面內的執行環境)就逾時，現在回 `page-not-responding` 並提示可以重試；以前會以 `content.probe` / `content.injection` 失敗，或說輸入「可能已經生效」。已經送出輸入之後才逾時，仍說可能已經生效。
+- **動作在自己被取消之後才到頁面，回 `cancelled`**:以前回「頁面已過期」;其他晚到的請求照舊。
+- **`viewport` 重設回報的頁面尺寸，一律和截圖同一套基準**:以前量得到頁面時會少一條捲軸的寬度;重設時也不再額外量測頁面。
+
 ## 0.12.4 — 2026-10-18
 
 - **告訴 agent 沒完成的頁面內動作，不會事後才生效**:`scroll`、`form_input` 等頁面內動作超過該次呼叫的時間、agent 已收到 `page-not-responding` 後，worker 會停掉這次呼叫剩下的步驟；頁面若在那之後才收到請求，會在動到任何東西前拒絕。頁面已經開始執行的動作無法中途停下，提示仍會說「可能已經生效」。

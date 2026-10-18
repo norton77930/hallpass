@@ -617,14 +617,14 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       // Answering `emulated: false` here would be this worker telling the agent something it has
       // no reason to believe - and the refusal is the attachment's, in the attachment's words.
       if (!cleared.ok) return inputUnavailable(callId, cleared.unavailableReason);
-      // The page could not be measured - it was never emulated, so there was no attachment to ask
-      // through - and the tab's own content area is then the last fact left about its size. Not the
-      // *window's* bounds (012/S2c F4): those include the browser's own furniture, and an agent
-      // given them would aim every later coordinate at a viewport that is smaller than it was told.
-      // In the page's CSS pixels, the basis the next screenshot's frame is in (2026-10-18, R-282):
-      // the tab's size does not follow page zoom, so it is the same facts the frame is made of.
-      // A zoom nobody could read leaves no size to state - the frame is absent, not 100 %.
-      const measured = cleared.real ?? (await captureFrameFacts(tabId)).frame;
+      // The size stated is the next screenshot's frame, made of the same facts (R-175, R-282): the
+      // tab's own content area - innerWidth-style, scrollbar included - over the page zoom, in the
+      // page's CSS pixels. Not the attachment's measurement after the clear, even when it took one:
+      // that is the layout viewport's client size, which leaves the scrollbar out, so a reset that
+      // could measure and one that could not answered two widths for the same page (012). Not the
+      // *window's* bounds either (012/S2c F4): those include the browser's own furniture. A zoom
+      // nobody could read leaves no size to state - the frame is absent, not 100 %.
+      const measured = (await captureFrameFacts(tabId)).frame;
       if (measured === undefined && (await getTabSnapshot(tabId)) !== undefined) {
         return answer(callId, "failed", "viewport-not-measured");
       }
