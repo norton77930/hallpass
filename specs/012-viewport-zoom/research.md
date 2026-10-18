@@ -333,3 +333,41 @@ tab's size does not follow page zoom; the page's CSS width is the tab's size ove
 **Alternatives**: (a) drop the space silently on a change - the agent's next point would be read as
 CSS pixels while it is still looking at a shrunk picture; (b) compare `tab.width` alone - misses page
 zoom entirely; (c) measure `innerWidth` with a script per action - a page round trip on every point.
+
+**Follow-up (2026-10-18)**: two gaps in the one measurement, found by audit.
+
+- *Zoom unreadable* (`chrome.tabs.getZoom` throws, or answers nothing usable): the frame was taken
+  at 100 %, so a space stored at zoom 1.25 (frame 950) was refused as "zoom changed" by the next
+  failed read, and a picture taken blind mapped about a quarter off. Now `captureFrameFacts`
+  returns **no frame** - the same answer as for a tab nobody could size. Effects: a `screenshot`
+  still answers (no `frame`, `agent.screenshot.frame-unknown`) and stores no new space (it forgets
+  the old one, as for any frame-less whole picture); a point is never refused for it
+  (`viewportChangedReason` passes an unmeasured width); an emulated tab whose zoom is unreadable
+  gets `capture-refused` rather than a picture of the owner's window. `viewport reset` with no
+  attachment to measure through answers in the same CSS pixels (tab size over zoom) and, with no
+  readable zoom, `failed` `viewport-not-measured` instead of a width on another basis.
+- *Under emulation* (measured on Chromium 151.0.7922.34, 2026-10-18; CDP
+  `Emulation.setDeviceMetricsOverride` 500x800 at scale factor 1, then `chrome.tabs.setZoom`, in
+  either order): `innerWidth` was 500 / 625 / 400 / 746 at zoom 1 / 0.8 / 1.25 / 0.67, and
+  `Page.captureScreenshot` at 1.25 returned a 500x800 PNG. So under emulation too the page's CSS
+  size is the record over the zoom (800 high becomes 640 at 1.25, 1000 at 0.8). The frame is now
+  `round(record / zoom)` on both axes, through the same zoom read, so a zoom change while emulated
+  is detected. The capture is **not** in the frame's pixels (measured, same browser: under the
+  500x800 override at 1.25, a `Page.captureScreenshot` clip of 400x640 returns a 400x640 PNG of only
+  the top-left 80 % of the page - a right-edge fixed strip is missing - while 500x800 returns the
+  whole page; `Input.dispatchMouseEvent(200,100)` lands at `clientX/Y` 200,100 with and without
+  emulation at zoom 1 and 1.25). So a CDP clip is in the override's own units, and points are in
+  CSS. `captureFrameFacts` therefore carries both: `capture` (the record, which is the clip and the
+  fitted picture's base) and `frame` (record / zoom, which maps points). The stored space is the
+  real ratio - a 500 px picture of a 400 px frame, picture 250 = CSS 200 - and a region, asked in
+  frame pixels, is multiplied by capture / frame to become its clip. At zoom 1 the two are equal.
+- *Scroll offset under emulation* (measured on the same browser, 500x800 override, zoom 1.25,
+  `scrollTo(0,400)`): `scrollY` 400; `Page.getLayoutMetrics` `cssVisualViewport.pageY` 400 (the
+  deprecated `visualViewport.pageY` is 400 too, so neither is a unit-of-the-override alternative).
+  A screenshot with no clip shows the band at y 400 at its top; a clip at y 400 shows about 100 px
+  of blank above that band, and a clip at y 500 matches the no-clip picture exactly. So the clip's
+  offset is the page offset times the zoom, like its size: R-174's shift is now `offset x zoom`
+  (`pageScale` on the protocol path; `zoom` on the frame facts). Only the protocol path builds a
+  clip, and it is the emulated tab's path (every other tab is the visible-tab capture), so there
+  is no non-emulated path with the same error; at zoom 1 nothing changes. A region's far edge is
+  rounded as a point is, so a region ending on the frame's edge ends on the capture's.

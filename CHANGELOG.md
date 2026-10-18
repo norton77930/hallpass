@@ -5,6 +5,30 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.12.4 — 2026-10-18
+
+**An effect the agent was told did not happen stays not done, and points stay right on a zoomed,
+emulated page.**
+
+- **A late in-page effect no longer lands after the answer.** When `scroll`, `form_input` or
+  another in-page effect runs out of its call's time and the agent is told `page-not-responding`,
+  the worker stops the rest of that call, and a page that only receives the request after that
+  moment refuses it before changing anything. An action the page had already started cannot be
+  stopped; the hint still says it may have taken effect.
+- **One slow in-page round trip answers `page-not-responding`.** A single request the page did not
+  answer within 10 s used to fail the call with `content.execution`; it now gives the same answer
+  and hint as the call's overall time limit.
+- **Points on a zoomed page under `viewport`.** While a `viewport` size is set, a page zoomed in or
+  out lays out at the set size divided by the zoom (500 px wide at 125 % is 400 page pixels). The
+  page size and the point conversion now follow that, the screenshot still shows the whole page,
+  including when it is scrolled, and a zoom change while a size is set is caught by the
+  `viewport-changed` refusal.
+- **A zoom level that cannot be read is not taken as 100 %.** The screenshot then reports no page
+  size and leaves points unconverted instead of converting them through a wrong size; a tab with a
+  `viewport` size set refuses the screenshot instead.
+- **`viewport` reset reports the page size on the same basis as the screenshot** on a zoomed page
+  (it reported the unzoomed size).
+
 ## 0.12.3 — 2026-10-18
 
 **Smaller screenshots, and a point is never read off a picture of another page width.**

@@ -77,7 +77,17 @@ export type CapturedImage = {
 /** Where a picture comes from: the visible tab, or the attachment an emulated tab already has. */
 export type CapturePath =
   | { kind: "visible-tab" }
-  | { kind: "protocol"; clip: CaptureRegion; scale: number };
+  | {
+      kind: "protocol";
+      clip: CaptureRegion;
+      scale: number;
+      /**
+       * Clip units per CSS pixel of page offset: the page zoom (2026-10-18). Absent is 1. The clip
+       * is in the emulation's own units, the scroll offset is in CSS pixels, and the two differ by
+       * the zoom.
+       */
+      pageScale?: number;
+    };
 
 /** One protocol command over a tab's existing attachment; the caller owns the attaching. */
 export type CaptureSend = (
@@ -174,12 +184,14 @@ export function decideCapturePath(
   record: CaptureFrame | undefined,
   region: CaptureRegion | undefined,
   scale: number,
+  pageScale?: number,
 ): CapturePath {
   if (!record) return { kind: "visible-tab" };
   return {
     kind: "protocol",
     clip: region ?? { x: 0, y: 0, width: record.width, height: record.height },
     scale,
+    ...(pageScale === undefined || pageScale === 1 ? {} : { pageScale }),
   };
 }
 
@@ -452,8 +464,15 @@ export async function captureThroughProtocol(input: {
   tabId: number;
   clip: CaptureRegion;
   scale: number;
+  /** Clip units per CSS pixel of scroll offset: the page zoom under emulation; 1 when absent. */
+  pageScale?: number;
 }): Promise<string> {
-  const offset = await viewportOffset(input.send, input.tabId);
+  const measured = await viewportOffset(input.send, input.tabId);
+  // The offset is the page's own, in CSS pixels, and the clip is in the emulation's units (measured
+  // 2026-10-18: scrolled to 400 at 125 %, a clip at y 500 matches the picture with no clip, y 400
+  // shows 100 px of blank above it). At zoom 1 the two are the same.
+  const factor = input.pageScale ?? 1;
+  const offset = { x: Math.round(measured.x * factor), y: Math.round(measured.y * factor) };
   const shot = await input.send(input.tabId, "Page.captureScreenshot", {
     format: "png",
     fromSurface: true,
@@ -547,6 +566,7 @@ async function capturePicture(input: CaptureInput, deps: CaptureDeps): Promise<C
         send: deps.send,
         tabId: input.tabId,
         clip: path.clip,
+        ...(path.pageScale === undefined ? {} : { pageScale: path.pageScale }),
         scale: target ? target.width / Math.max(clipFrame.width, 1) : path.scale,
       });
       const size = await measure(data);

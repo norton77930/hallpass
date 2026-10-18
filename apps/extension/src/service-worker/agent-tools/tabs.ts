@@ -16,7 +16,6 @@ import {
   navigateTab,
   queryTabSnapshots,
   removeTab,
-  tabContentSize,
   watchTabSettle,
 } from "../../chrome-adapters/tabs.js";
 import { resizeWindow } from "../../chrome-adapters/windows.js";
@@ -29,6 +28,7 @@ import type { ScreenshotSpaces } from "./coordinate-space.js";
 import type { BeforeunloadOutcome } from "./dialogs.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { inputUnavailable } from "./input.js";
+import { captureFrameFacts } from "./photograph.js";
 import { nothingClosed, ownershipRefusal, tabsContextHint } from "./ownership.js";
 import type { AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
@@ -621,7 +621,13 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       // through - and the tab's own content area is then the last fact left about its size. Not the
       // *window's* bounds (012/S2c F4): those include the browser's own furniture, and an agent
       // given them would aim every later coordinate at a viewport that is smaller than it was told.
-      const measured = cleared.real ?? (await tabContentSize(tabId));
+      // In the page's CSS pixels, the basis the next screenshot's frame is in (2026-10-18, R-282):
+      // the tab's size does not follow page zoom, so it is the same facts the frame is made of.
+      // A zoom nobody could read leaves no size to state - the frame is absent, not 100 %.
+      const measured = cleared.real ?? (await captureFrameFacts(tabId)).frame;
+      if (measured === undefined && (await getTabSnapshot(tabId)) !== undefined) {
+        return answer(callId, "failed", "viewport-not-measured");
+      }
       if (measured?.width === undefined || measured.height === undefined) {
         // The window went between the two reads, which takes the tab with it. A size made up here
         // would be a fact about nothing, and `stale` is the word for a tab that is not there.

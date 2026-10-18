@@ -37,6 +37,10 @@ function installChrome(): void {
     },
     scripting: { async executeScript() {} },
     tabs: {
+      // Page zoom (R-282): 100 %, as the tests were written for; an unreadable one is no frame.
+      async getZoom() {
+        return 1;
+      },
       async get(tabId: number) {
         if (tabId !== AGENT_TAB) throw new Error("No tab with id");
         return { id: AGENT_TAB, url: PAGE_URL };

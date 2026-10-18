@@ -360,3 +360,13 @@ called.
     that cannot be measured never refuses (0.12.2's behaviour).
   - No stored space: unchanged, points are CSS pixels. The gate, the owner's summary and a stated
     plan still see the arguments as the agent wrote them.
+- **2026-10-18 — The frame is never made from a zoom nobody could read, and an emulated tab's frame
+  follows page zoom** (R-282 follow-up; defect fix). FR-158/FR-163 amended: when the page zoom
+  cannot be read there is no frame (the tab is treated as one nobody could size) rather than a frame
+  at 100 %; a point is then not refused and a whole picture stores no space. The frame of an
+  emulated tab is the emulated size divided by the zoom (500x800 at 125 % is 400x640 CSS); the
+  capture itself stays the emulated size, so the picture is 500x800 and its stored ratio to the
+  frame is the real 1.25. The
+  `viewport` tool's `reset` answer, when it cannot measure the page through an attachment, uses the
+  same basis as the next screenshot's frame (tab size divided by zoom), and fails with
+  `viewport-not-measured` if the zoom cannot be read.

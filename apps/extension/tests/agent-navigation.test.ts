@@ -51,6 +51,8 @@ type FakeChrome = {
    * itself, which is how Chrome's own `tabs.remove` comes to throw (003/B7).
    */
   closeRaces: boolean;
+  /** The page zoom `tabs.getZoom` reports (R-282); `undefined` is Chrome refusing to say. */
+  zoom: number | undefined;
   /**
    * Chrome's real shape for `tabs.create({ url })`: the promise resolves before the navigation has
    * committed, with `url: ""`, and the address appears on the record only when the document commits
@@ -118,6 +120,7 @@ function installChrome(): FakeChrome {
     neverCompletes: false,
     staleCompleteFirst: false,
     closeRaces: false,
+    zoom: 1,
     commitsLate: false,
     downloads: [],
     firstNavigationPending: false,
@@ -264,6 +267,10 @@ function installChrome(): FakeChrome {
         tab.historyIndex += 1;
         tab.url = tab.history[tab.historyIndex] ?? tab.url;
         settle(tab);
+      },
+      async getZoom() {
+        if (state.zoom === undefined) throw new Error("No zoom");
+        return state.zoom;
       },
       async remove(tabId: number) {
         if (state.closeRaces) {
@@ -849,6 +856,35 @@ describe("T041 agent tab tools", () => {
       outcome: "ok",
       result: { width: 1180, height: 700, emulated: false },
     });
+  });
+
+  /**
+   * 012 change log 2026-10-18 (R-282): the answer and the next screenshot's frame are one basis.
+   * The tab's own size does not follow page zoom, the page's CSS width does - so at 125 % a
+   * 1 180-wide tab lays out 944 CSS pixels, and that is what a reset must say it is.
+   */
+  it("answers an unmeasured reset in the page's CSS pixels under page zoom", async () => {
+    const tools = build();
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+    viewportReal = undefined;
+    fake.zoom = 1.25;
+
+    const reset = await tools.run(call("viewport", { tabId, action: "reset" }));
+
+    expect(reset).toEqual({ callId: "call-1", outcome: "ok", result: { width: 944, height: 560, emulated: false } });
+  });
+
+  it("does not make up a size when the page's zoom could not be read", async () => {
+    const tools = build();
+    const created = await tools.run(call("tabs_create", {}));
+    const { tabId } = created.result as { tabId: number };
+    viewportReal = undefined;
+    fake.zoom = undefined;
+
+    const reset = await tools.run(call("viewport", { tabId, action: "reset" }));
+
+    expect(reset).toEqual({ callId: "call-1", outcome: "failed", reason: "viewport-not-measured" });
   });
 
   /**

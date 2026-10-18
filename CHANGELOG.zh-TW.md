@@ -3,6 +3,14 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.12.4 — 2026-10-18
+
+- **告訴 agent 沒完成的頁面內動作，不會事後才生效**:`scroll`、`form_input` 等頁面內動作超過該次呼叫的時間、agent 已收到 `page-not-responding` 後，worker 會停掉這次呼叫剩下的步驟；頁面若在那之後才收到請求，會在動到任何東西前拒絕。頁面已經開始執行的動作無法中途停下，提示仍會說「可能已經生效」。
+- **單次頁面往返超過 10 秒，回 `page-not-responding`**:以前會以 `content.execution` 失敗，現在和整體時間上限的回答與提示一致。
+- **設定了 `viewport` 尺寸、頁面又有縮放時，座標仍然準**:這時頁面實際排版寬度是設定寬度除以縮放比例(125% 時 500 寬等於 400 頁面像素)。頁面尺寸與座標換算現在照這個算，截圖仍拍到整個頁面(捲動後也一樣);設定尺寸期間改變縮放，會被 `viewport-changed` 擋下。
+- **讀不到縮放比例時，不再當成 100%**:截圖不回報頁面尺寸、座標不換算，避免用錯的尺寸換算；設定了 `viewport` 尺寸的分頁則拒絕截圖。
+- **`viewport` 重設回報的頁面尺寸與截圖同一套基準**(縮放過的頁面以前回報未縮放的尺寸)。
+
 ## 0.12.3 — 2026-10-18
 
 - **整頁截圖改成 JPEG**:不帶 `region` 的 `screenshot` 與 `computer` 的截圖改回傳品質 0.75 的 `image/jpeg`,像素尺寸和 0.12.2 一樣。還是超過單次回應上限時，每次降 0.05 重壓，最低到 0.10,仍太大才拒絕；`computer` 的截圖現在也會像 `screenshot` 一樣回「請用 scale ≤ … 重試」,不再整個呼叫失敗。區域截圖維持 PNG、保留螢幕實際像素。

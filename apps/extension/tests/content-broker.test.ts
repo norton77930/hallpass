@@ -1062,7 +1062,7 @@ describe("WP3 dispatch fence inside the executor", () => {
   function installChrome(input: {
     activeTabId: number;
     injections: unknown[];
-    onMessage: (type: string) => unknown;
+    onMessage: (type: string, frame: Record<string, unknown>) => unknown;
   }) {
     (globalThis as { chrome?: unknown }).chrome = {
       runtime: { id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
@@ -1078,7 +1078,7 @@ describe("WP3 dispatch fence inside the executor", () => {
         async sendMessage(_tabId: number, message: unknown) {
           const parsed = contentRuntimeMessageSchema.safeParse(message);
           if (!parsed.success) throw new Error("invalid-content-frame");
-          return input.onMessage(parsed.data.type);
+          return input.onMessage(parsed.data.type, parsed.data as Record<string, unknown>);
         },
       },
     };
@@ -1186,6 +1186,26 @@ describe("WP3 dispatch fence inside the executor", () => {
     expect(executed).toMatchObject({ ok: true, effect: "scrolled", scrollTop: 80 });
     expect(sent).toEqual(["content.probe", "content.execute-action"]);
     expect(answers).toEqual([true]);
+  });
+
+  /** 015 change log 2026-10-18: the moment the caller is answered travels on the action frame. */
+  it("puts the caller's deadline on the action frame, and leaves it off when there is none", async () => {
+    const frames: Record<string, unknown>[] = [];
+    installChrome({
+      activeTabId: 7,
+      injections: [],
+      onMessage: (type, frame) => {
+        if (type === "content.probe") {
+          return { documentEpoch: "doc-live", canonicalOrigin: "https://example.test" };
+        }
+        frames.push(frame);
+        return { ok: true, effect: "scrolled", scrollTop: 80, targetVisibility: "not-applicable" };
+      },
+    });
+    await executeOnActiveTab({ ...scrollInput, deadlineAt: 1_760_000_000_000 });
+    await executeOnActiveTab(scrollInput);
+    expect(frames[0]).toMatchObject({ type: "content.execute-action", deadlineAt: 1_760_000_000_000 });
+    expect(frames[1]).not.toHaveProperty("deadlineAt");
   });
 
   /**

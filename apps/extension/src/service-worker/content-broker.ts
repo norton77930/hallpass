@@ -21,6 +21,8 @@ import {
 import { classifyPageSupport, type PageSupportInput } from "../chrome-adapters/tabs.js";
 import { injectContentRuntime } from "../chrome-adapters/scripting.js";
 import {
+  isPageDeadline,
+  pageDeadlineFailure,
   pageFailure,
   type ConditionEvaluator,
   type PageExecutionOutcome,
@@ -92,6 +94,8 @@ function contentFrame(input: {
    * the remote path builds is byte-identical to the one it built before this field existed.
    */
   policy?: "classified" | "trusted-agent";
+  /** Effect frames only (015 change log 2026-10-18); left off when absent, as `policy` is. */
+  deadlineAt?: number;
   payload: Record<string, unknown>;
 }): ReturnType<typeof contentRuntimeMessageSchema.parse> {
   return contentRuntimeMessageSchema.parse({
@@ -105,6 +109,7 @@ function contentFrame(input: {
     expectedTabId: input.tabId,
     expectedDocumentEpoch: input.documentEpoch,
     ...(input.policy === undefined ? {} : { policy: input.policy }),
+    ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
     payload: input.payload,
   });
 }
@@ -124,19 +129,11 @@ function contentFrame(input: {
 export const CONTENT_OPERATION_DEADLINE_MS = 10_000;
 
 /**
- * The failures `withDeadline` itself raised (015/T401, FR-206, R-197).
- *
- * A deadline is a different fact from every other way a round trip can fail: the page is still
- * there, its frame simply did not answer in time, and asking again may well work. The failure it
- * raises keeps its existing code - every caller that classifies by code reads it exactly as before -
- * and is remembered here as well, so the one caller that has to tell "did not answer" from "is not
- * there" (`probeActiveTab`) can, without a new failure code in the port vocabulary.
+ * The failures `withDeadline` itself raised (015/T401, FR-206, R-197) are marked by
+ * `pageDeadlineFailure`, so the callers that have to tell "did not answer" from "is not there" -
+ * `probeActiveTab`, and the agent's in-page effects (015 change log 2026-10-18) - can.
  */
-const deadlineFailures = new WeakSet<object>();
-
-function isDeadline(error: unknown): boolean {
-  return typeof error === "object" && error !== null && deadlineFailures.has(error);
-}
+const isDeadline = isPageDeadline;
 
 function withDeadline<T>(
   operation: Promise<T>,
@@ -145,9 +142,7 @@ function withDeadline<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      const failure = pageFailure(code, outcomeCode);
-      deadlineFailures.add(failure);
-      reject(failure);
+      reject(pageDeadlineFailure(code, outcomeCode));
     }, CONTENT_OPERATION_DEADLINE_MS);
     operation.then(
       (value) => {
@@ -1154,6 +1149,11 @@ export async function executeOnActiveTab(input: {
    */
   stillAllowed?: () => boolean;
   /**
+   * When the caller is answered for this effect, in epoch milliseconds (015 change log 2026-10-18).
+   * Carried on the frame so a runtime that reaches it only later refuses it as `cancelled`.
+   */
+  deadlineAt?: number;
+  /**
    * When set, the page is this tab, whether or not it is active; when absent, the active tab of the
    * current window - the remote caller's binding. It must still be the leased tab: the comparison
    * below is unchanged, so an explicit tab that is not `expectedTabId` is refused as any other tab
@@ -1183,6 +1183,7 @@ export async function executeOnActiveTab(input: {
       tabId: page.tabId,
       documentEpoch: binding.documentEpoch,
       ...(input.policy === undefined ? {} : { policy: input.policy }),
+      ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
       payload: { action: input.capability, arguments: input.arguments },
     });
   } catch {

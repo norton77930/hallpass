@@ -4,7 +4,7 @@ import { captureTab } from "../src/chrome-adapters/capture.js";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads, SCREENSHOT_MAX_BASE64_CHARS } from "../src/service-worker/agent-tools/reads.js";
-import { toViewportRegion } from "../src/service-worker/agent-tools/coordinate-space.js";
+import { toViewportPoint, toViewportRegion } from "../src/service-worker/agent-tools/coordinate-space.js";
 
 /**
  * 003/T035 — `screenshot` (US2, FR-039).
@@ -77,7 +77,7 @@ const PNG = "data:image/png;base64,iVBORw0KGgo=";
 
 describe("T035 agent screenshot", () => {
   beforeEach(() => {
-    (globalThis as { chrome?: unknown }).chrome = {};
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { getZoom: async () => 1 } };
   });
 
   afterEach(() => {
@@ -444,7 +444,7 @@ describe("a whole-viewport picture sets the tab's coordinate space", () => {
   const DEVICE = { width: 1484, height: 884 };
 
   beforeEach(() => {
-    (globalThis as { chrome?: unknown }).chrome = {};
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { getZoom: async () => 1 } };
   });
 
   afterEach(() => {
@@ -481,6 +481,80 @@ describe("a whole-viewport picture sets the tab's coordinate space", () => {
 
     expect(response.result).toMatchObject({ width: 1187, height: 707, frame: FRAME, coverage: "viewport" });
     expect(remembered).toEqual([{ tabId: AGENT_TAB, space: { frame: FRAME, image: { width: 1187, height: 707 } } }]);
+  });
+
+  it("takes a picture with no frame, and keeps no space, when the page's zoom cannot be read (2026-10-18)", async () => {
+    (globalThis as { chrome?: unknown }).chrome = {
+      tabs: {
+        getZoom: async () => {
+          throw new Error("No tab with id");
+        },
+      },
+    };
+    const { remembered, store } = spaces();
+    const { runner, diagnostics } = harness({
+      screenshotSpaces: store,
+      captureDeps: { captureVisibleTab: async () => PNG, activateTab: async () => undefined, measure: async () => DEVICE },
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response.outcome).toBe("ok");
+    expect(response.result).not.toHaveProperty("frame");
+    // Nothing new is stored, and what was stored is forgotten: a ratio from another moment is not kept.
+    expect(remembered).toEqual([{ tabId: AGENT_TAB, space: undefined }]);
+    expect(diagnostics).toContain("agent.screenshot.frame-unknown");
+  });
+
+  it("aims an emulated tab's clip in CSS pixels under page zoom, and refuses when the zoom is unreadable", async () => {
+    const clips: unknown[] = [];
+    const { remembered, store } = spaces();
+    const build = () =>
+      harness({
+        screenshotSpaces: store,
+        currentViewport: async () => ({ width: 500, height: 800 }) as never,
+        sendOverAttachment: async (_tabId, method, params) => {
+          // Scrolled to 400 CSS pixels, which is 500 in the override's units at 125 %.
+          if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { pageX: 0, pageY: 400 } };
+          if (method === "Page.captureScreenshot") clips.push((params as { clip: unknown }).clip);
+          return { data: "cHJvdG9jb2w=" };
+        },
+        captureDeps: {
+          captureVisibleTab: async () => {
+            throw new Error("captureVisibleTab must not be used under emulation");
+          },
+          activateTab: async () => undefined,
+          measure: async () => ({ width: 500, height: 800 }),
+        },
+      });
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { getZoom: async () => 1.25 } };
+
+    const zoomed = await build().runner.run(request({ tabId: AGENT_TAB }));
+
+    // Measured 2026-10-18: a 500x800 override at 125 % lays out 400x640 CSS pixels, and a CDP clip
+    // is in the override's own units - a 400x640 clip shows only the top-left 80 % of the page.
+    expect(zoomed.result).toMatchObject({ frame: { width: 400, height: 640 }, width: 500, height: 800 });
+    expect(clips).toEqual([expect.objectContaining({ y: 500, width: 500, height: 800 })]);
+    // The stored ratio is the real one: the picture's centre (250, 400) is CSS (200, 320).
+    expect(remembered).toEqual([
+      { tabId: AGENT_TAB, space: { frame: { width: 400, height: 640 }, image: { width: 500, height: 800 } } },
+    ]);
+    const space = remembered[0]!.space as Parameters<typeof toViewportPoint>[1];
+    expect(toViewportPoint({ x: 250, y: 400 }, space)).toEqual({ x: 200, y: 320 });
+
+    // A region is asked in CSS pixels and clipped in the override's units: 80 px at 125 % is 100.
+    await build().runner.run(request({ tabId: AGENT_TAB, region: { x: 80, y: 40, width: 80, height: 160 } }));
+    expect(clips.at(-1)).toEqual(expect.objectContaining({ x: 100, y: 550, width: 100, height: 200 }));
+
+    (globalThis as { chrome?: unknown }).chrome = {
+      tabs: {
+        getZoom: async () => {
+          throw new Error("No tab with id");
+        },
+      },
+    };
+    const refused = await build().runner.run(request({ tabId: AGENT_TAB }));
+    expect(refused).toEqual({ callId: "call-1", outcome: "not-readable", reason: "capture-refused" });
   });
 
   it("refuses a region once the page is no longer as wide as the picture's, before photographing (R-282)", async () => {

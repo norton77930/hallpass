@@ -137,8 +137,44 @@ describe("a point read off a picture of a frame that is no longer that wide", ()
     const tabSize = async () => ({ width: 1187, height: 707 });
     expect((await captureFrameFacts(7, { tabSize, tabZoom: async () => 1.25 })).frame).toEqual({ width: 950, height: 566 });
     expect((await captureFrameFacts(7, { tabSize, tabZoom: async () => 0.8 })).frame).toEqual({ width: 1484, height: 884 });
-    // A zoom nobody could read is 100 %, which is what the frame meant before.
-    expect((await captureFrameFacts(7, { tabSize, tabZoom: async () => undefined })).frame).toEqual({ width: 1187, height: 707 });
+  });
+
+  it("measures an emulated viewport's frame in CSS pixels under page zoom too", async () => {
+    // Measured on Chromium 151.0.7922.34, 2026-10-18 (R-282): a 500x800 override lays the page out
+    // 500, 625, 400, 746 wide at zoom 1, 0.8, 1.25, 0.67 - the record divided by the zoom.
+    const currentViewport = async () => ({ width: 500, height: 800 });
+    const frameAt = async (zoom: number | undefined) =>
+      captureFrameFacts(7, { currentViewport, tabZoom: async () => zoom });
+    expect(await frameAt(1.25)).toEqual({
+      emulated: true,
+      frame: { width: 400, height: 640 },
+      capture: { width: 500, height: 800 },
+      zoom: 1.25,
+    });
+    expect(await frameAt(0.8)).toEqual({
+      emulated: true,
+      frame: { width: 625, height: 1000 },
+      capture: { width: 500, height: 800 },
+      zoom: 0.8,
+    });
+    expect(await frameAt(1)).toEqual({
+      emulated: true,
+      frame: { width: 500, height: 800 },
+      capture: { width: 500, height: 800 },
+      zoom: 1,
+    });
+    // And a zoom nobody could read is no frame here as well - still emulated, so no window picture.
+    expect(await frameAt(undefined)).toEqual({ emulated: true });
+  });
+
+  it("builds no frame from a zoom nobody could read, rather than assuming 100 %", async () => {
+    // 2026-10-18: a 1 187-wide tab at 125 % is a 950 px page; had the failed read meant 100 %, a
+    // space stored at 950 would be refused as "zoom changed" and one stored blind would map ~25 % off.
+    const tabSize = async () => ({ width: 1187, height: 707 });
+    expect(await captureFrameFacts(7, { tabSize, tabZoom: async () => undefined })).toEqual({ emulated: false });
+    expect(await captureFrameFacts(7, { tabSize, tabZoom: async () => { throw new Error("no zoom"); } })).toEqual({
+      emulated: false,
+    });
   });
 
   it("knows which calls carry a point, and which only name elements", () => {

@@ -28,7 +28,7 @@ import {
 } from "../content-broker.js";
 import type { DownloadObserver } from "../download-observer.js";
 import { verifyPageEffect } from "../effect-verification.js";
-import type { PageExecutionOutcome } from "../page-ports.js";
+import { isPageDeadline, type PageExecutionOutcome } from "../page-ports.js";
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
 import { decideGate, type StatedPlan } from "./gate.js";
@@ -328,6 +328,14 @@ const INPUT_CALL_BUDGET_MS = AGENT_CALL_TIMEOUT_MS - AGENT_CALL_TIMEOUT_SLACK_MS
  * before F4, not a new one. The same holds for the in-page effects bounded the same way.
  */
 const INPUT_BUDGET_FLOOR_MS = 5_000;
+
+/** An in-page effect's share of the call's budget (015 change log 2026-10-18). */
+type InPageBudget = {
+  /** False from the moment the budget answered the agent; the delivery stops at its next step. */
+  live: () => boolean;
+  /** That moment, in epoch milliseconds, for the action frame to carry. */
+  deadlineAt: number;
+};
 
 type EffectPlan = {
   capability: RuntimeAction;
@@ -2455,9 +2463,11 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      */
     deps.onDelivered?.(callId, {});
 
-    return answeringInPageDeadline(callId, receivedAt, async () => {
+    return answeringInPageDeadline(callId, receivedAt, async (budget) => {
       let last: Extract<PageExecutionOutcome, { ok: true }> | undefined;
       for (let attempt = 0; attempt < planned.plan.repeat; attempt += 1) {
+        // Answered already: nothing further is sent, and what this returns is read by nobody.
+        if (!budget.live()) return inputNotAnswered(callId);
         let outcome: PageExecutionOutcome;
         try {
           outcome = await execute({
@@ -2474,14 +2484,26 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
             // classification refusals are skipped. Nothing else is.
             policy: "trusted-agent",
             tab: binding.tabId,
+            // 015 change log 2026-10-18: the call's own budget is part of the fence, and the frame
+            // carries the moment the agent is answered so a page that reaches it later refuses it.
+            stillAllowed: budget.live,
+            deadlineAt: budget.deadlineAt,
           });
         } catch (error) {
           // The executor threw *after* the effect may have begun, which is the one case where nothing
           // was observed at all. It is never reported as success.
           deps.reportDiagnostic?.("agent.effect.execute-uncertain");
+          // The action frame went out and the page did not answer it in time: the same fact, and the
+          // same words, as a spent budget (015 change log 2026-10-18).
+          if (isPageDeadline(error)) return inputNotAnswered(callId);
           return answer(callId, "failed", error instanceof Error ? error.message : "execute-failed");
         }
         if (!outcome.ok) {
+          // The page refused the frame past its `deadlineAt`: that is the spent budget, whichever of
+          // the two the worker happens to see first, never a Stop (015 change log 2026-10-18).
+          if (outcome.reason === "cancelled" && (!budget.live() || now() >= budget.deadlineAt)) {
+            return inputNotAnswered(callId);
+          }
           const mapped = refusalOutcome(outcome.reason);
           return answer(callId, mapped.outcome, mapped.reason);
         }
@@ -2489,6 +2511,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         if (outcome.documentChanged === true) break;
       }
       if (!last) return answer(callId, "failed", "nothing-executed");
+      if (!budget.live()) return inputNotAnswered(callId);
 
       const dialogBefore = deps.currentDialog?.(binding.tabId);
       const verifying = verifyPageEffect({
@@ -2511,6 +2534,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       const raced = await racingDialog(binding.tabId, dialogBefore, verifying);
       if ("dialog" in raced) {
         const unverified = observationOf(last, "target-unconfirmed");
+        if (!budget.live()) return inputNotAnswered(callId);
         if (unverified !== undefined) {
           deps.onEffect?.(request.sessionId, binding.tabId);
           return { callId, outcome: "ok", result: { observed: unverified, dialog: raced.dialog } };
@@ -2527,6 +2551,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       const current = deps.currentDialog?.(binding.tabId);
       const raised = current && current.id !== dialogBefore?.id ? current : undefined;
       const observed = observationOf(last, verdict);
+      // The binding correction above is a fact about the page and stands; the effect report does not.
+      if (!budget.live()) return inputNotAnswered(callId);
       if (!observed) return answer(callId, "failed", "unreadable-evidence");
       deps.onEffect?.(request.sessionId, binding.tabId);
       return { callId, outcome: "ok", result: { observed, ...(raised === undefined ? {} : { dialog: raised }) } };
@@ -2553,19 +2579,28 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
    * `timed-out / no-answer`. So the chain gets the deadline the input budget has - the same end, the
    * same floor - and answers as a spent budget does when it passes. The page's late answer is read
    * by nobody; what it did is the "may have taken effect" the hint says.
+   *
+   * 015 change log 2026-10-18: once it has answered, the delivery it raced stops - `live()` turns
+   * false, which closes the executor's fence and skips whatever the delivery had left (the
+   * verification, the effect report) - and the action frame carries `deadlineAt`, so a page that only
+   * reaches it later refuses it. An action the page is already running is not stopped.
    */
   async function answeringInPageDeadline(
     callId: string,
     receivedAt: number,
-    deliver: () => Promise<AgentNativeResponse>,
+    deliver: (budget: InPageBudget) => Promise<AgentNativeResponse>,
   ): Promise<AgentNativeResponse> {
     const deadline = Math.max(receivedAt + INPUT_CALL_BUDGET_MS, now() + INPUT_BUDGET_FLOOR_MS);
+    let answered = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const spent = new Promise<AgentNativeResponse>((resolve) => {
-      timer = setTimeout(() => resolve(inputNotAnswered(callId)), Math.max(0, deadline - now()));
+      timer = setTimeout(() => {
+        answered = true;
+        resolve(inputNotAnswered(callId));
+      }, Math.max(0, deadline - now()));
     });
     try {
-      return await Promise.race([deliver(), spent]);
+      return await Promise.race([deliver({ live: () => !answered, deadlineAt: deadline }), spent]);
     } finally {
       clearTimeout(timer);
     }

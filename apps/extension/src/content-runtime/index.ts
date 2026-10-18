@@ -249,6 +249,15 @@ export function handleContentMessage(
   if (context.cancelledOperations.has(message.operationId)) {
     return { ok: false, reason: "cancelled" };
   }
+  // 015 change log 2026-10-18: the worker has already answered the caller for this effect, so a
+  // frame reached only now - queued behind a page that was busy - is refused before it acts.
+  if (
+    message.type === "content.execute-action" &&
+    message.deadlineAt !== undefined &&
+    Date.now() > message.deadlineAt
+  ) {
+    return { ok: false, reason: "cancelled" };
+  }
   if (message.type === "content.collect-page") {
     if (
       typeof document !== "undefined" &&

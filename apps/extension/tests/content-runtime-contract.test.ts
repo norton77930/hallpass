@@ -143,6 +143,71 @@ describe("content runtime wire contract", () => {
     ).toMatchObject({ ok: false, reason: "stale-context" });
   });
 
+  /**
+   * 015 change log 2026-10-18: an action frame carries the moment the worker answers the agent for
+   * it. A page that only gets to the frame after that - it was queued behind a hung page - refuses it
+   * before touching anything, because the agent has already been told how the call ended.
+   */
+  it("refuses an action frame whose deadline has passed, before anything changes", () => {
+    document.body.innerHTML = '<input type="text" name="nickname" aria-label="Nickname" value="start" />';
+    const input = document.querySelector("input");
+    if (!(input instanceof HTMLInputElement)) throw new Error("fixture-missing");
+    const probe = handleContentMessage(frame("content.probe", "probe-unbound", {})) as { documentEpoch: string };
+    const collected = handleContentMessage(
+      frame("content.collect-page", probe.documentEpoch, {
+        generalPageReadGrantId: "grant-general-1",
+        bounds: TEST_COLLECTION_BOUNDS,
+        requestedDataCategories: ["page.visible-text", "page.target-metadata"],
+      }),
+    ) as { semanticNodes: Array<{ label?: string; targetHandle?: string }> };
+    const handle = collected.semanticNodes.find((node) => node.label === "Nickname")?.targetHandle;
+    expect(handle).toBeTruthy();
+    const enter = (deadlineAt: number) =>
+      handleContentMessage({
+        ...frame("content.execute-action", probe.documentEpoch, {
+          action: "browser.enter-text",
+          arguments: { targetHandle: handle, text: "late", editMode: "replace" },
+        }),
+        deadlineAt,
+      });
+
+    expect(enter(Date.now() - 1)).toMatchObject({ ok: false, reason: "cancelled" });
+    expect(input.value).toBe("start");
+    // The same frame inside its deadline still acts.
+    expect(enter(Date.now() + 60_000)).toMatchObject({ ok: true, effect: "text-entered" });
+    expect(input.value).toBe("late");
+  });
+
+  it("refuses an action frame that arrives after its operation was cancelled", () => {
+    document.body.innerHTML = '<input type="text" name="nickname" aria-label="Nickname" value="start" />';
+    const input = document.querySelector("input");
+    if (!(input instanceof HTMLInputElement)) throw new Error("fixture-missing");
+    const probe = handleContentMessage(frame("content.probe", "probe-unbound", {})) as { documentEpoch: string };
+    const collected = handleContentMessage(
+      frame("content.collect-page", probe.documentEpoch, {
+        generalPageReadGrantId: "grant-general-1",
+        bounds: TEST_COLLECTION_BOUNDS,
+        requestedDataCategories: ["page.visible-text", "page.target-metadata"],
+      }),
+    ) as { semanticNodes: Array<{ label?: string; targetHandle?: string }> };
+    const handle = collected.semanticNodes.find((node) => node.label === "Nickname")?.targetHandle;
+    const operationId = "operation-cancelled";
+    expect(
+      handleContentMessage({ ...frame("content.cancel", probe.documentEpoch, {}), operationId }),
+    ).toMatchObject({ ok: true, effect: "cancelled" });
+    // A cancel ends the binding, so the frame queued behind it is refused before it acts.
+    expect(
+      handleContentMessage({
+        ...frame("content.execute-action", probe.documentEpoch, {
+          action: "browser.enter-text",
+          arguments: { targetHandle: handle, text: "late", editMode: "replace" },
+        }),
+        operationId,
+      }),
+    ).toMatchObject({ ok: false, reason: "stale-binding" });
+    expect(input.value).toBe("start");
+  });
+
   it("keeps form text out of general visible text and never issues unsafe action handles", () => {
     document.body.innerHTML =
       '<p>Public fixture text</p>' +
