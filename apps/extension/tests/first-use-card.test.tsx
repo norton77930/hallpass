@@ -1,0 +1,248 @@
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { agentPanelCommandSchema, type ConversationPanelState } from "@hallpass/contracts";
+import { ConversationTab } from "../src/side-panel/agent/conversation/ConversationTab.js";
+import {
+  installAgentPort,
+  project,
+  renderShell,
+  ui,
+  uninstallAgentPort,
+  type FakeAgentPort,
+} from "./helpers/agent-shell-harness.js";
+import { CONVERSATION_READY, commandsSent, installTabStorage, withConversation } from "./helpers/conversation-fixtures.js";
+
+/**
+ * 019/T548 - the first-use card (US3, FR-299 - FR-302, D-019-5, D-019-7, R-314).
+ *
+ * Nothing is downloaded and nothing is admitted to the browser without the owner's Download: the
+ * card says what the download is, about how big, that it is a request to the npm registry, that the
+ * agent runs with the owner's own settings, and that it will use this browser under the site rules.
+ * Cancel sends nothing. A missing agent gets install guidance instead, never a download.
+ */
+
+const FIRST_USE: ConversationPanelState = {
+  ...CONVERSATION_READY,
+  consent: "unknown",
+  agents: [
+    { agent: "claude-code", availability: "needs-install", version: "2.1.0" },
+    { agent: "codex", availability: "missing" },
+  ],
+};
+
+const settle = async () => {
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+const pick = (name: RegExp) => fireEvent.click(screen.getByRole("button", { name }));
+const card = () => screen.getByRole("region", { name: ui("conversation.firstUse.title").replace("{agent}", "Claude Code") });
+
+describe("T548 the first-use card", () => {
+  let port: FakeAgentPort;
+
+  beforeEach(() => {
+    port = installAgentPort();
+    installTabStorage();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  async function open(conversation: ConversationPanelState = FIRST_USE, locale: "en-US" | "zh-TW" = "en-US") {
+    renderShell(locale);
+    project(port, withConversation(conversation));
+    await settle();
+  }
+
+  it("states what, how big, the registry request, the owner's own settings and the site rules", async () => {
+    await open();
+    pick(/^Claude Code/);
+
+    const text = card().textContent ?? "";
+    expect(text).toContain(ui("conversation.firstUse.what").replace("{agent}", "Claude Code"));
+    expect(text).toContain(ui("conversation.firstUse.size").replace("{size}", ui("conversation.size.claude-code")));
+    expect(text).toContain(ui("conversation.firstUse.registry"));
+    expect(text).toContain(ui("conversation.firstUse.settings").replace("{agent}", "Claude Code"));
+    expect(text).toContain(ui("conversation.firstUse.browser"));
+    expect(commandsSent(port)).toEqual([]);
+  });
+
+  it("sends the consent, then the install, on Download", async () => {
+    await open();
+    pick(/^Claude Code/);
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.consent", payload: { granted: true } },
+      { type: "ui.conversation.install", payload: { agent: "claude-code" } },
+    ]);
+    for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
+  });
+
+  it("sends only the install when the one-time consent was already given", async () => {
+    await open({ ...FIRST_USE, consent: "granted" });
+    pick(/^Claude Code/);
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.install", payload: { agent: "claude-code" } }]);
+  });
+
+  it("asks for the consent alone, with no download, for an agent already set up", async () => {
+    await open({ ...FIRST_USE, agents: [{ agent: "claude-code", availability: "ready" }] });
+    pick(/^Claude Code/);
+    expect(card().textContent).not.toContain(ui("conversation.firstUse.registry"));
+    expect(screen.queryByRole("button", { name: ui("conversation.firstUse.download") })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.allow") }));
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.consent", payload: { granted: true } }]);
+  });
+
+  it("sends nothing on Cancel and goes back to the agents", async () => {
+    await open();
+    pick(/^Claude Code/);
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.cancel") }));
+
+    expect(commandsSent(port)).toEqual([]);
+    expect(screen.queryByRole("region", { name: /Claude Code/ })).toBeNull();
+    expect(screen.getByRole("group", { name: ui("conversation.picker.agentsLabel") })).toBeTruthy();
+  });
+
+  it("gives install guidance for an agent that is not installed, and offers no download", async () => {
+    await open();
+    pick(/^Codex/);
+
+    expect(screen.getByRole("heading", { name: ui("conversation.missing.title").replace("{agent}", "Codex") })).toBeTruthy();
+    expect(screen.getByText(ui("conversation.missing.codex"))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: ui("conversation.firstUse.download") })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.back") }));
+    expect(commandsSent(port)).toEqual([]);
+  });
+
+  it("says which version is installed when it does not work with the connector", async () => {
+    await open({ ...FIRST_USE, agents: [{ agent: "claude-code", availability: "version-problem", version: "1.0.0", detail: "needs 2.x" }] });
+    pick(/^Claude Code/);
+
+    expect(screen.getByRole("heading", { name: ui("conversation.version.title").replace("{agent}", "Claude Code") })).toBeTruthy();
+    expect(screen.getByText(ui("conversation.version.installed").replace("{version}", "1.0.0"))).toBeTruthy();
+    expect(screen.getByText("needs 2.x")).toBeTruthy();
+    expect(commandsSent(port)).toEqual([]);
+  });
+
+  it("shows the install's phase until the agent is ready", async () => {
+    await open();
+    pick(/^Claude Code/);
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+
+    const bar = screen.getByRole("progressbar", { name: ui("conversation.install.label") });
+    expect(bar.getAttribute("aria-valuenow")).toBeNull();
+    expect(screen.getByRole("status").textContent).toBe(ui("conversation.install.preparing"));
+
+    // T547 (G2): the phase is the broker's word, not inferred from the consent.
+    project(port, withConversation({ ...FIRST_USE, consent: "granted" }));
+    expect(screen.getByRole("status").textContent).toBe(ui("conversation.install.preparing"));
+    project(
+      port,
+      withConversation({
+        ...FIRST_USE,
+        consent: "granted",
+        agents: [{ agent: "claude-code", availability: "needs-install", installing: "downloading" }],
+      }),
+    );
+    expect(screen.getByRole("status").textContent).toBe(
+      ui("conversation.install.downloading").replace("{size}", ui("conversation.size.claude-code")),
+    );
+
+    project(port, withConversation({ ...FIRST_USE, consent: "granted", agents: [{ agent: "claude-code", availability: "ready" }] }));
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByRole("button", { name: /^Claude Code/ }).textContent).toContain(ui("conversation.availability.ready"));
+  });
+
+  it("T547 (G2): shows the phase the broker names rather than guessing it", async () => {
+    await open({ ...FIRST_USE, consent: "granted" });
+    pick(/^Claude Code/);
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+    const installing = (phase: "preparing" | "downloading" | "finishing") =>
+      withConversation({
+        ...FIRST_USE,
+        consent: "granted",
+        agents: [{ agent: "claude-code", availability: "needs-install", installing: phase }],
+      });
+
+    project(port, installing("preparing"));
+    expect(screen.getByRole("status").textContent).toBe(ui("conversation.install.preparing"));
+    project(port, installing("downloading"));
+    expect(screen.getByRole("status").textContent).toBe(
+      ui("conversation.install.downloading").replace("{size}", ui("conversation.size.claude-code")),
+    );
+    project(port, installing("finishing"));
+    expect(screen.getByRole("status").textContent).toBe(ui("conversation.install.finishing"));
+  });
+
+  it("says the install failed and retries it on the owner's word", () => {
+    const sent: unknown[] = [];
+    const view = (lastError?: { code: "install-failed"; detail: string }) => (
+      <ConversationTab
+        conversation={{ ...FIRST_USE, consent: "granted" }}
+        logs={{}}
+        locale="en-US"
+        send={(command) => sent.push(command)}
+        {...(lastError === undefined ? {} : { lastError })}
+      />
+    );
+    const { rerender } = render(view());
+    fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+    rerender(view({ code: "install-failed", detail: "network unreachable" }));
+
+    expect(screen.getByText(ui("conversation.install.failed"))).toBeTruthy();
+    expect(screen.getByText("network unreachable")).toBeTruthy();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.install.retry") }));
+    expect(sent).toEqual([
+      { type: "ui.conversation.install", payload: { agent: "claude-code" } },
+      { type: "ui.conversation.install", payload: { agent: "claude-code" } },
+    ]);
+    expect(screen.getByRole("progressbar")).toBeTruthy();
+  });
+
+  it.each(["consent-needed", "broker-unavailable", "agent-missing"] as const)(
+    "ends the preparing view with the failed view and Retry when the install is refused with %s",
+    (code) => {
+      const sent: unknown[] = [];
+      const view = (lastError?: { code: typeof code; detail: string }) => (
+        <ConversationTab
+          conversation={{ ...FIRST_USE, consent: "granted" }}
+          logs={{}}
+          locale="en-US"
+          send={(command) => sent.push(command)}
+          {...(lastError === undefined ? {} : { lastError })}
+        />
+      );
+      const { rerender } = render(view());
+      fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+      expect(screen.getByRole("progressbar")).toBeTruthy();
+      rerender(view({ code, detail: "the helper went away" }));
+
+      expect(screen.getByText(ui("conversation.install.failed"))).toBeTruthy();
+      expect(screen.getByText("the helper went away")).toBeTruthy();
+      expect(screen.queryByRole("progressbar")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.install.retry") }));
+      expect(sent.at(-1)).toEqual({ type: "ui.conversation.install", payload: { agent: "claude-code" } });
+      expect(screen.getByRole("progressbar")).toBeTruthy();
+    },
+  );
+
+  it("reads in zh-TW", async () => {
+    await open(FIRST_USE, "zh-TW");
+    pick(/^Claude Code/);
+    expect(screen.getByRole("region", { name: "為側欄設定 Claude Code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "下載" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();
+  });
+});

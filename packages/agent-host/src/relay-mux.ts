@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { AGENT_LINK_PROTOCOL, agentLinkFrameSchema } from "@hallpass/contracts";
 import type { UploadRootsListing } from "./upload-config-store.js";
 
@@ -95,7 +96,41 @@ export type RelayMux = {
    * already be on its way back through this same connection.
    */
   pendingCallCount: () => number;
+  /**
+   * 019 R-312: the SHA-256 (hex) of the secret this relay's broker holds - from the spawn, or from
+   * the sidecar of the broker it adopted - or `undefined` for none. Set by the process code in
+   * `native-host.ts`; this file only compares. The last call wins.
+   */
+  expectBroker: (secretSha256: string | undefined) => void;
+  /** The session that greeted as the broker and is still attached, if any. */
+  brokerSessionId: () => string | undefined;
+  /**
+   * Sends `relay-gone` to the broker's link (R-312, on stdin end); `false` when none is attached.
+   * `release` (T572, a superseded relay): that link is closed behind the frame, so the broker redials
+   * this run's next relay now rather than when the drain of the servers' calls ends.
+   */
+  tellBrokerRelayGone: (options?: { release?: boolean }) => boolean;
 };
+
+/**
+ * Whether a presented broker secret is the one behind the expected hash (019 R-312). Both sides are
+ * hashed to the same length first, so the comparison is constant-time and needs no length check.
+ */
+function brokerSecretMatches(secret: string, expectedSha256: string | undefined): boolean {
+  if (expectedSha256 === undefined) return false;
+  const presented = createHash("sha256").update(secret).digest();
+  const expected = Buffer.from(expectedSha256, "hex");
+  return expected.length === presented.length && timingSafeEqual(presented, expected);
+}
+
+/** Whether a frame carries either broker greeting field at its top level (T523). */
+function carriesBrokerField(frame: unknown): boolean {
+  return (
+    typeof frame === "object" &&
+    frame !== null &&
+    (Object.hasOwn(frame, "role") || Object.hasOwn(frame, "brokerSecret"))
+  );
+}
 
 function frameField(frame: unknown, field: "callId" | "sessionId" | "type"): string | undefined {
   if (!frame || typeof frame !== "object") {
@@ -118,6 +153,9 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
    * session that is no longer there and are dropped, not delivered to whoever attaches next).
    */
   const calls = new Map<string, string>();
+  /** 019 R-312: the hash of the secret the broker of this relay holds, and the broker's session. */
+  let expectedBrokerSha256: string | undefined;
+  let brokerSession: string | undefined;
 
   function connectionSessionId(connection: MuxConnection): string | undefined {
     for (const [sessionId, attached] of sessions) {
@@ -155,6 +193,24 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
           return "rejected";
         }
         const { sessionId } = greeting.data;
+        /**
+         * 019 R-312, T523: admission of the broker's link - not policy, and not routing. `role`
+         * (and its secret) is admitted only with the secret behind the hash this relay was given
+         * for its own broker; a lone secret is refused too, and so is an ordinary greeting naming
+         * the broker's session, which would otherwise take that id - and the conversation frames
+         * the worker accepts from it - over from the broker's live link.
+         */
+        const asBroker = greeting.data.role !== undefined || greeting.data.brokerSecret !== undefined;
+        if (asBroker) {
+          const secret = greeting.data.brokerSecret;
+          if (greeting.data.role !== "broker" || secret === undefined || !brokerSecretMatches(secret, expectedBrokerSha256)) {
+            log("relay.mux.broker-role-refused", secret === undefined ? "no-secret" : "secret");
+            return "rejected";
+          }
+        } else if (sessionId === brokerSession) {
+          log("relay.mux.broker-role-refused", "broker-session");
+          return "rejected";
+        }
         // A session that greets again has reconnected after a link drop; its entry is replaced and
         // nothing is announced, because the session did not end - only its socket did.
         //
@@ -182,7 +238,10 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
          * can be read from. Nor does the protocol stamp (T099j): it is a fact about the loopback
          * leg, already checked above, and the worker has no version question to ask.
          */
-        const { token: _token, protocol: _protocol, ...announcement } = greeting.data;
+        //
+        // 019 R-312: nor does the broker's secret, for the same reason as the token.
+        const { token: _token, protocol: _protocol, brokerSecret: _brokerSecret, ...announcement } = greeting.data;
+        if (asBroker) brokerSession = sessionId;
         options.toWorker(announcement);
         log("relay.mux.attached", `sessions=${sessions.size} calls=${calls.size}`);
         return "accepted";
@@ -209,6 +268,13 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
       const claimed = frameField(frame, "sessionId");
       if (claimed !== sessionId) {
         log("relay.mux.frame-refused", claimed === undefined ? "no-session" : "foreign-session");
+        return "rejected";
+      }
+
+      // 019 T523: the broker's two greeting fields belong to the greeting alone; on any other frame
+      // they are a claim the relay has no way to check, so the frame is refused, not forwarded.
+      if (carriesBrokerField(frame)) {
+        log("relay.mux.broker-role-refused", "not-a-greeting");
         return "rejected";
       }
 
@@ -289,6 +355,7 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
         return;
       }
       sessions.delete(sessionId);
+      if (sessionId === brokerSession) brokerSession = undefined;
       for (const [callId, owner] of calls) {
         if (owner === sessionId) {
           calls.delete(callId);
@@ -304,6 +371,23 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
 
     pendingCallCount() {
       return calls.size;
+    },
+
+    expectBroker(secretSha256) {
+      expectedBrokerSha256 = secretSha256;
+    },
+
+    brokerSessionId() {
+      return brokerSession;
+    },
+
+    tellBrokerRelayGone(options) {
+      const connection = brokerSession === undefined ? undefined : sessions.get(brokerSession);
+      if (brokerSession === undefined || connection === undefined) return false;
+      connection.send({ type: "relay-gone", sessionId: brokerSession });
+      // Behind the frame on the same link, so the broker reads it before the close.
+      if (options?.release === true) void connection.close?.();
+      return true;
     },
   };
 }

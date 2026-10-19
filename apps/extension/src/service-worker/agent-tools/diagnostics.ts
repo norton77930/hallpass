@@ -459,7 +459,7 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
         if (held.state !== "this") return ownershipRefusal(callId, held);
         if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
         if (asked.rememberMode) {
-          await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode });
+          await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
         }
       }
     }

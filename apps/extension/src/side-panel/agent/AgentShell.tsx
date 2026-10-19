@@ -1,14 +1,20 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactElement } from "react";
 import {
   AGENT_PANEL_PORT_NAME,
   agentPanelMessageSchema,
   type AgentPanelCommand,
   type AgentPanelState,
+  type ConversationError,
+  type ConversationPanelState,
 } from "@hallpass/contracts";
 import { reportTestDiagnostic } from "../../diagnostics.js";
+import { lookup } from "../../locales/catalog.js";
+import { appendLogEntry, type ConversationLogs } from "./conversation/conversation-log.js";
+import { ConversationTab } from "./conversation/ConversationTab.js";
 import { panelWindowMessage } from "../../panel-window.js";
 import { BrowserRow } from "./BrowserRow.js";
 import { NotConnected } from "./NotConnected.js";
+import { PanelConsentSwitch } from "./PanelConsentSwitch.js";
 import { NoticeCard, PromptCard } from "./PromptCard.js";
 import { SessionCard } from "./SessionCard.js";
 import { SiteList } from "./SiteList.js";
@@ -40,18 +46,85 @@ const MAX_RECONNECT_ATTEMPTS = 6;
 export type AgentComposition = "not-connected" | "idle" | "sessions";
 
 /**
+ * The agent-id namespace of the side panel's own agent (`service-worker/panel-sessions.ts`, R-321).
+ * Kept as a literal here because the panel bundle imports nothing from the worker.
+ */
+const PANEL_AGENT_PREFIX = "panel:";
+
+/**
  * R-125 in one place. Not connected wins over everything: a paired browser whose link is down has
  * nothing the owner can do about a session, and an unpaired one has no session to show.
+ *
+ * 019 T563 follow-up: the side panel's own agent needs no pairing (FR-305), so "something is
+ * connected to this browser" is also true for an owner who granted the panel consent, and for any
+ * panel session already in the projection. Without it their session cards and the site list - where
+ * the sites the panel agent touches are switched - stayed hidden behind the not-paired page. An
+ * owner with neither a pairing nor a panel consent sees what they always saw.
  */
 export function deriveComposition(state: AgentPanelState): AgentComposition {
-  if (state.bridge !== "connected" || state.paired.length === 0) return "not-connected";
+  if (state.bridge !== "connected") return "not-connected";
+  const panelAgent =
+    state.conversation?.consent === "granted" ||
+    state.sessions.some((session) => session.agentId.startsWith(PANEL_AGENT_PREFIX));
+  if (state.paired.length === 0 && !panelAgent) return "not-connected";
   return state.sessions.length === 0 ? "idle" : "sessions";
 }
 
 export type SendCommand = (command: AgentPanelCommand) => void;
 
-function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
+/** 019 T547: how many of this document's own commandIds are remembered while their results are due. */
+const OWN_COMMANDS_KEPT = 64;
+
+const mintCommandId = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `panel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+/**
+ * 019 T547, R-318: which conversation a (re)connected document asks the worker to page from, and
+ * from which seq. The one on screen - or, when a worker that restarted has forgotten which was open,
+ * the one this document last showed - from the seq after the last event it kept (0 if none).
+ */
+function resyncTarget(
+  conversation: ConversationPanelState,
+  lastShown: string | undefined,
+  lastSeqs: ReadonlyMap<string, number>,
+): { conversationId: string; fromSeq: number } | undefined {
+  const conversationId = conversation.active ?? lastShown;
+  if (conversationId === undefined) return undefined;
+  const last = lastSeqs.get(conversationId);
+  return { conversationId, fromSeq: last === undefined ? 0 : last + 1 };
+}
+
+function useAgentPort(): {
+  state: AgentPanelState;
+  logs: ConversationLogs;
+  send: SendCommand;
+  lastError: ConversationError | undefined;
+} {
   const [state, setState] = useState<AgentPanelState>(EMPTY_STATE);
+  /**
+   * 019 D-019-6, T546: what the Conversation tab has been told, per conversation, in this document's
+   * memory only. Nothing of it is written anywhere; a reopened panel is sent it again (T547).
+   */
+  const [logs, setLogs] = useState<ConversationLogs>({});
+  /**
+   * 019 T547: the broker's refusal of the last command *this document* sent, cleared by its next
+   * success. Results reach every document; one whose commandId this document did not mint is
+   * another panel's, and not shown here.
+   */
+  const [lastError, setLastError] = useState<ConversationError | undefined>(undefined);
+  const ownCommands = useRef<string[]>([]);
+  /** The last seq kept per conversation (a number per id, the events stay in `logs`). */
+  const lastSeqs = useRef(new Map<string, number>());
+  /** Set on every connection and whenever the conversation part is unavailable; cleared by a resync. */
+  const needsResync = useRef(true);
+  const lastShown = useRef<string | undefined>(undefined);
+  /**
+   * 019 T572: the broker whose events `logs` and `lastSeqs` hold (the projection's `epoch`). Kept
+   * across reconnections, as the logs are: a worker that restarted may be attached to the same broker.
+   */
+  const epoch = useRef<string | undefined>(undefined);
   const portRef = useRef<chrome.runtime.Port | undefined>(undefined);
   /** A fresh connection on the owner's word, for after the backoff has given up. */
   const reconnectRef = useRef<(() => void) | undefined>(undefined);
@@ -73,7 +146,54 @@ function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
       }
       // A projection proves this connection is healthy, so the next drop backs off from scratch.
       attempt = 0;
-      setState(parsed.data.payload);
+      if (parsed.data.type === "conversation-event") {
+        // 019 T546, FR-288: one broker event for the Conversation tab, kept with its conversation.
+        const payload = parsed.data.payload;
+        const last = lastSeqs.current.get(payload.conversationId);
+        if (last === undefined || payload.seq > last) lastSeqs.current.set(payload.conversationId, payload.seq);
+        setLogs((current) => appendLogEntry(current, payload));
+        return;
+      }
+      if (parsed.data.type === "conversation-result") {
+        // 019 T547 (G1): only this document's own commands; the latest one decides.
+        const result = parsed.data.payload;
+        const index = ownCommands.current.indexOf(result.commandId);
+        if (index < 0) return;
+        ownCommands.current.splice(index, 1);
+        setLastError(result.ok ? undefined : result.error);
+        return;
+      }
+      const projected = parsed.data.payload;
+      setState(projected);
+      const conversation = projected.conversation;
+      if (conversation === undefined || !conversation.available) {
+        // Events may be missed while the broker is away; ask again once it is back.
+        needsResync.current = true;
+        return;
+      }
+      if (conversation.epoch !== undefined) {
+        if (epoch.current !== undefined && epoch.current !== conversation.epoch) {
+          // 019 T572: a replacement broker restarts every conversation's seqs at 0, so what this
+          // document kept would swallow its events as repeats (and an old "running" would hold the
+          // composer). Drop all of it and page the conversation on screen again from 0.
+          lastSeqs.current.clear();
+          setLogs({});
+          needsResync.current = true;
+        }
+        epoch.current = conversation.epoch;
+      }
+      if (!needsResync.current) {
+        lastShown.current = conversation.active;
+        return;
+      }
+      needsResync.current = false;
+      const target = resyncTarget(conversation, lastShown.current, lastSeqs.current);
+      lastShown.current = target?.conversationId;
+      if (target !== undefined) {
+        // 019 T547 (G4): the worker turns this into a page request from that seq; the overview
+        // came with the projection just received.
+        portRef.current?.postMessage({ type: "ui.conversation.resync", payload: target } satisfies AgentPanelCommand);
+      }
     };
     const connect = (): void => {
       if (disposed) {
@@ -90,6 +210,8 @@ function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
         return;
       }
       portRef.current = port;
+      // 019 T547: a new connection may follow a worker restart; the first available state asks again.
+      needsResync.current = true;
       port.onMessage.addListener(onMessage);
       /**
        * Which window this panel is in, on every connection (fix 2026-09-23, panel in another
@@ -166,7 +288,15 @@ function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
     };
   }, []);
 
-  const send: SendCommand = (command) => {
+  const send: SendCommand = (pressed) => {
+    // 019 T547 (G1): a conversation command leaves with the id its result will come back under.
+    let command = pressed;
+    if (command.type.startsWith("ui.conversation.") && command.type !== "ui.conversation.resync" && !("commandId" in command)) {
+      const commandId = mintCommandId();
+      command = { ...command, commandId } as AgentPanelCommand;
+      ownCommands.current.push(commandId);
+      if (ownCommands.current.length > OWN_COMMANDS_KEPT) ownCommands.current.shift();
+    }
     const port = portRef.current;
     if (!port) {
       // This press is lost - the projection it answered may not survive the reconnect anyway -
@@ -185,7 +315,100 @@ function useAgentPort(): { state: AgentPanelState; send: SendCommand } {
     }
   };
 
-  return { state, send };
+  return { state, logs, send, lastError };
+}
+
+/** 019 D-019-3, FR-284: the two tabs, and the key the last one is remembered under. */
+export type AgentPanelTabName = "conversation" | "connections";
+const PANEL_TABS: readonly AgentPanelTabName[] = ["conversation", "connections"];
+export const PANEL_TAB_STORAGE_KEY = "agentPanelTab";
+
+const isPanelTab = (value: unknown): value is AgentPanelTabName => PANEL_TABS.includes(value as AgentPanelTabName);
+
+/**
+ * The tab on screen, opened on the one used last (FR-284, US7 scenario 3).
+ *
+ * Every storage access is wrapped: a panel whose storage throws or is missing still opens, on
+ * Conversation, and still switches - remembering the tab is a convenience, never a reason the
+ * owner cannot reach a control. A choice the owner makes before the read settles wins.
+ */
+function usePanelTab(): [AgentPanelTabName, (tab: AgentPanelTabName) => void] {
+  const [tab, setTab] = useState<AgentPanelTabName>("conversation");
+  const chosen = useRef(false);
+  useEffect(() => {
+    let disposed = false;
+    try {
+      const read = chrome.storage?.local?.get?.(PANEL_TAB_STORAGE_KEY) as Promise<Record<string, unknown>> | undefined;
+      void Promise.resolve(read)
+        .then((items) => {
+          const stored = items?.[PANEL_TAB_STORAGE_KEY];
+          if (!disposed && !chosen.current && isPanelTab(stored)) setTab(stored);
+        })
+        .catch(() => reportTestDiagnostic("agent.panel.tab-unread"));
+    } catch {
+      reportTestDiagnostic("agent.panel.tab-unread");
+    }
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  const choose = (next: AgentPanelTabName): void => {
+    chosen.current = true;
+    setTab(next);
+    try {
+      const write = chrome.storage?.local?.set?.({ [PANEL_TAB_STORAGE_KEY]: next }) as Promise<void> | undefined;
+      void Promise.resolve(write).catch(() => reportTestDiagnostic("agent.panel.tab-unsaved"));
+    } catch {
+      reportTestDiagnostic("agent.panel.tab-unsaved");
+    }
+  };
+  return [tab, choose];
+}
+
+/**
+ * 019 FR-284, US7 scenario 2: how many questions wait in the question slot - pairing, consent,
+ * plan, site plan, browser choice. The slot shows one at a time above both tabs; the count on the
+ * Connections tab is how the owner learns while in a conversation that more are waiting there.
+ */
+export function connectionsAttentionCount(state: AgentPanelState): number {
+  return [state.pending, state.prompt, state.plan, state.sitePlan, state.browserChoice].filter(
+    (question) => question !== undefined,
+  ).length;
+}
+
+/**
+ * 019 FR-306, T554: the tab the owner is viewing in this panel's window, so a message can name it
+ * and the agent starts there. Read when the panel opens and again whenever the active tab changes;
+ * `currentWindow` is the window the side panel belongs to. Without the tabs API, or with no tab to
+ * name, a message names none - the worker then places nothing and the agent claims a tab itself.
+ * The worker decides what the id is worth: a tab another session holds, or a browser page, is not
+ * placed (the claim path refuses it).
+ */
+function useActiveTabId(): number | undefined {
+  const [activeTabId, setActiveTabId] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    let disposed = false;
+    const read = (): void => {
+      try {
+        const query = chrome.tabs?.query?.({ active: true, currentWindow: true }) as Promise<chrome.tabs.Tab[]> | undefined;
+        void Promise.resolve(query)
+          .then((tabs) => {
+            if (!disposed) setActiveTabId(tabs?.[0]?.id);
+          })
+          .catch(() => reportTestDiagnostic("agent.panel.active-tab-unread"));
+      } catch {
+        reportTestDiagnostic("agent.panel.active-tab-unread");
+      }
+    };
+    read();
+    const activated = chrome.tabs?.onActivated;
+    activated?.addListener(read);
+    return () => {
+      disposed = true;
+      activated?.removeListener(read);
+    };
+  }, []);
+  return activeTabId;
 }
 
 /** How often the cards' "last action" words are measured again (016 FR-230). */
@@ -208,8 +431,12 @@ function useMinuteClock(): number {
 }
 
 export function AgentShell(props: { locale: string }): ReactElement {
-  const { state, send } = useAgentPort();
+  const { state, logs, send, lastError } = useAgentPort();
   const now = useMinuteClock();
+  const t = (key: string): string => lookup(key, props.locale);
+  const [tab, chooseTab] = usePanelTab();
+  const activeTabId = useActiveTabId();
+  const tabRefs = useRef<Partial<Record<AgentPanelTabName, HTMLButtonElement | null>>>({});
   const composition = deriveComposition(state);
 
   /**
@@ -252,9 +479,102 @@ export function AgentShell(props: { locale: string }): ReactElement {
       />
     ) : null;
 
+  /**
+   * 019 FR-282: Connections & sites is everything the panel showed before this feature, unchanged
+   * (the 006 compositions, the 016 status row, the 018 browser row).
+   */
+  /**
+   * 019 FR-309, T555: the panel consent, beside the browser it is about. Present whenever the
+   * projection offers conversations - also before any external agent has paired, since the side
+   * panel's own agent needs no pairing.
+   */
+  const consentSwitch =
+    state.conversation === undefined ? null : (
+      <PanelConsentSwitch consent={state.conversation.consent} locale={props.locale} send={send} />
+    );
+  const connections =
+    composition === "not-connected" ? (
+      <>
+        <NotConnected
+          variant={state.paired.length === 0 ? "not-paired" : "bridge-lost"}
+          diagnostics={state.diagnostics ?? {}}
+          locale={props.locale}
+          onRetry={() => {
+            send({ type: "ui.agent.retry-bridge", payload: {} });
+          }}
+        />
+        {browserRow}
+        {consentSwitch}
+      </>
+    ) : (
+      <>
+        <StatusRow
+          sessionCount={state.sessions.length}
+          paired={state.paired}
+          locale={props.locale}
+          onUnpair={(agentId) => {
+            // 016 FR-223: the agent the owner chose, and no other - the menu names each one.
+            send({ type: "ui.agent.unpair", payload: { agentId } });
+          }}
+        />
+        {browserRow}
+        {consentSwitch}
+        {sessions.map((session) => (
+          <SessionCard
+            key={session.sessionId}
+            session={session}
+            agentName={agentName(session.agentId)}
+            locale={props.locale}
+            now={now}
+            onStop={() => {
+              send({ type: "ui.agent.session-stop", payload: { sessionId: session.sessionId } });
+            }}
+            onRelease={() => {
+              send({ type: "ui.agent.session-release", payload: { sessionId: session.sessionId } });
+            }}
+            onInterrupt={() => {
+              send({ type: "ui.agent.session-interrupt", payload: { sessionId: session.sessionId } });
+            }}
+            onWithdrawSitePlan={() => {
+              send({ type: "ui.agent.site-plan-withdraw", payload: { sessionId: session.sessionId } });
+            }}
+          />
+        ))}
+        <SiteList
+          sites={state.sites}
+          transitions={state.transitions}
+          uploadRoots={state.uploadRoots}
+          locale={props.locale}
+          send={send}
+        />
+      </>
+    );
+
+  /** 019 FR-284: the count shows on the Connections tab only while the other tab is shown. */
+  const attention = connectionsAttentionCount(state);
+  const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    // The ARIA tabs pattern: arrows move and wrap, Home/End jump; selection follows focus.
+    const index = PANEL_TABS.indexOf(tab);
+    const next =
+      event.key === "ArrowRight"
+        ? PANEL_TABS[(index + 1) % PANEL_TABS.length]
+        : event.key === "ArrowLeft"
+          ? PANEL_TABS[(index - 1 + PANEL_TABS.length) % PANEL_TABS.length]
+          : event.key === "Home"
+            ? PANEL_TABS[0]
+            : event.key === "End"
+              ? PANEL_TABS[PANEL_TABS.length - 1]
+              : undefined;
+    if (next === undefined) return;
+    event.preventDefault();
+    chooseTab(next);
+    tabRefs.current[next]?.focus();
+  };
+
   return (
     <div className="agent-shell" data-agent-state={composition}>
       {/* 016 FR-224: no in-panel heading - the browser's side-panel header already names the product. */}
+      {/* 019 FR-283: the question slot sits above the tab bar, so it is on screen on both tabs. */}
       <PromptCard state={state} locale={props.locale} promptAgent={promptAgent} send={send} />
       {/*
         008 FR-114: under the question area, never in it. A notice is not an answerable question,
@@ -262,58 +582,57 @@ export function AgentShell(props: { locale: string }): ReactElement {
         is the one on screen, because the notice is about what just happened.
       */}
       {notice === undefined ? null : <NoticeCard notice={notice} locale={props.locale} />}
-      {composition === "not-connected" ? (
-        <>
-          <NotConnected
-            variant={state.paired.length === 0 ? "not-paired" : "bridge-lost"}
-            diagnostics={state.diagnostics ?? {}}
-            locale={props.locale}
-            onRetry={() => {
-              send({ type: "ui.agent.retry-bridge", payload: {} });
-            }}
-          />
-          {browserRow}
-        </>
+      {state.conversation === undefined ? (
+        // A projection with no conversation part (a worker without 019): today's panel, no tabs.
+        connections
       ) : (
         <>
-          <StatusRow
-            sessionCount={state.sessions.length}
-            paired={state.paired}
-            locale={props.locale}
-            onUnpair={(agentId) => {
-              // 016 FR-223: the agent the owner chose, and no other - the menu names each one.
-              send({ type: "ui.agent.unpair", payload: { agentId } });
-            }}
-          />
-          {browserRow}
-          {sessions.map((session) => (
-            <SessionCard
-              key={session.sessionId}
-              session={session}
-              agentName={agentName(session.agentId)}
-              locale={props.locale}
-              now={now}
-              onStop={() => {
-                send({ type: "ui.agent.session-stop", payload: { sessionId: session.sessionId } });
-              }}
-              onRelease={() => {
-                send({ type: "ui.agent.session-release", payload: { sessionId: session.sessionId } });
-              }}
-              onInterrupt={() => {
-                send({ type: "ui.agent.session-interrupt", payload: { sessionId: session.sessionId } });
-              }}
-              onWithdrawSitePlan={() => {
-                send({ type: "ui.agent.site-plan-withdraw", payload: { sessionId: session.sessionId } });
-              }}
-            />
-          ))}
-          <SiteList
-            sites={state.sites}
-            transitions={state.transitions}
-            uploadRoots={state.uploadRoots}
-            locale={props.locale}
-            send={send}
-          />
+          <div role="tablist" aria-label={t("agent.tabs.label")} className="agent-tabs" onKeyDown={onTabKeyDown}>
+            {PANEL_TABS.map((name) => {
+              const selected = tab === name;
+              const count = name === "connections" && !selected ? attention : 0;
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  role="tab"
+                  id={`agent-tab-${name}`}
+                  aria-selected={selected}
+                  aria-controls={`agent-tabpanel-${name}`}
+                  tabIndex={selected ? 0 : -1}
+                  className="agent-tab"
+                  ref={(element) => {
+                    tabRefs.current[name] = element;
+                  }}
+                  onClick={() => chooseTab(name)}
+                >
+                  {t(name === "conversation" ? "agent.tabs.conversation" : "agent.tabs.connections")}
+                  {count > 0 ? (
+                    <>
+                      <span className="agent-tab-count" data-tab-count aria-hidden="true">
+                        {count}
+                      </span>
+                      <span className="agent-sr-only">{t("agent.tabs.waiting").replace("{count}", String(count))}</span>
+                    </>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+          <div role="tabpanel" id={`agent-tabpanel-${tab}`} aria-labelledby={`agent-tab-${tab}`} className="agent-tabpanel">
+            {tab === "conversation" ? (
+              <ConversationTab
+                conversation={state.conversation}
+                logs={logs}
+                locale={props.locale}
+                send={send}
+                {...(activeTabId === undefined ? {} : { activeTabId })}
+                {...(lastError === undefined ? {} : { lastError })}
+              />
+            ) : (
+              connections
+            )}
+          </div>
         </>
       )}
     </div>

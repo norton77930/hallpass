@@ -176,7 +176,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
         return { ok: false, response: ownershipRefusal(callId, { state: "not-yours" }) };
       }
       if (asked.rememberMode) {
-        await deps.siteModes.set(binding.site, { mode: asked.rememberMode as SiteMode });
+        await deps.siteModes.set(binding.site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
       }
     }
     return { ok: true, context, binding };

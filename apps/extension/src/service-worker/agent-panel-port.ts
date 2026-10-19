@@ -1,4 +1,10 @@
-import { AGENT_PANEL_PORT_NAME, agentPanelCommandSchema } from "@hallpass/contracts";
+import {
+  AGENT_PANEL_PORT_NAME,
+  agentPanelCommandSchema,
+  type AgentPanelCommand,
+  type AgentPanelMessage,
+  type ConversationPanelCommand,
+} from "@hallpass/contracts";
 import { isPanelWindowType, parsePanelWindowMessage } from "../panel-window.js";
 import { isTrustedControlSender } from "./shared-port.js";
 import type { AgentRuntime } from "./agent-runtime.js";
@@ -88,6 +94,11 @@ export type AgentPanelPort = {
   onPresenceChange(listener: (visible: boolean) => void): void;
 };
 
+/** 019 T547: the Conversation tab's commands, which the runtime forwards to the broker. */
+function isConversationCommand(command: AgentPanelCommand): command is ConversationPanelCommand {
+  return command.type.startsWith("ui.conversation.");
+}
+
 export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort {
   const connected = new Set<AgentPanelPortLike>();
   const presenceListeners: Array<(visible: boolean) => void> = [];
@@ -158,9 +169,14 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
     if (mine !== generation) {
       return;
     }
+    postToAll({ type: "worker.agent.state", payload });
+  }
+
+  /** One message to every connected panel document; a port that cannot take it is dropped. */
+  function postToAll(message: AgentPanelMessage): void {
     for (const port of [...connected]) {
       try {
-        port.postMessage({ type: "worker.agent.state", payload });
+        port.postMessage(message);
       } catch {
         // A port that cannot be written to is not a panel any more. Dropped *and* disconnected:
         // left connected on Chrome's side, it would be a live port never written to again - the
@@ -180,6 +196,14 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
   // `publish` is a no-op while nothing is connected.
   input.runtime.subscribe(() => {
     void publish();
+  });
+  /**
+   * 019 T547, FR-288: what the broker says - a command's result, an event, a page's events - goes
+   * to every panel document as it comes, beside the projection rather than inside it: the worker
+   * keeps no conversation content, so there is no later moment at which it could still be sent.
+   */
+  input.runtime.conversation.onPanelMessage((message) => {
+    postToAll(message);
   });
 
   return {
@@ -222,6 +246,12 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
           return;
         }
         const command = parsed.data;
+        if (isConversationCommand(command)) {
+          // 019 T547: validated above against the closed union, which has no way to name the
+          // worker's own page request; the runtime forwards it to this relay run's broker.
+          input.runtime.conversation.command(command);
+          return;
+        }
         switch (command.type) {
           case "ui.agent.pair-decide":
             void input.runtime.pairing.decide(command.payload.agentId, command.payload.accepted);

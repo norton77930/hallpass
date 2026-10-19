@@ -17,7 +17,7 @@ Load `apps\extension\dist\agent` at `chrome://extensions` (Developer mode → Lo
 a rebuild, reload the extension; the host does not need reinstalling unless the checkout moves.
 
 The repository is npm workspaces: `apps/extension` (the extension), `packages/agent-host` (MCP
-server, relay, installer), `packages/contracts` (the tool contracts and wire schemas, shared),
+server, relay, installer, the side-panel conversation broker), `packages/contracts` (the tool contracts and wire schemas, shared),
 `packages/domain`, `packages/test-kit`.
 
 ## Tests
@@ -43,6 +43,37 @@ Two more need a real Chrome and are run locally before a release:
 - **The acceptance probes** (`tests/acceptance/probe-004`) drive the bridge with a real coding-agent
   session (`claude -p`) against public pages and write a timestamped report. They cost API calls;
   run them for a release, not for every change.
+
+### The side-panel conversation: the fake agent
+
+The conversation broker (`packages/agent-host/src/broker.ts`, started by the relay, one per browser
+run) drives the owner's own Claude Code or Codex over the Agent Client Protocol. Its tests and its
+gate never need a real agent: `tests/harness/fake-acp-agent.ts` is a small stand-in that speaks the
+ACP subset the broker uses (streamed text, permission requests, modes, session load, a crash, child
+processes, calls to Hallpass's browser tools). It is not a model: each behaviour is chosen by a
+keyword in the prompt or by an environment variable such as `FAKE_ACP_SCENARIO` (`claude` or `codex`
+modes); the header of the file lists them. Its own tests run with
+`npx vitest run --project unit tests/harness/fake-acp-agent.test.ts`.
+
+To put the fake agent behind the broker in the packaged gate, set these for the **browser's** process
+(the broker is started by Chrome's native host), together with the private `LOCALAPPDATA` and
+`HALLPASS_FOREIGN_AGENT_SERVERS=allow` described above:
+
+- `HALLPASS_TEST_MODE=1` - without it the two variables below are ignored, so an installed host can
+  never be pointed at a fake agent;
+- `HALLPASS_BROKER_TEST_AGENT` - a JSON argv that replaces every agent launch, for example
+  `["node","--experimental-strip-types","<checkout>/tests/harness/fake-acp-agent.ts"]`;
+- `HALLPASS_BROKER_TEST_IDLE_MS` - shortens the 10-minute idle stop.
+
+Then run the conversation spec, which skips itself unless all of this is in place:
+
+```powershell
+npx playwright test --config playwright.extension.config.ts tests/e2e/packaged/agent-conversation.spec.ts --reporter=list
+```
+
+The same variables are honoured by the broker tests under `packages/agent-host/tests/broker-*.test.ts`
+(for example `broker-job.test.ts`, which proves that no agent process outlives the broker). Real-agent runs (Claude Code and Codex, signed
+in) are acceptance probes: they cost API calls and are run for a release, not for a change.
 
 A change to product behaviour comes with the test that would have caught its absence: one focused
 failing test first, then the smallest change that makes it pass.

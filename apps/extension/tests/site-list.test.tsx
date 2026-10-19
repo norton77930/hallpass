@@ -49,6 +49,23 @@ describe("T191 site list", () => {
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 
+  it("says who made a site's last change, and nothing for a record from before anyone was named (019 FR-308)", () => {
+    renderShell();
+    project(port, {
+      ...IDLE,
+      sites: [
+        { ...open, changedBy: "panel-agent", changedAt: "2026-10-19T08:00:00.000Z" },
+        { ...ask, site: "https://owner.test", mode: "follow-a-plan", changedBy: "owner", changedAt: "2026-10-19T08:00:00.000Z" },
+        { ...ask, site: "https://older.test", mode: "follow-a-plan" },
+      ],
+    });
+
+    const row = (site: string) => document.querySelector(`[data-site="${site}"]`) as HTMLElement;
+    expect(within(row(open.site)).getByText(ui("agent.siteChangedBy.panel-agent"))).toBeTruthy();
+    expect(within(row("https://owner.test")).getByText(ui("agent.siteChangedBy.owner"))).toBeTruthy();
+    expect(row("https://older.test").querySelector(".agent-site-author")).toBeNull();
+  });
+
   it("revokes a site with the closed command, naming only the site", () => {
     renderShell();
     project(port, { ...IDLE, sites: [ask, open] });

@@ -64,6 +64,15 @@ export function browsersDirectory(env: HostEnvironment = process.env): string {
 }
 
 /**
+ * Where each browser's conversation broker is recorded, `<browserId>.json` (019 R-312, data-model
+ * "Broker sidecar"): `{ pid, browserRunId, secretSha256, startedAt }`, written by the relay that
+ * spawned the broker, read by the next relay of that browser to adopt it, removed by the broker.
+ */
+export function brokersDirectory(env: HostEnvironment = process.env): string {
+  return join(hostDataDirectory(env), "brokers");
+}
+
+/**
  * Where the browser each agent chose last is remembered, `<agentId>.json` (018 R-271, D-018-11).
  *
  * One file per agent so that a later key cannot lose another agent's update; the agent id is the

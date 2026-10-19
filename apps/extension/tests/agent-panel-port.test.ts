@@ -192,8 +192,46 @@ describe("T019 agent panel port", () => {
         diagnostics: { relayPid: 4242 },
         // 018 FR-268: this browser, named by its kind until the relay reports the others.
         browser: { name: "Browser", defaultName: "Browser", kind: "unknown", others: 0 },
+        // 019 T547: always there; no broker has greeted this relay yet.
+        conversation: {
+          available: false,
+          reason: "broker-unavailable",
+          consent: "unknown",
+          conversations: [],
+          agents: [],
+          folders: [],
+        },
       },
     });
+  });
+
+  it("019 T547: hands a ui.conversation command to the runtime, and the runtime's conversation messages to every panel", async () => {
+    const diagnostics: string[] = [];
+    const { panel, runtime } = setup({ reportDiagnostic: (code) => diagnostics.push(code) });
+    const forwarded = vi.spyOn(runtime.conversation, "command");
+    const first = fakePanelPort();
+    const second = fakePanelPort();
+    panel.accept(first);
+    panel.accept(second);
+
+    second.emit({ type: "ui.conversation.stop", payload: { conversationId: "conv-0123456789abcdef" }, commandId: "p-1" });
+    // The worker's own page request is not a panel command.
+    second.emit({ type: "worker.conversation.page", payload: { conversationId: "conv-0123456789abcdef", fromSeq: 0 } });
+
+    expect(forwarded).toHaveBeenCalledTimes(1);
+    expect(forwarded).toHaveBeenCalledWith({
+      type: "ui.conversation.stop",
+      payload: { conversationId: "conv-0123456789abcdef" },
+      commandId: "p-1",
+    });
+    expect(diagnostics).toEqual(["agent.panel.command-rejected"]);
+    // No broker is attached: the refusal is the worker's own, and both documents hear it.
+    for (const port of [first, second]) {
+      expect(port.sent).toContainEqual({
+        type: "conversation-result",
+        payload: { commandId: "p-1", ok: false, error: { code: "broker-unavailable", detail: expect.any(String) } },
+      });
+    }
   });
 
   /**

@@ -1,0 +1,423 @@
+import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { agentPanelCommandSchema, CONVERSATION_ERROR_CODES, CONVERSATION_NOTICES } from "@hallpass/contracts";
+import { lookup } from "../src/locales/catalog.js";
+import {
+  installAgentPort,
+  project,
+  renderShell,
+  ui,
+  uninstallAgentPort,
+  type FakeAgentPort,
+} from "./helpers/agent-shell-harness.js";
+import {
+  CONVERSATION_ID,
+  commandsSent,
+  lastCommandId,
+  CONVERSATION_OPEN,
+  CONVERSATION_READY,
+  VIEW,
+  emitEvent,
+  installTabStorage,
+  withConversation,
+} from "./helpers/conversation-fixtures.js";
+
+/**
+ * 019/T545 - the Conversation tab (US1, US2, FR-285 - FR-294).
+ *
+ * What the owner sees is the `conversation` part of the projection (no content) plus the events the
+ * worker forwards; what leaves is one `ui.conversation.*` command per press, each checked against
+ * the panel command schema. The mode switch is the safety-relevant control: it must offer exactly
+ * the two modes and nothing that approves everything (FR-292).
+ */
+
+const settle = async () => {
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+const header = () => screen.getByRole("region", { name: ui("conversation.header.label") });
+const log = () => screen.getByRole("log", { name: ui("conversation.messages.label") });
+const expectValidCommands = (port: FakeAgentPort) => {
+  for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
+};
+
+describe("T545 the Conversation tab", () => {
+  let port: FakeAgentPort;
+
+  beforeEach(() => {
+    port = installAgentPort();
+    installTabStorage();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  async function open(conversation = CONVERSATION_OPEN, locale: "en-US" | "zh-TW" = "en-US") {
+    renderShell(locale);
+    project(port, withConversation(conversation));
+    await settle();
+  }
+
+  it("offers both agents with their availability, and starts a scratch conversation with a ready one", async () => {
+    await open({ ...CONVERSATION_READY, agents: [CONVERSATION_READY.agents[0]!, { agent: "codex", availability: "missing" }] });
+
+    const agents = screen.getByRole("group", { name: ui("conversation.picker.agentsLabel") });
+    const claude = within(agents).getByRole("button", { name: /^Claude Code/ });
+    const codex = within(agents).getByRole("button", { name: /^Codex/ });
+    expect(claude.textContent).toContain(ui("conversation.availability.ready"));
+    expect(codex.textContent).toContain(ui("conversation.availability.missing"));
+
+    fireEvent.click(claude);
+
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } },
+    ]);
+    expectValidCommands(port);
+  });
+
+  it("says why there is no conversation when the host is too old or its helper is not there", async () => {
+    await open({ ...CONVERSATION_READY, available: false, reason: "host-outdated" });
+    expect(screen.getByText(ui("conversation.unavailable.host-outdated"))).toBeTruthy();
+    expect(screen.queryByRole("group", { name: ui("conversation.picker.agentsLabel") })).toBeNull();
+    cleanup();
+
+    await open({ ...CONVERSATION_READY, available: false, reason: "broker-unavailable" });
+    expect(screen.getByText(ui("conversation.unavailable.broker-unavailable"))).toBeTruthy();
+  });
+
+  it("shows the agent, the folder and the mode in the header", async () => {
+    await open();
+    const region = header();
+    expect(region.textContent).toContain("Claude Code");
+    expect(region.textContent).toContain(ui("conversation.folder.scratch"));
+    expect(region.textContent).toContain(ui("conversation.mode.strict"));
+    cleanup();
+
+    await open({
+      ...CONVERSATION_OPEN,
+      conversations: [{ ...VIEW, agent: "codex", folder: { kind: "project", path: "D:\\work\\shop" }, mode: "agent-review" }],
+    });
+    expect(header().textContent).toContain("Codex");
+    expect(header().textContent).toContain("D:\\work\\shop");
+    expect(header().textContent).toContain(ui("conversation.mode.agent-review"));
+  });
+
+  it("follows a mode event in the header", async () => {
+    await open();
+    emitEvent(port, 1, { type: "mode", mode: "agent-review" });
+    expect(header().textContent).toContain(ui("conversation.mode.agent-review"));
+  });
+
+  it("appends streamed text to one message in a polite live log, and keeps the owner's words apart", async () => {
+    await open();
+    emitEvent(port, 1, { type: "text", role: "owner", text: "summarise this table" });
+    emitEvent(port, 2, { type: "text", role: "agent", text: "The table has " });
+    emitEvent(port, 3, { type: "text", role: "agent", text: "three rows." });
+
+    const messages = log();
+    expect(messages.getAttribute("aria-live")).toBe("polite");
+    const items = messages.querySelectorAll("[data-message-role]");
+    expect([...items].map((item) => item.getAttribute("data-message-role"))).toEqual(["owner", "agent"]);
+    expect(items[0]?.textContent).toContain("summarise this table");
+    expect(items[1]?.textContent).toContain("The table has three rows.");
+  });
+
+  it("drops a repeated event and ignores another conversation's", async () => {
+    await open();
+    emitEvent(port, 1, { type: "text", role: "agent", text: "once" });
+    emitEvent(port, 1, { type: "text", role: "agent", text: "once" });
+    emitEvent(port, 1, { type: "text", role: "agent", text: "elsewhere" }, "conv-ffffffffffffffff");
+
+    expect(log().textContent).toContain("once");
+    expect(log().textContent).not.toContain("onceonce");
+    expect(log().textContent).not.toContain("elsewhere");
+  });
+
+  it("lists each action with what it is, its input and its latest status, marking one allowed by rule", async () => {
+    await open();
+    emitEvent(port, 1, { type: "tool", toolCallId: "t-1", kind: "read", title: "Read page", inputSummary: "https://shop.test/", status: "running" });
+    emitEvent(port, 2, { type: "tool", toolCallId: "t-2", kind: "edit", title: "Write table.csv", inputSummary: "table.csv", status: "done", byRule: true });
+    emitEvent(port, 3, { type: "tool", toolCallId: "t-1", kind: "read", title: "Read page", inputSummary: "https://shop.test/", status: "done" });
+    emitEvent(port, 4, { type: "tool", toolCallId: "t-3", kind: "execute", title: "Run rm", inputSummary: "rm table.csv", status: "refused" });
+
+    const list = screen.getByRole("list", { name: ui("conversation.actions.label") });
+    const rows = within(list).getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.textContent).toContain("Read page");
+    expect(rows[0]?.textContent).toContain("https://shop.test/");
+    expect(rows[0]?.getAttribute("data-status")).toBe("done");
+    expect(rows[0]?.textContent).toContain(ui("conversation.action.status.done"));
+    expect(rows[1]?.textContent).toContain(ui("conversation.action.byRule"));
+    expect(rows[0]?.textContent).not.toContain(ui("conversation.action.byRule"));
+    expect(rows[2]?.textContent).toContain(ui("conversation.action.status.refused"));
+  });
+
+  it("offers Stop while the agent works, and sends it for this conversation", async () => {
+    await open();
+    expect(screen.queryByRole("button", { name: ui("conversation.stop") })).toBeNull();
+    emitEvent(port, 1, { type: "state", state: "running" });
+
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.stop") }));
+
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.stop", payload: { conversationId: CONVERSATION_ID } }]);
+    expectValidCommands(port);
+
+    emitEvent(port, 2, { type: "state", state: "stopped" });
+    expect(screen.getByText(ui("conversation.state.stopped"))).toBeTruthy();
+    expect(screen.queryByRole("button", { name: ui("conversation.stop") })).toBeNull();
+  });
+
+  it("shows a permission card with exactly three answers, sends the owner's, and leaves when closed", async () => {
+    await open();
+    emitEvent(port, 1, { type: "permission", requestId: "r-1", toolCallId: "t-9", kind: "edit", title: "Write table.csv", detail: "+3 lines" });
+
+    const card = screen.getByRole("group", { name: /Write table\.csv/ });
+    expect(card.textContent).toContain("+3 lines");
+    const answers = within(card).getAllByRole("button");
+    expect(answers.map((button) => button.textContent)).toEqual([
+      ui("conversation.permission.allow-once"),
+      ui("conversation.permission.reject"),
+      ui("conversation.permission.allow-conversation"),
+    ]);
+
+    fireEvent.click(within(card).getByRole("button", { name: ui("conversation.permission.allow-conversation") }));
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.answer", payload: { conversationId: CONVERSATION_ID, requestId: "r-1", answer: "allow-conversation" } },
+    ]);
+    expectValidCommands(port);
+
+    emitEvent(port, 2, { type: "permission-closed", requestId: "r-1", answer: "allow-conversation" });
+    expect(screen.queryByRole("group", { name: /Write table\.csv/ })).toBeNull();
+  });
+
+  it.each(["read", "search", "think"] as const)(
+    "T572: offers no 'allow for this conversation' on a %s card, which the broker keeps no rule for",
+    async (kind) => {
+      await open();
+      emitEvent(port, 1, { type: "permission", requestId: "r-1", toolCallId: "t-9", kind, title: "Look it up", detail: "" });
+
+      const card = screen.getByRole("group", { name: /Look it up/ });
+      expect(within(card).getAllByRole("button").map((button) => button.textContent)).toEqual([
+        ui("conversation.permission.allow-once"),
+        ui("conversation.permission.reject"),
+      ]);
+    },
+  );
+
+  it("offers exactly two modes, and sends the switch", async () => {
+    await open();
+    const switcher = screen.getByRole("radiogroup", { name: ui("conversation.mode.label") });
+    const radios = within(switcher).getAllByRole("radio");
+    expect(radios).toHaveLength(2);
+    expect(radios.map((radio) => (radio as HTMLInputElement).value)).toEqual(["strict", "agent-review"]);
+    expect((radios[0] as HTMLInputElement).checked).toBe(true);
+    expect(switcher.textContent?.toLowerCase()).not.toMatch(/full|bypass|yolo|never ask/);
+
+    fireEvent.click(radios[1]!);
+
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.set-mode", payload: { conversationId: CONVERSATION_ID, mode: "agent-review" } },
+    ]);
+    expectValidCommands(port);
+  });
+
+  it("says Codex works read-only and asks, and what its own rules still allow, in strict mode only (FR-293)", async () => {
+    await open({ ...CONVERSATION_OPEN, conversations: [{ ...VIEW, agent: "codex" }] });
+    expect(screen.getByText(ui("conversation.mode.codexStrictNote"))).toBeTruthy();
+    cleanup();
+
+    await open({ ...CONVERSATION_OPEN, conversations: [{ ...VIEW, agent: "codex", mode: "agent-review" }] });
+    expect(screen.queryByText(ui("conversation.mode.codexStrictNote"))).toBeNull();
+    cleanup();
+
+    await open();
+    expect(screen.queryByText(ui("conversation.mode.codexStrictNote"))).toBeNull();
+  });
+
+  it.each(CONVERSATION_ERROR_CODES)("puts a notice with code %s into the conversation in the panel's own words", async (code) => {
+    await open();
+    emitEvent(port, 1, { type: "notice", code, text: "redacted detail" });
+
+    const notice = log().querySelector(`[data-notice-code='${code}']`);
+    expect(notice?.textContent).toContain(ui(`conversation.error.${code}`));
+    expect(notice?.textContent).toContain("redacted detail");
+  });
+
+  it.each(CONVERSATION_NOTICES)("says the notice %s in the panel's own words, the broker's detail under it", async (code) => {
+    await open();
+    emitEvent(port, 1, { type: "notice", code, text: "what was asked" });
+
+    const notice = log().querySelector(`[data-notice-code='${code}']`);
+    expect(notice?.textContent).toContain(ui(`conversation.notice.${code}`));
+    expect(notice?.textContent).toContain("what was asked");
+  });
+
+  it("says a declined sandbox-permissions request in zh-TW too (R-317)", async () => {
+    await open(CONVERSATION_OPEN, "zh-TW");
+    emitEvent(port, 1, { type: "notice", code: "sandbox-permissions-declined", text: "" });
+    const notice = screen.getByRole("log").querySelector("[data-notice-code='sandbox-permissions-declined']");
+    expect(notice?.textContent).toBe(lookup("conversation.notice.sandbox-permissions-declined", "zh-TW"));
+    expect(notice?.textContent).not.toBe(lookup("conversation.notice.sandbox-permissions-declined", "en-US"));
+  });
+
+  it("shows a notice the panel has no words for as the broker's own text", async () => {
+    await open();
+    emitEvent(port, 1, { type: "notice", code: "reconnecting", text: "Continuing the conversation" });
+    expect(log().textContent).toContain("Continuing the conversation");
+  });
+
+  it("sends the owner's message for this conversation, without a tab id the shell does not know", async () => {
+    await open();
+    const box = screen.getByRole("textbox", { name: ui("conversation.composer.label").replace("{agent}", "Claude Code") });
+    const send = screen.getByRole("button", { name: ui("conversation.composer.send") });
+    expect((send as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(box, { target: { value: "summarise this table" } });
+    fireEvent.click(send);
+
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.send", payload: { conversationId: CONVERSATION_ID, text: "summarise this table" } },
+    ]);
+    expectValidCommands(port);
+    expect((box as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("reads in zh-TW", async () => {
+    await open(CONVERSATION_OPEN, "zh-TW");
+    const zh = (key: string) => lookup(key, "zh-TW");
+    expect(screen.getByRole("region", { name: "對話資訊" }).textContent).toContain("變更前先問");
+    expect(screen.getByRole("textbox", { name: "給 Claude Code 的訊息" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "傳送" })).toBeTruthy();
+    emitEvent(port, 1, { type: "permission", requestId: "r-1", toolCallId: "t-9", kind: "execute", title: "npm test", detail: "npm test" });
+    expect(screen.getByRole("button", { name: zh("conversation.permission.allow-once") }).textContent).toBe("允許一次");
+    expect(screen.getByRole("radiogroup", { name: zh("conversation.mode.label") })).toBeTruthy();
+  });
+});
+
+/**
+ * 019/T547 - the panel's half of the worker forwarding: each `ui.conversation.*` command leaves with
+ * a commandId, the broker's refusal of one this document sent is shown until its next success, and
+ * a (re)connecting document names the seq it needs next so the worker asks the broker for that page.
+ */
+describe("T547 the panel's side of the forwarding", () => {
+  let port: FakeAgentPort;
+
+  beforeEach(() => {
+    port = installAgentPort();
+    installTabStorage();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    uninstallAgentPort();
+  });
+
+  const result = (payload: Record<string, unknown>) =>
+    act(() => {
+      port.emit({ type: "conversation-result", payload });
+    });
+  const resyncs = () => port.sent.filter((message) => (message as { type: string }).type === "ui.conversation.resync");
+
+  it("gives every conversation command a commandId, and shows a refusal of its own command until the next success", async () => {
+    renderShell();
+    project(port, withConversation(CONVERSATION_READY));
+    await act(async () => undefined);
+    fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+    const first = lastCommandId(port);
+    expect(first).toMatch(/.+/u);
+    expect(agentPanelCommandSchema.safeParse(port.sent.at(-1)).success).toBe(true);
+
+    // Another document's command: not this panel's to show.
+    result({ commandId: "someone-else", ok: false, error: { code: "busy", detail: "elsewhere" } });
+    expect(screen.queryByText(ui("conversation.error.busy"))).toBeNull();
+
+    result({ commandId: first, ok: false, error: { code: "too-many-running", detail: "Three are running." } });
+    expect(screen.getByText(ui("conversation.error.too-many-running"))).toBeTruthy();
+    expect(screen.getByText("Three are running.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+    const second = lastCommandId(port);
+    expect(second).not.toBe(first);
+    result({ commandId: second, ok: true, value: { conversationId: CONVERSATION_ID } });
+    expect(screen.queryByText(ui("conversation.error.too-many-running"))).toBeNull();
+  });
+
+  it("asks for the open conversation's log from 0 when it connects knowing nothing", async () => {
+    renderShell();
+    project(port, withConversation(CONVERSATION_OPEN));
+    project(port, withConversation(CONVERSATION_OPEN));
+
+    expect(resyncs()).toEqual([{ type: "ui.conversation.resync", payload: { conversationId: CONVERSATION_ID, fromSeq: 0 } }]);
+  });
+
+  it("after a reconnect, asks only for what follows the last event it kept", () => {
+    vi.useFakeTimers();
+    renderShell();
+    project(port, withConversation(CONVERSATION_OPEN));
+    emitEvent(port, 0, { type: "text", role: "agent", text: "one" });
+    emitEvent(port, 1, { type: "text", role: "agent", text: "two" });
+    port.sent.length = 0;
+
+    port.drop();
+    act(() => {
+      vi.advanceTimersByTime(250);
+    });
+    project(port, withConversation(CONVERSATION_OPEN));
+
+    expect(resyncs()).toEqual([{ type: "ui.conversation.resync", payload: { conversationId: CONVERSATION_ID, fromSeq: 2 } }]);
+  });
+
+  it("asks nothing while the conversation part is unavailable, and asks once it is back", async () => {
+    renderShell();
+    project(port, withConversation({ ...CONVERSATION_OPEN, available: false, reason: "broker-unavailable" }));
+    expect(resyncs()).toEqual([]);
+
+    project(port, withConversation(CONVERSATION_OPEN));
+    expect(resyncs()).toHaveLength(1);
+  });
+
+  it("puts a page's earlier events before the later ones it already holds, and drops repeats", async () => {
+    renderShell();
+    project(port, withConversation(CONVERSATION_OPEN));
+    await act(async () => undefined);
+    emitEvent(port, 5, { type: "text", role: "owner", text: "later" });
+    emitEvent(port, 3, { type: "text", role: "agent", text: "earlier" });
+    emitEvent(port, 3, { type: "text", role: "agent", text: "earlier" });
+
+    const text = log().textContent ?? "";
+    expect(text.indexOf("earlier")).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf("earlier")).toBeLessThan(text.indexOf("later"));
+    expect(text.split("earlier")).toHaveLength(2);
+  });
+
+  it("T572: when the broker epoch changes, drops what it kept and pages the open conversation again from 0", async () => {
+    renderShell();
+    project(port, withConversation({ ...CONVERSATION_OPEN, epoch: "broker-a" }));
+    await act(async () => undefined);
+    emitEvent(port, 0, { type: "text", role: "owner", text: "old question" });
+    emitEvent(port, 1, { type: "state", state: "running" });
+    expect(screen.getByRole("button", { name: ui("conversation.stop") })).toBeTruthy();
+    port.sent.length = 0;
+
+    // A replacement broker: its seqs start at 0 again, and its projection names it.
+    project(port, withConversation({ ...CONVERSATION_OPEN, epoch: "broker-b" }));
+
+    expect(resyncs()).toEqual([{ type: "ui.conversation.resync", payload: { conversationId: CONVERSATION_ID, fromSeq: 0 } }]);
+    expect(log().textContent).not.toContain("old question");
+    // The old broker's "running" no longer holds the composer: the overview's state stands.
+    expect(screen.queryByRole("button", { name: ui("conversation.stop") })).toBeNull();
+
+    emitEvent(port, 0, { type: "text", role: "owner", text: "new question" });
+    expect(log().textContent).toContain("new question");
+
+    // The same epoch again is no change.
+    port.sent.length = 0;
+    project(port, withConversation({ ...CONVERSATION_OPEN, epoch: "broker-b" }));
+    expect(resyncs()).toEqual([]);
+    expect(log().textContent).toContain("new question");
+  });
+});

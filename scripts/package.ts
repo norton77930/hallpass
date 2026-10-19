@@ -8,10 +8,12 @@ import { build } from "vite";
  * `npm run package` — the QA installation package (007, FR-094).
  *
  * One command turns a checkout into `release/hallpass-<version>.zip`: the agent build of
- * the extension, the host bundled into three self-contained files, the two PowerShell scripts and
+ * the extension, the host bundled into four self-contained files (plus koffi's win32-x64 file set and
+ * the pinned adapter manifests for the broker, 019 T568), the two PowerShell scripts and
  * the README. The bundler is Vite's own JS API (already a dependency: it builds the extension), in
- * its server-side mode with nothing externalised except Node's built-ins, which is what makes the
- * host runnable from an extracted folder with no `node_modules` beside it (US1.2).
+ * its server-side mode with nothing externalised except Node's built-ins (and koffi, whose native
+ * binary cannot be bundled), which is what makes the host runnable from an extracted folder with no
+ * install step beside it (US1.2).
  *
  * This file imports nothing from the repository itself: it runs under `--experimental-strip-types`,
  * which cannot resolve a sibling `.ts` through a `.js` specifier, and the contract test imports
@@ -20,12 +22,46 @@ import { build } from "vite";
 
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** The three host entries and the flat names they take inside `host/` (T201). */
+/**
+ * The host entries and the flat names they take inside `host/` (T201; the broker is 019 T568).
+ * `broker.js` resolves `./mcp-server.js`, `./codex-app-server-shim.js` (019 SC-135: what Codex's
+ * `CODEX_PATH` runs, strict turns made read-only) and the pinned adapter manifests from its own location.
+ */
 export const HOST_ENTRIES = [
   { entry: "packages/agent-host/src/mcp-server.ts", output: "mcp-server.js" },
   { entry: "packages/agent-host/src/native-host.ts", output: "native-host.js" },
   { entry: "packages/agent-host/src/install/cli.ts", output: "install.js" },
+  { entry: "packages/agent-host/src/broker.ts", output: "broker.js" },
+  { entry: "packages/agent-host/src/codex-app-server-shim.ts", output: "codex-app-server-shim.js" },
 ] as const;
+
+/**
+ * The one module the bundle does not pull in (019 R-313, R-327): koffi loads a native binary, which
+ * cannot live inside a bundled file. `stageHostRuntime` puts it beside the bundles as
+ * `host/node_modules/koffi`, where the broker's bare `import "koffi"` finds it.
+ */
+export const HOST_EXTERNAL_MODULES = ["koffi"] as const;
+
+/**
+ * Exactly what koffi 3.x needs to load on win32-x64, relative to `node_modules/` (measured: the
+ * broker imports it as ESM, `src/koffi/src/static.js` requires the platform package, which is
+ * `@koromix/koffi-win32-x64`). The other platforms' prebuilts, the CommonJS entries, the C++
+ * sources, the docs and `index.d.ts` stay out of the zip.
+ */
+export const KOFFI_PACKAGE_FILES = [
+  "koffi/LICENSE.txt",
+  "koffi/package.json",
+  "koffi/index.js",
+  "koffi/src/koffi/index.js",
+  "koffi/src/koffi/src/static.js",
+  "@koromix/koffi-win32-x64/package.json",
+  "@koromix/koffi-win32-x64/index.js",
+  "@koromix/koffi-win32-x64/win32_x64/koffi.node",
+] as const;
+
+/** The pinned adapter manifests the broker installs from on the owner's consent (R-314). */
+export const AGENT_MANIFEST_FILES = ["package.json", "package-lock.json"] as const;
+const AGENT_MANIFEST_DIRECTORIES = ["claude-code", "codex"] as const;
 
 /** What the zip's root holds, exactly (US1.1; the contract test pins it). */
 export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "README.md", "VERSION"] as const;
@@ -63,7 +99,7 @@ export async function bundleHost(outDir: string): Promise<string[]> {
         minify: false,
         sourcemap: false,
         rolldownOptions: {
-          external: [/^node:/],
+          external: [/^node:/, ...HOST_EXTERNAL_MODULES],
           output: { format: "es", entryFileNames: output, chunkFileNames: `${output.replace(/\.js$/, "")}-[hash].js` },
         },
       },
@@ -72,6 +108,37 @@ export async function bundleHost(outDir: string): Promise<string[]> {
     written.push(resolve(outDir, output));
   }
   return written;
+}
+
+/**
+ * Copy the files the bundles cannot carry into `hostDir`: koffi's win32-x64 file set under
+ * `node_modules/` and the adapter manifests under `agents/<agent>/`. Returns the staged paths,
+ * relative to `hostDir`, with forward slashes. A missing source is an error: a package without
+ * them would install and then fail at the first conversation.
+ */
+export function stageHostRuntime(hostDir: string): string[] {
+  const staged: string[] = [];
+  const copy = (from: string, to: string, name: string): void => {
+    if (!existsSync(from)) {
+      throw new Error(`cannot package ${name}: ${from} does not exist (run npm ci)`);
+    }
+    mkdirSync(dirname(to), { recursive: true });
+    cpSync(from, to);
+    staged.push(name);
+  };
+  for (const file of KOFFI_PACKAGE_FILES) {
+    copy(resolve(repoRoot, "node_modules", file), resolve(hostDir, "node_modules", file), `node_modules/${file}`);
+  }
+  for (const agent of AGENT_MANIFEST_DIRECTORIES) {
+    for (const file of AGENT_MANIFEST_FILES) {
+      copy(
+        resolve(repoRoot, "packages/agent-host/agents", agent, file),
+        resolve(hostDir, "agents", agent, file),
+        `agents/${agent}/${file}`,
+      );
+    }
+  }
+  return staged;
 }
 
 /** The Windows `tar.exe` (bsdtar) writes zip with `-a`; the Git Bash `tar` on PATH is GNU and cannot. */
@@ -149,6 +216,9 @@ export async function buildPackage(): Promise<string> {
   const bundled = await bundleHost(hostDir);
   for (const file of bundled) {
     process.stdout.write(`  ${file} (${statSync(file).size} bytes)\n`);
+  }
+  for (const file of stageHostRuntime(hostDir)) {
+    process.stdout.write(`  host/${file}\n`);
   }
 
   step("smoke-test the bundled mcp-server (T203)");

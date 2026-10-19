@@ -74,8 +74,12 @@ test.describe("agent panel states", () => {
     expect(notPaired).not.toContain(ui("agent.sitesTitle"));
     expect(notPaired).not.toContain(ui("agent.status.connected"));
     expect(notPaired).not.toContain(ui("agent.session.stop"));
-    // Exactly one landmark region: the page itself.
-    expect(await panel.evaluatePanel("document.querySelectorAll('section').length")).toBe(1);
+    // Exactly one landmark region: the page itself - beside 019's panel consent switch (FR-309, T555),
+    // which is shown before any external agent pairs because the panel's own agent needs no pairing.
+    expect(
+      await panel.evaluatePanel("document.querySelectorAll('section:not(.agent-panel-consent)').length"),
+    ).toBe(1);
+    expect(await panel.evaluatePanel("document.querySelectorAll('section.agent-panel-consent').length")).toBe(1);
     expect(await isAgentPaired(panel, locale)).toBe(false);
 
     let alpha: McpHarnessClient | undefined;

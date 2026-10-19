@@ -64,6 +64,8 @@ export type McpHarnessClient = {
   listToolNames(): Promise<string[]>;
   /** Everything the server wrote to stderr so far - its stable codes, for a failure report. */
   stderr(): string;
+  /** 019 T551: the server's instructions from its initialize answer, if it gave any. */
+  instructions(): string | undefined;
   close(): Promise<void>;
 };
 
@@ -171,6 +173,9 @@ export async function startMcpClient(options: StartMcpClientOptions = {}): Promi
     },
     stderr() {
       return stderrText;
+    },
+    instructions() {
+      return client.getInstructions();
     },
     async close() {
       await client.close();

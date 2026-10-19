@@ -174,6 +174,9 @@ Chrome 頂端出現「Hallpass 已開始對此瀏覽器進行偵錯」橫幅是�
 | `relay.log` | relay 的診斷紀錄(只有穩定代碼,沒有頁面內容);回報問題時附上 |
 | `com.hallpass.host.json`、`native-host.cmd` | host manifest 與啟動器,`install.ps1` 寫、`uninstall.ps1` 刪 |
 | `agent-id` | 這台機器的 agent 身分,配對只問一次靠它 |
+| `conversations.json`、`folders.json`、`conversation-consent\`、`brokers\`、`broker.log` | 側欄「對話」分頁用的索引(不含對話內容)、專案資料夾清單、同意紀錄與 broker 的紀錄;移除時刪除 |
+| `agents\` | 第一次使用某個 agent 時,經你同意才從 npm registry 下載的轉接器;移除時刪除 |
+| `scratch\` | 沒指定資料夾的對話的工作資料夾,agent 可能在裡面寫了檔案;**移除時保留**(連 `-Purge` 也不刪),`uninstall.ps1` 會告訴你它的位置,不需要時自行刪除 |
 
 登錄:`HKCU\Software\<瀏覽器>\NativeMessagingHosts\com.hallpass.host`,四個瀏覽器根都寫:`Google\Chrome`、`Chromium`、`Microsoft\Edge`、`BraveSoftware\Brave-Browser`(只在目前使用者;Chrome 驗收過,Edge、Brave 只註冊、未實機驗證,見公開 repo issue #2)。
 

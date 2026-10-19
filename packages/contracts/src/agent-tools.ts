@@ -7,6 +7,19 @@ import {
   TARGET_VISIBILITIES,
   WAIT_CONDITIONS,
 } from "./common.js";
+import {
+  conversationBrowserTokenFrameSchema,
+  conversationCommandFrameSchema,
+  conversationEventFrameSchema,
+  conversationOverviewFrameSchema,
+  conversationPageFrameSchema,
+  conversationPanelCommandSchema,
+  conversationPanelEventMessageSchema,
+  conversationPanelResultMessageSchema,
+  conversationPanelStateSchema,
+  conversationResultFrameSchema,
+  relayGoneFrameSchema,
+} from "./conversation.js";
 
 /**
  * The closed boundaries of the local-agent bridge (003).
@@ -3432,6 +3445,21 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
      * requesting session's, because a `hello` naming a live session replaces that connection.
      */
     intent: z.literal("choose").optional(),
+    /**
+     * 019 R-312: this link is the conversation broker's. Optional, and valid only together with the
+     * secret the relay gave the broker it spawned (or whose hash its sidecar holds, for an adopted
+     * one) - the relay checks that, refuses `role` on any other greeting (`broker-role-refused`)
+     * and strips `brokerSecret` before forwarding, as it strips `token`. The shape does not tie the
+     * two together, so the relay can parse a lone `role` and refuse it with a code of its own.
+     */
+    role: z.literal("broker").optional(),
+    brokerSecret: z.string().min(43).max(128).optional(),
+    /**
+     * 019 R-321: an mcp-server started for a panel conversation (agent id `panel:<conversationId>`).
+     * A token the worker does not know is refused as `not-admitted`, never downgraded to an external
+     * pairing. Never stored or logged.
+     */
+    panelToken: z.string().min(32).max(128).optional(),
   }),
   /**
    * The relay's acknowledgement, and the whole of it: its pid. That is what lets a server tell a
@@ -3624,6 +3652,20 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
     sessionId: z.string().min(1).max(128),
     requestId: z.string().min(1).max(128),
   }),
+  /**
+   * 019 (contracts/conversation-frames.md, R-312, R-323). New frame types, so an older side drops
+   * them as unknown and the protocol stays 2: the relay's "I am gone" to the broker, and the six
+   * frames between the worker and the broker. Each names the broker's `sessionId`, which is how the
+   * relay routes them unchanged; the worker accepts them only from the session that greeted as
+   * `role: "broker"`.
+   */
+  relayGoneFrameSchema,
+  conversationCommandFrameSchema,
+  conversationResultFrameSchema,
+  conversationEventFrameSchema,
+  conversationOverviewFrameSchema,
+  conversationPageFrameSchema,
+  conversationBrowserTokenFrameSchema,
 ]);
 
 export type AgentLinkFrame = z.infer<typeof agentLinkFrameSchema>;
@@ -3705,6 +3747,14 @@ export const siteModeRecordSchema = z.strictObject({
   site: siteOriginSchema,
   mode: siteModeSchema,
   diagnosticsGranted: z.boolean(),
+  /**
+   * 019 R-328: who made the last change - a panel conversation's agent, an external agent, or the
+   * owner from the site list. Optional both ways: a record written before 019 reads unchanged, and
+   * "ask" (the default, which deletes the record) needs no author. The store re-validates with this
+   * strict shape, so the fields must exist here before any writer sets them.
+   */
+  changedBy: z.enum(["panel-agent", "external-agent", "owner"]).optional(),
+  changedAt: z.string().min(1).max(64).optional(),
 });
 
 export type SiteModeRecord = z.infer<typeof siteModeRecordSchema>;
@@ -4210,6 +4260,8 @@ export const agentPanelStateSchema = z.strictObject({
       notRecorded: z.array(absolutePathSchema).max(16).optional(),
     })
     .optional(),
+  /** 019 R-324: the Conversation tab's state. A 0.12.5 worker never sets it. */
+  conversation: conversationPanelStateSchema.optional(),
 });
 
 export type AgentPanelState = z.infer<typeof agentPanelStateSchema>;
@@ -4219,6 +4271,10 @@ export const agentPanelMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("worker.agent.state"),
     payload: agentPanelStateSchema,
   }),
+  /** 019 R-324: one broker event, fanned out to every open panel document (FR-288). */
+  conversationPanelEventMessageSchema,
+  /** 019 T547: the broker's answer to one `ui.conversation.*` command, to every panel document. */
+  conversationPanelResultMessageSchema,
 ]);
 
 export type AgentPanelMessage = z.infer<typeof agentPanelMessageSchema>;
@@ -4412,6 +4468,13 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
     type: z.literal("ui.agent.browser-choice-decide"),
     payload: z.strictObject({ requestId: z.string().min(1).max(128), confirm: z.boolean() }),
   }),
+  /**
+   * 019 R-324: the `ui.conversation.*` commands of the Conversation tab, defined beside the frames
+   * that carry them to the broker. Nothing among them can grant a site capability or name a
+   * full-access mode (FR-292, SC-140). T547: each may carry the panel's `commandId`, and
+   * `ui.conversation.resync` is the reconnecting panel naming the seq it needs next.
+   */
+  ...conversationPanelCommandSchema.options,
 ]);
 
 export type AgentPanelCommand = z.infer<typeof agentPanelCommandSchema>;

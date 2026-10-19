@@ -72,6 +72,11 @@ export function SiteList(props: {
             <li key={record.site} data-site={record.site} className="agent-site">
               <div className="agent-site-head">
                 <span className="agent-site-name">{displayOrigin(record.site)}</span>
+                {/* 019 FR-308, R-328: who made the last change - the side-panel agent's card, an
+                    external agent's, or the owner here. A record from before 019 names nobody. */}
+                {record.changedBy === undefined ? null : (
+                  <span className="agent-site-author">{t(`agent.siteChangedBy.${record.changedBy}`)}</span>
+                )}
               </div>
               {/* The label names the control for assistive technology; on screen the site name
                   above it already says which site, so the text is visually hidden. */}

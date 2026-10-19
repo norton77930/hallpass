@@ -11,14 +11,18 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@agentclientprotocol/sdk": "1.9.0",
     "@hallpass/contracts": "0.0.0",
     "@hallpass/domain": "0.0.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "koffi": "3.3.3",
     "zod": "4.4.3"
   }
 }

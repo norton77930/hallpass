@@ -1,9 +1,9 @@
 # Hallpass(瀏覽器代理橋接)— 操作手冊(維護者版)
 
-2026-10-18 · 適用於 **Hallpass 0.12.5**(37 個 MCP 工具、side panel 三態、錄製 GIF 與對話框、
+2026-10-19 · 適用於 **Hallpass 0.13.0**(37 個 MCP 工具、side panel 三態、錄製 GIF 與對話框、
 中斷、跳站確認、上傳資料夾詢問、0.7.0 的配對與提示修正、0.8.0 的「答案要誠實」、0.9.0 的「看得懂的面板」,
 0.10.0 的「工作階段的網站計畫」、0.11.0 的「好幾個瀏覽器同時服務,由你決定 agent 用哪一個」,
-0.11.1、0.11.2 的可靠性修正,0.12.0 的「按下與截圖前再確認一次網站」,0.12.1 把同樣的確認延伸到按鍵，0.12.2 讓截圖與座標使用同一套像素,0.12.3 的 JPEG 截圖與「頁面寬度變了就請 agent 重新截圖」,0.12.4 的「逾時後的頁面內動作不會事後生效」與縮放頁面上的座標修正，以及 0.12.5 的「頁面忙到來不及回應時回答更準」)。
+0.11.1、0.11.2 的可靠性修正,0.12.0 的「按下與截圖前再確認一次網站」,0.12.1 把同樣的確認延伸到按鍵，0.12.2 讓截圖與座標使用同一套像素,0.12.3 的 JPEG 截圖與「頁面寬度變了就請 agent 重新截圖」,0.12.4 的「逾時後的頁面內動作不會事後生效」與縮放頁面上的座標修正，0.12.5 的「頁面忙到來不及回應時回答更準」,以及 0.13.0 的「側欄直接和你自己的 agent 對話」,見 §9.11)。
 
 > 這份是中文的維護者手冊。英文的 README 是公開入口;開發從 <https://github.com/norton77930/hallpass> 繼續。
 這份文件寫給**要開始用 AI(Claude Code)操作自己瀏覽器的人**;開發與測試的細節在
@@ -24,8 +24,8 @@ Claude Code ──stdio──▶ mcp-server.js ──loopback──▶ relay(nat
 
 ## 1. 安裝(做一次)
 
-> **不想碰 repo?用安裝包。**`npm run package` 會產出 `release/hallpass-<版本>.zip`(目前是 `hallpass-0.12.5.zip`,
-> 也可以從 release v0.12.5 下載;擴充功能資料夾 + 自足的
+> **不想碰 repo?用安裝包。**`npm run package` 會產出 `release/hallpass-<版本>.zip`(目前是 `hallpass-0.13.0.zip`,
+> 發布後也可以從 release v0.13.0 下載;擴充功能資料夾 + 自足的
 > host + `install.ps1` / `uninstall.ps1` + README)。解壓後跑 `install.ps1`,照它印出的路徑載入擴充功能、把 server
 > 定義貼進你用的 MCP client(README 有 Claude Code / Claude Desktop / Codex CLI / Cursor 四種的位置)。只需要 Node 24,
 > 不需要 npm、不需要 build。下面 1.2–1.4 是從 repo 安裝的方式。
@@ -235,10 +235,10 @@ agent 回報 `not-yours` / `held-by-session` 表示那個分頁不是它的(你�
 
 ## 8. 更新與移除
 
-- **升級到 0.12.5(從 0.3.0 之後的任何版本)**:名稱、路徑、MCP server 名稱(`hallpass`)都沒變,只有兩步,
+- **升級到 0.13.0(從 0.3.0 之後的任何版本)**:名稱、路徑、MCP server 名稱(`hallpass`)都沒變,只有兩步,
   先後順序都可以:
-  1. **重新安裝主機**(這一版主機有改,主機與擴充功能的版本要一致)。安裝包使用者從 release v0.12.5
-     (<https://github.com/norton77930/hallpass/releases/tag/v0.12.5>)下載 `hallpass-0.12.5.zip`,解壓縮到原本的
+  1. **重新安裝主機**(這一版主機有改,主機與擴充功能的版本要一致)。安裝包使用者從 release v0.13.0
+     (<https://github.com/norton77930/hallpass/releases/tag/v0.13.0>)下載 `hallpass-0.13.0.zip`,解壓縮到原本的
      資料夾(蓋掉 `extension\`、`host\`、兩個 `.ps1` 和 README),重新執行 `install.ps1`;從 repo 安裝的人先
      `npm run build`,再跑 `npm run agent-host:install`。`tabs_context` 的提示文字(0.12.0)、選瀏覽器時的側欄提醒句(0.11.2)、主機啟動器用完整路徑找 Node.js(0.11.1)、多瀏覽器選擇(0.11.0)、
      網站計畫(0.10.0)、工作階段卡片上的專案名稱(0.9.0)、batch 裡上傳檔案與配對卡片自動收回(0.8.0),
@@ -263,6 +263,7 @@ agent 回報 `not-yours` / `held-by-session` 表示那個分頁不是它的(你�
 - **移除**:`npm run agent-host:uninstall`(刪 `%LOCALAPPDATA%\hallpass` 與登錄鍵)、
   `claude mcp remove hallpass`、在 `chrome://extensions` 移除擴充功能。安裝包的 `uninstall.ps1` 遇到安裝前留下的
   備份(`.bak`)時會把它放回去並重新註冊,Chrome、Chromium、Edge 與 Brave 四個登錄位置都會重新指回。
+  從 0.13.0 起它也會刪掉側欄對話留下的檔案,但**保留 `scratch\`** 並告訴你位置(見 §9.11)。
 - **從 0.1.x 升級**:安裝包使用者把新 zip 蓋進同一個資料夾 → 重跑 `install.ps1` → 重新載入擴充功能;
   Chrome 會問一次 `offscreen` 權限,配對、站點模式、`config.json` 都留著(`scripts/package/README.md`
   §2.1 與 QA 指南是同一份說明,已用 `tests/acceptance/upgrade-proof.mjs` + `upgrade-host-proof.ps1` 驗過)。
@@ -549,7 +550,90 @@ session 繼續,問題留著等下一次呼叫)。要**離開**的呼叫不會被
 > **升級提醒**：**重新安裝主機**（新的啟動器是安裝時寫入的；`npm run agent-host:install`，安裝包使用者是
 > `install.ps1`），再到 `chrome://extensions` **重新載入**擴充功能。
 
+## 9.11 019:側欄對話與 broker(0.13.0 起;工具數不變仍是 37)
+
+側欄多了一個「對話」分頁:你直接和**自己電腦上已經裝好、登入好的** Claude Code 或 Codex 對話,不必切到終端機。
+原本的側欄內容整個搬進第二個分頁「連線與網站」;外部 agent 的配對卡、同意卡、計畫卡、問題卡仍疊在兩個分頁
+的上面。006 的「側欄不聊天」只對外部 agent 還成立(006 變更紀錄有註記)。使用者看到的說明在 README 的
+「Talk to your agent in the side panel」,隱私面的說明在 `PRIVACY.md`。
+
+**多了哪些程序**
+
+```
+側欄 ──▶ service worker ──native messaging──▶ relay(native-host.js)──loopback──▶ broker(broker.js)──ACP/stdio──▶ 轉接器 ──▶ 你的 claude / codex
+                                                      │                                │
+                                          每個瀏覽器一個 relay                 每個「瀏覽器執行期」一個 broker
+                                                                              (另外啟動 mcp-server.js 給 agent 用瀏覽器)
+```
+
+- **broker 屬於瀏覽器的這一次執行,不屬於某個 relay**:Chrome 會把 worker 與 native host 一起換掉,所以 relay 在收到
+  擴充功能的 ack 時,先讀 `brokers\<browserId>.json`:同一次執行的 broker 還活著就**接手**(不重啟、agent 不受影響),
+  否則啟動新的 broker,用 stdin 交給它一次性的密語(不放環境變數、不放引數、不寫檔案),sidecar 只存密語的 SHA-256。
+  broker 用 `role: "broker"` 加密語向 relay 打招呼才被接受;密語不對就拒絕。
+- **殺不掉的程序**:broker 啟動後**第一件事**是用 koffi 建一個 Windows 的 kill-on-close job 並把自己放進去,
+  之後它啟動的所有東西(轉接器、你的 CLI、它們的子程序,包括 `cmd.exe` 與 detached 的孫程序)都在這個 job 裡;
+  broker 以任何方式結束(含被 `taskkill /F`),Windows 會把整棵樹收掉。建不起 job 就**不跑**(寫 `broker.job-failed`
+  後結束),不會在沒有保護的情況下啟動 agent。
+- **生命週期**:relay 消失(worker 重啟)時 broker 每秒重撥一次、最多 **15 秒**,等到同一次執行的新 relay 就接回去;
+  等不到、或發現另一次執行的 relay(= 瀏覽器重開過),就在 3 秒內優雅關閉 agent 並退出,job 兜底。
+  閒置 **10 分鐘**的 agent 會被停掉,下一則訊息再叫回來;同時最多 **3 個** agent,第 4 個會停掉閒置最久的。
+- **agent 用瀏覽器**:broker 把 Hallpass 自己的 `mcp-server.js`(和 `broker.js` 放在同一個資料夾)當作 MCP server 交給
+  agent,用 broker 的 node 執行;面板 agent 不需要逐個對話配對,只要面板上那一次「允許側欄 agent 使用這個瀏覽器」
+  (在「連線與網站」可以收回,每個瀏覽器各自一份)。網站模式與同意和外部 agent **共用**,網站列會寫最後一次是誰改的。
+
+**`%LOCALAPPDATA%\hallpass\` 底下多了什麼**
+
+| 路徑 | 內容 | 備註 |
+|---|---|---|
+| `conversations.json` | 對話索引:標題(第一則訊息的第一行,最多 120 字)、agent、資料夾、模式、上次使用時間、agent 自己的 session id | 最多 50 筆、30 天;**不含對話內容**(內容只在 broker 記憶體裡,執行中每個對話最多 256 KB,供重新開側欄時回放;重播歷史靠 agent 自己的紀錄) |
+| `folders.json` | 你加進清單的專案資料夾 | 只能從 Windows 資料夾對話框加 |
+| `conversation-consent\<browserId>.json` | 這個瀏覽器的「允許側欄 agent 使用」同意 | 每個瀏覽器一份 |
+| `agents\<agent>\<轉接器版本>\` | 第一次使用時下載的轉接器 | 下載中是 `.staging-<隨機>`,成功才改名,失敗或 broker 當掉都會清掉 |
+| `scratch\<conversationId>\` | 沒指定資料夾的對話的工作資料夾 | **Hallpass 永遠不自己刪**(agent 可能在裡面寫了檔案) |
+| `brokers\<browserId>.json` | broker 的 sidecar:pid、瀏覽器執行 id、密語的 SHA-256、開始時間 | relay 寫、broker 結束時移除 |
+| `broker.log`(`broker.log.1`) | broker 日誌 | 超過 5 MB 輪替一次 |
+
+- **轉接器怎麼下載**:第一次用某個 agent,面板先跳卡片說明(Claude Code 約 60 MB、Codex 約 20 MB)、等你按「下載」。下載
+  由**安裝時的那個 Node.js 隨附的 `npm.cmd`** 執行 `npm ci --omit=optional --ignore-scripts --no-audit --no-fund`,
+  依據 zip 內的 `host\agents\<agent>\package.json` 與 `package-lock.json`:每個檔案都照 lockfile 的 integrity 驗證、
+  不跑任何安裝腳本、版本固定(Claude Code 的 `@agentclientprotocol/claude-agent-acp`、Codex 的
+  `@agentclientprotocol/codex-acp`,版本就是 lockfile 裡的那個,以 `packages/agent-host/src/broker/agents.ts` 為準)。
+  請求去 `registry.npmjs.org`(你的 npm 另有設定時依你的設定)。Hallpass 不自己寫下載或雜湊程式。
+  轉接器驅動的是**你已安裝的 CLI**(`--omit=optional` 就是不要它附帶的 CLI),所以版本、登入、設定、指示檔與 MCP
+  server 都和你的終端機一樣;測過的 CLI 版本是 Claude Code 2.1.302、Codex 0.162.1,版本不合時面板會說明、不啟動。
+- **日誌**:`broker.log` 只記穩定代碼與 pid,不記對話內容,也不記密語;帶細節的行會先過同一個遮蔽器(網址裡的帳密、
+  長得像 token 的長字串)。常見代碼:`broker.started`、`broker.job-ready`、`broker.job-failed`、`broker.secret-missing`、
+  `broker.arguments-invalid`、`broker.agent-started`、`broker.crashed`。agent 自己的 stderr 預設不顯示。
+- **安裝包**(`npm run package`):zip 的 `host\` 多了 `broker.js`、`node_modules\koffi`(只含 win32-x64 的預建檔,
+  共 8 個檔案;koffi 的原生檔無法打包進 `broker.js`,所以是 external)和 `agents\claude-code`、`agents\codex` 各兩個檔
+  (`package.json`、`package-lock.json`)。`install.ps1` 缺任何一個都會在動手前停下來;`uninstall.ps1` 會刪
+  `conversations.json`、`folders.json`、`agents\`、`brokers\`、`broker.log`(含 `.1`)、`conversation-consent\`,
+  但**保留 `scratch\`**(連 `-Purge` 也不刪),並印出它的位置。有檔案被占用(Chrome 還開著)而刪不掉時只提醒,
+  關掉 Chrome 後再跑一次。
+- **升級**:這一版需要新的主機(`broker.js` 是新的入口)與新的擴充功能,**重新安裝主機並重新載入擴充功能**。
+  主機太舊時對話分頁會寫「Hallpass host 太舊」;連線協定版本不變(仍是 2)。
+
+**疑難排解(019)**
+
+| 現象 | 先看 | 處理 |
+|---|---|---|
+| 對話分頁說主機太舊(`host-outdated`) | `%LOCALAPPDATA%\hallpass\native-host.cmd` 指向的是不是舊的 checkout / 舊的解壓縮資料夾 | 重新安裝主機(`install.ps1` 或 `npm run agent-host:install`),再重新載入擴充功能 |
+| 對話分頁說連不到 helper(`broker-unavailable`) | `broker.log` 最後幾行:`broker.job-failed`(建不起 job)、`broker.secret-missing`(relay 沒交密語)、`broker.arguments-invalid`;`brokers\` 裡的 sidecar;`relay.log` | job 失敗時附 `broker.log` 與 Windows 版本回報(不啟動 agent 是刻意的);sidecar 指向已不存在的 pid 時,重開瀏覽器 |
+| 選 agent 時說「沒有安裝」 | 終端機執行 `where claude` / `where codex` | 照官方說明安裝並先在終端機登入一次;Hallpass 不替你安裝或登入 |
+| 說版本不合 | 面板顯示的已安裝版本 vs 測過的版本 | 在終端機更新 agent,再重選;沒有任何對話被啟動 |
+| 轉接器下載失敗 | `agents\<agent>\` 底下是否還有 `.staging-*`(不該有);`npm.cmd` 是否在 Node.js 旁邊(`where npm`);公司 proxy / 內部 registry 設定(`npm config get registry`) | 按「再試一次」;失敗時不留半成品 |
+| 說三個 agent 都在忙 | 有沒有三個對話都在跑 | 等一個做完或按「停止」 |
+| 說這個對話在另一個瀏覽器執行中(`in-use-elsewhere`) | 另一個瀏覽器的側欄 | 同一個對話一次只能在一個瀏覽器裡跑;到那邊停掉,或另開對話 |
+| 說需要先同意(`consent-needed`) | 「連線與網站」裡「允許側欄 agent 使用這個瀏覽器」是不是被關掉 | 打開它,或在下一次啟動對話時再同意一次 |
+| 關了瀏覽器之後還有 agent 程序 | `Get-CimInstance Win32_Process` 找 `broker.js` 與它的子程序 | 設計上不該有(SC-136);有的話附 `broker.log` 回報,並先 `Stop-Process` 掉 |
+
 ## 10. 跑驗收(工程)
+
+- **側欄對話的 gate(019)**:`tests/e2e/packaged/agent-conversation.spec.ts` 不用真的 agent,而是讓 broker 跑
+  `tests/harness/fake-acp-agent.ts`。要在**瀏覽器程序**的環境設 `HALLPASS_TEST_MODE=1`、
+  `HALLPASS_BROKER_TEST_AGENT`(JSON argv)與可選的 `HALLPASS_BROKER_TEST_IDLE_MS`,再加上上面的私有
+  `LOCALAPPDATA` 與 `HALLPASS_FOREIGN_AGENT_SERVERS=allow`;沒有 `HALLPASS_TEST_MODE=1` 時這兩個變數一律不生效,
+  所以裝好的主機不可能被指到假 agent。詳見 `CONTRIBUTING.md` 與 `specs/019-side-panel-agent/quickstart.md` §3。
 
 - **附著模式的 gate**(`HALLPASS_CDP_ENDPOINT`):008 新增
   `tests/e2e/packaged/agent-recording.spec.ts`(錄製、覆蓋圖、worker 被殺、200 張上限、下載被拒)與
@@ -604,4 +688,4 @@ owner 2026-09-18 的規則,008 全程適用,寫在這裡是因為它省下的時
 ---
 
 開發從 2026-09-19 起在公開 repo 繼續:<https://github.com/norton77930/hallpass>。原私有 repo 只作存檔。
-本手冊適用 Hallpass 0.12.5(2026-10-18)。
+本手冊適用 Hallpass 0.13.0(2026-10-19)。

@@ -415,6 +415,6 @@ describe("T225 dialogs", () => {
 
     await h.dialogs.run(dialogCall({ action: "accept" }));
 
-    expect(setMode).toHaveBeenCalledWith(SITE, { mode: "skip-checks" });
+    expect(setMode).toHaveBeenCalledWith(SITE, { mode: "skip-checks", session: SESSION });
   });
 });

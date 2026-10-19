@@ -87,6 +87,8 @@ export async function openSidePanel(input: {
   fixturePage: Page;
   tabId: number;
   copy: PanelCopy;
+  /** Which 019 panel tab to land on: Connections & sites (default) or whatever the panel remembers. */
+  tab?: "connections" | "as-remembered";
 }): Promise<SidePanelDriver> {
   const { context, extensionId, fixturePage, tabId, copy } = input;
   const launcher = await context.newPage();
@@ -206,6 +208,22 @@ export async function openSidePanel(input: {
 
   await launcher.close();
   await fixturePage.bringToFront();
+
+  // 019 D-019-3: the panel opens on the Conversation tab (or the one it remembers), and everything a
+  // pre-019 journey reads - the status row, session cards, the site list - lives on Connections &
+  // sites. Journeys land there unless they ask for the remembered tab; a panel without tabs (no
+  // conversation part yet) is left as it is.
+  if ((input.tab ?? "connections") === "connections") {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const selected = await evaluatePanel(
+        `(()=>{const b=document.getElementById('agent-tab-connections');if(!b)return null;if(b.getAttribute('aria-selected')!=='true')b.click();return b.getAttribute('aria-selected')==='true'})()`,
+        true,
+      );
+      if (selected === true) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
 
   return {
     evaluatePanel,

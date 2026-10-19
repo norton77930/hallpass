@@ -663,3 +663,277 @@
   clip: rect(0 0 0 0);
   white-space: nowrap;
 }
+
+/* ---------- 019 tabs (D-019-3, FR-282 - FR-284) ---------- */
+
+/* Under the question slot, so a consent card is above the tab bar on both tabs (FR-283). */
+.agent-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--line);
+}
+
+.agent-shell button.agent-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-2);
+}
+
+.agent-shell button.agent-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The count of questions waiting in Connections & sites while Conversation is shown. */
+.agent-tab-count {
+  min-width: var(--sp-4);
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-2);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: var(--fs-1);
+  text-align: center;
+}
+
+.agent-tabpanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* ---------- 019 Conversation tab (T546, T548) ---------- */
+
+.agent-conversation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-conversation-agents {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.agent-conversation-availability,
+.agent-conversation-detail,
+.agent-conversation-who,
+.agent-conversation-action-input,
+.agent-conversation-state,
+.agent-conversation-mode-label {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-header dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0;
+}
+
+.agent-conversation-header dt {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-header dd {
+  margin: 0;
+}
+
+.agent-conversation-mode [role="radiogroup"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+
+.agent-conversation-note {
+  color: var(--warn);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.agent-conversation-message {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.agent-conversation-message[data-message-role="owner"] {
+  background: var(--surface-2);
+}
+
+.agent-conversation-message p {
+  white-space: pre-wrap;
+}
+
+.agent-conversation-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-actions li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-left: 2px solid var(--line);
+}
+
+.agent-conversation-actions li[data-status="done"] {
+  border-left-color: var(--ok);
+}
+
+.agent-conversation-actions li[data-status="failed"],
+.agent-conversation-actions li[data-status="refused"] {
+  border-left-color: var(--danger);
+}
+
+.agent-conversation-action-rule {
+  color: var(--warn);
+}
+
+.agent-conversation-notice {
+  padding: var(--sp-2) var(--sp-3);
+  border-left: 2px solid var(--warn);
+  background: var(--surface);
+}
+
+/* A card waiting on the owner wears the warning colour, as the 016 waiting session does. */
+.agent-conversation-permission {
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--warn);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.agent-conversation-permission-detail {
+  margin: 0 0 var(--sp-2);
+  white-space: pre-wrap;
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-composer textarea {
+  width: 100%;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+/* 019 T563: the list of conversations and the folder chooser. */
+.agent-conversation-list,
+.agent-conversation-folders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-conversation-entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-conversation-entries li,
+.agent-conversation-folder-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+}
+
+.agent-conversation-entry {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  text-align: start;
+}
+
+.agent-conversation-entry-meta {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-entry-label {
+  color: var(--warn);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-folder {
+  overflow-wrap: anywhere;
+}
+
+.agent-conversation-folder-choices label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-conversation-folder-path label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.agent-conversation-folder-path input[type="text"] {
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+/* Indeterminate: npm's byte count is not sent, so the bar says "under way", not how far (R-314). */
+.agent-conversation-progress {
+  height: var(--sp-1);
+  border-radius: var(--r-1);
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--accent) 50%, var(--surface-2) 100%);
+  background-size: 200% 100%;
+  animation: agent-conversation-progress 1.5s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-conversation-progress {
+    animation: none;
+    background: var(--accent);
+  }
+}
+
+@keyframes agent-conversation-progress {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}

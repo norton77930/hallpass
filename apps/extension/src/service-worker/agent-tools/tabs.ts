@@ -409,7 +409,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
     const held = await deps.tabs.ownership(request.sessionId, tabId);
     if (held.state !== "this") return ownershipRefusal(callId, held);
     if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
-    if (asked.rememberMode) await deps.siteModes.set(site, { mode: asked.rememberMode });
+    if (asked.rememberMode) await deps.siteModes.set(site, { mode: asked.rememberMode, session: request.sessionId });
     return undefined;
   }
 
