@@ -13,6 +13,7 @@ import {
   uninstallAgentPort,
   type FakeAgentPort,
 } from "./helpers/agent-shell-harness.js";
+import { CONVERSATION_READY, withConversation } from "./helpers/conversation-fixtures.js";
 
 /**
  * 006/T191 — the four compositions, derived from the projection alone (FR-081, R-125).
@@ -213,5 +214,70 @@ describe("T191 the shell derives its composition from the projection", () => {
     project(port, { ...IDLE, bridge: "made-up" as never });
 
     expect(shellState()).toBe("idle");
+  });
+
+  /**
+   * 019 T563 follow-up: the side panel's own agent needs no pairing (FR-305), so an owner who has
+   * only given the panel consent is connected for the purposes of Connections & sites - their
+   * panel session cards and the site list have to be there, or the sites the panel agent touches
+   * cannot be seen or switched.
+   */
+  describe("a panel-only owner (panel consent, no external pairing)", () => {
+    const panelSession = {
+      sessionId: "session-panel",
+      agentId: "panel:conv-0123456789abcdef",
+      tabs: [],
+      sites: [],
+      state: "working" as const,
+    };
+    const connections = () => fireEvent.click(screen.getByRole("tab", { name: ui("agent.tabs.connections") }));
+
+    it("is connected once the panel consent is granted, with the site list and no session yet", () => {
+      renderShell();
+      project(port, withConversation(CONVERSATION_READY, NOT_PAIRED));
+      connections();
+
+      expect(shellState()).toBe("idle");
+      expect(screen.getByText(ui("agent.status.connected"))).toBeTruthy();
+      expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: ui("agent.notPaired.title") })).toBeNull();
+    });
+
+    it("shows a panel session's card and the site list", () => {
+      renderShell();
+      project(port, withConversation(CONVERSATION_READY, { ...NOT_PAIRED, sessions: [panelSession] }));
+      connections();
+
+      expect(shellState()).toBe("sessions");
+      expect(document.querySelector("[data-session-id='session-panel']")).toBeTruthy();
+      expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
+    });
+
+    it("counts a panel session as connected even when the consent shown is not yet granted", () => {
+      renderShell();
+      project(port, withConversation({ ...CONVERSATION_READY, consent: "unknown" }, { ...NOT_PAIRED, sessions: [panelSession] }));
+
+      expect(shellState()).toBe("sessions");
+    });
+
+    it.each([
+      ["no consent answer yet", { ...CONVERSATION_READY, consent: "unknown" as const }],
+      ["the consent withdrawn", { ...CONVERSATION_READY, consent: "withdrawn" as const }],
+    ])("still shows the not-paired page with %s", (_name, conversation) => {
+      renderShell();
+      project(port, withConversation(conversation, NOT_PAIRED));
+      connections();
+
+      expect(shellState()).toBe("not-connected");
+      expect(screen.getByRole("heading", { name: ui("agent.notPaired.title") })).toBeTruthy();
+      expect(screen.queryByText(ui("agent.sitesNone"))).toBeNull();
+    });
+
+    it("is not connected while the bridge is down, whatever the consent", () => {
+      renderShell();
+      project(port, withConversation(CONVERSATION_READY, { ...NOT_PAIRED, bridge: "disconnected" }));
+
+      expect(shellState()).toBe("not-connected");
+    });
   });
 });

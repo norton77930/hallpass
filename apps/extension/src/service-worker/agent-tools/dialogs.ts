@@ -86,7 +86,8 @@ export type AgentDialogsDeps = {
   send(tabId: number, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
   siteModes: {
     get(site: string): Promise<{ mode: SiteMode }>;
-    set(site: string, patch: { mode: SiteMode }): Promise<unknown>;
+    // 019 R-328, T556: `session` names whose card it was; the store records that session's kind.
+    set(site: string, patch: { mode: SiteMode; session?: string }): Promise<unknown>;
   };
   prompts: Pick<AgentPromptController, "ask">;
   tabOwnership(sessionId: string, tabId: number): Promise<TabOwnership>;
@@ -421,7 +422,7 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
         const held = await deps.tabOwnership(request.sessionId, tabId);
         if (held.state !== "this") return ownershipRefusal(callId, held);
         if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
-        if (asked.rememberMode) await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode });
+        if (asked.rememberMode) await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
         // The owner may have pressed the dialog's own button in their browser while the card was
         // up; answering a dialog that is no longer there would be a claim about nothing.
         if (current.get(tabId)?.id !== dialog.id) return refusalAnswer(callId, "failed", { reason: "no-dialog" });

@@ -11,6 +11,11 @@ import {
   type PromptWaitingFrame,
 } from "@hallpass/contracts";
 import type { PairingAnswer } from "./pairing-controller.js";
+import {
+  isConversationLinkFrame,
+  type ConversationCommandFrame,
+  type ConversationLinkFrame,
+} from "./conversation-relay.js";
 
 /**
  * The worker's end of the local agent bridge (003/T013, R-102).
@@ -190,7 +195,24 @@ export type AgentBridgeDeps = {
    * binding the session already owns. The token the server presented to the relay is not part of
    * it; it never leaves the host.
    */
-  onSessionAnnounced?: (session: { sessionId: string; agentId: string; displayName: string; intent?: "choose" }) => void;
+  onSessionAnnounced?: (session: {
+    sessionId: string;
+    agentId: string;
+    displayName: string;
+    intent?: "choose";
+    /** 019 R-312: the conversation broker, already admitted by the relay on its secret. */
+    role?: "broker";
+    /**
+     * 019 R-321: the token a panel conversation's mcp-server presents. Passed to the runtime, which
+     * alone can say whether it is live; never logged here or anywhere.
+     */
+    panelToken?: string;
+  }) => void;
+  /**
+   * 019 R-323: a `conversation-*` frame from the link, as parsed. Whether it came from the broker
+   * session is the runtime's question (`conversation-relay.ts`).
+   */
+  onConversationFrame?: (frame: ConversationLinkFrame) => void;
   /**
    * 018 FR-274, R-273: a server on a choose-only link asks whether this browser is the one to use.
    * Its *presence* is what the ack advertises as `browser-choice`, so the relay's record never says
@@ -293,6 +315,8 @@ export type AgentBridge = {
   sendBrowserName(name: string): void;
   /** 018 FR-274: the owner's answer on the choice card, addressed to the choose link's session. */
   sendBrowserChoiceResult(sessionId: string, requestId: string, decision: "confirm" | "decline"): void;
+  /** 019 T547: a panel command (or the worker's page request) for the broker. Lost with no link. */
+  sendConversationCommand(frame: ConversationCommandFrame): void;
   disconnect(): void;
 };
 
@@ -513,6 +537,10 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
             displayName: link.data.displayName,
             // 018 R-273: a choose-only link; the runtime creates no session state for it.
             ...(link.data.intent === undefined ? {} : { intent: link.data.intent }),
+            // 019 R-312: the broker; no session state either.
+            ...(link.data.role === undefined ? {} : { role: link.data.role }),
+            // 019 R-321, T553: a panel conversation's server; the runtime decides whether it is live.
+            ...(link.data.panelToken === undefined ? {} : { panelToken: link.data.panelToken }),
           });
           return;
         case "browser-choice-request":
@@ -621,6 +649,15 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
             // every other field of this frame is - the panel is the one place it means anything.
             ...(link.data.preserved === undefined ? {} : { preserved: link.data.preserved }),
           });
+          return;
+        case "conversation-result":
+        case "conversation-event":
+        case "conversation-overview":
+        case "conversation-page":
+        case "conversation-browser-token":
+          // 019 R-323: the broker's frames. The code is logged, the content never is.
+          deps.reportDiagnostic?.("agent.bridge.conversation-frame");
+          if (isConversationLinkFrame(link.data)) deps.onConversationFrame?.(link.data);
           return;
         default:
           // `hello-ack` belongs to the relay's loopback half; a relay sending one up the native
@@ -835,6 +872,9 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     },
     sendBrowserChoiceResult(sessionId: string, requestId: string, decision: "confirm" | "decline"): void {
       send({ type: "browser-choice-result", sessionId, requestId, decision });
+    },
+    sendConversationCommand(frame: ConversationCommandFrame): void {
+      send(frame);
     },
     disconnect(): void {
       const open = port;

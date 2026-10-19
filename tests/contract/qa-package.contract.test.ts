@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { builtinModules } from "node:module";
@@ -14,6 +15,7 @@ import {
   PACKAGE_ROOT_ENTRIES,
   readZipEntry,
   repoRoot,
+  stageHostRuntime,
 } from "../../scripts/package.js";
 
 /**
@@ -64,22 +66,78 @@ describe("QA package host bundle", () => {
     await rm(outDir, { recursive: true, force: true });
   });
 
-  it("writes exactly the three host files, with no maps or chunks beside them", async () => {
+  it("writes exactly the five host files, with no maps or chunks beside them", async () => {
     expect(bundled.map((file) => file.slice(outDir.length + 1)).sort()).toEqual(
       [...HOST_ENTRIES].map((entry) => entry.output).sort(),
     );
-    await expect(readdir(outDir)).resolves.toEqual(["install.js", "mcp-server.js", "native-host.js"]);
+    await expect(readdir(outDir)).resolves.toEqual([
+      "broker.js",
+      "codex-app-server-shim.js",
+      "install.js",
+      "mcp-server.js",
+      "native-host.js",
+    ]);
   });
 
-  it("imports nothing but Node built-ins in any of the three files (US1.2)", async () => {
+  it("puts the Codex app-server shim beside broker.js, which finds it by its own location (019 SC-135)", async () => {
+    const broker = await readFile(resolve(outDir, "broker.js"), "utf8");
+    expect(broker).toContain("./codex-app-server-shim.js");
+    const shim = await readFile(resolve(outDir, "codex-app-server-shim.js"), "utf8");
+    expect(shim).toContain("turn/start");
+    expect(shim).toContain("readOnly");
+  });
+
+  it("imports nothing but Node built-ins in any of the files, except koffi in broker.js (US1.2, 019 R-327)", async () => {
     for (const file of bundled) {
       const source = await readFile(file, "utf8");
       const specifiers = importSpecifiers(source);
-      const foreign = specifiers.filter((specifier) => !isNodeBuiltin(specifier));
+      const allowed = file.endsWith("broker.js") ? ["koffi"] : [];
+      const foreign = specifiers.filter((specifier) => !isNodeBuiltin(specifier) && !allowed.includes(specifier));
       expect(specifiers.length, `${file} has no imports at all`).toBeGreaterThan(0);
       expect(foreign, `${file} imports ${foreign.join(", ")}`).toEqual([]);
-      expect(source, `${file} carries a CommonJS require shim`).not.toMatch(/(createRequire|__require)/);
+      expect(source, `${file} carries a CommonJS require shim`).not.toMatch(/\b(createRequire|__require)\b/);
     }
+  });
+
+  it("keeps koffi as the one external, used by broker.js alone (019 R-327)", async () => {
+    expect(importSpecifiers(await readFile(resolve(outDir, "broker.js"), "utf8"))).toContain("koffi");
+    for (const name of ["mcp-server.js", "native-host.js", "install.js", "codex-app-server-shim.js"]) {
+      expect(importSpecifiers(await readFile(resolve(outDir, name), "utf8")), name).not.toContain("koffi");
+    }
+  });
+
+  it("finds its sibling mcp-server.js by its own location, so the broker starts Hallpass's server from host/", async () => {
+    const broker = await readFile(resolve(outDir, "broker.js"), "utf8");
+    expect(broker).toContain("./mcp-server.js");
+    expect(broker).toContain("import.meta.url");
+  });
+
+  it("stages koffi's win32-x64 file set and the pinned adapter manifests, and koffi loads from there", () => {
+    const staged = stageHostRuntime(outDir).sort();
+    expect(staged).toEqual(
+      [
+        "agents/claude-code/package-lock.json",
+        "agents/claude-code/package.json",
+        "agents/codex/package-lock.json",
+        "agents/codex/package.json",
+        "node_modules/@koromix/koffi-win32-x64/index.js",
+        "node_modules/@koromix/koffi-win32-x64/package.json",
+        "node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node",
+        "node_modules/koffi/LICENSE.txt",
+        "node_modules/koffi/index.js",
+        "node_modules/koffi/package.json",
+        "node_modules/koffi/src/koffi/index.js",
+        "node_modules/koffi/src/koffi/src/static.js",
+      ].sort(),
+    );
+    // The staged folder alone must be enough: a bare `import "koffi"` from host/ finds it, loads the
+    // prebuilt binary and answers a call, the way broker.js does for the job object.
+    const answer = execFileSync(
+      process.execPath,
+      ["--input-type=module", "-e", 'import koffi from "koffi"; process.stdout.write(koffi.version + ":" + koffi.sizeof("int"));'],
+      { cwd: outDir, encoding: "utf8" },
+    );
+    expect(answer).toMatch(/^3\.\d+\.\d+:4$/u);
   });
 
   it("keeps the installer's own-location resolution, so host/install.js finds its sibling relay", async () => {
@@ -95,16 +153,31 @@ describe("QA package zip (only when a full run has produced one)", () => {
     ? readdirSync(releaseDir).filter((name) => name.startsWith(`${PACKAGE_NAME}-`) && name.endsWith(".zip"))
     : [];
 
-  it.skipIf(zips.length === 0)("contains exactly the US1.1 root entries and only the three host files", () => {
+  it.skipIf(zips.length === 0)("contains exactly the US1.1 root entries and only the host files of 019 R-327", () => {
     const entries = listZip(resolve(releaseDir, zips[0] ?? ""));
     const roots = new Set(entries.map((entry) => (entry.includes("/") ? `${entry.split("/")[0]}/` : entry)));
     expect([...roots].sort()).toEqual([...PACKAGE_ROOT_ENTRIES].sort());
-    expect(entries.filter((entry) => entry.startsWith("host/") && entry !== "host/").sort()).toEqual([
+    const hostFiles = entries.filter((entry) => entry.startsWith("host/") && !entry.endsWith("/"));
+    const isRuntime = (entry: string): boolean => entry.startsWith("host/node_modules/") || entry.startsWith("host/agents/");
+    expect(hostFiles.filter((entry) => !isRuntime(entry)).sort()).toEqual([
+      "host/broker.js",
+      "host/codex-app-server-shim.js",
       "host/install.js",
       "host/mcp-server.js",
       "host/native-host.js",
     ]);
-    expect(entries.some((entry) => entry.includes("node_modules"))).toBe(false);
+    expect(hostFiles.filter((entry) => entry.startsWith("host/agents/")).sort()).toEqual([
+      "host/agents/claude-code/package-lock.json",
+      "host/agents/claude-code/package.json",
+      "host/agents/codex/package-lock.json",
+      "host/agents/codex/package.json",
+    ]);
+    // node_modules is koffi and its win32-x64 prebuilt, nothing else (coverage F5).
+    const modules = hostFiles.filter((entry) => entry.startsWith("host/node_modules/"));
+    expect(modules).toContain("host/node_modules/koffi/index.js");
+    expect(modules).toContain("host/node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node");
+    expect(modules.filter((entry) => !/^host\/node_modules\/(koffi|@koromix\/koffi-win32-x64)\//u.test(entry))).toEqual([]);
+    expect(entries.some((entry) => entry.includes("node_modules") && !entry.startsWith("host/node_modules/"))).toBe(false);
     expect(entries.filter((entry) => entry.endsWith(".map") || entry.endsWith(".d.ts"))).toEqual([]);
     expect(entries.some((entry) => entry.startsWith("extension/manifest.json"))).toBe(true);
   });
@@ -130,7 +203,7 @@ describe("QA package 0.2.0 zip (only when a full run has produced one)", () => {
   });
 
   it.skipIf(!built)("stamps one version into the zip name, VERSION and the packed manifest", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.12.5");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.13.0");
     expect(readZipEntry(zipPath, "VERSION").trim()).toBe(AGENT_EXTENSION_VERSION);
     const manifest = JSON.parse(readZipEntry(zipPath, "extension/manifest.json")) as { version?: string };
     expect(manifest.version).toBe(AGENT_EXTENSION_VERSION);
@@ -149,6 +222,10 @@ describe("QA package PowerShell scripts (T204)", () => {
     expect(script).toContain("node -v");
     expect(script).toMatch(/-lt 24/);
     expect(script).toContain("host\\install.js");
+    // 019 R-327: the broker, its koffi dependency and the pinned adapter manifests are required files.
+    for (const required of ["broker.js", "codex-app-server-shim.js", "node_modules", "koffi", "agents", "package-lock.json"]) {
+      expect(script, `install.ps1 does not check ${required}`).toContain(required);
+    }
     expect(script).toContain("Set-Clipboard");
     expect(script).toContain("-Register");
     expect(script).toContain("claude mcp add hallpass --scope user -- node");
@@ -170,6 +247,21 @@ describe("QA package PowerShell scripts (T204)", () => {
     expect(script).toContain("-Purge");
     expect(script).toContain("config.json");
     expect(script).toContain("chrome://extensions");
+  });
+
+  /**
+   * 019 R-327 / D-019-8: the uninstaller clears what the panel conversation wrote, but a scratch
+   * folder holds the owner's own files - it is kept, and the owner is told where it is.
+   */
+  it("uninstall.ps1 removes the broker's files, keeps scratch\\ and says so", async () => {
+    const script = await readFile(resolve(assetsDir, "uninstall.ps1"), "utf8");
+    for (const name of ["conversations.json", "folders.json", "agents", "brokers", "broker.log", "conversation-consent"]) {
+      expect(script, `uninstall.ps1 does not remove ${name}`).toContain(name);
+    }
+    expect(script).toContain("scratch");
+    expect(script).toMatch(/scratch[^\n]*(保留|沒有刪)/u);
+    // The scratch folder is never itself a removal target.
+    expect(script).not.toMatch(/Remove-Item[^\n]*scratch/u);
   });
 
   /**

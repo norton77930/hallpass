@@ -1,4 +1,10 @@
-import { AGENT_TOOL_NAMES, type AgentActivityItem, type AgentToolName, type SiteMode } from "@hallpass/contracts";
+import {
+  AGENT_TOOL_NAMES,
+  type AgentActivityItem,
+  type AgentToolName,
+  type CONVERSATION_NOTICES,
+  type SiteMode,
+} from "@hallpass/contracts";
 
 /**
  * Every message key the agent side panel can put on screen (003/T068, rebuilt in 006 S1).
@@ -90,6 +96,15 @@ export const ACTIVITY_OUTCOME_KEYS: Record<AgentActivityItem["outcome"], string>
 export const WINDOW_STATE_KEYS: Record<"maximized" | "fullscreen", string> = {
   maximized: "agent.activity.windowMaximized",
   fullscreen: "agent.activity.windowFullscreen",
+};
+
+/**
+ * 019 R-317: the conversation notices the panel says itself (`CONVERSATION_NOTICES`), keyed by the
+ * closed contract list so a code added there without a sentence does not compile. The broker's text
+ * under it is only the detail.
+ */
+export const CONVERSATION_NOTICE_KEYS: Record<(typeof CONVERSATION_NOTICES)[number], string> = {
+  "sandbox-permissions-declined": "conversation.notice.sandbox-permissions-declined",
 };
 
 /**
@@ -257,9 +272,43 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.sitePlan.warning",
   "agent.sitePlan.approve",
   "agent.sitePlan.decline",
+  // 019/T544: the tab bar above the conversation and today's view.
+  "agent.tabs.label",
+  "agent.tabs.conversation",
+  "agent.tabs.connections",
+  "agent.tabs.waiting",
+  // 019 FR-309, T555: the panel consent switch in Connections & sites.
+  "agent.panelConsent.label",
+  "agent.panelConsent.granted",
+  "agent.panelConsent.withdrawn",
+  "agent.panelConsent.unknown",
+  // 019 FR-308, R-328, T556: who made a site's last change.
+  "agent.siteChangedBy.panel-agent",
+  "agent.siteChangedBy.external-agent",
+  "agent.siteChangedBy.owner",
+  // 019 US5, US6, FR-303, FR-304, T563: the list of conversations and the folder chooser.
+  "conversation.error.path-entry",
+  "conversation.list.label",
+  "conversation.list.show",
+  "conversation.list.newInFolder",
+  "conversation.list.cannotContinue",
+  "conversation.list.inUseElsewhere",
+  "conversation.list.remove",
+  "conversation.list.removeShort",
+  "conversation.list.removeNote",
+  "conversation.list.notice.index-unreadable",
+  "conversation.folders.label",
+  "conversation.folders.scratch",
+  "conversation.folders.startLabel",
+  "conversation.folders.start",
+  "conversation.folders.add",
+  "conversation.folders.remove",
+  "conversation.folders.pathLabel",
+  "conversation.folders.addTyped",
   ...Object.values(MODE_KEYS),
   ...Object.values(TOOL_SUMMARY_KEYS),
   ...Object.values(UPLOAD_DELIVERY_SUMMARY_KEYS),
   ...Object.values(ACTIVITY_OUTCOME_KEYS),
   ...Object.values(WINDOW_STATE_KEYS),
+  ...Object.values(CONVERSATION_NOTICE_KEYS),
 ];

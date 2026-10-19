@@ -21,9 +21,20 @@ const STORAGE_KEY = "agentSiteModes";
 /** What a site nobody has decided about is worth: the owner is asked, every time. */
 export const DEFAULT_SITE_MODE: SiteMode = "ask";
 
+/** 019 R-328: who made a site's last mode change. */
+export type SiteModeAuthor = NonNullable<SiteModeRecord["changedBy"]>;
+
 export type SiteModePatch = {
   mode?: SiteMode;
   diagnosticsGranted?: boolean;
+  /** 019 R-328, T556: the owner's own change, from the site list. */
+  changedBy?: SiteModeAuthor;
+  /**
+   * 019 R-328, T556: the session whose card the owner answered with "remember". The store asks
+   * `authorOf` what kind of session it is, so a writer names the session it served and never has to
+   * know, or be trusted to say, whether that was a panel conversation.
+   */
+  session?: string;
 };
 
 export type SiteModeStore = {
@@ -68,7 +79,13 @@ function assertSite(site: string): void {
   }
 }
 
-type StoredRecords = Record<string, { mode: SiteMode; diagnosticsGranted: boolean }>;
+type StoredRecord = {
+  mode: SiteMode;
+  diagnosticsGranted: boolean;
+  changedBy?: SiteModeAuthor;
+  changedAt?: string;
+};
+type StoredRecords = Record<string, StoredRecord>;
 
 export type SiteModeStoreDeps = {
   read: () => Promise<StoredRecords>;
@@ -78,6 +95,13 @@ export type SiteModeStoreDeps = {
    * dropped instead of being written back over them (004/T129c).
    */
   watch?: (onExternalChange: () => void) => void;
+  /**
+   * 019 R-328, T556: the kind of a live session - `panel-agent` for a panel conversation's,
+   * `external-agent` otherwise - or `undefined` for one no longer known, whose change then names
+   * nobody rather than a guess.
+   */
+  authorOf?: (sessionId: string) => SiteModeAuthor | undefined;
+  now?: () => string;
 };
 
 async function readRecords(): Promise<StoredRecords> {
@@ -93,7 +117,14 @@ async function readRecords(): Promise<StoredRecords> {
     // then honours.
     const parsed = siteModeRecordSchema.safeParse({ site, ...(value as object) });
     if (parsed.success) {
-      out[site] = { mode: parsed.data.mode, diagnosticsGranted: parsed.data.diagnosticsGranted };
+      // 019 R-328: the author rides along when there is one; a record from before 019 has none.
+      const { mode, diagnosticsGranted, changedBy, changedAt } = parsed.data;
+      out[site] = {
+        mode,
+        diagnosticsGranted,
+        ...(changedBy === undefined ? {} : { changedBy }),
+        ...(changedAt === undefined ? {} : { changedAt }),
+      };
     }
   }
   return out;
@@ -121,9 +152,11 @@ export function watchSiteModes(onExternalChange: () => void): void {
   });
 }
 
-export function createSiteModeStore(
-  deps: SiteModeStoreDeps = { read: readRecords, write: writeRecords, watch: watchSiteModes },
-): SiteModeStore {
+/** The storage-backed deps, for a caller that adds `authorOf` to them (019 T556). */
+export const defaultSiteModeStoreDeps: SiteModeStoreDeps = { read: readRecords, write: writeRecords, watch: watchSiteModes };
+
+export function createSiteModeStore(deps: SiteModeStoreDeps = defaultSiteModeStoreDeps): SiteModeStore {
+  const now = deps.now ?? (() => new Date().toISOString());
   let loaded: StoredRecords | undefined;
   /**
    * The record changed since `loaded` was taken, so `loaded` is a claim about storage that storage
@@ -165,7 +198,26 @@ export function createSiteModeStore(
       site,
       mode: entry?.mode ?? DEFAULT_SITE_MODE,
       diagnosticsGranted: entry?.diagnosticsGranted ?? false,
+      ...(entry?.changedBy === undefined ? {} : { changedBy: entry.changedBy }),
+      ...(entry?.changedAt === undefined ? {} : { changedAt: entry.changedAt }),
     };
+  }
+
+  /**
+   * 019 R-328, T556: the author a change records. A mode change names whoever made it - the owner,
+   * or the kind of session whose card was answered - and replaces the earlier author even when it
+   * cannot name one, so a decision is never credited to whoever made the one before it. A change to
+   * the diagnostics grant alone is not a mode change and keeps the mode's author.
+   */
+  function authorship(patch: SiteModePatch, current: SiteModeRecord): Pick<StoredRecord, "changedBy" | "changedAt"> {
+    if (patch.mode === undefined) {
+      return {
+        ...(current.changedBy === undefined ? {} : { changedBy: current.changedBy }),
+        ...(current.changedAt === undefined ? {} : { changedAt: current.changedAt }),
+      };
+    }
+    const changedBy = patch.changedBy ?? (patch.session === undefined ? undefined : deps.authorOf?.(patch.session));
+    return changedBy === undefined ? {} : { changedBy, changedAt: now() };
   }
 
   return {
@@ -178,9 +230,10 @@ export function createSiteModeStore(
       return enqueue(async () => {
         const stored = { ...(await load()) };
         const current = recordOf(site, stored);
-        const next = {
+        const next: StoredRecord = {
           mode: patch.mode ?? current.mode,
           diagnosticsGranted: patch.diagnosticsGranted ?? current.diagnosticsGranted,
+          ...authorship(patch, current),
         };
         // A record that says exactly what the absence of one says is not a decision: it would sit
         // in the panel's list as something the owner decided and may revoke, for a site they have

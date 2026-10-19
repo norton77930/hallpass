@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createSiteModeStore,
+  defaultSiteModeStoreDeps,
   siteOfUrl,
   type SiteModeStore,
 } from "../src/service-worker/site-mode-store.js";
@@ -218,5 +219,78 @@ describe("T129c the stored record outranks the cache", () => {
       mode: "skip-checks",
       diagnosticsGranted: false,
     });
+  });
+});
+
+describe("019 T556 a site's record says who changed it (R-328, FR-308)", () => {
+  let storage: Record<string, unknown>;
+  const SITE = "https://fixtures.test";
+  const AT = "2026-10-19T08:00:00.000Z";
+  const stored = () => (storage.agentSiteModes as Record<string, Record<string, unknown>>)[SITE];
+  const storeWith = (authors: Record<string, "panel-agent" | "external-agent">) =>
+    createSiteModeStore({
+      ...defaultSiteModeStoreDeps,
+      authorOf: (sessionId) => authors[sessionId],
+      now: () => AT,
+    });
+
+  beforeEach(() => {
+    storage = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("names the owner for a change from the site list", async () => {
+    const store = storeWith({});
+
+    await expect(store.set(SITE, { mode: "skip-checks", changedBy: "owner" })).resolves.toEqual({
+      site: SITE,
+      mode: "skip-checks",
+      diagnosticsGranted: false,
+      changedBy: "owner",
+      changedAt: AT,
+    });
+    expect(stored()).toEqual({ mode: "skip-checks", diagnosticsGranted: false, changedBy: "owner", changedAt: AT });
+  });
+
+  it("names the kind of session whose card the owner answered, a panel conversation or an external agent", async () => {
+    const store = storeWith({ "panel-1": "panel-agent", "session-h1": "external-agent" });
+
+    await store.set(SITE, { mode: "follow-a-plan", session: "panel-1" });
+    await expect(store.get(SITE)).resolves.toMatchObject({ changedBy: "panel-agent", changedAt: AT });
+    await store.set(SITE, { mode: "skip-checks", session: "session-h1" });
+    await expect(store.list()).resolves.toEqual([
+      { site: SITE, mode: "skip-checks", diagnosticsGranted: false, changedBy: "external-agent", changedAt: AT },
+    ]);
+  });
+
+  it("keeps the author of the mode when only the diagnostics grant changes, and needs none back at ask", async () => {
+    const store = storeWith({ "panel-1": "panel-agent" });
+    await store.set(SITE, { mode: "skip-checks", session: "panel-1" });
+
+    await store.set(SITE, { diagnosticsGranted: true });
+    expect(stored()).toMatchObject({ changedBy: "panel-agent", changedAt: AT, diagnosticsGranted: true });
+
+    await store.set(SITE, { mode: "ask", diagnosticsGranted: false, changedBy: "owner" });
+    expect(stored()).toBeUndefined();
+  });
+
+  it("reads a record written before 019 unchanged, and leaves no stale author on a change nobody can name", async () => {
+    storage.agentSiteModes = { [SITE]: { mode: "skip-checks", diagnosticsGranted: false } };
+    const store = storeWith({});
+
+    await expect(store.get(SITE)).resolves.toEqual({ site: SITE, mode: "skip-checks", diagnosticsGranted: false });
+
+    await store.set(SITE, { mode: "follow-a-plan", changedBy: "owner" });
+    await store.set(SITE, { mode: "skip-checks", session: "gone" });
+    expect(stored()).toEqual({ mode: "skip-checks", diagnosticsGranted: false });
+  });
+
+  it("refuses a stored author the contract does not know, as any malformed record is", async () => {
+    storage.agentSiteModes = { [SITE]: { mode: "skip-checks", diagnosticsGranted: false, changedBy: "someone", changedAt: AT } };
+
+    await expect(storeWith({}).get(SITE)).resolves.toEqual({ site: SITE, mode: "ask", diagnosticsGranted: false });
   });
 });

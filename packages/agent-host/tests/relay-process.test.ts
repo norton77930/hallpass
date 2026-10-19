@@ -72,7 +72,10 @@ describe("T093 the relay listens and multiplexes", () => {
     relays.length = 0;
     relay = undefined;
     if (dataDir) {
-      await rm(dataDir, { recursive: true, force: true });
+      // 019 R-312: an acknowledged relay with an identity starts a broker, which keeps appending to
+      // its log in this directory for its 15 s redial window after the relay is killed; retry the
+      // removal over such a write rather than fail the cleanup.
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
       dataDir = "";
     }
   });

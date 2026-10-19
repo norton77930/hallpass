@@ -31,7 +31,21 @@ $installer    = Join-Path $hostDir "install.js"
 $serverPath   = Join-Path $hostDir "mcp-server.js"
 $extensionDir = Join-Path $PSScriptRoot "extension"
 
-foreach ($required in @($installer, (Join-Path $hostDir "native-host.js"), $serverPath, (Join-Path $extensionDir "manifest.json"))) {
+$requiredFiles = @(
+  $installer,
+  (Join-Path $hostDir "native-host.js"),
+  $serverPath,
+  (Join-Path $hostDir "broker.js"),
+  (Join-Path $hostDir "codex-app-server-shim.js"),
+  (Join-Path $hostDir "node_modules\koffi\index.js"),
+  (Join-Path $hostDir "node_modules\@koromix\koffi-win32-x64\win32_x64\koffi.node"),
+  (Join-Path $hostDir "agents\claude-code\package.json"),
+  (Join-Path $hostDir "agents\claude-code\package-lock.json"),
+  (Join-Path $hostDir "agents\codex\package.json"),
+  (Join-Path $hostDir "agents\codex\package-lock.json"),
+  (Join-Path $extensionDir "manifest.json")
+)
+foreach ($required in $requiredFiles) {
   if (-not (Test-Path -LiteralPath $required)) {
     Write-Host "找不到 $required。請把 zip 完整解壓縮後,從解壓縮出來的資料夾執行 install.ps1。" -ForegroundColor Red
     exit 1
@@ -127,5 +141,5 @@ Write-Host "   MCP client 端把舊的 server 換成新的(Claude Code):"
 Write-Host "   claude mcp remove poc-browser --scope user"
 Write-Host "   $claudeAddLine"
 Write-Host ""
-Write-Host "檔案位置:$dataDir(config.json、bridge.json、relay.log)"
+Write-Host "檔案位置:$dataDir(config.json、bridge.json、relay.log;側欄對話另有 conversations.json、agents\、scratch\、broker.log)"
 exit 0

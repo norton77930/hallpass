@@ -1,0 +1,8 @@
+{
+  "name": "hallpass-agent-claude-code",
+  "private": true,
+  "description": "Pinned ACP adapter for Claude Code, installed by the Hallpass broker on the owner's consent (019 R-314).",
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.81.2"
+  }
+}

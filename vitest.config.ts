@@ -26,6 +26,7 @@ export default defineConfig({
             "packages/**/*.test.ts",
             "apps/extension/tests/**/*.test.ts",
             "tests/acceptance/probe-004/**/*.test.ts",
+            "tests/harness/**/*.test.ts",
           ],
           exclude: ["apps/extension/tests/**/*.test.tsx"],
           setupFiles: ["./tests/setup.ts"],

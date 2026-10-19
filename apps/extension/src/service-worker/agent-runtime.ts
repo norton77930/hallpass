@@ -9,7 +9,10 @@ import {
   type AgentNotice,
   type AgentNativeRequest,
   type AgentNativeResponse,
+  type AgentPanelMessage,
   type AgentPanelState,
+  type ConversationPanelCommand,
+  type ConversationPanelState,
   type AgentPanelTab,
   type AgentToolName,
   type SiteMode,
@@ -40,7 +43,7 @@ import {
   type PairingState,
   type PairingWaitingTick,
 } from "./pairing-controller.js";
-import { createSiteModeStore, siteOfUrl, type SiteModeStore } from "./site-mode-store.js";
+import { createSiteModeStore, defaultSiteModeStoreDeps, siteOfUrl, type SiteModeStore } from "./site-mode-store.js";
 import { chromeTransitionStore } from "./transition-store.js";
 import {
   applyTransition,
@@ -76,6 +79,9 @@ import {
   type PromptWaitingTick,
 } from "./agent-tools/prompts.js";
 import { summariseToolCall } from "./agent-tools/summaries.js";
+import { BROKER_GREETING_WINDOW_MS, createConversationRelay, type ConversationLinkFrame } from "./conversation-relay.js";
+import { createPanelConsentStore } from "./panel-consent.js";
+import { createPanelTokens, isPanelAgentId, panelAgentId } from "./panel-sessions.js";
 import { createAgentReads } from "./agent-tools/reads.js";
 import { createAgentRecordingTools } from "./agent-tools/recording.js";
 import { createActionContext } from "./recording/action-context.js";
@@ -341,6 +347,11 @@ export type AgentRuntimeOptions = {
    * decides when it is called, and it is called only when the answer changes.
    */
   setAttention?: (on: boolean) => void;
+  /**
+   * 019 T527: where the broker's `conversation-*` frames go once they are known to be the broker's.
+   * Nothing consumes them before S5; injected by tests, which is how the filtering is observable.
+   */
+  onConversationFrame?: (frame: ConversationLinkFrame) => void;
 };
 
 /**
@@ -479,6 +490,15 @@ export type AgentRuntime = {
    * assumes no panel, which is the truth for a worker Chrome has just woken.
    */
   bindPanelPresence: (presence: AgentPanelPresence) => void;
+  /**
+   * 019 T547: the Conversation tab's side of the worker. `command` takes one `ui.conversation.*`
+   * command a panel document sent (validated at the panel port) on to the broker; `onPanelMessage`
+   * is how the panel port hears the results, events and pages it fans out to every document.
+   */
+  conversation: {
+    command: (command: ConversationPanelCommand) => void;
+    onPanelMessage: (listener: (message: AgentPanelMessage) => void) => void;
+  };
 };
 
 function scheduleRetryAlarm(): void {
@@ -655,7 +675,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     holders: () => tabs.sessionsHoldingAnyTab(),
     reportDiagnostic: reportTestDiagnostic,
   });
-  const siteModes = createSiteModeStore();
+  /**
+   * 019 R-328, T556: a mode remembered from a card names the kind of session that raised it, read
+   * from the live session here rather than from anything the runner or the agent says.
+   */
+  const siteModes = createSiteModeStore({
+    ...defaultSiteModeStoreDeps,
+    authorOf: (sessionId) => {
+      const live = sessions.get(sessionId);
+      if (live === undefined) return undefined;
+      return live.kind === "panel" ? "panel-agent" : "external-agent";
+    },
+  });
   const prompts = createAgentPromptController({
     onChange() {
       // A question raised or ended is half of what the icon shows (011 FR-152); the other half is
@@ -690,6 +721,79 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * carry choice frames, and goes when the link ends or the relay does.
    */
   const chooseLinks = new Set<string>();
+  /**
+   * 019 R-312, T527: the conversation broker's session for this relay run - not an agent session:
+   * no card, no record, no tab group, no pairing. `conversation-*` frames pass from it alone.
+   */
+  const panelMessageListeners: Array<(message: AgentPanelMessage) => void> = [];
+  /**
+   * 019 R-321, T553: the panel conversations' tokens (memory only) and the owner's one-time consent
+   * (FR-299, D-019-11). Together they are the whole of a panel session's admission; `agentPairings`
+   * is never read or written for one.
+   */
+  const panelTokens = createPanelTokens();
+  const panelConsent = createPanelConsentStore();
+  const conversations = createConversationRelay({
+    deliver: (frame) => options.onConversationFrame?.(frame),
+    reportDiagnostic: reportTestDiagnostic,
+    // T547: commands out on the native link, everything the broker says out to every panel.
+    sendFrame: (frame) => bridge.sendConversationCommand(frame),
+    toPanels: (message) => {
+      for (const listener of panelMessageListeners) listener(message);
+    },
+    changed: () => notify(),
+    // T553: only the broker session's frames reach here (the relay drops anyone else's).
+    onBrowserToken: ({ conversationId, token, startTabId }) => {
+      panelTokens.set(conversationId, token, startTabId);
+      reportTestDiagnostic(token === null ? "agent.panel.token-revoked" : "agent.panel.token-issued");
+      notify();
+    },
+  });
+  /**
+   * 019 T572 (architecture S1): the panel tokens across a relay restart. The broker re-attaches a
+   * second or more after a new relay starts, and the panel conversations' mcp-servers redial faster;
+   * revoking every token at the relay's greeting refused them as not-admitted, and the agent told the
+   * owner they had not allowed it. So the tokens wait out the broker's greeting window: the broker
+   * that issued them greeting again keeps them (it sends its live ones again, each replacing), a
+   * different broker greeting ends them at once (they were another broker's runs), and no broker
+   * within the window ends them when it closes. A broker leaving and a withdrawal still revoke at once.
+   */
+  let relayRun = 0;
+  /** The broker whose tokens are being held over a relay restart; undefined when none are. */
+  let tokensHeldFrom: string | undefined;
+  function holdPanelTokens(from: string | undefined): void {
+    const run = ++relayRun;
+    // A second relay start inside the window finds no broker attached; the tokens are still the
+    // first one's, and the new window covers them.
+    tokensHeldFrom = from ?? tokensHeldFrom;
+    const timer = setTimeout(() => {
+      if (run !== relayRun || conversations.current() !== undefined) return;
+      tokensHeldFrom = undefined;
+      panelTokens.revokeAll();
+      reportTestDiagnostic("agent.panel.tokens-expired");
+      notify();
+    }, BROKER_GREETING_WINDOW_MS) as unknown as { unref?: () => void };
+    timer.unref?.();
+  }
+  /**
+   * A broker greeted: tokens held for another broker are not this one's. And (T572) it hears the
+   * owner's panel consent as this worker records it - the same command the switch sends - since a
+   * switch pressed while no broker was attached reached the worker only, and the broker's own record
+   * would otherwise keep the old answer. The answer is read after the await, so a press made
+   * meanwhile is the one sent; an unknown answer (none given, or unreadable) is not sent.
+   */
+  function brokerGreeted(sessionId: string): void {
+    if (tokensHeldFrom !== undefined && tokensHeldFrom !== sessionId) panelTokens.revokeAll();
+    tokensHeldFrom = undefined;
+    void panelConsent
+      .read()
+      .then(() => {
+        const answer = panelConsent.current();
+        if (answer === "unknown" || !conversations.isBroker(sessionId)) return;
+        conversations.command({ type: "ui.conversation.consent", payload: { granted: answer === "granted" } });
+      })
+      .catch(() => reportTestDiagnostic("agent.panel.consent-sync-failed"));
+  }
   const bindings = createAgentPageBindings();
   /**
    * The two pieces of state a call can outlive a round trip with (US5): the batch the owner
@@ -866,8 +970,48 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * would be able to speak into the first's conversation, and a rebuild would invalidate every ref
    * the first session holds for an event it never saw.
    */
-  type LiveSession = { agentId: string; agentName: string; lastHelloAt: string; lastActivityAt: string };
+  type LiveSession = {
+    agentId: string;
+    agentName: string;
+    lastHelloAt: string;
+    lastActivityAt: string;
+    /**
+     * 019 R-321, T553: a session whose greeting carried a panel token. Decided by the greeting
+     * alone - a panel session is admitted by its token and the panel consent and never by a
+     * pairing, and an external one never by a token, whatever agent id either names.
+     */
+    kind?: "panel";
+  };
   const sessions = new Map<string, LiveSession>();
+  /**
+   * 019 R-321: the token each panel session greeted with, kept beside the session rather than on it
+   * so nothing that copies a session record can carry it anywhere. Memory only; read per call, so a
+   * token revoked a moment ago refuses the very next call.
+   */
+  const panelTokenOf = new Map<string, string>();
+
+  /**
+   * 019 R-321, T553: whether a panel session may act - the panel consent is granted, its token is
+   * live, and the token was issued for the conversation its agent id names. Nothing else admits one.
+   */
+  async function panelAdmitted(sessionId: string, session: LiveSession): Promise<boolean> {
+    const token = panelTokenOf.get(sessionId);
+    if (token === undefined) return false;
+    const conversationId = panelTokens.conversationOf(token);
+    if (conversationId === undefined || session.agentId !== panelAgentId(conversationId)) return false;
+    return (await panelConsent.read()) === "granted";
+  }
+
+  /**
+   * Whether a live session may act now: its pairing for an external session, its token and the
+   * panel consent for a panel one (019 R-321). Checked per call, so an unpair or a withdrawal bites
+   * the very next call (SC-026, FR-309).
+   */
+  async function admitted(sessionId: string, session: LiveSession): Promise<boolean> {
+    if (session.kind === "panel") return panelAdmitted(sessionId, session);
+    if (isPanelAgentId(session.agentId)) return false;
+    return pairing.isPaired(session.agentId);
+  }
 
   /**
    * One fabricated binding per session (D-M3-2), kept by session id rather than in a variable the
@@ -1801,7 +1945,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     const refusal = async (): Promise<AgentSitePlanApproval | undefined> => {
       const live = sessions.get(sessionId);
       if (!live) return { ok: false, reason: "session-ended" };
-      if (!(await pairing.isPaired(live.agentId))) return { ok: false, reason: "not-paired" };
+      // 019 R-321: a panel session's plan stands on its admission, as an external one's on its pairing.
+      if (!(await admitted(sessionId, live))) return { ok: false, reason: "not-paired" };
       return undefined;
     };
     const before = await refusal();
@@ -1885,10 +2030,29 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
        */
       return { callId, outcome: "denied", reason: "session-ended" };
     }
-    if (!(await pairing.isPaired(session.agentId))) {
+    if (!(await admitted(request.sessionId, session))) {
       // Checked per call rather than remembered from the pairing: unpairing has to bite the very
       // next call of a session that is already open (SC-026), and a cached "yes" would let it not.
-      return { callId, outcome: "denied", reason: "not-paired" };
+      // 019 R-321: a panel session is refused in its own word - it was never paired, and an agent
+      // told `not-paired` would be told to reconnect a server it did not start.
+      return { callId, outcome: "denied", reason: session.kind === "panel" ? "not-admitted" : "not-paired" };
+    }
+    if (session.kind === "panel") {
+      /**
+       * 019 FR-306, R-321, T554: the tab the owner was viewing when they sent the message joins the
+       * panel session's group on its first browser call of the turn - the claim path, without a
+       * card, because the owner sent the message from that tab. Handed out once per turn; a tab
+       * another session holds is not taken (the claim refuses it), and any other tab is the agent's
+       * own `tabs_claim`.
+       */
+      const token = panelTokenOf.get(request.sessionId);
+      const conversationId = token === undefined ? undefined : panelTokens.conversationOf(token);
+      const startTabId = conversationId === undefined ? undefined : panelTokens.takeStartTab(conversationId);
+      if (startTabId !== undefined) {
+        const claimed = await tabs.claim(request.sessionId, startTabId).catch(() => undefined);
+        reportTestDiagnostic(claimed?.ok === true ? "agent.panel.start-tab" : "agent.panel.start-tab-refused");
+        if (claimed?.ok === true) notify();
+      }
     }
     // The card's "newest activity first" (006 R-127) reads this: any call of the session is its
     // activity, not only the effects that also move its main tab.
@@ -1954,6 +2118,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     }
     await tabs.endSession(ending);
     sessions.delete(ending);
+    // 019 R-321: and the token it greeted with, which only a fresh greeting can present again.
+    panelTokenOf.delete(ending);
     /**
      * And once more now that the session is gone, which no approval can get past: one that was
      * checked while the session was still live and queued its write behind the clear above lands
@@ -1967,6 +2133,48 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     activity.delete(ending);
     notices.delete(ending);
     notify();
+  }
+
+  /**
+   * 019 FR-299, FR-309, D-019-11, T555: the owner's answer to "Side-panel agent may use this
+   * browser" - the first-use card's Download, or the switch in Connections & sites.
+   *
+   * The worker's record changes before anything is awaited, so admission follows it from the next
+   * call. A withdrawal then revokes every panel token and runs, for every panel session, the teardown
+   * an unpair runs and more - its calls stopped, the host told at once with an unpair-shaped refusal,
+   * then everything it held let go (questions, site plan, debugger, tab group, window state). The
+   * broker revokes the same tokens on its side and never sends them again (T558), so a granted
+   * consent does not revive a still-running agent: only a new agent run, with a new token, gets
+   * browser access, and the consent says no until the owner answers. External sessions and
+   * pairings are never touched.
+   */
+  async function answerPanelConsent(granted: boolean): Promise<void> {
+    const written = panelConsent.write(granted);
+    if (!granted) {
+      panelTokens.revokeAll();
+      for (const [sessionId, session] of [...sessions]) {
+        if (session.kind !== "panel") continue;
+        stops.stopSession(sessionId);
+        bridge.notifyUnpaired(session.agentId, sessionId);
+        await releaseSession(sessionId, "stopped").catch(() => reportTestDiagnostic("agent.session.end-failed"));
+      }
+    }
+    notify();
+    await written.catch(() => reportTestDiagnostic("agent.panel.consent-unsaved"));
+  }
+
+  /**
+   * The projection's conversation part (019 T547), with the consent as the worker records it
+   * (T553): the owner's answer here wins over the broker's last overview, so the switch shows a
+   * withdrawal at once. With no answer recorded here, the broker's word is shown - except a
+   * "granted" this worker never heard, which would hide the first-use card while admitting nothing:
+   * the owner is asked again, and that answer lands here too.
+   */
+  async function conversationProjection(): Promise<ConversationPanelState> {
+    const part = conversations.panelState(bridge.status() === "connected");
+    const own = await panelConsent.read();
+    if (own !== "unknown") return { ...part, consent: own };
+    return part.consent === "granted" ? { ...part, consent: "unknown" } : part;
   }
 
   /**
@@ -2240,13 +2448,39 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         chooseLinks.add(announcement.sessionId);
         return;
       }
+      if (announcement.role === "broker") {
+        // 019 R-312: the relay checked the broker's secret; the worker keeps one per relay run.
+        if (conversations.announce(announcement.sessionId)) brokerGreeted(announcement.sessionId);
+        return;
+      }
+      if (conversations.isBroker(announcement.sessionId)) {
+        // The relay refuses this already; an ordinary greeting never takes the broker's id here either.
+        reportTestDiagnostic("agent.conversation.broker-session-taken");
+        return;
+      }
       const known = sessions.get(announcement.sessionId);
       const helloAt = new Date().toISOString();
+      /**
+       * 019 R-321, T553: a greeting with a panel token is a panel session whether or not the token
+       * is live - an unknown one is refused as `not-admitted`, never downgraded to an external
+       * pairing - and one without a token is external whatever its agent id says. Decided afresh on
+       * every greeting; the token stays in memory beside the session, never in its record.
+       */
+      const kind = announcement.panelToken === undefined ? undefined : ("panel" as const);
+      if (announcement.panelToken === undefined) panelTokenOf.delete(announcement.sessionId);
+      else panelTokenOf.set(announcement.sessionId, announcement.panelToken);
+      if (kind !== undefined) {
+        reportTestDiagnostic(
+          panelTokens.conversationOf(announcement.panelToken!) === undefined ? "agent.panel.token-unknown" : "agent.panel.session",
+        );
+      }
       if (known) {
         known.lastHelloAt = helloAt;
         known.lastActivityAt = helloAt;
         known.agentId = announcement.agentId;
         known.agentName = announcement.displayName;
+        if (kind === undefined) delete known.kind;
+        else known.kind = kind;
       } else {
         contextFor(announcement.sessionId);
         sessions.set(announcement.sessionId, {
@@ -2254,12 +2488,17 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           agentName: announcement.displayName,
           lastHelloAt: helloAt,
           lastActivityAt: helloAt,
+          ...(kind === undefined ? {} : { kind }),
         });
       }
       // Written where an evicted worker will find it: the reconciliation's alarm may fire in a
       // worker that never saw this greeting.
       void tabs.announce(announcement.sessionId, helloAt).catch(() => undefined);
       notify();
+    },
+    /** 019 R-323: a conversation frame, accepted only from this relay run's broker session. */
+    onConversationFrame(frame) {
+      conversations.receive(frame);
     },
     /**
      * The folder a session's host reported (016 FR-226, R-204), kept on the session's persisted
@@ -2279,6 +2518,21 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         .catch(() => reportTestDiagnostic("agent.session.label-failed"));
     },
     async decidePairing(request) {
+      /**
+       * 019 R-321, T553: a panel session is answered here and never by the pairing controller - a
+       * synthetic accepted result when its token and the panel consent admit it, an unmarked refusal
+       * (`not-admitted` at the host) when not. Nothing is read from or written to `agentPairings`,
+       * and no card is raised. An external session naming a panel agent id is refused the same way:
+       * that namespace is never offered to the owner as an agent to pair.
+       */
+      const asking = sessions.get(request.sessionId);
+      if (asking?.kind === "panel") {
+        return (await panelAdmitted(request.sessionId, asking)) ? "accepted" : "unpaired";
+      }
+      if (isPanelAgentId(request.agentId)) {
+        reportTestDiagnostic("agent.panel.external-panel-id");
+        return "unpaired";
+      }
       // Pairing, and only pairing (004/T099i). The session behind this request announced itself on
       // its greeting; what is left here is the owner's question about the agent.
       if (!pairingRequestedAt.has(request.agentId)) pairingRequestedAt.set(request.agentId, new Date().toISOString());
@@ -2393,6 +2647,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         choices.endSession(ended);
         return;
       }
+      // 019: the broker's link ending; there was no agent session to release. The tokens it issued
+      // die with it (R-321): its agents' servers are refused from the next call.
+      if (conversations.ended(ended)) {
+        panelTokens.revokeAll();
+        return;
+      }
       if (!sessions.has(ended)) {
         reportTestDiagnostic("agent.session.end-unknown");
         return;
@@ -2412,6 +2672,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         choices.clear();
         notify();
       }
+      // 019 R-312: one broker per relay run; this run's broker greets this relay afresh. 019 R-321,
+      // T572: its tokens are held for the greeting window, not revoked here (`holdPanelTokens`).
+      const tokensFrom = conversations.current();
+      conversations.relayStarted();
+      holdPanelTokens(tokensFrom);
       // The greeting side of the T169 ring: which worker instance was greeted by which host. Two
       // instance ids greeted inside one test is the two-instances shape; one id with a new host
       // pid is a drop and re-open.
@@ -2540,7 +2805,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         sitePlan?: { origins: string[] };
       }> = [];
       for (const [id, session] of sessions) {
-        if (!(await pairing.isPaired(session.agentId))) continue;
+        // 019 R-321: and a panel session only while it is admitted.
+        if (!(await admitted(id, session))) continue;
         // 016 FR-226 - FR-228, R-205: who the card is about, read from the persisted record so it
         // is the same after a worker restart. A session with no record yet shows none of it.
         const identity = await tabs.identity(id).catch(() => undefined);
@@ -2695,7 +2961,20 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
               },
             }),
         diagnostics: await readBridgeDiagnostics(),
+        // 019 T547: always present - unavailable, with its reason, while no broker is attached.
+        conversation: await conversationProjection(),
       };
+    },
+    conversation: {
+      command(command) {
+        if (command.type === "ui.conversation.consent") {
+          // 019 FR-309, T555: the worker's own record first, so admission follows the owner's
+          // answer before the broker has heard it; a withdrawal tears every panel session down.
+          void answerPanelConsent(command.payload.granted).catch(() => reportTestDiagnostic("agent.panel.consent-failed"));
+        }
+        conversations.command(command);
+      },
+      onPanelMessage: (listener) => void panelMessageListeners.push(listener),
     },
     bindPanelPresence(presence: AgentPanelPresence): void {
       panelPresence = presence;
@@ -2855,7 +3134,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       }
     },
     async setSiteMode(site: string, mode: SiteMode): Promise<void> {
-      await siteModes.set(site, { mode });
+      // 019 R-328, T556: the owner's own change, from the site list.
+      await siteModes.set(site, { mode, changedBy: "owner" });
       notify();
     },
     async clearSiteMode(site: string): Promise<void> {

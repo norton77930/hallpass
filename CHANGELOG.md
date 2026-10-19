@@ -5,6 +5,35 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.13.0 — 2026-10-20
+
+**Talk to your own Claude Code or Codex in the side panel.**
+
+- **A Conversation tab.** The side panel has two tabs: *Conversation* and *Connections & sites*
+  (everything that was there before). A consent card from an external agent stays above both. The
+  conversation drives the Claude Code or Codex you already installed and signed in to, through a
+  small pinned connector downloaded once with your consent (`npm ci` against a lockfile in the
+  package, hashes checked, no install scripts). See "Talk to your agent in the side panel" in the
+  README.
+- **Strict by default.** Every conversation starts in the agent's asking mode, file edits and
+  changing commands raise *Allow once / Reject / Allow for this conversation*, and one conversation
+  can switch to the agent's own automatic review. A mode that approves everything is never offered.
+  Codex's strict turns run read-only, so it asks before changing files in its own folder too.
+  Every action the agent reports is listed.
+- **Browser access under the same rules.** After a one-time consent, the panel's agent uses this
+  browser with the same site modes and consent cards as an external agent; the site list says which
+  surface last changed a site. Withdrawing the consent cuts every running panel agent off at once.
+- **History without content.** Hallpass keeps only an index of recent conversations (title, agent,
+  folder, mode, last used; the newest 50 within 30 days) and replays a conversation from the
+  agent's own store. Each conversation has one folder: its own scratch folder or a project folder you
+  add.
+- **Lifetime.** A broker started by the host owns the agents: closing the panel keeps them running,
+  closing the browser ends them all (Windows job object, no orphans), an idle agent stops after 10
+  minutes and comes back on the next message, at most three run at once.
+- **Upgrading.** Reinstall the host as usual. The package gains `host\broker.js`, a minimal `koffi`
+  and `host\agents\`; `uninstall.ps1` removes the conversation files and keeps `scratch\`. The 37
+  browser tools are unchanged.
+
 ## 0.12.5 — 2026-10-18
 
 **A page too busy to answer is reported as such, and `viewport` reset states its size on one basis.**

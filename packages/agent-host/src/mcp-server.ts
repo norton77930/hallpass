@@ -7,8 +7,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
+  agentBrowserIdSchema,
   agentControlFrameSchema,
   agentNativeResponseSchema,
+  conversationIdSchema,
   agentToolArgSchemas,
   agentUploadImageRequestSchema,
   defaultScreenshotFileName,
@@ -481,10 +483,82 @@ function clampIdentity(value: string, field: string): string {
  * also what an unmarked refusal from an older extension is taken as. `denied` is left for the one
  * refusal that is neither: a call that found no exchange at all to wait on.
  */
-type PairingOutcome = "paired" | "declined" | "unpaired" | "denied" | "timed-out";
+type PairingOutcome = "paired" | "declined" | "unpaired" | "denied" | "timed-out" | "not-admitted";
 
 function log(code: string, detail?: string): void {
   process.stderr.write(detail === undefined ? `${code}\n` : `${code} ${detail}\n`);
+}
+
+/**
+ * 019 R-321, R-322, T552: the server the conversation broker starts for one side-panel
+ * conversation, as its environment says. The broker sets all three; anything else is an ordinary
+ * server and none of them is set.
+ */
+const PANEL_TOKEN_ENV = "HALLPASS_PANEL_TOKEN";
+const PANEL_BROWSER_ENV = "HALLPASS_PANEL_BROWSER";
+const PANEL_CONVERSATION_ENV = "HALLPASS_PANEL_CONVERSATION";
+/**
+ * 019 R-322, T566: optional, set by the broker only when the panel's entry could not take the name
+ * `hallpass` (the owner's own Codex `hallpass` cannot be merged over) - the name it took instead.
+ */
+const PANEL_SERVER_NAME_ENV = "HALLPASS_PANEL_SERVER_NAME";
+
+/** The contract's one line for a panel conversation's server (contracts/conversation-frames.md). */
+const PANEL_INSTRUCTIONS =
+  "You were started from the Hallpass side panel; the user's current tab is in your tab group.";
+
+/**
+ * 019 R-322, FR-305: the panel server's instructions; under another name than `hallpass`, a second
+ * line tells the agent which of the two browser tool sets is its own.
+ */
+function panelInstructions(serverName: string | undefined): string {
+  if (serverName === undefined || serverName === "hallpass") return PANEL_INSTRUCTIONS;
+  return `${PANEL_INSTRUCTIONS}\nUse only the browser tools of the "${serverName}" server. A server named "hallpass" from your own settings is a separate connection to this browser: do not use it.`;
+}
+
+/** 019 R-321: what a panel server's agent is told when the worker does not admit it. */
+const PANEL_NOT_ADMITTED_HINT =
+  "The owner has not allowed the side-panel agent to use this browser, or has withdrawn that permission. Ask the user to turn on \"Side-panel agent may use this browser\" in the Hallpass side panel, then try again; do not try another browser.";
+
+/** 019 R-321: a panel server's browser is the one the broker named; it cannot be changed or asked about. */
+const PANEL_BROWSER_FIXED_HINT =
+  "This conversation was started from the Hallpass side panel and uses that browser only.";
+
+type PanelIdentity = { token: string; browserId: string; conversationId: string; serverName?: string };
+
+/**
+ * 019 R-321, T552: the panel identity, read once at start.
+ *
+ * All three or none. Half a panel environment is refused - the server exits - rather than run as an
+ * ordinary server, which would greet as the owner's own agent with the owner's pairing and so give a
+ * panel conversation exactly the identity R-321 keeps it out of. The token is taken out of this
+ * process's environment once read, and appears in no log line: what is logged names the variables,
+ * never a value.
+ */
+function readPanelIdentity(): PanelIdentity | undefined {
+  const token = process.env[PANEL_TOKEN_ENV];
+  const browserId = process.env[PANEL_BROWSER_ENV];
+  const conversationId = process.env[PANEL_CONVERSATION_ENV];
+  delete process.env[PANEL_TOKEN_ENV];
+  if (token === undefined && browserId === undefined && conversationId === undefined) return undefined;
+  const wrong = [
+    ...(token === undefined || token.length < 32 || token.length > 128 ? [PANEL_TOKEN_ENV] : []),
+    ...(browserId === undefined || !agentBrowserIdSchema.safeParse(browserId).success ? [PANEL_BROWSER_ENV] : []),
+    ...(conversationId === undefined || !conversationIdSchema.safeParse(conversationId).success ? [PANEL_CONVERSATION_ENV] : []),
+  ];
+  if (wrong.length > 0 || token === undefined || browserId === undefined || conversationId === undefined) {
+    log("agent.panel.env-refused", wrong.join(","));
+    throw new Error("agent.panel.env-refused");
+  }
+  log("agent.panel.mode");
+  // A name outside the MCP name characters is not one the broker set: it is ignored, not echoed.
+  const serverName = process.env[PANEL_SERVER_NAME_ENV];
+  return {
+    token,
+    browserId,
+    conversationId,
+    ...(serverName !== undefined && /^[A-Za-z0-9_-]{1,64}$/u.test(serverName) ? { serverName } : {}),
+  };
 }
 
 /**
@@ -513,7 +587,13 @@ export type AgentMcpServer = {
 };
 
 export async function startAgentMcpServer(): Promise<AgentMcpServer> {
-  const agentId = clampIdentity(await readOrCreateAgentId(), "agentId");
+  /**
+   * 019 R-321: a panel conversation's server greets as `panel:<conversationId>` and never under the
+   * shared per-user id - it neither reads nor creates that id, so it can never present the owner's
+   * own pairing, nor leave one behind for the owner's agent to inherit.
+   */
+  const panel = readPanelIdentity();
+  const agentId = panel === undefined ? clampIdentity(await readOrCreateAgentId(), "agentId") : `panel:${panel.conversationId}`;
   const pairingBoundMs = pairingTimeoutMs();
   const pairingProgressEveryMs = pairingProgressMs();
   const attachBoundMs = attachTimeoutMs();
@@ -1081,6 +1161,23 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         // The decline marker is about this one answer, not something the worker can be asked, so it
         // is not kept among the capabilities (FR-032a review F2).
         link.workerFeatures = new Set((control.data.features ?? []).filter((feature) => feature !== PAIRING_DECLINED_MARKER));
+        /**
+         * 019 R-321, T552: a panel server is never paired - the worker admits it on its token and
+         * the panel consent, checked on every call - so a refusal is `not-admitted`, and it is not
+         * kept: the calls waiting end with it, the exchange is cleared, and the next call asks again.
+         * Kept, it would outlive what it was about - a relay restart revokes every token until the
+         * broker re-issues them, and a withdrawal the owner reverses comes with a new token.
+         */
+        if (panel !== undefined && !control.data.accepted) {
+          link.settlePairing?.("not-admitted");
+          link.pairing = undefined;
+          link.pairRequested = false;
+          link.settlePairing = undefined;
+          link.pairingPending = false;
+          screenshots.clear();
+          log("agent.panel.not-admitted");
+          return;
+        }
         if (declined) {
           /**
            * A decline answers the request it was raised for, and only that one (FR-032a).
@@ -1216,7 +1313,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     links.set(browser.browserId, link);
     log("agent.browser.link-opened", browser.kind);
     link.dial = dialRelay({
-      hello: { sessionId, agentId, displayName: clampIdentity(displayName, "displayName") },
+      hello: {
+        sessionId,
+        agentId,
+        displayName: clampIdentity(displayName, "displayName"),
+        // 019 R-321: the panel conversation's token, in the greeting and nowhere else.
+        ...(panel === undefined ? {} : { panelToken: panel.token }),
+      },
       onFrame: (value) => onRelayFrame(link, value),
       target: () => dialTarget(link),
       onAttached(relayPid) {
@@ -1312,7 +1415,11 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     });
   }
 
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
+  // 019 T552: a panel conversation's server says where it was started from; no other change.
+  const server = new McpServer(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    panel === undefined ? undefined : { instructions: panelInstructions(panel.serverName) },
+  );
 
   /**
    * The one tool of the spike. Its argument list is empty on purpose: it proves the whole path -
@@ -1539,7 +1646,13 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
    * recycle retracts its record for a moment) and then refused, however many others are connected.
    * Nothing ever moves a session to another browser except the agent selecting one.
    */
-  let bound: AgentBrowserSummary | undefined;
+  /**
+   * 019 R-321, T552: a panel server is bound from the start to the browser whose broker started it,
+   * so the remembered choice is never read (it is read only while unbound) and nothing but that
+   * browser's own record is ever dialled; the browser tools below refuse to move it.
+   */
+  let bound: AgentBrowserSummary | undefined =
+    panel === undefined ? undefined : { browserId: panel.browserId, name: "Browser", kind: "unknown" };
   let boundAbsentSinceMs: number | undefined;
 
   /**
@@ -2086,6 +2199,16 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     if (tool === "list_browsers") {
       return listBrowsers();
     }
+    // 019 R-321: a panel server neither writes a remembered choice nor raises a choice card.
+    if (panel !== undefined && (tool === "select_browser" || tool === "request_browser_choice")) {
+      log("agent.panel.browser-fixed");
+      return {
+        callId: randomBytes(8).toString("hex"),
+        outcome: "denied",
+        reason: "panel-browser-fixed",
+        hint: PANEL_BROWSER_FIXED_HINT,
+      };
+    }
     if (tool === "select_browser") {
       return selectBrowser(typeof args.browserId === "string" ? args.browserId : "");
     }
@@ -2534,6 +2657,10 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     // in another browser answers nothing here.
     requestPairing(link);
     const pairingOutcome = await awaitPairing(link, extra);
+    if (pairingOutcome === "not-admitted") {
+      // 019 R-321: a panel server's refusal, in its own words - it was never paired.
+      return { callId, outcome: "denied", reason: "not-admitted", hint: PANEL_NOT_ADMITTED_HINT };
+    }
     if (pairingOutcome !== "paired") {
       return {
         callId,

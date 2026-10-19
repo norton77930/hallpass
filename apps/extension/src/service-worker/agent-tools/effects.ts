@@ -2422,7 +2422,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
       if (asked.rememberMode) {
         // FR-042: the owner may set the site's mode from inside the prompt they are answering.
-        await deps.siteModes.set(binding.site, { mode: asked.rememberMode as SiteMode });
+        await deps.siteModes.set(binding.site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
       }
       // The owner's own yes, which is the other half of "approved" (008/R-139).
       noteApproval(tabId, tool, args);

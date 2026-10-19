@@ -136,6 +136,57 @@ are connected.
 - Each browser keeps its own consent: the agent is paired, and every site asks, separately in each
   browser. Approving something in one browser never allows anything in another.
 
+## Talk to your agent in the side panel
+
+Everything above is a coding agent in a terminal using your browser. The side panel can also go the
+other way: its **Conversation** tab lets you talk to the Claude Code or Codex already installed on
+your computer, about the page you are looking at, without switching to a terminal. The other tab,
+**Connections & sites**, holds everything described above, and a consent card from an external agent
+stays above both tabs.
+
+- **It is your own agent.** The panel drives the Claude Code or Codex you installed and signed in to
+  (it must be installed; Hallpass does not install or log in to it for you). It has the same sign-in,
+  settings, instruction files, MCP servers and hooks as in your terminal, and its conversation is
+  kept by the agent itself. Hallpass keeps only a short list of recent conversations (title, agent,
+  folder, mode, last used) so you can continue one later.
+- **One-time download, with your consent.** The first time you use an agent, the panel shows what it
+  is about to fetch and waits for you: a small pinned *connector* (about 60 MB for Claude Code, about
+  20 MB for Codex) that lets the panel talk to the agent you already have. It is downloaded by the
+  `npm` that comes with your Node.js, with `npm ci` against a lockfile shipped in the Hallpass
+  package: every file is checked against its pinned hash, no install script runs, and the connector
+  never updates itself. The request goes to the npm registry (`registry.npmjs.org`, unless your own
+  npm is configured otherwise); Hallpass adds no data of its own. It is stored under
+  `%LOCALAPPDATA%\hallpass\agents\`. Nothing is downloaded before you agree.
+- **One-time consent to use this browser.** The first conversation also asks whether agents started
+  from the side panel may use this browser. There is no per-conversation pairing; the same site modes
+  and the same consent cards apply as for an external agent, and the decisions are shared with them.
+  The site list says whether the panel or an external agent last changed a site. Take the consent
+  back with **Side-panel agent may use this browser** under *Connections & sites*.
+- **One folder per conversation.** A conversation starts in its own *scratch folder* under
+  `%LOCALAPPDATA%\hallpass\scratch\`, or in a project folder you add through the Windows folder
+  dialog. The folder is shown in the conversation and never changes; to work somewhere else, start a
+  new conversation. Hallpass never deletes a scratch folder (the agent may have written files you
+  want); the panel can open it.
+- **Ask before changes, always visible.** A conversation starts in the agent's strictest asking
+  mode. Before the agent edits a file or runs a command that changes something, the conversation shows
+  a card: *Allow once*, *Reject*, or *Allow for this conversation*. Reading is not asked. You can
+  switch one conversation to the agent's own automatic review, where only what the agent's own
+  reviewer blocks comes to you; the next conversation starts strict again. A mode that approves
+  everything without asking is **never offered**. Every action the agent reports is listed in the
+  conversation. For Claude Code, strict mode asks even where your own settings would allow the action.
+  For Codex, Hallpass keeps strict turns read-only, so Codex asks before changing files in its folder
+  too; commands your own Codex rules allow still run without asking, and the panel says so. A card left
+  unanswered keeps the agent waiting; it never expires into an approval. "Allow for this conversation"
+  covers that kind of action in that conversation only.
+- **The browser tools are the same tools.** When the agent uses the page, the call is listed in the
+  conversation and the site's mode applies exactly as for an external agent; a site on **ask** raises
+  its consent card first. The agent starts on the tab you were viewing when you sent the message, and
+  tabs it opens go into its own tab group.
+- **Lifetime.** Closing the side panel does not stop a running agent, and reopening it shows the same
+  conversation. Closing the browser ends every agent, and you can continue the conversation later. An
+  agent idle for 10 minutes is stopped and comes back on your next message. At most three panel agents
+  run at once. No agent process outlives the browser.
+
 ## The consent model
 
 | Site mode | Meaning | Use it for |
@@ -180,7 +231,9 @@ the extension makes no network requests of its own. The relay log
 **What leaves it.** Whatever a tool answers — page text, form values, screenshots — goes to your
 coding agent, and from there to the model provider that agent uses, exactly as a file the agent
 reads would. Hallpass redacts password, hidden, one-time-code and payment-card fields; everything
-else the agent reads, its provider sees.
+else the agent reads, its provider sees. The same holds for the side-panel conversation: your
+messages and the agent's answers go to your own agent's provider, under that agent's terms, and
+Hallpass stores none of them (see [PRIVACY.md](PRIVACY.md)).
 
 **Prompt injection.** A web page is untrusted input: its text can try to instruct the agent that
 reads it. Hallpass does not detect that and does not claim to. What it gives you is a decision

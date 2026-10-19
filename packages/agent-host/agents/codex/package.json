@@ -1,0 +1,8 @@
+{
+  "name": "hallpass-agent-codex",
+  "private": true,
+  "description": "Pinned ACP adapter for Codex, installed by the Hallpass broker on the owner's consent (019 R-314).",
+  "dependencies": {
+    "@agentclientprotocol/codex-acp": "1.13.1"
+  }
+}

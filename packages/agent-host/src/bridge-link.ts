@@ -363,6 +363,17 @@ export type DialRelayOptions = {
      * in-browser choice - an older relay parses `hello` strictly and would refuse the greeting.
      */
     intent?: "choose";
+    /**
+     * 019 R-312: the conversation broker's link, admitted only with the secret its relay gave it
+     * (`relay-mux.ts`). Sent by `broker.ts` alone.
+     */
+    role?: "broker";
+    brokerSecret?: string;
+    /**
+     * 019 R-321: a panel conversation's server, admitted by the worker on this token. Sent by
+     * `mcp-server.ts` in panel mode alone; never logged.
+     */
+    panelToken?: string;
   };
   /** Every frame from the relay except the acknowledgement, which the loop consumes itself. */
   onFrame: (value: unknown) => void;

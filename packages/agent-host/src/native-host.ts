@@ -24,6 +24,7 @@ import {
   removeBridgeRecord,
   type FrameChannel,
 } from "./bridge-link.js";
+import { createBrokerSupervisor, launchBroker, type BrokerSupervisor } from "./broker-launch.js";
 import { browsersDirectory, hostDataDirectory } from "./host-paths.js";
 import { createRelayMux, type RelayMux } from "./relay-mux.js";
 import {
@@ -53,6 +54,11 @@ import { createUploadConfigStore } from "./upload-config-store.js";
  * and rewrites none of them; pairing, tab ownership and the per-site gate all live in the worker or
  * in the server, so this process can be read end to end and seen to add no authority. The frames it
  * consumes itself - `relay-ack`, `browser-name` - are about its own record, never a session's.
+ *
+ * 019 R-312 adds process ownership of one child and nothing else: after the ack it adopts or spawns
+ * this browser run's conversation broker (`broker-launch.ts`), admits that broker's greeting by the
+ * secret only it was given (`relay-mux.ts`), and tells it `relay-gone` when Chrome closes the port.
+ * It reads nothing of a conversation.
  */
 
 /**
@@ -332,9 +338,16 @@ async function main(): Promise<void> {
    * leaving - nothing would retract it (review B121 #1).
    */
   let leaving = false;
+  /** T529 F1/F3: this relay's care for its browser run's broker (`broker-launch.ts`). */
+  let brokerSupervisor: BrokerSupervisor | undefined;
   const leave = (): void => {
     if (leaving) return;
     leaving = true;
+    // A relay on its way out starts no broker: the next relay of this run adopts or spawns one.
+    brokerSupervisor?.stop();
+    // 019 R-312: before the sockets close, so the broker redials for this run's next relay rather
+    // than reading the close as anything else. It goes ahead of `close()` on the same socket.
+    if (mux.tellBrokerRelayGone()) log("relay.broker.told-gone");
     void close().finally(exitAfterFlush);
   };
   const ackBound = setTimeout(() => {
@@ -375,6 +388,35 @@ async function main(): Promise<void> {
     writeToChrome({ type: "browser-identity-conflict" });
   };
 
+  /** The browser run this relay last prepared a broker for, so a repeated identity starts nothing new. */
+  let brokerPreparedFor: string | undefined;
+  /**
+   * 019 R-312, T525: adopt this browser run's broker or spawn one, and arm the greeting check with
+   * its secret's hash. Before the record is published: a broker dials only a published record, so
+   * it never greets a relay that does not yet know its hash. A browser with no run id or no minted
+   * identity (an extension older than 018) gets none - it could not use one. A broker that cannot
+   * be started is logged and the relay serves on: the agent link does not depend on it.
+   */
+  const prepareBroker = async (identity: BrowserIdentity): Promise<void> => {
+    if (identity.legacy || identity.browserRunId === undefined) {
+      log("relay.broker.skipped", identity.legacy ? "legacy" : "no-run");
+      return;
+    }
+    const key = `${identity.browserId}/${identity.browserRunId}`;
+    if (brokerPreparedFor === key) return;
+    const { browserId, browserRunId } = identity;
+    // T529 F1/F3: a silent adopted broker is replaced once, a broker that exits is respawned once.
+    brokerSupervisor?.stop();
+    const supervisor = createBrokerSupervisor({
+      launch: ({ force, onExit }) => launchBroker({ browserId, browserRunId, force, onExit }),
+      expectBroker: (hash) => mux.expectBroker(hash),
+      brokerSessionId: () => mux.brokerSessionId(),
+      log,
+    });
+    brokerSupervisor = supervisor;
+    if (await supervisor.start()) brokerPreparedFor = key;
+  };
+
   /** The record for an identity this relay has just been given, or a refusal (R-276). */
   const adopt = async (identity: BrowserIdentity): Promise<void> => {
     const reading = await inspectBrowserRecord(browserRecordPath(identity.browserId));
@@ -385,6 +427,8 @@ async function main(): Promise<void> {
       return;
     }
     conflictedId = undefined;
+    await prepareBroker(identity);
+    if (leaving) return;
     const name = pendingName ?? identity.name;
     pendingName = undefined;
     const { name: _ackName, ...rest } = identity;
@@ -453,6 +497,11 @@ async function main(): Promise<void> {
         if (reading.status === "protocol-mismatch") log("relay.protocol-mismatch", "browser record");
         log("relay.superseded", `winner=${winner ?? "unknown"} speaker=${process.pid} browser=${record.browserId}`);
         superseded = true;
+        // T572 (R-312): like `leave()`, nothing more is started for the broker, and it is told -
+        // and let go now: it is not one of the calls the drain waits for, and the winner's adopt
+        // grace runs while it would otherwise sit on this relay.
+        brokerSupervisor?.stop();
+        if (mux.tellBrokerRelayGone({ release: true })) log("relay.broker.told-gone");
         void drainThenClose(mux, close).finally(exitAfterFlush);
         return;
       }
