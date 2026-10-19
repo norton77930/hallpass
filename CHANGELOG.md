@@ -5,6 +5,23 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.13.1 — 2026-10-20
+
+**Side-panel agent stability.**
+
+- **Closing the browser ends panel agents at once.** The broker now watches the browser's own
+  process: when the browser is gone, every panel agent ends straight away (it took about 16 s in
+  0.13.0). When only the host connection was recycled, the broker waits up to 35 s for the browser to
+  reconnect instead of 15 s.
+- **First use goes straight to the conversation.** After the one-time connector download the
+  conversation you asked for starts, in the folder you chose, instead of returning to the agent list.
+- **No stale "In use in another browser" label** right after an extension reload.
+- **One folder, one row.** A project folder added with or without a trailing `\` is the same folder;
+  existing duplicates merge.
+- **Hardening.** Withdrawing the side-panel consent leaves no moment in which a browser connection is
+  still handed to a starting agent, a connection the withdrawal revoked is not accepted again when
+  the broker reconnects, and the broker's record file is created exclusively.
+
 ## 0.13.0 — 2026-10-20
 
 **Talk to your own Claude Code or Codex in the side panel.**

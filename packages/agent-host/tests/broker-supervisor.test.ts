@@ -1,9 +1,11 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   brokerSidecarPath,
   createBrokerSupervisor,
+  launchBroker,
   removeOwnBrokerSidecarSync,
   type BrokerLaunch,
 } from "../src/broker-launch.js";
@@ -219,5 +221,65 @@ describe("a crashing broker removes its own sidecar", () => {
     const path = await write(4243);
     removeOwnBrokerSidecarSync(BROWSER, 4242, { LOCALAPPDATA: dir });
     expect(JSON.parse(await readFile(path, "utf8")).pid).toBe(4243);
+  });
+});
+
+describe("T579 the relay creates the broker sidecar exclusively", () => {
+  let dir = "";
+  beforeEach(async () => {
+    dir = await makeTempDir("hallpass-sidecar-");
+  });
+  afterEach(async () => {
+    await removeDir(dir);
+  });
+
+  const BROWSER = "c0ffee00-0000-4000-8000-0000000000c2";
+  const RUN = "run-1";
+  const env = () => ({ LOCALAPPDATA: dir });
+  const sidecar = (pid: number, browserRunId = RUN) => ({ pid, browserRunId, secretSha256: "b".repeat(64), startedAt: "t" });
+  /** Synchronous, so it lands inside the spawn - between this relay's read and its write. */
+  const put = (record: unknown) => {
+    const path = brokerSidecarPath(BROWSER, env());
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, JSON.stringify(record));
+  };
+  const none = () => rmSync(brokerSidecarPath(BROWSER, env()), { force: true });
+  const onDisk = async () => JSON.parse(await readFile(brokerSidecarPath(BROWSER, env()), "utf8")) as { pid: number };
+  /** Spawns pid 900; `meanwhile` is what another relay writes while this one spawns. */
+  const launch = (alive: number[], meanwhile?: unknown, force = false) =>
+    launchBroker({
+      browserId: BROWSER,
+      browserRunId: RUN,
+      env: env(),
+      force,
+      isAlive: (pid) => pid === 900 || alive.includes(pid),
+      spawnBroker: () => {
+        if (meanwhile !== undefined) put(meanwhile);
+        return 900;
+      },
+    });
+
+  it("keeps a live broker of this run whose relay created it first (EEXIST)", async () => {
+    const launched = await launch([4242], sidecar(4242));
+    expect(launched).toMatchObject({ kind: "spawned", pid: 900, sidecarWritten: false });
+    expect((await onDisk()).pid).toBe(4242);
+  });
+
+  it("replaces a stale one in its place: a dead pid, another run's, or the one a forced spawn went past", async () => {
+    expect(await launch([], sidecar(4242))).toMatchObject({ sidecarWritten: true });
+    expect((await onDisk()).pid).toBe(900);
+
+    none();
+    expect(await launch([4243], sidecar(4243, "run-0"))).toMatchObject({ sidecarWritten: true });
+    expect((await onDisk()).pid).toBe(900);
+
+    put(sidecar(4244));
+    expect(await launch([4244], undefined, true)).toMatchObject({ kind: "spawned", sidecarWritten: true });
+    expect((await onDisk()).pid).toBe(900);
+  });
+
+  it("creates it when there is none", async () => {
+    expect(await launch([])).toMatchObject({ kind: "spawned", sidecarWritten: true });
+    expect(await onDisk()).toMatchObject({ pid: 900, browserRunId: RUN });
   });
 });

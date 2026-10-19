@@ -167,6 +167,8 @@ export type PoolHarnessOptions = {
   store?: boolean;
   /** In place of the plain spawn of the agent (a test that rewrites what the fake says). */
   spawnAgent?: ConversationPoolOptions["spawnAgent"];
+  /** What the broker turns into an overview (T577). */
+  onChange?: () => void;
 };
 
 export async function poolHarness(options: PoolHarnessOptions = {}) {
@@ -187,6 +189,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     ...(options.cap === undefined ? {} : { cap: options.cap }),
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.spawnAgent === undefined ? {} : { spawnAgent: options.spawnAgent }),
+    ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
     onEvent: rec.onEvent,
     resolveLaunch: async (agent) => ({
       ok: true,

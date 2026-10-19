@@ -3,6 +3,8 @@ import {
   type ConversationEntry,
   type ConversationFolderEntry,
 } from "@hallpass/contracts";
+// A value import only this way: `folders.ts` imports nothing of this module but a type.
+import { normalizeFolderPath } from "./folders.js";
 
 /**
  * The broker's conversation index and the owner's folder list (019 R-319, data-model), as seams.
@@ -47,7 +49,8 @@ export interface FolderList {
   remove(path: string): Promise<boolean>;
 }
 
-const sameFolder = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+/** T579: as `folders.ts` - a trailing separator makes no second folder, a drive root stays `X:\`. */
+const sameFolder = (a: string, b: string) => normalizeFolderPath(a).toLowerCase() === normalizeFolderPath(b).toLowerCase();
 
 export function memoryFolderList(initial: ConversationFolderEntry[] = []): FolderList {
   let folders = initial.map((folder) => ({ ...folder }));
@@ -56,7 +59,7 @@ export function memoryFolderList(initial: ConversationFolderEntry[] = []): Folde
     has: async (path) => folders.some((folder) => sameFolder(folder.path, path)),
     add: async (path, addedAt) => {
       if (folders.some((folder) => sameFolder(folder.path, path))) return;
-      folders = [...folders, { path, addedAt }].slice(-CONVERSATION_MAX_FOLDERS);
+      folders = [...folders, { path: normalizeFolderPath(path), addedAt }].slice(-CONVERSATION_MAX_FOLDERS);
     },
     remove: async (path) => {
       const before = folders.length;

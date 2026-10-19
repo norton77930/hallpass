@@ -1,7 +1,8 @@
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CONVERSATION_MAX_FOLDERS } from "@hallpass/contracts";
+import { memoryFolderList } from "../src/broker/conversation-index.js";
 import {
   createFolderActions,
   ensureScratchFolder,
@@ -77,6 +78,56 @@ describe("T561 folders.json", () => {
     expect(await other.remove("D:\\work\\p31")).toBe(true);
     expect(await folders.has("D:\\work\\p31")).toBe(false);
   }, 60_000); // 31 sequential temp + rename writes: seconds alone, longer under the full parallel run
+});
+
+describe("T578 a trailing separator", () => {
+  it("does not make a second folder: added, found and removed as one, drive roots kept", async () => {
+    await mkdir(data, { recursive: true });
+    const folders = fileFolderList({ path: join(data, "folders.json") });
+    await folders.add("C:\\work\\proj\\", AT);
+    await folders.add("C:\\work\\proj", AT);
+    await folders.add("c:\\work\\proj/", AT);
+    await folders.add("C:\\", AT);
+    expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\work\\proj", "C:\\"]);
+    expect(await folders.has("C:\\work\\proj\\")).toBe(true);
+    expect(await folders.has("C:\\work\\proj")).toBe(true);
+    expect(await folders.remove("C:\\work\\proj\\")).toBe(true);
+    expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\"]);
+  });
+
+  it("reads already-stored entries that differ only by the separator as one row", async () => {
+    await mkdir(data, { recursive: true });
+    const stored = [
+      { path: "C:\\work\\proj\\", addedAt: AT },
+      { path: "C:\\work\\proj", addedAt: AT },
+      { path: "C:\\", addedAt: AT },
+    ];
+    await writeFile(join(data, "folders.json"), JSON.stringify({ version: 1, folders: stored }), "utf8");
+    const folders = fileFolderList({ path: join(data, "folders.json") });
+    expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\work\\proj", "C:\\"]);
+    expect(await folders.remove("C:\\work\\proj")).toBe(true);
+    expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\"]);
+  });
+
+  it("T579: the in-memory list (the S4 seam) treats them as one folder too", async () => {
+    const folders = memoryFolderList();
+    await folders.add("C:\\work\\proj\\", AT);
+    await folders.add("c:\\work\\proj/", AT);
+    await folders.add("C:", AT);
+    await folders.add("C:\\", AT);
+    expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\work\\proj", "C:\\"]);
+    expect(await folders.has("C:\\work\\proj")).toBe(true);
+    expect(await folders.remove("C:\\Work\\Proj\\")).toBe(true);
+    expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\"]);
+  });
+
+  it("a typed path with a trailing separator is added without it", async () => {
+    const real = join(dir, "typed");
+    await mkdir(real);
+    const { folderActions, folders } = actions();
+    expect(await folderActions.addTyped(`${real}\\`)).toEqual({ kind: "added", path: real });
+    expect((await folders.list()).map((folder) => folder.path)).toEqual([real]);
+  });
 });
 
 describe("T561 scratch folders", () => {

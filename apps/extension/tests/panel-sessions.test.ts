@@ -550,6 +550,47 @@ describe("T555 withdrawing the panel consent (FR-309)", () => {
     expect(held.find((tab) => tab.tabId === 8)?.holder).toBe("this");
   });
 
+  it.each([
+    ["a relay restart (its tokens held for the greeting window)", { type: "relay-started", relayPid: 4343 }],
+    ["its link ending (its tokens dropped until it greets again)", { type: "session-ended", sessionId: BROKER }],
+  ])("T579: a token the withdrawal revoked is not held again when the same broker greets anew after %s", async (_how, away) => {
+    const port = fakePort();
+    const runtime = composeAgentRuntime({ connectNative: () => port });
+    runtime.start();
+    port.emit({ type: "relay-started", relayPid: 4242 });
+    await vi.waitFor(() => expect(port.sent).toContainEqual(expect.objectContaining({ type: "relay-ack" })));
+    port.emit(brokerHello);
+    port.emit(tokenFrame(TOKEN));
+    port.emit(panelHello());
+    port.emit(pairRequest(PANEL_SESSION, PANEL_AGENT));
+    await vi.waitFor(() => expect(pairResults(port, PANEL_SESSION)).toHaveLength(1));
+
+    // The broker is away. The owner withdraws meanwhile - and gives the consent again - before the
+    // broker hears either.
+    port.emit(away);
+    if (away.type === "relay-started") {
+      await vi.waitFor(() => expect(port.sent).toContainEqual(expect.objectContaining({ type: "relay-ack", relayPid: 4343 })));
+    }
+    runtime.conversation.command({ type: "ui.conversation.consent", payload: { granted: false }, commandId: "c-1" });
+    await vi.waitFor(() => expect(fake.local[PANEL_CONSENT_KEY]).toMatchObject({ granted: false }));
+    runtime.conversation.command({ type: "ui.conversation.consent", payload: { granted: true }, commandId: "c-2" });
+    await vi.waitFor(() => expect(fake.local[PANEL_CONSENT_KEY]).toMatchObject({ granted: true }));
+
+    // The same broker greets anew and hands its live runs' tokens again (`regrantBrowserTokens`).
+    port.emit(brokerHello);
+    port.emit(tokenFrame(TOKEN));
+    port.emit(panelHello(TOKEN, PANEL_AGENT, "panel-session-2"));
+    port.emit(call("panel-session-2", "call-1"));
+    await vi.waitFor(() => expect(answerTo(port, "call-1")).toBeDefined());
+    expect(answerTo(port, "call-1")?.reason).toBe("not-admitted");
+
+    // A new run's token is taken as ever.
+    port.emit(tokenFrame(OTHER_TOKEN));
+    port.emit(panelHello(OTHER_TOKEN, PANEL_AGENT, "panel-session-3"));
+    port.emit(call("panel-session-3", "call-2"));
+    await vi.waitFor(() => expect(answerTo(port, "call-2")?.outcome).toBe("ok"));
+  });
+
   it("T572: tells a broker that greets the owner's answer given while no broker was attached", async () => {
     const port = fakePort();
     const runtime = composeAgentRuntime({ connectNative: () => port });

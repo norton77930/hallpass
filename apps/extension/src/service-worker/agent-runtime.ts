@@ -2151,7 +2151,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   async function answerPanelConsent(granted: boolean): Promise<void> {
     const written = panelConsent.write(granted);
     if (!granted) {
-      panelTokens.revokeAll();
+      // T579: for good - the broker may re-send them when it greets anew, before it hears this.
+      panelTokens.revokeAllForGood();
       for (const [sessionId, session] of [...sessions]) {
         if (session.kind !== "panel") continue;
         stops.stopSession(sessionId);

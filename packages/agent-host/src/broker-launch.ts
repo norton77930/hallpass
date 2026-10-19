@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { agentBrowserIdSchema } from "@hallpass/contracts";
@@ -148,10 +148,8 @@ export async function launchBroker(options: {
   onExit?: (pid: number) => void;
 }): Promise<BrokerLaunch> {
   const sidecar = await readBrokerSidecar(options.browserId, options.env);
-  if (
-    options.force !== true &&
-    decideBrokerOnAck(sidecar, options.browserRunId, options.isAlive ?? isProcessAlive) === "adopt"
-  ) {
+  const isAlive = options.isAlive ?? isProcessAlive;
+  if (options.force !== true && decideBrokerOnAck(sidecar, options.browserRunId, isAlive) === "adopt") {
     return { kind: "adopted", pid: sidecar!.pid, secretSha256: sidecar!.secretSha256 };
   }
   const secret = mintBrokerSecret();
@@ -168,11 +166,41 @@ export async function launchBroker(options: {
   };
   // A sidecar that cannot be written costs only adoption by the next relay; this relay still holds
   // the hash and admits its broker, so the spawn is not undone over it.
-  const sidecarWritten = await writeHostFileAtomically(brokerSidecarPath(options.browserId, options.env), record).then(
+  const sidecarWritten = await createBrokerSidecar(options.browserId, options.env, record, sidecar, isAlive);
+  return { kind: "spawned", pid, secretSha256, sidecarWritten };
+}
+
+/**
+ * T579 (D-019-14): the sidecar is created exclusively (`wx`), never written over blindly. One that is
+ * there already (EEXIST) - another relay of this run wrote it since `passed` was read - is kept when it
+ * names a live broker of this run: that relay's broker is the one the next relay adopts. Anything
+ * else is stale and replaced as before (temp + rename): unreadable, a dead pid, another run's, or the
+ * very record this spawn went past (`passed`, including a forced spawn's silent broker).
+ */
+async function createBrokerSidecar(
+  browserId: string,
+  env: HostEnvironment | undefined,
+  record: BrokerSidecar,
+  passed: BrokerSidecar | undefined,
+  isAlive: (pid: number) => boolean,
+): Promise<boolean> {
+  const path = brokerSidecarPath(browserId, env);
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as { code?: string }).code !== "EEXIST") return false;
+  }
+  const present = await readBrokerSidecar(browserId, env);
+  const wentPast = present !== undefined && passed !== undefined && present.pid === passed.pid && present.secretSha256 === passed.secretSha256;
+  if (present !== undefined && !wentPast && present.browserRunId === record.browserRunId && present.pid !== record.pid && isAlive(present.pid)) {
+    return false;
+  }
+  return writeHostFileAtomically(path, record).then(
     () => true,
     () => false,
   );
-  return { kind: "spawned", pid, secretSha256, sidecarWritten };
 }
 
 /* ------------------------------------------------------------------------------------------- */

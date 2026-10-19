@@ -416,3 +416,45 @@ owner made directly in the list belongs to neither surface.
 uses (initialize, session/new, load, set_mode, prompt, cancel, request_permission, session updates,
 mode drift, crash) and drives the unit, relay-process and packaged-gate tests. Real agents run only in
 the release probe `S19` (paid, owner-approved per release) and in the S2/S4 measurements.
+
+## R-330 — Which process is the browser, for the broker's watch (T575, D-019-14)
+
+**Measured** (branded Chrome, 2026-10-20, `Win32_Process` of a live relay): Chrome starts the native host
+as `cmd.exe /d /s /c ""<launcher>.cmd" chrome-extension://<id>/ --parent-window=0" < \\.\pipe\… > \\.\pipe\…`,
+so the chain is relay `node.exe` ← `cmd.exe` ← `chrome.exe` with no `--type` (the browser's main process).
+The broker is the relay's child. `--parent-window` is `0` for a connection made from the service worker,
+so it cannot name the browser.
+
+**Decision**: the broker finds the browser itself, at start, while the relay that spawned it is still
+there: from its own pid, the relay (any image), then any `cmd.exe` launcher shells, then the first other
+ancestor is the browser (`broker/browser-process.ts`). One Toolhelp snapshot gives the parents and image
+names; `GetProcessTimes` guards each hop, since a parent created after its child is a pid Windows reused.
+The broker then opens a `SYNCHRONIZE` handle to the browser, checks its creation time once more, and
+holds it for its life (a held handle keeps the pid from being reused) and polls it every second with
+`WaitForSingleObject(…, 0)`. Gone → shutdown at once; alive → a relay loss gets 35 s; not known (any step
+fails, not Windows) → the 15 s window of 0.13.0, so a missing pid never lengthens the broker's life.
+
+**Alternatives**: the relay hands the pid down on the broker's command line - it has no native call for
+its grandparent, and the package contract keeps koffi to `broker.js` alone (R-327), so the relay would
+pass only its own parent (the shell) and the broker would still have to walk; `--parent-window` - `0`
+from a worker; the relay's `process.ppid` - the shell, which lives exactly as long as the relay.
+
+## R-331 — A withdrawal comes before any later hand-out, and stays (T579, D-019-14)
+
+**Found** (T558 review): the consent the pool checks before a start or a resume is a file read, and a
+resume does seconds of discovery after it; a withdrawal landing meanwhile was answered by a fresh token.
+And a withdrawal made while the broker was away cleared the worker's tokens, but the broker - not yet
+told - handed its live runs' tokens again when it greeted anew (`regrantBrowserTokens`), and the
+worker took them.
+
+**Decision**: the broker's pool counts withdrawals (`revokeBrowserTokens`). A start or resume notes
+the count before its consent check, and `Conversation.start` asks at the mint itself - nothing awaits
+between the two - whether it is unchanged; if not, no agent starts (`consent-needed`). The worker
+keeps the tokens it dropped with a broker's link or a relay run (its runs' servers still hold them, so
+the broker sends them again by design), and a withdrawal turns those and the live ones into tokens
+revoked for good that `set` never takes again; each memory is bounded (256). A new agent run's token
+is new, so it is taken as ever.
+
+**Alternatives**: re-reading the consent right before the mint - still a file read with its own
+window; refusing every token while the worker's consent is withdrawn - leaves a withdraw-then-grant
+inside the broker's absence open, which is exactly the case found.

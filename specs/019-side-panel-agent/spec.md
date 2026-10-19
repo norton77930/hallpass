@@ -83,6 +83,16 @@ Spec-gate answers (2026-10-18, as proposed):
   start when the installed connector's modes differ from the measured ones (R-317). Commands the
   owner's own Codex rules allow still run without asking, as for Claude's allow list outside the
   rules of D-019-12. FR-293 and Story 2 scenario 7 change accordingly.
+- **D-019-14 — 0.13.1 follow-ups** (owner, 2026-10-20 grill, G2): the broker also watches the
+  browser's main process: when the browser is gone every panel agent ends at once; when only the relay
+  went (the worker or the host was recycled) it waits up to 35 s for a new relay (was 15 s for every
+  case, T572). After a one-time install the conversation the owner asked for starts by itself instead
+  of returning to the picker (Story 3 as written). A project folder given with or without a trailing
+  separator is the same folder. Right after an extension reload a conversation is not shown as in use
+  in another browser. Three hardening items from the T558 review: a consent withdrawal leaves no window
+  in which a token is handed out after it was revoked, a token revoked for a broker is not held again
+  when that broker greets anew, and the broker sidecar is created exclusively. FR-296 changes
+  accordingly; no new requirement otherwise.
 
 ## Why this feature exists
 
@@ -368,6 +378,8 @@ panel; with the Conversation tab active, an external consent request shows its c
   show the conversation with all output and actions produced meanwhile.
 - **FR-296**: Closing the browser MUST end every panel agent; no agent process started for the panel
   MUST remain afterwards, including after a browser crash.
+  Since 0.13.1 (D-019-14) the agents end as soon as the browser's main process is gone; when only the
+  relay went, the broker waits up to 35 s for a new one before ending them.
 - **FR-297**: An agent with no turn running and no card waiting for 10 minutes MUST be stopped; the next
   message to its conversation MUST continue it with its history.
 - **FR-311**: At most three panel agents MUST run at the same time. Starting a fourth MUST stop the

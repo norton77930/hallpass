@@ -80,7 +80,32 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
     browserRunId: string,
     { startConversation = true }: { startConversation?: boolean } = {},
   ): { child: ChildProcessWithoutNullStreams; toChrome: unknown[] } {
-    const child = spawn(process.execPath, [RELAY_ENTRY], {
+    return playWorker(spawn(process.execPath, [RELAY_ENTRY], relayOptions()), browserRunId, startConversation);
+  }
+
+  /**
+   * T575: a stand-in for the browser's main process that starts the relay as Chrome does - through
+   * `cmd.exe /d /s /c "<launcher>"`, the relay on the browser's own stdio - and then stays. Node's
+   * own job ends the shell with the stand-in (the relay below it breaks away silently); with Chrome
+   * the shell ends when its relay does. Either way the relay's pipe is what the test closes.
+   */
+  function startRelayUnderBrowser(browserRunId: string): { child: ChildProcessWithoutNullStreams; toChrome: unknown[] } {
+    const script = [
+      `const { spawn } = require("node:child_process");`,
+      `const [node, entry] = process.argv.slice(1);`,
+      `spawn("cmd.exe", ["/d", "/s", "/c", '""' + node + '" "' + entry + '""'],`,
+      `  { stdio: "inherit", windowsHide: true, windowsVerbatimArguments: true });`,
+      `setInterval(() => {}, 1000);`,
+    ].join("\n");
+    return playWorker(
+      spawn(process.execPath, ["-e", script, process.execPath, RELAY_ENTRY], relayOptions()),
+      browserRunId,
+      true,
+    );
+  }
+
+  function relayOptions() {
+    return {
       cwd: REPO_ROOT,
       env: {
         ...process.env,
@@ -91,8 +116,15 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
         FAKE_ACP_SPAWN_DETACHED: "1",
         FAKE_ACP_LOG: fakeLogPath(),
       },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+      stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
+    };
+  }
+
+  function playWorker(
+    child: ChildProcessWithoutNullStreams,
+    browserRunId: string,
+    startConversation: boolean,
+  ): { child: ChildProcessWithoutNullStreams; toChrome: unknown[] } {
     const toChrome: unknown[] = [];
     const decoder = new FrameDecoder();
     child.stdout.on("data", (chunk: Buffer) => {
@@ -259,21 +291,54 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
     expect(starts).toHaveLength(1);
   }, 60_000);
 
-  it("(d) with no new relay the whole tree is gone after the 15 s window", async () => {
+  /**
+   * T575 (D-019-14): the relay here is this test process's child, so this process stands for the
+   * browser's main process - alive throughout. Only the relay went: the broker waits 35 s (was 15 s).
+   */
+  it("(d) with the browser alive and no new relay the whole tree is gone after the 35 s window", async () => {
     const first = startRelay(RUN_1);
     const tree = await waitForTree();
 
     const closedAt = Date.now();
     first.child.stdin.end();
     await exitOf(first.child);
-    // Still redialling a few seconds in: the window is the broker's to keep, not an instant exit.
-    await sleep(3_000);
+    // Past the old 15 s window and still redialling: a recycled worker has time to come back.
+    await sleep(20_000);
     expect(isAlive(tree.broker)).toBe(true);
 
     await waitFor(() => alive(tree).length === 0, `0 pids of the tree (alive: ${alive(tree).join(",")})`, 25_000);
-    expect(Date.now() - closedAt).toBeGreaterThanOrEqual(14_000);
+    expect(Date.now() - closedAt).toBeGreaterThanOrEqual(34_000);
     // The broker removed its own sidecar on the way out.
     expect(await readSidecar()).toBeUndefined();
+  }, 75_000);
+
+  /**
+   * T575 (D-019-14, FR-296): a stand-in browser starts the relay the way Chrome does, through
+   * `cmd.exe /d /s /c`, and passes it its own stdio. The browser going (and its pipes with it) ends
+   * the tree at once, well inside the window a relay-only loss gets.
+   */
+  it("(g) the browser's main process going ends the whole tree at once", async () => {
+    const browser = startRelayUnderBrowser(RUN_1);
+    const tree = await waitForTree();
+    // The broker's ancestry is the shape the browser gives it: broker <- relay <- cmd.exe <- browser.
+    const relayPid = await parentOf(tree.broker);
+    const shellPid = await parentOf(relayPid);
+    expect(await parentOf(shellPid)).toBe(browser.child.pid);
+
+    const goneAt = Date.now();
+    process.kill(browser.child.pid!);
+    browser.child.stdin.end();
+
+    await waitFor(() => alive(tree).length === 0, `0 pids of the tree (alive: ${alive(tree).join(",")})`, 8_000);
+    expect(Date.now() - goneAt).toBeLessThan(8_000);
+    expect(await readSidecar()).toBeUndefined();
+    for (const pid of [relayPid, shellPid]) {
+      try {
+        process.kill(pid);
+      } catch {
+        // already gone with its pipe
+      }
+    }
   }, 60_000);
 
   /**

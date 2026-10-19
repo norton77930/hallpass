@@ -39,13 +39,34 @@ export type PanelTokens = {
   takeStartTab: (conversationId: string) => number | undefined;
   /** Every token goes: the broker left, a new relay started, or the owner withdrew the consent. */
   revokeAll: () => void;
+  /**
+   * T579 (D-019-14, R-331): every token goes for good - the owner withdrew the consent. A broker that has
+   * not heard of it yet hands its live runs' tokens again when it greets anew; those are not taken.
+   */
+  revokeAllForGood: () => void;
 };
+
+/** How many dropped and revoked tokens are remembered (each): far more than the runs one withdrawal ends. */
+const REVOKED_FOR_GOOD_KEPT = 256;
 
 export function createPanelTokens(): PanelTokens {
   const byConversation = new Map<string, { token: string; startTabId?: number }>();
   const byToken = new Map<string, string>();
+  /** Dropped with the broker's link or a relay run; its runs' servers still hold them, so it re-sends them. */
+  const dropped = new Set<string>();
+  const revokedForGood = new Set<string>();
+  const remember = (into: Set<string>, token: string): void => {
+    into.add(token);
+    if (into.size > REVOKED_FOR_GOOD_KEPT) into.delete(into.values().next().value!);
+  };
+  const revokeAll = (): void => {
+    for (const token of byToken.keys()) remember(dropped, token);
+    byConversation.clear();
+    byToken.clear();
+  };
   return {
     set(conversationId, token, startTabId) {
+      if (token !== null && revokedForGood.has(token)) return;
       // A token already issued to another conversation is not moved: the broker mints one per run.
       const holder = token === null ? undefined : byToken.get(token);
       if (holder !== undefined && holder !== conversationId) return;
@@ -71,7 +92,10 @@ export function createPanelTokens(): PanelTokens {
       byConversation.set(conversationId, { token: entry.token });
       return startTabId;
     },
-    revokeAll() {
+    revokeAll,
+    revokeAllForGood() {
+      for (const token of [...byToken.keys(), ...dropped]) remember(revokedForGood, token);
+      dropped.clear();
       byConversation.clear();
       byToken.clear();
     },

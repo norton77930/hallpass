@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type KeyboardEvent, type ReactElement } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactElement } from "react";
 import {
   CONVERSATION_AGENTS,
   CONVERSATION_ERROR_CODES,
@@ -58,14 +58,25 @@ export function ConversationTab(props: {
   const [foldersOpen, setFoldersOpen] = useState(false);
   /** The folder a new conversation would start in, as the owner last picked it (FR-303). */
   const [pickedFolder, setPickedFolder] = useState<ConversationFolder>(SCRATCH);
+  /** The folder the owner asked for along with the agent they are setting up (scratch for the agent buttons). */
+  const [chosenFolder, setChosenFolder] = useState<ConversationFolder>(SCRATCH);
+  /**
+   * T576: the conversation the owner asked for when they pressed Download. It starts once, when the
+   * install they began finishes with the agent ready; Cancel (or a new press) drops it.
+   */
+  const pendingStart = useRef<{ agent: ConversationAgent; folder: ConversationFolder } | undefined>(undefined);
 
   const availabilityOf = (agent: ConversationAgent) => conversation.agents.find((entry) => entry.agent === agent);
   const agentName = (agent: ConversationAgent): string => t(`conversation.agent.${agent}`);
   const installingReady = installing !== undefined && availabilityOf(installing)?.availability === "ready";
   useEffect(() => {
     // The connector arrived: the install is over and the agent is offered as ready.
-    if (installingReady) setInstalling(undefined);
-  }, [installingReady]);
+    if (!installingReady) return;
+    setInstalling(undefined);
+    const wanted = pendingStart.current;
+    pendingStart.current = undefined;
+    if (wanted !== undefined) send({ type: "ui.conversation.start", payload: wanted });
+  }, [installingReady, send]);
 
   useEffect(() => {
     // Another conversation opened or started: that is what the owner wants to see now.
@@ -105,8 +116,9 @@ export function ConversationTab(props: {
   }
 
   const consented = conversation.consent === "granted";
-  const install = (agent: ConversationAgent): void => {
+  const install = (agent: ConversationAgent, startIn: ConversationFolder): void => {
     // FR-299: the consent goes first, and only on the owner's press; the install follows it.
+    pendingStart.current = { agent, folder: startIn };
     setHandledError(props.lastError);
     setInstalling(agent);
     setChosen(undefined);
@@ -125,8 +137,9 @@ export function ConversationTab(props: {
         size={t(`conversation.size.${installing}`)}
         t={t}
         {...(failure === undefined ? {} : { failure })}
-        onRetry={() => install(installing)}
+        onRetry={() => install(installing, pendingStart.current?.folder ?? SCRATCH)}
         onCancel={() => {
+          pendingStart.current = undefined;
           setHandledError(props.lastError);
           setInstalling(undefined);
         }}
@@ -150,7 +163,7 @@ export function ConversationTab(props: {
           t={t}
           onAccept={() => {
             if (availability === "needs-install") {
-              install(chosen);
+              install(chosen, chosenFolder);
             } else {
               send({ type: "ui.conversation.consent", payload: { granted: true } });
               setChosen(undefined);
@@ -168,6 +181,7 @@ export function ConversationTab(props: {
       send({ type: "ui.conversation.start", payload: { agent, folder: startIn } });
       return;
     }
+    setChosenFolder(startIn);
     setChosen(agent);
   };
   // A folder the owner removed from the list is no longer a choice; the scratch folder is.
