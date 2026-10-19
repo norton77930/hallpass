@@ -238,6 +238,75 @@ describe("T548 the first-use card", () => {
     },
   );
 
+  describe("T576 the conversation starts when the install finishes", () => {
+    const READY = { ...FIRST_USE, consent: "granted" as const, agents: [{ agent: "claude-code" as const, availability: "ready" as const }, FIRST_USE.agents[1]!] };
+    const starts = (sent: unknown[]) => sent.filter((command) => (command as { type: string }).type === "ui.conversation.start");
+    const view = (conversation: ConversationPanelState, sent: unknown[], lastError?: { code: "install-failed"; detail: string }) => (
+      <ConversationTab
+        conversation={conversation}
+        logs={{}}
+        locale="en-US"
+        send={(command) => sent.push(command)}
+        {...(lastError === undefined ? {} : { lastError })}
+      />
+    );
+
+    it("starts in scratch once, for an agent button", () => {
+      const sent: unknown[] = [];
+      const { rerender } = render(view({ ...FIRST_USE, consent: "granted" }, sent));
+      fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+      expect(starts(sent)).toEqual([]);
+
+      rerender(view(READY, sent));
+      rerender(view({ ...READY }, sent)); // a later projection of the same ready state starts nothing more
+      expect(starts(sent)).toEqual([{ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } }]);
+      expect(screen.queryByRole("progressbar")).toBeNull();
+    });
+
+    it("starts in the folder picked with Start with {agent}", () => {
+      const sent: unknown[] = [];
+      const withFolder = (conversation: ConversationPanelState) => ({
+        ...conversation,
+        folders: [{ path: "C:\\work\\proj", addedAt: "2026-10-19T12:00:00.000Z" }],
+      });
+      const { rerender } = render(view(withFolder({ ...FIRST_USE, consent: "granted" }), sent));
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.list.newInFolder") }));
+      fireEvent.click(screen.getByRole("radio", { name: "C:\\work\\proj" }));
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.folders.start").replace("{agent}", "Claude Code") }));
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+
+      rerender(view(withFolder(READY), sent));
+      expect(starts(sent)).toEqual([
+        { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "project", path: "C:\\work\\proj" } } },
+      ]);
+    });
+
+    it("starts nothing after a failed install, Retry keeps the wish, Cancel drops it", () => {
+      const sent: unknown[] = [];
+      const base = { ...FIRST_USE, consent: "granted" as const };
+      const { rerender } = render(view(base, sent));
+      fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+      rerender(view(base, sent, { code: "install-failed", detail: "network unreachable" }));
+      expect(starts(sent)).toEqual([]);
+
+      fireEvent.click(screen.getByRole("button", { name: ui("conversation.install.retry") }));
+      rerender(view(READY, sent));
+      expect(starts(sent)).toHaveLength(1);
+
+      cleanup();
+      sent.length = 0;
+      const second = render(view(base, sent));
+      fireEvent.click(second.getByRole("button", { name: /^Claude Code/ }));
+      fireEvent.click(second.getByRole("button", { name: ui("conversation.firstUse.download") }));
+      second.rerender(view(base, sent, { code: "install-failed", detail: "network unreachable" }));
+      fireEvent.click(second.getByRole("button", { name: ui("conversation.firstUse.cancel") }));
+      second.rerender(view(READY, sent));
+      expect(starts(sent)).toEqual([]);
+    });
+  });
+
   it("reads in zh-TW", async () => {
     await open(FIRST_USE, "zh-TW");
     pick(/^Claude Code/);

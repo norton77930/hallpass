@@ -8,6 +8,7 @@ import { dialRelay, isProcessAlive, type BridgeRecord, type RelayDial } from "./
 import { browserRecordPath, inspectBrowserRecord } from "./browser-record.js";
 import { removeOwnBrokerSidecar, removeOwnBrokerSidecarSync } from "./broker-launch.js";
 import { defaultAgentPorts } from "./broker/agents.js";
+import { watchBrowserProcess } from "./broker/browser-process.js";
 import { createBrowserAccess } from "./broker/browser-token.js";
 import { codexConfigPath } from "./broker/codex-config.js";
 import { createAgentLauncher, createCommandHandler, fileConsentStore, type CommandHandler } from "./broker/commands.js";
@@ -16,6 +17,7 @@ import { conversationIndexPath, fileConversationIndex } from "./broker/index-sto
 import { ConversationPool, spawnAgentProcess } from "./broker/conversation.js";
 import { cleanStaging, installAgent, shippedManifestsDirectory } from "./broker/install.js";
 import { createKillOnCloseJob } from "./broker/job.js";
+import { createBrokerLifetime } from "./broker/lifetime.js";
 import { redact } from "./broker/redact.js";
 import { runCommand } from "./broker/run-command.js";
 import { readBrokerTestOverrides } from "./broker/test-mode.js";
@@ -31,11 +33,14 @@ import { hostDataDirectory, isWindowsDeviceName } from "./host-paths.js";
  * process its relay started (it never appears in a log, an argument or the environment). Then the
  * link, greeting with `role: "broker"` and that secret.
  *
- * Lifetime (R-312): the broker belongs to the browser run, not to a relay. On `relay-gone`, on the
- * link closing, or on its stdin closing (the spawning relay is gone), it redials every second for up
- * to 15 s, and only a relay whose record carries the same `browserRunId` will do. A record of
- * another run that is live means the browser restarted: this run is over. Either way out, it
- * removes its own sidecar, stops its agents within 3 s, and exits; the job ends whatever is left.
+ * Lifetime (R-312, T575): the broker belongs to the browser run, not to a relay. At start it finds the
+ * browser's main process above its relay and watches it (`broker/browser-process.ts`, R-330): the
+ * browser gone ends the run at once. On `relay-gone`, on the link closing, or on its stdin closing
+ * (the spawning relay is gone), it redials every second for up to 35 s while the browser is alive -
+ * 15 s when the browser is not known (`broker/lifetime.ts`) - and only a relay whose record carries
+ * the same `browserRunId` will do. A record of another run that is live means the browser
+ * restarted: this run is over. Any way out, it removes its own sidecar, stops its agents within
+ * 3 s, and exits; the job ends whatever is left.
  *
  * Conversations (S4, T539/T540): `conversation-command` frames from the worker go to the command
  * handler (`broker/commands.ts`), which drives the pool of agent processes (`broker/conversation.ts`);
@@ -51,9 +56,7 @@ const ROTATED_LOG_PATH = `${logPath}.1`;
 /** As `relay.log` (004 B107): checked at start, rotated once rather than truncated. */
 const LOG_SIZE_CAP_BYTES = 5 * 1024 * 1024;
 
-/** How long the broker looks for a relay of its own run before it shuts down (R-312, FR-296). */
-const REDIAL_WINDOW_MS = 15_000;
-/** How often it looks inside that window. */
+/** How often the broker looks for a relay of its own run inside its window (`broker/lifetime.ts`). */
 const REDIAL_MS = 1_000;
 /** Graceful stop of the agents before the exit (R-313's first layer); the job is the backstop. */
 const SHUTDOWN_BOUND_MS = 3_000;
@@ -151,6 +154,10 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+  // T575: found while the spawning relay is still there to be the first link of the chain.
+  const browser = watchBrowserProcess();
+  log("broker.browser", browser === undefined ? "unknown" : String(browser.pid));
+
   const secret = await readSecretLine(SECRET_READ_BOUND_MS);
   if (secret === undefined || secret.length < 43 || secret.length > 128) {
     log("broker.secret-missing");
@@ -241,12 +248,11 @@ async function main(): Promise<void> {
 
   let shuttingDown = false;
   let attachedRelayPid: number | undefined;
-  let windowTimer: ReturnType<typeof setTimeout> | undefined;
 
   const shutdown = async (reason: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
-    if (windowTimer !== undefined) clearTimeout(windowTimer);
+    lifetime.stop();
     log("broker.shutdown", reason);
     // First, so no relay adopts a broker that is on its way out; only while it is still this one's.
     await removeOwnBrokerSidecar(browserId, process.pid).catch(() => log("broker.sidecar-remove-failed"));
@@ -262,17 +268,16 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  /** The 15 s window opens once per absence and closes when a relay of this run acknowledges. */
+  /** The browser watch, and the relay window that opens once per absence (`broker/lifetime.ts`). */
+  const lifetime = createBrokerLifetime({
+    ...(browser === undefined ? {} : { browserGone: browser.isGone }),
+    end: (reason) => void shutdown(reason),
+    log,
+  });
   const openWindow = (reason: string): void => {
-    if (shuttingDown || windowTimer !== undefined) return;
-    log("broker.window-open", reason);
-    windowTimer = setTimeout(() => void shutdown("window-expired"), REDIAL_WINDOW_MS);
+    if (!shuttingDown) lifetime.openWindow(reason);
   };
-  const closeWindow = (): void => {
-    if (windowTimer === undefined) return;
-    clearTimeout(windowTimer);
-    windowTimer = undefined;
-  };
+  const closeWindow = (): void => lifetime.closeWindow();
 
   /**
    * This browser's record, only while it is this run's (R-312). A live relay of another run in it

@@ -67,16 +67,39 @@ export function isAbsoluteFolderPath(path: string): boolean {
 /* ------------------------------------------------------------------------------------------- */
 
 const folderFileSchema = z.strictObject({ version: z.literal(1), folders: z.array(conversationFolderEntrySchema) });
-const sameFolder = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/**
+ * T578: `C:\work\proj`, `C:\work\proj\` and `C:\work\proj/` are one folder. The trailing separators
+ * go; a drive root (`C:\`) keeps its one, since `C:` alone is the drive's current directory.
+ */
+export function normalizeFolderPath(path: string): string {
+  if (/^[A-Za-z]:[\\/]*$/u.test(path)) return `${path.slice(0, 2)}\\`;
+  return path.replace(/[\\/]+$/u, "");
+}
+
+const sameFolder = (a: string, b: string) => normalizeFolderPath(a).toLowerCase() === normalizeFolderPath(b).toLowerCase();
 
 export function fileFolderList(options: { path: string; now?: () => number; log?: (code: string, detail?: string) => void }): FolderList {
   const { path } = options;
   const now = options.now ?? Date.now;
   let queue: Promise<unknown> = Promise.resolve();
 
+  /** Entries stored before T578 that differ only by the separator are one row (the oldest stays). */
+  const unique = (folders: ConversationFolderEntry[]): ConversationFolderEntry[] => {
+    const seen = new Set<string>();
+    const kept: ConversationFolderEntry[] = [];
+    for (const folder of folders) {
+      const key = normalizeFolderPath(folder.path).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      kept.push({ ...folder, path: normalizeFolderPath(folder.path) });
+    }
+    return kept;
+  };
+
   const read = async (): Promise<ConversationFolderEntry[]> => {
     const result = await readHostJsonFile(path, folderFileSchema, now());
-    if (result.kind === "ok") return result.value.folders.slice(-CONVERSATION_MAX_FOLDERS);
+    if (result.kind === "ok") return unique(result.value.folders).slice(-CONVERSATION_MAX_FOLDERS);
     if (result.kind === "kept-aside") options.log?.("broker.folders-unreadable", result.keptAs);
     return [];
   };
@@ -102,7 +125,7 @@ export function fileFolderList(options: { path: string; now?: () => number; log?
     add: (added, addedAt) =>
       change((folders) => ({
         // At the cap the oldest folder leaves the list (as the S4 seam did); the folder itself is untouched.
-        folders: folders.some((folder) => sameFolder(folder.path, added)) ? folders : [...folders, { path: added, addedAt }],
+        folders: folders.some((folder) => sameFolder(folder.path, added)) ? folders : [...folders, { path: normalizeFolderPath(added), addedAt }],
         result: undefined,
       })),
     remove: (removed) =>
@@ -223,7 +246,8 @@ export function createFolderActions(options: {
   const log = options.log ?? (() => undefined);
   let open: Promise<AddFolderResult> | undefined;
 
-  const addExisting = async (path: string): Promise<AddFolderResult> => {
+  const addExisting = async (given: string): Promise<AddFolderResult> => {
+    const path = normalizeFolderPath(given);
     if (!isAbsoluteFolderPath(path) || !(await isDirectory(path))) {
       return { kind: "failed", error: failure("folder-missing", `${path} is not an existing folder.`) };
     }

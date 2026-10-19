@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Every test here starts real fake-agent processes: seconds alone, far longer under the full parallel run.
 vi.setConfig({ testTimeout: 60_000 });
+import type { ConversationEntry } from "@hallpass/contracts";
+import { memoryConversationIndex, type ConversationIndex } from "../src/broker/conversation-index.js";
 import { poolHarness, deadPid, isAlive, sleep, waitFor, requests } from "./conversation-harness.js";
 
 /**
@@ -291,5 +293,67 @@ describe("T538 lease across browsers", () => {
     const opened = await other.pool.open(id);
     expect(opened.ok).toBe(true);
     expect((await h.index.get(id))?.lease).toMatchObject({ browserRunId: "run-b", pid: 4_000_001 });
+  });
+});
+
+/**
+ * T577 (D-019-14): after an extension reload the new broker lists conversations whose lease the old
+ * broker still holds while it shuts down. When that lease goes - released, or its holder dead - the
+ * list is sent again, so the panel does not keep "in use in another browser" until the next change.
+ */
+describe("T577 a lease released after the list was sent", () => {
+  const ID = "conv-0000000000000577";
+  const leased = (pid: number): ConversationEntry => ({
+    conversationId: ID,
+    agent: "claude-code",
+    agentSessionId: "session-577",
+    title: "Held by the old broker",
+    folder: { kind: "scratch" },
+    mode: "strict",
+    createdAt: "2026-10-20T00:00:00.000Z",
+    lastUsedAt: "2026-10-20T00:00:00.000Z",
+    resumable: true,
+    lease: { browserRunId: "run-a", pid, at: "2026-10-20T00:00:00.000Z" },
+  });
+
+  async function listedHeld(index: ConversationIndex) {
+    let changes = 0;
+    h = await poolHarness({ index, browserRunId: "run-b", brokerPid: 4_000_002, onChange: () => (changes += 1) });
+    expect((await h.pool.views())[0]?.inUseElsewhere).toBe(true);
+    return { changes: () => changes };
+  }
+
+  it("re-sends the list once the old broker releases the lease, and not while it holds it", async () => {
+    const index = memoryConversationIndex([leased(process.pid)]);
+    const seen = await listedHeld(index);
+
+    h!.clock.advance(5_000);
+    await sleep(100);
+    expect(seen.changes()).toBe(0);
+
+    const { lease: _released, ...free } = (await index.get(ID))!;
+    await index.put(free);
+    h!.clock.advance(5_000);
+    await waitFor(() => seen.changes() === 1, "the list to be sent again");
+    expect((await h!.pool.views())[0]?.inUseElsewhere).toBeUndefined();
+  });
+
+  it("re-sends the list once the lease's holder is dead", async () => {
+    let holderAlive = true;
+    const index = memoryConversationIndex([leased(4_000_001)]);
+    let changes = 0;
+    h = await poolHarness({
+      index,
+      browserRunId: "run-b",
+      brokerPid: 4_000_002,
+      isAlive: () => holderAlive,
+      onChange: () => (changes += 1),
+    });
+    expect((await h.pool.views())[0]?.inUseElsewhere).toBe(true);
+
+    holderAlive = false;
+    h.clock.advance(5_000);
+    await waitFor(() => changes === 1, "the list to be sent again");
+    expect((await h.pool.views())[0]?.inUseElsewhere).toBeUndefined();
   });
 });

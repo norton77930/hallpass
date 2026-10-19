@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { conversationBrowserTokenFrameSchema, type ConversationCommand } from "@hallpass/contracts";
 import { browserTokenFrame, createBrowserAccess, mintBrowserToken } from "../src/broker/browser-token.js";
-import { createCommandHandler, fileConsentStore } from "../src/broker/commands.js";
+import { createCommandHandler, fileConsentStore, type ConsentState, type ConsentStore } from "../src/broker/commands.js";
 import { memoryConversationIndex, memoryFolderList } from "../src/broker/conversation-index.js";
 import { CONVERSATION_IDLE_MS, ConversationPool } from "../src/broker/conversation.js";
 import { createFolderActions } from "../src/broker/folders.js";
@@ -276,8 +276,8 @@ describe("T552 a run's token", () => {
 });
 
 describe("T552 through the command handler", () => {
-  async function withHandler(h: ReturnType<typeof setup>) {
-    const consent = fileConsentStore(join(dir, "data"), BROWSER);
+  async function withHandler(h: ReturnType<typeof setup>, store?: ConsentStore) {
+    const consent = store ?? fileConsentStore(join(dir, "data"), BROWSER);
     await consent.write(true, "2026-10-19T00:00:00.000Z");
     const frames: Record<string, unknown>[] = [];
     const handler = createCommandHandler({
@@ -343,5 +343,77 @@ describe("T552 through the command handler", () => {
     const issued = tokenFrames(a).filter((each) => typeof each.frame.token === "string");
     expect(issued.length).toBeGreaterThan(0);
     expect(issued[0]!.frame.token).not.toBe(first);
+  });
+
+  /**
+   * A consent record whose `nth` read from now is held: it answers what the record said when that
+   * read began, as a file read that began before the withdrawal's rename does.
+   */
+  function heldConsent() {
+    let state: ConsentState = "unknown";
+    let reads = 0;
+    let holdAt = 0;
+    const held: Array<() => void> = [];
+    const store: ConsentStore = {
+      read: () => {
+        reads += 1;
+        const seen = state;
+        if (reads !== holdAt) return Promise.resolve(seen);
+        return new Promise((resolve) => held.push(() => resolve(seen)));
+      },
+      write: async (granted) => {
+        state = granted ? "granted" : "withdrawn";
+      },
+    };
+    return {
+      store,
+      held,
+      holdRead: (nth: number) => (holdAt = reads + nth),
+      release: () => {
+        for (const resolve of held.splice(0)) resolve();
+      },
+    };
+  }
+
+  const issuedSince = (mark: number) =>
+    sent.slice(mark).filter((each) => each.frame.type === "conversation-browser-token" && typeof each.frame.token === "string");
+
+  it("T579: a withdrawal while a start's consent read is under way hands out no token and starts no agent", async () => {
+    const h = setup();
+    const consent = heldConsent();
+    const { run } = await withHandler(h, consent.store);
+
+    // The handler's own check (1st read) passes; the pool's check right before the launch (2nd) is held.
+    consent.holdRead(2);
+    const starting = run({ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } });
+    await waitFor(() => consent.held.length === 1, "the start's consent read");
+    const mark = sent.length;
+    expect(await run({ type: "ui.conversation.consent", payload: { granted: false } })).toMatchObject({ ok: true });
+    consent.release();
+
+    expect(await starting).toMatchObject({ ok: false, error: { code: "consent-needed" } });
+    expect(issuedSince(mark)).toEqual([]);
+    expect(requests(await readFakeLog(logPath), "initialize")).toEqual([]);
+  });
+
+  it("T579: a withdrawal while a resume's consent read is under way hands out no token", async () => {
+    const h = setup();
+    const consent = heldConsent();
+    const { run } = await withHandler(h, consent.store);
+    const id = await h.start();
+    h.clock.advance(CONVERSATION_IDLE_MS);
+    await waitFor(() => h.pool.state(id) === "stopped", "the idle stop");
+
+    // `send` to a stopped conversation resumes it; its consent read (the 1st) is held.
+    consent.holdRead(1);
+    const sending = run({ type: "ui.conversation.send", payload: { conversationId: id, text: "again" } });
+    await waitFor(() => consent.held.length === 1, "the resume's consent read");
+    const mark = sent.length;
+    expect(await run({ type: "ui.conversation.consent", payload: { granted: false } })).toMatchObject({ ok: true });
+    consent.release();
+
+    expect(await sending).toMatchObject({ ok: false, error: { code: "consent-needed" } });
+    expect(issuedSince(mark)).toEqual([]);
+    expect(h.pool.state(id)).toBe("stopped");
   });
 });

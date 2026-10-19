@@ -282,6 +282,29 @@ answers, rules per conversation, any self mode change reset, pages ≤ 256 KB.
 - [X] T574 Close coverage.md (every FR/SC mapped to a passing task), update memory and handoff; owner
   owes merge, release, host reinstall
 
+
+## Phase S10: 0.13.1 follow-ups (D-019-14, owner grill 2026-10-20)
+
+- [X] T575 Failing test first, then the broker watches the browser's main process (pid handed down by the
+  relay): browser gone → end every agent at once; relay gone with the browser alive → wait up to 35 s for
+  a new relay (packages/agent-host/src/broker.ts, broker lifetime tests)
+- [X] T576 [P] Failing test first, then a finished one-time install starts the conversation the owner
+  asked for (with the chosen folder) instead of returning to the picker
+  (apps/extension/src/side-panel/agent/conversation/ConversationTab.tsx and its test)
+- [X] T577 [P] Failing test first, then the "in use in another browser" label is not shown for a
+  conversation right after an extension reload (worker/broker lease list re-sent; owner-visible label only)
+- [X] T578 [P] Failing test first, then a project folder with or without a trailing separator is one
+  folder in the folder list and in the index (packages/agent-host/src/broker/ folder store)
+- [X] T579 Failing tests first, then the T558 hardening items: no token handed out after a consent
+  withdrawal revoked it; a revoked token is not held again when the same broker greets anew; the broker
+  sidecar is created exclusively (packages/agent-host/src/broker*, relay broker spawn)
+- [X] T580 Review of T575 and T579 (lifecycle and token handling); fix findings
+- [X] T581 Branded Chrome 155: browser close ends the broker tree well under 15 s (T571 script, 5 trials),
+  relay-only loss keeps the conversation, install-then-start live; report appended to
+  docs/reference-probe-019.md
+- [X] T582 0.13.1: version bump, changelog, typecheck, unit, contract, snapshot, package; merge, public
+  release, host reinstall (pre-authorised, G21)
+
 ---
 
 ## Dependencies
@@ -289,7 +312,8 @@ answers, rules per conversation, any self mode change reset, pages ≤ 256 KB.
 S0 (T516–T518) → S1 (T519–T521) → S2 (T522–T529) → {S3 (T530–T534), S4 (T535–T542)}; S5 (T543–T549)
 needs S1 and S4's command handler (T540) for T547/T549, its static UI (T543–T546, T548) only S1; S6
 (T550–T558) needs S4 + S5; S7 (T559–T564) needs S4 + S5 and can run beside S6; S8 (T565–T567) needs S6;
-S9 (T568–T574) needs all. Reviews T529 and T558 gate the slices that build on them.
+S9 (T568–T574) needs all. S10 (T575–T582, 0.13.1): T575 ∥ T576–T578; T579 after T575 (same broker
+files); T580 after T575 + T579; T581 after T580; T582 last. Reviews T529 and T558 gate the slices that build on them.
 
 ## Parallel opportunities
 

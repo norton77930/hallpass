@@ -62,6 +62,8 @@ export const CONVERSATION_RUNNING_CAP = 3;
 export const TEXT_FRAME_INTERVAL_MS = 50;
 /** How long an agent gets to leave after its stdin closes before it is killed (R-312's 3 s). */
 const AGENT_STOP_BOUND_MS = 3_000;
+/** T577: how often a conversation listed as in use in another browser is looked at again. */
+const LEASE_RECHECK_MS = 1_000;
 const NEW_TITLE = "New conversation";
 
 export type ClockTimer = { cancel(): void };
@@ -278,6 +280,11 @@ export type StartRequest = {
   versions: StartFailureVersions;
   /** The agent's own session id: resume with `session/load` instead of `session/new`. */
   resume?: string;
+  /**
+   * T579 (D-019-14, R-331): asked at the hand-out itself - nothing awaits between it and the token's mint -
+   * whether no withdrawal came since the caller's consent check began; `false` starts nothing.
+   */
+  mayHandOut?: () => boolean;
 };
 
 export type StartOutcome =
@@ -406,6 +413,10 @@ export class Conversation {
   async start(request: StartRequest): Promise<StartOutcome> {
     // T572: one agent process per conversation; a second would be orphaned and write into this log.
     if (this.child !== undefined) return failure("busy", "The agent of this conversation is already running.");
+    if (request.mayHandOut?.() === false) {
+      this.setState(request.resume ? "stopped" : "gone");
+      return failure("consent-needed", "You withdrew the side-panel agent's access to this browser; the agent was not started.");
+    }
     this.closing = undefined;
     this.rules.clear();
     this.watchingMode = false;
@@ -1204,6 +1215,15 @@ export class ConversationPool {
   /** Index read-modify-writes, one at a time (file writes since S7, T560). */
   private writes: Promise<unknown> = Promise.resolve();
   private shuttingDown = false;
+  /** T577: listed as in use in another browser, and the next look at whether that is still so. */
+  private heldElsewhere = new Set<string>();
+  private releaseCheck: ClockTimer | undefined;
+  /**
+   * T579 (D-019-14, R-331): how many withdrawals there have been. A start or resume notes it before its
+   * consent check and hands out a token only while it is unchanged, so a withdrawal that lands while
+   * that check is under way (a file read, then seconds of discovery) is never answered by a token.
+   */
+  private revocations = 0;
 
   constructor(private readonly options: ConversationPoolOptions) {
     this.clock = options.clock ?? systemClock;
@@ -1230,6 +1250,7 @@ export class ConversationPool {
     mayStart?: ResumeGate,
   ): Promise<CommandOutcome<{ conversationId: string }>> {
     if (this.shuttingDown) return failure("broker-unavailable", "Hallpass is shutting down.");
+    const mayHandOut = this.noWithdrawalSinceNow();
     if (folder.kind === "project") {
       if (!(await this.options.folders.has(folder.path))) return failure("folder-missing", "That folder is not in your folder list.");
       if (!(await this.folderExists(folder.path))) return failure("folder-missing", `The folder ${folder.path} does not exist any more.`);
@@ -1258,7 +1279,7 @@ export class ConversationPool {
       }
     }
     // Nothing awaits between the consent above and the spawn (and the token's mint) inside `start`.
-    const started = await conversation.start({ cwd, spec: launch.spec, versions: launch.versions });
+    const started = await conversation.start({ cwd, spec: launch.spec, versions: launch.versions, mayHandOut });
     if (!started.ok) {
       this.conversations.delete(conversationId);
       this.options.onChange?.();
@@ -1360,6 +1381,7 @@ export class ConversationPool {
 
   async views(): Promise<ConversationView[]> {
     const entries = await this.options.index.list();
+    this.watchReleases(entries.filter((entry) => this.foreign(entry)).map((entry) => entry.conversationId));
     return entries.map((entry) => {
       const conversation = this.conversations.get(entry.conversationId);
       const { agentSessionId: _session, lease: _lease, ...shownEntry } = entry;
@@ -1386,12 +1408,22 @@ export class ConversationPool {
 
   /** T558: consent withdrawn - every live run's token is revoked and not handed again (FR-299). */
   revokeBrowserTokens(): void {
+    // T579: first, so a start whose consent check is under way hands nothing out after this.
+    this.revocations += 1;
     for (const conversation of this.conversations.values()) conversation.revokeBrowserToken();
+  }
+
+  /** T579: whether no withdrawal has come since this call (`revokeBrowserTokens`). */
+  private noWithdrawalSinceNow(): () => boolean {
+    const seen = this.revocations;
+    return () => this.revocations === seen;
   }
 
   /** Every agent ended, every lease of this broker cleared (R-319). */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.releaseCheck?.cancel();
+    this.releaseCheck = undefined;
     await Promise.all([...this.conversations.values()].map((conversation) => conversation.close("gone")));
     await this.writes.catch(() => undefined);
   }
@@ -1428,6 +1460,7 @@ export class ConversationPool {
 
   private async resume(conversationId: string, how: "open" | "send", mayResume?: ResumeGate): Promise<CommandOutcome<Conversation>> {
     if (this.shuttingDown) return failure("broker-unavailable", "Hallpass is shutting down.");
+    const mayHandOut = this.noWithdrawalSinceNow();
     const entry = await this.options.index.get(conversationId);
     if (entry === undefined) return unknown();
     if (this.foreign(entry)) return inUseElsewhere();
@@ -1464,7 +1497,13 @@ export class ConversationPool {
     const conversation = admission.conversation;
     let outcome: CommandOutcome<Conversation> = failure("broker-unavailable", "Hallpass could not continue this conversation.");
     try {
-      const started = await conversation.start({ cwd, spec: launch.spec, versions: launch.versions, resume: entry.agentSessionId });
+      const started = await conversation.start({
+        cwd,
+        spec: launch.spec,
+        versions: launch.versions,
+        resume: entry.agentSessionId,
+        mayHandOut,
+      });
       if (!started.ok) {
         if (started.unknownSession) await this.update(conversationId, (current) => ({ ...current, resumable: false }));
         this.options.onChange?.();
@@ -1557,6 +1596,40 @@ export class ConversationPool {
   /** R-319: held by another broker whose process is alive. A dead holder's lease is ignored. */
   private foreign(entry: ConversationEntry): boolean {
     return entry.lease !== undefined && !this.mine(entry.lease) && this.isAlive(entry.lease.pid);
+  }
+
+  /**
+   * T577 (D-019-14): the conversations last listed as in use in another browser. Another broker's
+   * release reaches only the file, so while any is listed the index is looked at again every
+   * `LEASE_RECHECK_MS`; one that is free now - released, removed, or its holder dead - makes the
+   * list go out again (`onChange`). Nothing is looked at while none is listed.
+   */
+  private watchReleases(heldElsewhere: string[]): void {
+    this.heldElsewhere = new Set(heldElsewhere);
+    if (this.heldElsewhere.size === 0 || this.shuttingDown) {
+      this.releaseCheck?.cancel();
+      this.releaseCheck = undefined;
+      return;
+    }
+    this.releaseCheck ??= this.clock.setTimer(() => {
+      this.releaseCheck = undefined;
+      void this.checkReleases();
+    }, LEASE_RECHECK_MS);
+  }
+
+  private async checkReleases(): Promise<void> {
+    if (this.shuttingDown) return;
+    const entries = await this.options.index.list().catch(() => undefined);
+    if (entries === undefined) {
+      this.watchReleases([...this.heldElsewhere]);
+      return;
+    }
+    const before = this.heldElsewhere.size;
+    const still = entries
+      .filter((entry) => this.heldElsewhere.has(entry.conversationId) && this.foreign(entry))
+      .map((entry) => entry.conversationId);
+    this.watchReleases(still);
+    if (still.length < before) this.options.onChange?.();
   }
 
   private iso(): string {
