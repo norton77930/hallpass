@@ -13,6 +13,7 @@ import {
   type FakeAgentPort,
 } from "./helpers/agent-shell-harness.js";
 import { PAIRING_JOINED_HIGHLIGHT_MS } from "../src/side-panel/agent/PromptCard.js";
+import { lookup } from "../src/locales/catalog.js";
 
 /**
  * 006/T191 — the prompts, one at a time, on top of whatever else is on screen (FR-084, FR-085, US4).
@@ -215,6 +216,31 @@ describe("T191 prompt cards", () => {
     // An undated projection (a 004 worker) keeps the old precedence: pairing first.
     project(port, { ...IDLE, pending: PENDING, prompt: PROMPT });
     expect(screen.getByRole("button", { name: ui("agent.accept") })).toBeTruthy();
+  });
+
+  /** 020/T606 P5: the one question on screen says how many more wait behind it, and is gone when none do. */
+  it.each(["en-US", "zh-TW"] as const)("in %s counts the questions waiting behind the one on screen", (locale) => {
+    renderShell(locale);
+    const t = (key: string) => lookup(key, locale);
+    const earlier = "2026-09-13T10:00:00.000Z";
+    const later = "2026-09-13T10:00:05.000Z";
+    const more = () => document.querySelector(".agent-prompt-more");
+    const plan = { planId: "plan-1", site: SITE, steps: [{ tool: "click" as const, summary: "click a page element" }], raisedAt: "2026-09-13T10:00:09.000Z" };
+
+    project(port, { ...IDLE, prompt: { ...PROMPT, raisedAt: earlier } });
+    expect(more()).toBeNull();
+
+    project(port, { ...IDLE, pending: { ...PENDING, requestedAt: later }, prompt: { ...PROMPT, raisedAt: earlier } });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(more()?.textContent).toBe(t("agent.moreWaitingOne"));
+
+    project(port, { ...IDLE, pending: { ...PENDING, requestedAt: later }, prompt: { ...PROMPT, raisedAt: earlier }, plan });
+    expect(more()?.textContent).toBe(t("agent.moreWaiting").replace("{n}", "2"));
+
+    // Answered: the next one is on screen, with the count of what is left.
+    project(port, { ...IDLE, pending: { ...PENDING, requestedAt: later }, plan });
+    expect(screen.getByRole("button", { name: t("agent.accept") })).toBeTruthy();
+    expect(more()?.textContent).toBe(t("agent.moreWaitingOne"));
   });
 
   /** 017/T476 (R-247): the site-plan question takes the top slot like the batch plan card, in arrival order. */

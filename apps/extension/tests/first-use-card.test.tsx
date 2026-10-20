@@ -19,6 +19,9 @@ import { CONVERSATION_READY, commandsSent, installTabStorage, withConversation }
  * card says what the download is, about how big, that it is a request to the npm registry, that the
  * agent runs with the owner's own settings, and that it will use this browser under the site rules.
  * Cancel sends nothing. A missing agent gets install guidance instead, never a download.
+ *
+ * 020 FR-314: the card comes when the owner sends to the agent on the chip (composer first), not
+ * when picking an agent; the held message itself is covered in composer.test.tsx.
  */
 
 const FIRST_USE: ConversationPanelState = {
@@ -35,7 +38,16 @@ const settle = async () => {
     await Promise.resolve();
   });
 };
-const pick = (name: RegExp) => fireEvent.click(screen.getByRole("button", { name }));
+/** 020 FR-314: the card comes when the owner sends to the agent on the chip, not when picking one. */
+const box = () => document.querySelector<HTMLTextAreaElement>(".agent-conversation-composer textarea")!;
+const sendWords = (words = "what is on this page?") => {
+  fireEvent.change(box(), { target: { value: words } });
+  fireEvent.click(document.querySelector<HTMLButtonElement>(".agent-conversation-composer button[type=submit]")!);
+};
+const choose = (name: RegExp) => {
+  fireEvent.click(screen.getByRole("button", { name: /^Agent: / }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name }));
+};
 const card = () => screen.getByRole("region", { name: ui("conversation.firstUse.title").replace("{agent}", "Claude Code") });
 
 describe("T548 the first-use card", () => {
@@ -59,7 +71,7 @@ describe("T548 the first-use card", () => {
 
   it("states what, how big, the registry request, the owner's own settings and the site rules", async () => {
     await open();
-    pick(/^Claude Code/);
+    sendWords();
 
     const text = card().textContent ?? "";
     expect(text).toContain(ui("conversation.firstUse.what").replace("{agent}", "Claude Code"));
@@ -72,7 +84,7 @@ describe("T548 the first-use card", () => {
 
   it("sends the consent, then the install, on Download", async () => {
     await open();
-    pick(/^Claude Code/);
+    sendWords();
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
 
     expect(commandsSent(port)).toEqual([
@@ -84,7 +96,7 @@ describe("T548 the first-use card", () => {
 
   it("sends only the install when the one-time consent was already given", async () => {
     await open({ ...FIRST_USE, consent: "granted" });
-    pick(/^Claude Code/);
+    sendWords();
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
 
     expect(commandsSent(port)).toEqual([{ type: "ui.conversation.install", payload: { agent: "claude-code" } }]);
@@ -92,7 +104,7 @@ describe("T548 the first-use card", () => {
 
   it("asks for the consent alone, with no download, for an agent already set up", async () => {
     await open({ ...FIRST_USE, agents: [{ agent: "claude-code", availability: "ready" }] });
-    pick(/^Claude Code/);
+    sendWords();
     expect(card().textContent).not.toContain(ui("conversation.firstUse.registry"));
     expect(screen.queryByRole("button", { name: ui("conversation.firstUse.download") })).toBeNull();
 
@@ -100,30 +112,29 @@ describe("T548 the first-use card", () => {
     expect(commandsSent(port)).toEqual([{ type: "ui.conversation.consent", payload: { granted: true } }]);
   });
 
-  it("sends nothing on Cancel and goes back to the agents", async () => {
+  it("sends nothing on Cancel and gives the words back", async () => {
     await open();
-    pick(/^Claude Code/);
+    sendWords();
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.cancel") }));
 
     expect(commandsSent(port)).toEqual([]);
     expect(screen.queryByRole("region", { name: /Claude Code/ })).toBeNull();
-    expect(screen.getByRole("group", { name: ui("conversation.picker.agentsLabel") })).toBeTruthy();
+    expect(box().value).toBe("what is on this page?");
   });
 
   it("gives install guidance for an agent that is not installed, and offers no download", async () => {
     await open();
-    pick(/^Codex/);
+    choose(/^Codex/);
 
     expect(screen.getByRole("heading", { name: ui("conversation.missing.title").replace("{agent}", "Codex") })).toBeTruthy();
     expect(screen.getByText(ui("conversation.missing.codex"))).toBeTruthy();
     expect(screen.queryByRole("button", { name: ui("conversation.firstUse.download") })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.back") }));
+    sendWords();
     expect(commandsSent(port)).toEqual([]);
   });
 
   it("says which version is installed when it does not work with the connector", async () => {
     await open({ ...FIRST_USE, agents: [{ agent: "claude-code", availability: "version-problem", version: "1.0.0", detail: "needs 2.x" }] });
-    pick(/^Claude Code/);
 
     expect(screen.getByRole("heading", { name: ui("conversation.version.title").replace("{agent}", "Claude Code") })).toBeTruthy();
     expect(screen.getByText(ui("conversation.version.installed").replace("{version}", "1.0.0"))).toBeTruthy();
@@ -133,7 +144,7 @@ describe("T548 the first-use card", () => {
 
   it("shows the install's phase until the agent is ready", async () => {
     await open();
-    pick(/^Claude Code/);
+    sendWords();
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
 
     const bar = screen.getByRole("progressbar", { name: ui("conversation.install.label") });
@@ -157,12 +168,13 @@ describe("T548 the first-use card", () => {
 
     project(port, withConversation({ ...FIRST_USE, consent: "granted", agents: [{ agent: "claude-code", availability: "ready" }] }));
     expect(screen.queryByRole("progressbar")).toBeNull();
-    expect(screen.getByRole("button", { name: /^Claude Code/ }).textContent).toContain(ui("conversation.availability.ready"));
+    // 020 FR-314: the agent is ready, so the held message's conversation starts.
+    expect(commandsSent(port).at(-1)).toEqual({ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } });
   });
 
   it("T547 (G2): shows the phase the broker names rather than guessing it", async () => {
     await open({ ...FIRST_USE, consent: "granted" });
-    pick(/^Claude Code/);
+    sendWords();
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
     const installing = (phase: "preparing" | "downloading" | "finishing") =>
       withConversation({
@@ -193,7 +205,7 @@ describe("T548 the first-use card", () => {
       />
     );
     const { rerender } = render(view());
-    fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+    sendWords();
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
     rerender(view({ code: "install-failed", detail: "network unreachable" }));
 
@@ -223,7 +235,7 @@ describe("T548 the first-use card", () => {
         />
       );
       const { rerender } = render(view());
-      fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+      sendWords();
       fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
       expect(screen.getByRole("progressbar")).toBeTruthy();
       rerender(view({ code, detail: "the helper went away" }));
@@ -251,10 +263,10 @@ describe("T548 the first-use card", () => {
       />
     );
 
-    it("starts in scratch once, for an agent button", () => {
+    it("starts in scratch once, for a message sent with the default folder", () => {
       const sent: unknown[] = [];
       const { rerender } = render(view({ ...FIRST_USE, consent: "granted" }, sent));
-      fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+      sendWords();
       fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
       expect(starts(sent)).toEqual([]);
 
@@ -264,16 +276,16 @@ describe("T548 the first-use card", () => {
       expect(screen.queryByRole("progressbar")).toBeNull();
     });
 
-    it("starts in the folder picked with Start with {agent}", () => {
+    it("starts in the folder picked on the folder chip", () => {
       const sent: unknown[] = [];
       const withFolder = (conversation: ConversationPanelState) => ({
         ...conversation,
         folders: [{ path: "C:\\work\\proj", addedAt: "2026-10-19T12:00:00.000Z" }],
       });
       const { rerender } = render(view(withFolder({ ...FIRST_USE, consent: "granted" }), sent));
-      fireEvent.click(screen.getByRole("button", { name: ui("conversation.list.newInFolder") }));
+      fireEvent.click(screen.getByRole("button", { name: /^Folder: / }));
       fireEvent.click(screen.getByRole("radio", { name: "C:\\work\\proj" }));
-      fireEvent.click(screen.getByRole("button", { name: ui("conversation.folders.start").replace("{agent}", "Claude Code") }));
+      sendWords();
       fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
 
       rerender(view(withFolder(READY), sent));
@@ -286,7 +298,7 @@ describe("T548 the first-use card", () => {
       const sent: unknown[] = [];
       const base = { ...FIRST_USE, consent: "granted" as const };
       const { rerender } = render(view(base, sent));
-      fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+      sendWords();
       fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
       rerender(view(base, sent, { code: "install-failed", detail: "network unreachable" }));
       expect(starts(sent)).toEqual([]);
@@ -298,7 +310,7 @@ describe("T548 the first-use card", () => {
       cleanup();
       sent.length = 0;
       const second = render(view(base, sent));
-      fireEvent.click(second.getByRole("button", { name: /^Claude Code/ }));
+      sendWords();
       fireEvent.click(second.getByRole("button", { name: ui("conversation.firstUse.download") }));
       second.rerender(view(base, sent, { code: "install-failed", detail: "network unreachable" }));
       fireEvent.click(second.getByRole("button", { name: ui("conversation.firstUse.cancel") }));
@@ -309,7 +321,7 @@ describe("T548 the first-use card", () => {
 
   it("reads in zh-TW", async () => {
     await open(FIRST_USE, "zh-TW");
-    pick(/^Claude Code/);
+    sendWords();
     expect(screen.getByRole("region", { name: "為側欄設定 Claude Code" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "下載" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "取消" })).toBeTruthy();

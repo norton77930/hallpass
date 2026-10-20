@@ -79,9 +79,11 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
     const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
     await expect.poll(() => selectedTab(panel), { timeout: 15_000 }).toBe("conversation");
 
-    // The picker offers the agent; with no consent given, picking it shows the first-use card.
+    // The agent chip offers the agent; with no consent given, sending to it shows the first-use card
+    // (020 FR-314: the message is held until the answer).
     await waitForPicker(panel);
     await pickAgent(panel);
+    await submitFirstMessage(panel);
     await expect.poll(() => setupCard(panel), { timeout: 15_000 }).toBe("first-use");
     const card = await panelSectionText(panel, "[data-setup=first-use]");
     expect(card).toContain(ui("conversation.firstUse.title").replace("{agent}", AGENT_NAME));
@@ -99,18 +101,22 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
     await sleep(1_500);
     expect(await fakeLog(), "Cancel started no agent").toEqual([]);
     expect(await consentFiles(), "Cancel recorded no consent").toEqual([]);
+    // 020 FR-321: the list is read in its drawer.
+    await showList(panel);
     expect(
       await panel.evaluatePanel("document.querySelectorAll('.agent-conversation-entries li').length"),
       await hostStateForMessage(panel),
     ).toBe(0);
+    await hideList(panel);
     expect(await consentSwitchState(panel)).not.toBe("granted");
 
-    // Asked again on the next pick (the agent stays unavailable until the owner says yes).
+    // Asked again on the next send (the agent stays unavailable until the owner says yes).
     await pickAgent(panel);
+    await submitFirstMessage(panel);
     await expect.poll(() => setupCard(panel), { timeout: 10_000 }).toBe("first-use");
     await panel.clickButton(ui("conversation.firstUse.allow"));
     await expect.poll(() => readConsentFile(), { timeout: 10_000 }).toBe(true);
-    await pickAgent(panel);
+    // The held message starts the conversation once the consent is given (020 FR-314).
     await waitForOpenConversation(panel);
   });
 
@@ -180,7 +186,7 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
     test.setTimeout(180_000);
     await resetHostConversationState(extensionWorker);
     const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
-    await startConversation(panel);
+    const first = await startConversation(panel);
     expect((await headerValues(panel))[2]).toBe(ui("conversation.mode.strict"));
 
     // Reject: the change does not happen and the agent is told.
@@ -221,9 +227,7 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
     await waitComposerReady(panel);
 
     // A new conversation asks again.
-    await showList(panel);
-    await pickAgent(panel);
-    const second = await waitForOpenConversation(panel);
+    const second = await startAnotherConversation(panel, first);
     expect(second).toBeTruthy();
     await sendMessage(panel, "tool:edit");
     await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
@@ -329,7 +333,7 @@ test.describe("019 side-panel conversation - part 2 (T557)", () => {
     // FR-308: the site row says who changed it last.
     await chooseTab(panel, "connections");
     await expect
-      .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE)}] .agent-site-author')?.textContent ?? null`), {
+      .poll(() => panel.evaluatePanel(`(()=>{const row=document.querySelector('[data-site=${JSON.stringify(SITE)}]');if(row&&!row.querySelector('.agent-site-more'))row.querySelector('.agent-site-more-button')?.click();return null})() ?? document.querySelector('[data-site=${JSON.stringify(SITE)}] .agent-site-author')?.textContent ?? null`), {
         timeout: 15_000,
       })
       .toBe(ui("agent.siteChangedBy.panel-agent"));
@@ -467,9 +471,7 @@ test.describe("019 side-panel conversation - part 3 (T564)", () => {
     await sendMessage(panel, "first-conversation");
     await expect.poll(() => logText(panel), { timeout: 20_000 }).toContain("echo:first-conversation");
     await waitComposerReady(panel);
-    await showList(panel);
-    await pickAgent(panel);
-    const second = await waitForOpenConversation(panel, first);
+    const second = await startAnotherConversation(panel, first);
     expect(second).not.toBe(first);
     await sendMessage(panel, "second-conversation");
     await expect.poll(() => logText(panel), { timeout: 20_000 }).toContain("echo:second-conversation");
@@ -504,6 +506,7 @@ test.describe("019 side-panel conversation - part 3 (T564)", () => {
     const index = JSON.parse(await readFile(join(hostDataDirectory(), "conversations.json"), "utf8")) as unknown;
     expect(JSON.stringify(index)).not.toContain(first);
     expect(JSON.stringify(index)).toContain(second);
+    await hideList(panel);
   });
 });
 
@@ -760,25 +763,72 @@ async function consentSwitchState(panel: SidePanelDriver): Promise<string | null
     | null;
 }
 
+/** 020 FR-313: the agent is chosen on the agent chip under the message box (a menu button). */
+const AGENT_CHIP = ".agent-conversation-chips button.agent-conversation-chip[aria-haspopup=menu]";
+/** The open conversation's first message (020 FR-314: a conversation starts with one). */
+const FIRST_MESSAGE = "opening";
+
+/** The agent chip is offered: the empty conversation is shown and nothing is held. */
 async function waitForPicker(panel: SidePanelDriver): Promise<void> {
   await expect
     .poll(
-      () =>
-        panel.evaluatePanel(
-          `[...document.querySelectorAll('.agent-conversation-agents button')].some((b)=>!b.disabled&&b.querySelector('.agent-conversation-agent-name')?.textContent===${JSON.stringify(AGENT_NAME)})`,
-        ),
+      () => panel.evaluatePanel(`(()=>{const c=document.querySelector(${JSON.stringify(AGENT_CHIP)});return !!c&&!c.disabled})()`),
       { timeout: 30_000 },
     )
     .toBe(true);
 }
 
+/** Chooses the agent in the agent chip's menu, once the worker has reported it. */
 async function pickAgent(panel: SidePanelDriver): Promise<void> {
   await waitForPicker(panel);
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const b=[...document.querySelectorAll('.agent-conversation-agents button')].find((x)=>x.querySelector('.agent-conversation-agent-name')?.textContent===${JSON.stringify(AGENT_NAME)});if(!b)return false;b.click();return true})()`,
-    true,
+  expect(
+    await panel.evaluatePanel(
+      `(()=>{const c=document.querySelector(${JSON.stringify(AGENT_CHIP)});if(!c)return false;if(c.getAttribute('aria-expanded')!=='true')c.click();return true})()`,
+      true,
+    ),
+  ).toBe(true);
+  await expect
+    .poll(
+      () =>
+        panel.evaluatePanel(
+          `(()=>{const b=[...document.querySelectorAll('.agent-conversation-menu-item[role=menuitemradio]')].find((x)=>!x.disabled&&x.querySelector('.agent-conversation-agent-name')?.textContent===${JSON.stringify(AGENT_NAME)});if(!b)return false;b.click();return true})()`,
+          true,
+        ),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+  await expect
+    .poll(() =>
+      panel.evaluatePanel(
+        `(()=>{const c=document.querySelector(${JSON.stringify(AGENT_CHIP)});return !!c&&c.getAttribute('aria-expanded')==='false'&&(c.textContent??'').trim()===${JSON.stringify(AGENT_NAME)}})()`,
+      ),
+    )
+    .toBe(true);
+}
+
+/** Types the message into the box and presses Send, once Send is offered. */
+async function fillAndSend(panel: SidePanelDriver, text: string): Promise<void> {
+  const filled = await panel.evaluatePanel(
+    `(()=>{const e=document.querySelector('.agent-conversation-composer textarea');if(!e)return false;` +
+      `Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(text)});` +
+      `e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`,
   );
-  expect(clicked).toBe(true);
+  expect(filled).toBe(true);
+  await expect
+    .poll(
+      () =>
+        panel.evaluatePanel(
+          "(()=>{const b=document.querySelector('.agent-conversation-composer button[type=submit]');if(!b||b.disabled)return false;b.click();return true})()",
+          true,
+        ),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
+/** The empty conversation's Send: the words are held while the start (or a first-use card) is under way. */
+async function submitFirstMessage(panel: SidePanelDriver): Promise<void> {
+  await fillAndSend(panel, FIRST_MESSAGE);
 }
 
 async function openConversationId(panel: SidePanelDriver): Promise<string | null> {
@@ -802,18 +852,51 @@ async function waitForOpenConversation(panel: SidePanelDriver, not?: string): Pr
 async function startConversation(panel: SidePanelDriver): Promise<string> {
   await expect.poll(() => selectedTab(panel), { timeout: 15_000 }).toBe("conversation");
   await pickAgent(panel);
+  await submitFirstMessage(panel);
   await expect.poll(() => setupCard(panel), { timeout: 15_000 }).toBe("first-use");
   await panel.clickButton(ui("conversation.firstUse.allow"));
   await expect.poll(() => readConsentFile(), { timeout: 10_000 }).toBe(true);
-  await pickAgent(panel);
   const id = await waitForOpenConversation(panel);
-  await waitComposerReady(panel);
+  await firstTurnDone(panel);
   return id;
 }
 
+/** 020 FR-315: "New conversation" over the open one, the agent picked, the first message sent. */
+async function startAnotherConversation(panel: SidePanelDriver, previous: string): Promise<string> {
+  await panel.clickButton(ui("conversation.new"));
+  await pickAgent(panel);
+  await submitFirstMessage(panel);
+  const id = await waitForOpenConversation(panel, previous);
+  await firstTurnDone(panel);
+  return id;
+}
+
+/** The held first message went (the box is empty), the agent answered it, and the turn is over. */
+async function firstTurnDone(panel: SidePanelDriver): Promise<void> {
+  await expect
+    .poll(() => panel.evaluatePanel("document.querySelector('.agent-conversation-composer textarea')?.value ?? null"), { timeout: 20_000 })
+    .toBe("");
+  await expect.poll(() => logText(panel), { timeout: 20_000 }).toContain(`echo:${FIRST_MESSAGE}`);
+  await waitComposerReady(panel);
+}
+
+/** 020 FR-321: opens the drawer of conversations (its rows exist only while it is open). */
 async function showList(panel: SidePanelDriver): Promise<void> {
-  await panel.clickButton(ui("conversation.list.show"));
-  await waitForPicker(panel);
+  const open = () => panel.evaluatePanel("document.querySelector('.agent-conversation-drawer[role=dialog]') !== null");
+  if (!(await open())) await panel.clickButton(ui("conversation.header.list"));
+  await expect.poll(open, { timeout: 10_000 }).toBe(true);
+}
+
+async function hideList(panel: SidePanelDriver): Promise<void> {
+  expect(
+    await panel.evaluatePanel(
+      "(()=>{const b=document.querySelector('.agent-conversation-drawer-head button');if(!b)return false;b.click();return true})()",
+      true,
+    ),
+  ).toBe(true);
+  await expect
+    .poll(() => panel.evaluatePanel("document.querySelector('.agent-conversation-drawer[role=dialog]') === null"), { timeout: 10_000 })
+    .toBe(true);
 }
 
 async function listEntries(panel: SidePanelDriver): Promise<Array<{ id: string; title: string; meta: string; hasTime: boolean }>> {
@@ -838,22 +921,7 @@ async function waitComposerReady(panel: SidePanelDriver): Promise<void> {
 }
 
 async function sendMessage(panel: SidePanelDriver, text: string): Promise<void> {
-  const filled = await panel.evaluatePanel(
-    `(()=>{const e=document.querySelector('.agent-conversation-composer textarea');if(!e)return false;` +
-      `Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(text)});` +
-      `e.dispatchEvent(new Event('input',{bubbles:true}));return true})()`,
-  );
-  expect(filled).toBe(true);
-  await expect
-    .poll(
-      () =>
-        panel.evaluatePanel(
-          "(()=>{const b=document.querySelector('.agent-conversation-composer button[type=submit]');if(!b||b.disabled)return false;b.click();return true})()",
-          true,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(true);
+  await fillAndSend(panel, text);
   await expect
     .poll(() => panel.evaluatePanel("document.querySelector('.agent-conversation-composer textarea')?.value ?? null"), { timeout: 10_000 })
     .toBe("");
@@ -876,13 +944,38 @@ async function stoppedSaid(panel: SidePanelDriver): Promise<boolean> {
   )) as boolean;
 }
 
+/** 020 FR-320: the mode chip of the open conversation (its accessible name is "Mode: {mode}"). */
+const MODE_CHIP = `section.agent-conversation .agent-conversation-chips button.agent-conversation-chip[aria-label^=${JSON.stringify(
+  ui("conversation.chip.mode").split("{mode}")[0]!,
+)}]`;
+
+/** Agent and folder from the header's "agent · folder" line, then the mode, which its chip carries. */
 async function headerValues(panel: SidePanelDriver): Promise<string[]> {
   return (await panel.evaluatePanel(
-    "[...document.querySelectorAll('.agent-conversation-header dd')].map((d)=>(d.textContent??'').trim())",
+    "[...document.querySelectorAll('.agent-conversation-header .agent-conversation-header-value')].map((d)=>(d.textContent??'').trim())" +
+      `.concat([...document.querySelectorAll(${JSON.stringify(`${MODE_CHIP} .agent-conversation-chip-text`)})].map((s)=>(s.textContent??'').trim()))`,
   )) as string[];
 }
 
+/**
+ * 020 FR-318: a turn's rows are listed once it ended, folded under "N steps" (failed and refused ones
+ * apart, always shown). Waits for the turn to end and unfolds every turn before reading.
+ */
 async function actionRows(panel: SidePanelDriver): Promise<ActionRow[]> {
+  await expect
+    .poll(() => panel.evaluatePanel("document.querySelector('.agent-conversation-turn[data-turn=running]') === null"), {
+      timeout: 20_000,
+    })
+    .toBe(true);
+  await panel.evaluatePanel(
+    "(()=>{for(const b of document.querySelectorAll('button.agent-conversation-steps[aria-expanded=false]'))b.click();return true})()",
+    true,
+  );
+  await expect
+    .poll(() => panel.evaluatePanel("document.querySelectorAll('button.agent-conversation-steps[aria-expanded=false]').length"), {
+      timeout: 10_000,
+    })
+    .toBe(0);
   return (await panel.evaluatePanel(
     `[...document.querySelectorAll('.agent-conversation-actions li')].map((li)=>({` +
       `title:(li.querySelector('.agent-conversation-action-title')?.textContent??'').trim(),` +
@@ -907,10 +1000,18 @@ async function answerPermission(panel: SidePanelDriver, answer: "allow-once" | "
   await expect.poll(() => permissionTitles(panel), { timeout: 15_000 }).toEqual([]);
 }
 
+/** 020 FR-320: the choices the mode chip's menu offers (opened for the read, closed after). */
 async function modeChoices(panel: SidePanelDriver): Promise<Array<{ value: string; label: string; checked: boolean }>> {
-  return (await panel.evaluatePanel(
+  const toggle = `(()=>{const c=document.querySelector(${JSON.stringify(MODE_CHIP)});if(!c)return false;c.click();return true})()`;
+  const radios = () => panel.evaluatePanel("document.querySelectorAll('.agent-conversation-mode input[type=radio]').length");
+  expect(await panel.evaluatePanel(toggle, true)).toBe(true);
+  await expect.poll(radios, { timeout: 10_000 }).toBeGreaterThan(0);
+  const choices = (await panel.evaluatePanel(
     "[...document.querySelectorAll('.agent-conversation-mode input[type=radio]')].map((i)=>({value:i.value,label:(i.closest('label')?.textContent??'').trim(),checked:i.checked}))",
   )) as Array<{ value: string; label: string; checked: boolean }>;
+  expect(await panel.evaluatePanel(toggle, true)).toBe(true);
+  await expect.poll(radios, { timeout: 10_000 }).toBe(0);
+  return choices;
 }
 
 async function groupIdOf(worker: PackagedWorker, tabId: number): Promise<number> {

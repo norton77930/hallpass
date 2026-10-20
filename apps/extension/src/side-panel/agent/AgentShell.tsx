@@ -492,11 +492,13 @@ export function AgentShell(props: { locale: string }): ReactElement {
     state.conversation === undefined ? null : (
       <PanelConsentSwitch consent={state.conversation.consent} locale={props.locale} send={send} />
     );
+  /** T607 (Q1): the conversation part says the helper cannot be reached (the Conversation tab's own page for it). */
+  const helperDown = state.conversation?.available === false && state.conversation.reason === "broker-unavailable";
   const connections =
     composition === "not-connected" ? (
       <>
         <NotConnected
-          variant={state.paired.length === 0 ? "not-paired" : "bridge-lost"}
+          variant={state.paired.length > 0 ? "bridge-lost" : helperDown ? "helper-down" : "not-paired"}
           diagnostics={state.diagnostics ?? {}}
           locale={props.locale}
           onRetry={() => {
@@ -512,6 +514,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
           sessionCount={state.sessions.length}
           paired={state.paired}
           locale={props.locale}
+          uploadListPath={state.uploadRoots?.path}
           onUnpair={(agentId) => {
             // 016 FR-223: the agent the owner chose, and no other - the menu names each one.
             send({ type: "ui.agent.unpair", payload: { agentId } });
@@ -519,6 +522,12 @@ export function AgentShell(props: { locale: string }): ReactElement {
         />
         {browserRow}
         {consentSwitch}
+        {/* T605: the session cards under a small heading of their own, as the sites have one. */}
+        {sessions.length === 0 ? null : (
+          <h2 className="agent-section-heading" data-sessions-heading="">
+            {t("agent.sessionsTitle")}
+          </h2>
+        )}
         {sessions.map((session) => (
           <SessionCard
             key={session.sessionId}
@@ -628,6 +637,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
                 send={send}
                 {...(activeTabId === undefined ? {} : { activeTabId })}
                 {...(lastError === undefined ? {} : { lastError })}
+                onGoConnections={() => chooseTab("connections")}
               />
             ) : (
               connections

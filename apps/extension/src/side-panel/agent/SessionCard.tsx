@@ -127,21 +127,13 @@ function stateText(session: SessionView, now: number, t: (key: string) => string
  * The subtitle (016 FR-229): when the session started, and how many tabs it holds on which sites -
  * or that it holds none. Sites by host name only, never a title (006 R-127).
  */
-function subtitleText(session: SessionView, t: (key: string) => string): string {
+function holdsText(session: SessionView, t: (key: string) => string): string {
   const count = session.tabs.length;
   const sites = (session.sites ?? []).join(t("agent.session.siteSeparator"));
-  const holds =
-    count === 0
-      ? t("agent.session.noSites")
-      : (count === 1 ? t("agent.session.holdsOne") : t("agent.session.holds").replace("{n}", String(count))).replace(
-          "{sites}",
-          () => sites,
-        );
-  const started = clockTime(session.startedAt);
-  // Without a folder the title already ends in the start time; saying it twice reads as a mistake.
-  return started === undefined || session.label === undefined
-    ? holds
-    : `${t("agent.session.started").replace("{time}", started)} · ${holds}`;
+  // T606 (B3): when it started is said under the name now, so this line is what it holds.
+  return count === 0
+    ? t("agent.session.noSites")
+    : (count === 1 ? t("agent.session.holdsOne") : t("agent.session.holds").replace("{n}", String(count))).replace("{sites}", () => sites);
 }
 
 /**
@@ -232,6 +224,11 @@ export function SessionCard(props: {
   const titleId = `agent-session-${session.sessionId}`;
   const held = session.tabs.length;
   const sitePlan = session.sitePlan;
+  const agentNameOf = session.agentName ?? props.agentName;
+  const started = clockTime(session.startedAt);
+  const startedText = started === undefined ? undefined : t("agent.session.started").replace("{time}", started);
+  // With a folder for a name the agent goes under it; without one the name is the agent already.
+  const metaText = session.label !== undefined ? [agentNameOf, startedText].filter((part) => part !== undefined).join(" · ") : startedText;
 
   return (
     <section
@@ -243,23 +240,30 @@ export function SessionCard(props: {
       {/* 016 FR-225: the same colour as the session's tab group, so a card and its tabs are found
           together. Decoration only - the title already says which session - and absent when the
           worker gave the session no colour, rather than a colour the panel made up. */}
-      {session.colour === undefined ? null : (
-        <div className="agent-session-stripe" data-colour={session.colour} aria-hidden="true" />
-      )}
       <div className="agent-session-body">
-        <h2 id={titleId}>
-          {/* The name this session's greeting carried, as inert text - it is remote input. The paired
-              record's name is only a fallback: one agent id is shared by every MCP client on the machine. */}
-          {/* 016 FR-226 – FR-228: then the folder its host reported, else when it started. */}
-          <SessionTitle
-            agentName={session.agentName ?? props.agentName}
-            label={session.label}
-            startedAt={session.startedAt}
-            t={t}
-          />
-        </h2>
-        <p className="agent-session-sites">{subtitleText(session, t)}</p>
-        <p className="agent-session-state">{stateText(session, props.now, t)}</p>
+        {/* T606 (B3): a dot, the name in bold with "agent · started" under it, the state as a pill. */}
+        <div className="agent-session-head">
+          {session.colour === undefined ? null : (
+            <span className="agent-session-stripe" data-colour={session.colour} aria-hidden="true" />
+          )}
+          <div className="agent-session-titles">
+            <h2 id={titleId}>
+              {/* The folder its host reported (016 FR-226 - FR-228), else the name this session's
+                  greeting carried - both inert text, remote input. The paired record's name is only a
+                  fallback: one agent id is shared by every MCP client on the machine. */}
+              {session.label !== undefined ? (
+                <span className="agent-session-label" title={session.label}>
+                  {visibleLabel(session.label)}
+                </span>
+              ) : (
+                agentNameOf
+              )}
+            </h2>
+            {metaText === undefined ? null : <p className="agent-session-meta">{metaText}</p>}
+          </div>
+          <p className="agent-session-state">{stateText(session, props.now, t)}</p>
+        </div>
+        <p className="agent-session-sites">{holdsText(session, t)}</p>
         {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
             recording and none has been exported - a card that said "no recording" would be a fact
             about nothing on every card the owner ever sees. */}
@@ -324,14 +328,13 @@ export function SessionCard(props: {
           </p>
         ) : null}
         {/*
-          016 FR-232 – FR-234: "End session" always, first and on its own; the rest only when they
-          would do something, after a spacer that keeps them away from it.
+          016 FR-232 – FR-234, T608 (Y1): one left-aligned row that wraps. "End session" always and
+          first, so its place never moves (FR-232); the rest only when they would do something.
         */}
         <div className="agent-session-actions">
           <button type="button" className="agent-danger" onClick={props.onStop}>
             {t("agent.session.stop")}
           </button>
-          <span className="agent-session-spacer" aria-hidden="true" />
           {/*
             014 FR-178, 016 FR-233: shown only while the session is working. Still deliberately not
             `disabled` when the count says nothing is in flight: the picture can be a moment old - the

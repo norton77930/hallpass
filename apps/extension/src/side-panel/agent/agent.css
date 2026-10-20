@@ -83,7 +83,7 @@
 .agent-shell button {
   min-height: 32px;
   padding: var(--sp-1) var(--sp-3);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--r-1);
   background: var(--surface);
   color: var(--text);
@@ -107,6 +107,19 @@
   filter: brightness(0.94);
 }
 
+/*
+ * T602: a primary button that cannot be pressed yet (Send with an empty box) reads as quiet, not
+ * washed out: a nested surface with meta text (4.7:1 light, 5.1:1 dark), at full opacity.
+ */
+.agent-shell .agent-primary:disabled,
+.agent-shell .agent-primary:disabled:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+  color: var(--text-3);
+  filter: none;
+  opacity: 1;
+}
+
 /* Stop ends a session: danger, outlined, never filled. */
 .agent-shell .agent-danger {
   border-color: var(--danger);
@@ -122,7 +135,7 @@
   max-width: 100%;
   min-height: 32px;
   padding: var(--sp-1) var(--sp-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--r-1);
   background: var(--surface);
 }
@@ -131,6 +144,11 @@
   width: var(--sp-4);
   height: var(--sp-4);
   margin: 0;
+  accent-color: var(--accent);
+}
+
+/* T606 (C6): radios are drawn in the accent too, not the browser's default blue. */
+.agent-shell input[type="radio"] {
   accent-color: var(--accent);
 }
 
@@ -145,8 +163,7 @@
 
 .agent-page,
 .agent-prompt,
-.agent-session,
-.agent-sites {
+.agent-session {
   padding: var(--sp-3);
   border: 1px solid var(--line);
   border-radius: var(--r-2);
@@ -196,7 +213,7 @@
 }
 
 .agent-status-count {
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
 .agent-dot {
@@ -219,8 +236,9 @@
   margin-top: var(--sp-1);
   padding: var(--sp-1);
   border: 1px solid var(--line);
-  border-radius: var(--r-1);
-  background: var(--surface);
+  border-radius: var(--r-3);
+  background: var(--bg);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--text) 18%, transparent);
 }
 
 .agent-menu button {
@@ -264,10 +282,70 @@
   min-width: 0;
 }
 
+.agent-browser-line {
+  min-height: 32px;
+}
+
+/* T605: "This browser: …" is a quiet line; Rename beside it reads as a link. */
 .agent-browser-name {
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+
+/* ---------- the side-panel agent's permission (019 FR-309), T605: a switch row ---------- */
+
+.agent-panel-consent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.agent-shell .agent-panel-consent-switch {
+  min-height: 32px;
+  color: var(--text);
+}
+
+.agent-shell .agent-panel-consent-switch input[role="switch"] {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: var(--r-pill);
+  background: var(--line-strong);
+  appearance: none;
+  cursor: pointer;
+}
+
+.agent-shell .agent-panel-consent-switch input[role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  transition: left 0.15s ease;
+}
+
+.agent-shell .agent-panel-consent-switch input[role="switch"]:checked {
+  background: var(--accent);
+}
+
+.agent-shell .agent-panel-consent-switch input[role="switch"]:checked::after {
+  left: 14px;
+  background: var(--accent-text);
+}
+
+.agent-shell .agent-panel-consent-note {
+  margin: 0;
+  padding-left: calc(30px + var(--sp-2));
+  color: var(--text-3);
+  font-size: var(--fs-1);
 }
 
 .agent-browser-input {
@@ -276,7 +354,7 @@
   font: inherit;
   color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--r-1);
   padding: var(--sp-1) var(--sp-2);
 }
@@ -295,7 +373,7 @@
 .agent-browser-others {
   margin: 0;
   font-size: var(--fs-1);
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
 /* ---------- prompt card ---------- */
@@ -327,7 +405,7 @@
   0% {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
-    background: var(--surface-strong);
+    background: var(--accent-soft);
   }
   100% {
     outline: 2px solid transparent;
@@ -370,7 +448,7 @@
 .agent-siteplan-question {
   display: block;
   font-weight: 400;
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
 .agent-siteplan-heading {
@@ -443,7 +521,7 @@
 
 .agent-session-nothing {
   font-size: var(--fs-1);
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
 /* ---------- session cards ---------- */
@@ -459,17 +537,106 @@
   flex-shrink: 0;
   padding: 0;
   overflow: hidden;
+  /* T605: a small bordered card on the panel ground. */
+  border-radius: var(--r-3);
+  background: var(--bg);
 }
 
 .agent-session-body {
   flex: 1 1 auto;
   min-width: 0;
-  padding: var(--sp-3);
+  padding: var(--sp-2) 10px;
 }
 
+.agent-shell .agent-session h2 {
+  margin-bottom: 2px;
+}
+
+.agent-shell .agent-session-actions button {
+  min-height: 28px;
+  padding: 2px 10px;
+  border-color: var(--line);
+  border-radius: var(--r-2);
+  background: var(--bg);
+}
+
+.agent-shell .agent-session-actions button:hover {
+  background: var(--surface-2);
+}
+
+.agent-shell .agent-session-actions button.agent-danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* T606 (B3): the session's tab-group colour is a dot before its name, not a stripe down the card. */
 .agent-session-stripe {
-  flex: 0 0 6px;
-  width: 6px;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 50%;
+}
+
+/*
+  T608 (Y1): the dot and the name sit side by side; the state pill is the next row under the name,
+  never beside it, so a long state ("Idle · last action just now") cannot squeeze the "agent ·
+  started" line into two. With no dot the first column is empty and takes no room.
+*/
+.agent-session-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--sp-2);
+  row-gap: 2px;
+  min-width: 0;
+}
+
+.agent-session-head > .agent-session-titles {
+  grid-column: 2;
+}
+
+.agent-session-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.agent-shell .agent-session-titles h2 {
+  overflow: hidden;
+  margin: 0;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-meta {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The state as a pill under the name and its "agent · started" line. */
+.agent-session-head .agent-session-state {
+  grid-column: 2;
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  font-size: var(--fs-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session[data-session-state="working"] .agent-session-head .agent-session-state {
+  background: var(--accent-soft);
+}
+
+.agent-session[data-session-state="waiting"] .agent-session-head .agent-session-state {
+  background: var(--warn-soft);
 }
 
 .agent-session-stripe[data-colour="cyan"] { background: var(--group-cyan); }
@@ -486,20 +653,105 @@
 }
 
 .agent-session-sites {
+  margin-top: var(--sp-1);
   font-size: var(--fs-1);
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
-/* 0.9.0: the upload list says what it is for; where the file lives is a quiet last line. */
+/* T606 (B2): what the upload list is for, in one short secondary line. */
 .agent-upload-roots-intro,
 .agent-upload-roots-empty {
-  color: var(--text-2);
+  color: var(--text-3);
+  font-size: var(--fs-1);
 }
 
 .agent-upload-roots-path {
   font-size: var(--fs-1);
-  color: var(--text-2);
+  line-height: 1.35;
+  color: var(--text-3);
   overflow-wrap: anywhere;
+}
+
+
+/* T605: one row per allowed directory - its path on a nested surface, its revoke at the end. */
+.agent-upload-roots ul,
+.agent-transitions ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-2);
+}
+
+.agent-upload-root,
+.agent-transition {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--sp-1) var(--sp-1) 10px;
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.agent-upload-root-path,
+.agent-transition-pair {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.agent-upload-root-path {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: var(--fs-1);
+}
+
+/*
+ * T606 (B4): the folder takes what the x leaves, however long its path is (basis 0, so the x never
+ * wraps to a line of its own); a "waiting for the host" note goes on the line below. T607 (S3): the
+ * folder's name on one line and its path under it on one line that ends in an ellipsis (the title
+ * has the whole path).
+ */
+.agent-upload-root > .agent-upload-root-text {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-upload-root-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-upload-root-text > .agent-upload-root-path {
+  flex: none;
+  overflow: hidden;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-upload-root > .agent-icon-button {
+  flex: none;
+}
+
+.agent-upload-root > .agent-upload-root-pending {
+  flex: 0 0 100%;
+}
+
+.agent-upload-root-pending,
+.agent-transition-used {
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+.agent-upload-roots-warning {
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: var(--fs-2);
 }
 
 .agent-session-state {
@@ -514,11 +766,6 @@
 .agent-session[data-session-state="waiting"] .agent-session-state {
   color: var(--warn);
   font-weight: 600;
-}
-
-/* 016 FR-233: pushes the optional controls away from "End session". */
-.agent-session-spacer {
-  flex: 1 1 auto;
 }
 
 .agent-session .agent-details {
@@ -547,7 +794,7 @@
 }
 
 .agent-activity-outcome {
-  color: var(--text-2);
+  color: var(--text-3);
 }
 
 /*
@@ -569,6 +816,22 @@
 
 /* ---------- site list ---------- */
 
+/*
+ * T605: no box around the list - a small heading with a hairline above it (see "shared small
+ * controls"), then one row per site with its mode on the right.
+ */
+.agent-sites {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-shell .agent-sites h2,
+.agent-shell .agent-sites h3 {
+  margin-bottom: 0;
+}
+
 .agent-sites > p {
   color: var(--text-2);
 }
@@ -576,69 +839,139 @@
 .agent-site {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3) 0;
+  gap: var(--sp-1);
+  padding: var(--sp-2) 0;
+}
+
+.agent-site + .agent-site {
   border-top: 1px solid var(--line);
 }
 
-.agent-site:last-child {
-  padding-bottom: 0;
-}
-
 .agent-site-name {
-  font-weight: 600;
   min-width: 0;
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: var(--fs-2);
+}
+
+.agent-site-author {
+  color: var(--text-3);
+  font-size: var(--fs-1);
 }
 
 
-/* One row per site: the name and its mode on the first line, the quiet controls under it. */
+
+/*
+ * T606 (B1): one line per site - its name, then its mode as a chip and a "more" button. What the
+ * chip or "more" opens is drawn under the line, over what follows, and leaves on Escape or a press
+ * elsewhere.
+ */
 .agent-site {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "head mode"
-    "tools tools";
+  position: relative;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
-  column-gap: var(--sp-3);
+  column-gap: var(--sp-2);
 }
 
-.agent-site-head {
-  grid-area: head;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-2);
+/* The host stays on the one line (the full name is its title); the chip and "more" never wrap away. */
+.agent-site-name {
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-site-mode {
-  grid-area: mode;
-}
-
-.agent-site-mode select {
-  min-width: 9em;
-}
-
-/* 016 FR-235: the permissive mode is marked on its own switch, in the warning colour. */
-.agent-site-mode select[data-permissive="true"] {
-  border: 2px solid var(--warn);
-}
-
-.agent-site-tools {
-  grid-area: tools;
-  display: flex;
-  flex-wrap: wrap;
+.agent-site-controls {
+  display: inline-flex;
+  flex: none;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-2) var(--sp-3);
+  gap: 2px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.agent-shell button.agent-site-mode-chip {
+  flex: none;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 26px;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg);
   color: var(--text-2);
   font-size: var(--fs-1);
+}
+
+/* 016 FR-235: acting without asking is marked on its own chip, in the warning colour. */
+.agent-shell button[data-site-mode][data-permissive="true"] {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.agent-shell button.agent-site-more-button {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+}
+
+.agent-site-popup {
+  position: absolute;
+  top: calc(100% - var(--sp-1));
+  right: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 180px;
+  max-width: 100%;
+  margin: 0;
+  padding: var(--sp-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--bg);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--text) 18%, transparent);
+  list-style: none;
+}
+
+.agent-site-more {
+  padding: var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-shell .agent-site-mode-menu button {
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
+  text-align: left;
+}
+
+.agent-shell .agent-site-mode-menu button:hover,
+.agent-shell .agent-site-mode-menu button:focus-visible {
+  background: var(--surface-2);
+}
+
+.agent-shell .agent-site-mode-menu button[aria-checked="true"] {
+  font-weight: 600;
+}
+
+.agent-shell .agent-site-mode-menu button[data-mode="skip-checks"] {
+  color: var(--warn);
 }
 
 .agent-site-diagnostics {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+.agent-site-more .agent-site-revoke {
+  align-self: flex-start;
 }
 
 /* A control that must be there but should not compete: text-sized, no fill until hovered. */
@@ -651,7 +984,7 @@
 }
 
 .agent-shell button.agent-quiet:hover {
-  border-color: var(--line);
+  border-color: var(--line-strong);
   color: var(--text);
 }
 
@@ -708,73 +1041,316 @@
   min-width: 0;
 }
 
-/* ---------- 019 Conversation tab (T546, T548) ---------- */
+/* ---------- T605: shared small controls ---------- */
 
-.agent-conversation {
+/* An icon-only button: its name is visually hidden words inside it (and its hover title). */
+.agent-shell button.agent-icon-button {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.agent-shell button.agent-icon-button:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* A text button that reads as a link (Rename). */
+.agent-shell button.agent-link {
+  min-height: 28px;
+  padding: var(--sp-1);
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+}
+
+.agent-shell button.agent-link:hover {
+  background: var(--accent-soft);
+}
+
+/* A section's small muted heading with a hairline above it, instead of a box around it. */
+.agent-shell .agent-section-heading,
+.agent-shell .agent-sites > h2,
+.agent-shell .agent-sites h3 {
+  margin: var(--sp-2) 0 0;
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* ---------- 019 Conversation tab (T546, T548), T605 planned layout ---------- */
+
+/*
+ * T602, T605: the Conversation tab fills what the shell has left under the tab bar and is a column -
+ * one header row, the middle (the message log, its one scroller, or the welcome), and the message box
+ * pinned at the bottom - so the shell itself does not scroll and the box never covers the log. A
+ * question card above the tab bar can still push the tab down; then the shell scrolls, and the tab
+ * keeps a usable height.
+ *
+ * H2: that floor is what is left for the header and the box with a few lines of log between them,
+ * not a comfortable height - a short panel shrinks the log alone, and only a panel too short for the
+ * header and the box together makes the shell scroll.
+ */
+.agent-tabpanel:has(> .agent-conversation-frame) {
+  flex: 1 1 0;
+  min-height: 240px;
+}
+
+.agent-conversation-frame {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.agent-conversation-frame > section {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.agent-conversation,
+.agent-shell .agent-conversation-new {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
   min-width: 0;
-}
-
-.agent-conversation-agents {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .agent-conversation-availability,
 .agent-conversation-detail,
-.agent-conversation-who,
 .agent-conversation-action-input,
-.agent-conversation-state,
-.agent-conversation-mode-label {
-  color: var(--text-2);
+.agent-conversation-state {
+  color: var(--text-3);
   font-size: var(--fs-1);
 }
 
-.agent-conversation-header dl {
+/* ---------- header row ---------- */
+
+.agent-conversation-header {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-1) var(--sp-3);
-  margin: 0;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
 }
 
-.agent-conversation-header dt {
-  color: var(--text-2);
-  font-size: var(--fs-1);
-}
-
-.agent-conversation-header dd {
-  margin: 0;
-}
-
-.agent-conversation-mode [role="radiogroup"] {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-3);
-}
-
-.agent-conversation-note {
-  color: var(--warn);
-  font-size: var(--fs-1);
-}
-
-.agent-conversation-log {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.agent-conversation-message {
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2);
+.agent-shell .agent-conversation-list-button {
   background: var(--surface);
 }
 
-.agent-conversation-message[data-message-role="owner"] {
+.agent-conversation-heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 var(--sp-1);
+}
+
+.agent-conversation-title,
+.agent-conversation-subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-conversation-title {
+  font-size: var(--fs-3);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.agent-conversation-subtitle {
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  line-height: 1.35;
+}
+
+.agent-conversation-subtitle .agent-conversation-folder {
+  overflow-wrap: normal;
+}
+
+/* ---------- welcome (the empty conversation's middle) ---------- */
+
+.agent-conversation-welcome {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-4);
+  text-align: center;
+}
+
+.agent-conversation-welcome-mark {
+  display: flex;
+  color: var(--accent);
+}
+
+.agent-shell .agent-conversation-welcome h2 {
+  margin: 0;
+  font-size: var(--fs-4);
+}
+
+.agent-shell .agent-conversation-welcome-lead {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.agent-conversation-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: 100%;
+  margin-top: var(--sp-1);
+}
+
+.agent-shell .agent-conversation-suggestions button {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  color: var(--text);
+  text-align: start;
+}
+
+.agent-shell .agent-conversation-suggestions button:hover {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+/*
+ * T606 (A2, H1): the first message, held under the first-use card, sits where the conversation will
+ * be - in the middle area, which fills what the box leaves, at its bottom just above the card, as a
+ * faded bubble on the right (the owner's bubble look comes from `.agent-conversation-message`).
+ */
+.agent-conversation-held {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-1);
+}
+
+/* margin-top: auto rather than justify-content: a long held message still scrolls from its top. */
+.agent-conversation-held > :first-child {
+  margin-top: auto;
+}
+
+.agent-conversation-held > [data-held] {
+  flex: none;
+  opacity: 0.7;
+}
+
+.agent-shell .agent-conversation-held-hint {
+  flex: none;
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  text-align: end;
+}
+
+/* ---------- the message log ---------- */
+
+/*
+ * T606 (P4): the frame takes the log's place in the column - it is what grows to fill the panel -
+ * and holds "Jump to latest" over the log's lower right corner. The log inside is the one scroller.
+ */
+.agent-conversation-log-frame {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.agent-shell button.agent-conversation-jump {
+  position: absolute;
+  right: var(--sp-3);
+  bottom: var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 28px;
+  padding: 2px var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--text) 14%, transparent);
+  font-size: var(--fs-1);
+}
+
+.agent-shell button.agent-conversation-jump:hover {
   background: var(--surface-2);
+}
+
+/*
+  T608 (B1): `position: relative` makes the log the containing block of the visually hidden
+  `.agent-sr-only` spans inside it. Without it they were placed against the frame, outside the
+  scroller, so they neither scrolled nor were clipped with the log and stretched the shell's own
+  scroll height (548 against 420 in a measured panel).
+*/
+.agent-conversation-log {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-height: 0;
+  padding: var(--sp-1) var(--sp-1) var(--sp-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The log's children keep their own height; the log scrolls instead of squeezing them. */
+.agent-conversation-log > * {
+  flex: none;
+}
+
+/* A short conversation sits at the bottom, by the box, as a chat does (and still scrolls when long). */
+.agent-conversation-log > :first-child {
+  margin-top: auto;
+}
+
+/* T605: no card around a message. The owner's words are a bubble on the right... */
+.agent-conversation-message {
+  min-width: 0;
+}
+
+.agent-conversation-message[data-message-role="owner"] {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-4);
+  background: var(--surface-2);
+}
+
+/* ...and the agent's reply flows on the panel ground. */
+.agent-conversation-message[data-message-role="agent"] {
+  line-height: 1.6;
 }
 
 .agent-conversation-message p {
@@ -790,61 +1366,569 @@
   font-size: var(--fs-1);
 }
 
+/* T607 (W1): a step is one line - title and input end in an ellipsis, the status sits at the line's end. */
 .agent-conversation-actions li {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--sp-1) var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
   border-left: 2px solid var(--line);
+}
+
+.agent-conversation-actions .agent-conversation-action-title,
+.agent-conversation-actions .agent-conversation-action-input {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-conversation-actions .agent-conversation-action-status,
+.agent-conversation-actions .agent-conversation-action-rule {
+  flex: none;
+}
+
+.agent-conversation-actions .agent-conversation-action-status {
+  margin-inline-start: auto;
 }
 
 .agent-conversation-actions li[data-status="done"] {
   border-left-color: var(--ok);
 }
 
+/* T605: a failed or refused action is a soft danger row, always in view. */
 .agent-conversation-actions li[data-status="failed"],
 .agent-conversation-actions li[data-status="refused"] {
-  border-left-color: var(--danger);
+  border-left: 0;
+  border-radius: var(--r-2);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.agent-conversation-actions li[data-status="failed"] *,
+.agent-conversation-actions li[data-status="refused"] * {
+  color: inherit;
+}
+
+.agent-conversation-action-title {
+  font-weight: 600;
 }
 
 .agent-conversation-action-rule {
   color: var(--warn);
 }
 
+/* 020 FR-318 (T595): a turn's actions take one line - the live one, or "N steps" folded. */
+.agent-conversation-turn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  font-size: var(--fs-2);
+}
+
+.agent-conversation-turn > .agent-conversation-actions {
+  align-self: stretch;
+}
+
+/* T605: one muted live line with a spinner while the turn runs. */
+.agent-conversation-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  margin: 0;
+  color: var(--text-2);
+}
+
+.agent-conversation-live .agent-conversation-action-title {
+  font-weight: 400;
+}
+
+.agent-conversation-spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: agent-conversation-spin 0.9s linear infinite;
+}
+
+@keyframes agent-conversation-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-conversation-spinner {
+    animation: none;
+  }
+}
+
+.agent-conversation-live:empty {
+  display: none;
+}
+
+/* T605: "N steps" is one muted line with a chevron that turns when the steps are shown. */
+.agent-shell .agent-conversation-steps {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--fs-2);
+}
+
+.agent-shell .agent-conversation-steps:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.agent-conversation-steps svg {
+  transition: transform 0.15s ease;
+}
+
+.agent-shell .agent-conversation-steps[aria-expanded="true"] {
+  color: var(--text-2);
+}
+
+.agent-conversation-steps[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
 .agent-conversation-notice {
   padding: var(--sp-2) var(--sp-3);
   border-left: 2px solid var(--warn);
-  background: var(--surface);
+  border-radius: var(--r-1);
+  background: var(--warn-soft);
 }
 
-/* A card waiting on the owner wears the warning colour, as the 016 waiting session does. */
+.agent-conversation-answer {
+  margin: 0;
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--line-strong);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation > .agent-conversation-state {
+  flex: none;
+  margin: 0;
+  padding: 0 var(--sp-1);
+}
+
+/* ---------- the footer: cards over the box, the box, what stays under it ---------- */
+
+/*
+ * 020 FR-319, SC-144, T605: the box - and a permission or first-use card directly above it - stays
+ * at the bottom of the panel while the log above it scrolls. A tall card scrolls inside itself rather
+ * than take the whole panel from the log; what a chip opened pops up over the log.
+ */
+.agent-conversation-composer-area {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* The cards that sit over the box: a raised card in the accent's line colour. */
+.agent-shell .agent-conversation-setup,
 .agent-conversation-permission {
+  max-height: 45vh;
+  overflow-y: auto;
   padding: var(--sp-3);
-  border: 1px solid var(--line);
-  border-top: 2px solid var(--warn);
-  border-radius: var(--r-2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-3);
   background: var(--surface);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.agent-conversation-permission h3 {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-3);
+  font-weight: 600;
+}
+
+.agent-conversation-permission > p {
+  color: var(--text-2);
+  font-size: var(--fs-2);
 }
 
 .agent-conversation-permission-detail {
+  max-height: 10lh;
   margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  overflow: auto;
+  border-radius: var(--r-2);
+  background: var(--code);
   white-space: pre-wrap;
   font-size: var(--fs-1);
 }
 
-.agent-conversation-composer textarea {
-  width: 100%;
-  padding: var(--sp-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-1);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  resize: vertical;
+/* T605: one rounded card holds the box and, under it, the chips with Send or Stop at the end. */
+.agent-conversation-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: 10px 10px var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-4);
+  background: var(--bg);
+  anchor-name: --agent-composer;
 }
 
-/* 019 T563: the list of conversations and the folder chooser. */
-.agent-conversation-list,
+.agent-conversation-composer:focus-within {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus);
+}
+
+.agent-conversation-composer:has(textarea[readonly]) {
+  background: var(--surface-2);
+}
+
+/* T602: the box starts at two lines and grows with the words up to eight, then scrolls. */
+.agent-conversation-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 2lh;
+  max-height: 8lh;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-3);
+  line-height: 1.45;
+  field-sizing: content;
+  overflow-y: auto;
+  resize: none;
+}
+
+/* The card shows the focus (above); the box inside it needs no ring of its own. */
+.agent-shell .agent-conversation-composer textarea:focus-visible {
+  outline: none;
+}
+
+.agent-conversation-composer textarea::placeholder {
+  color: var(--text-3);
+  opacity: 1;
+}
+
+.agent-conversation-composer textarea[readonly] {
+  color: var(--text-2);
+}
+
+/* The chips (one row), a flexible gap, then Send and Stop. */
+.agent-conversation-composer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-conversation-composer-row > .agent-conversation-chips {
+  flex: 1 1 auto;
+}
+
+.agent-conversation-composer-actions {
+  display: flex;
+  flex: none;
+  align-self: flex-end;
+  gap: var(--sp-1);
+}
+
+.agent-shell button.agent-conversation-send,
+.agent-shell button.agent-conversation-stop {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+}
+
+.agent-shell button.agent-conversation-send {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.agent-shell button.agent-conversation-send:hover {
+  background: var(--accent);
+  color: var(--accent-text);
+  filter: brightness(0.94);
+}
+
+/* Send with nothing to send reads as quiet, at full opacity (T602). */
+.agent-shell button.agent-conversation-send:disabled,
+.agent-shell button.agent-conversation-send:disabled:hover {
+  background: var(--surface-2);
+  color: var(--text-3);
+  cursor: default;
+  filter: none;
+}
+
+.agent-shell button.agent-conversation-stop,
+.agent-shell button.agent-conversation-stop:hover {
+  background: var(--text);
+  color: var(--bg);
+}
+
+/*
+ * T605: the chips sit on one row beside Send/Stop. T609 (N1): they stay on that one row at the
+ * panel's ordinary width, in both languages - the folder chip is the one that gives way, ending in
+ * an ellipsis with its hover title holding the whole path. The agent and mode chips and Send/Stop
+ * never shrink.
+ */
+.agent-conversation-chips {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  /* T610 shots: tight spacing, so the folder chip keeps a readable start at 400 px. */
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-shell .agent-conversation-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--fs-1);
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.agent-shell .agent-conversation-chip[data-chip="folder"] {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.agent-conversation-chip-short {
+  white-space: nowrap;
+}
+
+.agent-shell .agent-conversation-chip svg {
+  flex: none;
+  color: var(--text-3);
+}
+
+.agent-shell button.agent-conversation-chip:hover {
+  background: var(--surface-2);
+}
+
+.agent-shell button.agent-conversation-chip[aria-expanded="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.agent-shell button.agent-conversation-chip:disabled {
+  cursor: default;
+}
+
+/* D-020-6: the agent's own review wears the warning colour. */
+.agent-shell .agent-conversation-chip[data-warn],
+.agent-shell button.agent-conversation-chip[data-warn]:hover {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.agent-shell .agent-conversation-chip[data-warn] svg {
+  color: inherit;
+}
+
+/* FR-315: agent and folder of an open conversation are shown, not offered: quieter, no chevron. */
+.agent-shell .agent-conversation-chip[data-fixed] {
+  background: transparent;
+  color: var(--text-2);
+}
+
+.agent-conversation-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* FR-293's Codex note, in view under the box. */
+.agent-conversation-note {
+  margin: 0;
+  color: var(--warn);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-composer-area > .agent-conversation-note {
+  padding: 0 var(--sp-1);
+}
+
+/* ---------- what a chip opened: a menu that pops up over the log ---------- */
+
+.agent-conversation-popup {
+  position: absolute;
+  bottom: calc(100% + var(--sp-1));
+  left: 0;
+  z-index: 1;
+  width: min(100%, 320px);
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--bg);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--text) 18%, transparent);
+}
+
+/* Where anchoring is supported, the menu sits on the box itself even with a card above it. */
+@supports (anchor-name: --a) {
+  .agent-conversation-popup {
+    position-anchor: --agent-composer;
+    bottom: calc(anchor(top) + var(--sp-1));
+  }
+}
+
+/* The mode menu opens from the right, where its chip usually is. */
+.agent-conversation-popup:has(> .agent-conversation-mode) {
+  right: 0;
+  left: auto;
+}
+
+/* The popup is the card; what is inside it draws no box of its own. */
+.agent-conversation-popup > * {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+/* 020 FR-320 (T597): the mode chip's menu - each mode with what it means. */
+.agent-conversation-mode [role="radiogroup"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-conversation-mode-option {
+  padding: var(--sp-2) 10px;
+  border-radius: var(--r-2);
+}
+
+.agent-conversation-mode-option label {
+  font-weight: 600;
+}
+
+.agent-conversation-mode-option p {
+  margin: 0;
+}
+
+.agent-conversation-mode-explain {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+/* D-020-6: the agent's own review wears the warning colour while it is on. */
+.agent-conversation-mode-option[data-warn] {
+  background: var(--warn-soft);
+}
+
+.agent-conversation-mode-option[data-warn] label {
+  color: var(--warn);
+}
+
+/* T606 (C6): the agent's own review is the warning choice, chosen or not - its name and its radio. */
+.agent-conversation-mode-option[data-mode="agent-review"] label {
+  color: var(--warn);
+}
+
+.agent-conversation-mode-option[data-mode="agent-review"] input[type="radio"] {
+  accent-color: var(--warn);
+}
+
+.agent-conversation-mode-option .agent-conversation-note {
+  margin-top: var(--sp-1);
+  padding-top: var(--sp-1);
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+}
+
+.agent-conversation-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  list-style: none;
+}
+
+.agent-shell .agent-conversation-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  text-align: start;
+}
+
+.agent-shell .agent-conversation-menu-item:hover {
+  background: var(--surface-2);
+}
+
+.agent-shell .agent-conversation-menu-item[aria-checked="true"] {
+  background: var(--accent-soft);
+}
+
+.agent-conversation-agent-badge {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-conversation-menu-item[aria-checked="true"] .agent-conversation-agent-badge {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.agent-conversation-menu-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-conversation-menu-item[data-availability="ready"] .agent-conversation-availability {
+  color: var(--ok);
+}
+
+.agent-conversation-menu-note {
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+/* 019 T563: the folder chooser (in the popup). */
 .agent-conversation-folders {
   display: flex;
   flex-direction: column;
@@ -852,63 +1936,75 @@
   min-width: 0;
 }
 
-.agent-conversation-entries {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.agent-conversation-entries li,
 .agent-conversation-folder-row {
   display: flex;
   align-items: flex-start;
   gap: var(--sp-2);
 }
 
-.agent-conversation-entry {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: flex-start;
-  min-width: 0;
-  text-align: start;
-}
-
-.agent-conversation-entry-meta {
-  color: var(--text-2);
-  font-size: var(--fs-1);
-}
-
-.agent-conversation-entry-label {
-  color: var(--warn);
-  font-size: var(--fs-1);
-}
-
 .agent-conversation-folder {
   overflow-wrap: anywhere;
 }
 
-.agent-conversation-folder-choices label {
+/* T607 (J1): a chooser row is the folder's name over its path, each on one line; Remove stays whole. */
+.agent-conversation-folder-text {
   display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
+  flex-direction: column;
   min-width: 0;
 }
 
-.agent-conversation-folder-path label {
+.agent-conversation-folder-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-conversation-folder-full {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-conversation-folder-row button {
+  flex: none;
+  white-space: nowrap;
+}
+
+.agent-conversation-folder-choices {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
 }
 
+.agent-conversation-folder-choices label {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.agent-conversation-folder-path label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-1);
+}
+
+.agent-conversation-folder-path {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
 .agent-conversation-folder-path input[type="text"] {
   padding: var(--sp-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-1);
-  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--bg);
   color: var(--text);
   font: inherit;
 }
@@ -936,4 +2032,169 @@
   to {
     background-position: -100% 0;
   }
+}
+
+/* ---------- 020 FR-321 (T598): the drawer of conversations, from the left over a scrim ---------- */
+
+.agent-conversation-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  background: color-mix(in srgb, var(--text) 35%, transparent);
+}
+
+.agent-conversation-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  width: min(85%, 300px);
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--sp-3);
+  border-right: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 8px 0 24px color-mix(in srgb, var(--text) 16%, transparent);
+}
+
+.agent-conversation-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.agent-shell .agent-conversation-drawer-head h2 {
+  margin: 0;
+}
+
+.agent-conversation-drawer-search {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.agent-conversation-drawer-search::placeholder {
+  color: var(--text-3);
+  opacity: 1;
+}
+
+.agent-conversation-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agent-conversation-group h3 {
+  margin: 0;
+  padding: 6px var(--sp-1) 2px;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  font-weight: 400;
+}
+
+.agent-conversation-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-conversation-entries li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border-radius: var(--r-2);
+}
+
+.agent-conversation-entries li:hover {
+  background: var(--surface-2);
+}
+
+.agent-shell .agent-conversation-entry {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: 7px var(--sp-2);
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  text-align: start;
+}
+
+/* The title, meta and labels stack in one column beside the badge. */
+.agent-conversation-entry-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.agent-shell .agent-conversation-entry:hover {
+  background: transparent;
+}
+
+.agent-conversation-entry-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * T605: agent · folder · time on one line. T607 (G1): the agent and folder end in an ellipsis when
+ * the line is short; the time keeps its width and is never cut.
+ */
+.agent-conversation-entry-meta {
+  display: flex;
+  gap: var(--sp-1);
+  max-width: 100%;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+}
+
+.agent-conversation-entry-where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-conversation-entry-meta .agent-conversation-folder {
+  overflow-wrap: normal;
+}
+
+/* T605: Remove is a muted icon at the row's end. */
+.agent-shell button.agent-conversation-entry-remove {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  color: var(--text-3);
+}
+
+/* T602: the last use stays on one line; T607 (G1): and whole. */
+.agent-conversation-entry-time {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.agent-conversation-entry-meta > [aria-hidden="true"] {
+  flex-shrink: 0;
+}
+
+.agent-conversation-entry-label {
+  color: var(--warn);
+  font-size: var(--fs-1);
 }

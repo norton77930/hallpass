@@ -650,6 +650,12 @@ async function setDiagnostics(panel: SidePanelDriver, site: string, granted: boo
       message: `the site list has no row for ${site}`,
     })
     .toBe(true);
+  // T606: the diagnostics grant is behind the row's "more" button; open it when it is shut.
+  await panel.evaluatePanel(
+    `(()=>{const row=document.querySelector('[data-site=${JSON.stringify(site)}]');if(row&&!row.querySelector('.agent-site-more'))row.querySelector('.agent-site-more-button')?.click();return true})()`,
+    true,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
   const clicked = await panel.evaluatePanel(
     `(()=>{const box=document.querySelector(${JSON.stringify(`${row} input[type=checkbox]`)});` +
       `if(!box)return false;if(box.checked===${String(granted)})return true;box.click();return true})()`,
@@ -670,6 +676,7 @@ async function clearSite(panel: SidePanelDriver, site: string): Promise<void> {
     .evaluatePanel(`document.querySelector(${JSON.stringify(`.agent-sites li[data-site=${JSON.stringify(site)}]`)}) !== null`)
     .catch(() => false);
   if (present !== true) return;
+  await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] .agent-site-more-button')?.click(), true`, true);
   await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", site)).catch(() => undefined);
 }
 

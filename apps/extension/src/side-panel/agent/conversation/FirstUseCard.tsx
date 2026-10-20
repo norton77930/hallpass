@@ -1,5 +1,6 @@
 import { useId, type ReactElement } from "react";
 import type { ConversationAgentAvailability, ConversationInstallPhase } from "@hallpass/contracts";
+import { availabilityDetail } from "./broker-words.js";
 
 /**
  * 019 US3, FR-299 - FR-302, D-019-5, D-019-7, R-314: what the owner sees before an agent's first
@@ -50,12 +51,14 @@ export function FirstUseCard(props: {
   );
 }
 
-/** FR-301, US3 scenarios 3 and 4: an agent that is not installed, or whose version does not fit. */
+/**
+ * FR-301, US3 scenarios 3 and 4: an agent that is not installed, or whose version does not fit.
+ * 020 FR-313: shown above the message box while that agent is on the chip, and Send stays off.
+ */
 export function AgentProblemCard(props: {
   agent: ConversationAgentAvailability;
   agentName: string;
   t: T;
-  onBack: () => void;
 }): ReactElement {
   const { t, agent } = props;
   const titleId = useId();
@@ -69,13 +72,10 @@ export function AgentProblemCard(props: {
       {!missing && agent.version !== undefined ? (
         <p>{t("conversation.version.installed").replace("{version}", () => agent.version ?? "")}</p>
       ) : null}
-      {/* Already redacted by the broker (R-326). */}
-      {agent.detail === undefined ? null : <p className="agent-conversation-detail">{agent.detail}</p>}
-      <div className="agent-prompt-actions">
-        <button type="button" onClick={props.onBack}>
-          {t("conversation.back")}
-        </button>
-      </div>
+      {/* Already redacted by the broker (R-326); T608: its known sentence is said in the panel's language. */}
+      {agent.detail === undefined ? null : (
+        <p className="agent-conversation-detail">{availabilityDetail(agent.detail, props.agentName, t)}</p>
+      )}
     </section>
   );
 }
@@ -97,7 +97,11 @@ export function InstallProgress(props: {
     return (
       <section className="agent-page agent-conversation-setup" data-setup="install-failed" aria-label={t("conversation.install.label")}>
         <p>{t("conversation.install.failed")}</p>
-        <p className="agent-conversation-detail">{props.failure}</p>
+        {/* T608 (L3): the broker's redacted log is for whoever is asked for it - folded, as on the session cards. */}
+        <details className="agent-details">
+          <summary>{t("agent.details.title")}</summary>
+          <p className="agent-conversation-detail">{props.failure}</p>
+        </details>
         <div className="agent-prompt-actions">
           <button type="button" className="agent-primary" onClick={props.onRetry}>
             {t("conversation.install.retry")}

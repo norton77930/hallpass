@@ -5,23 +5,33 @@
  * this file as text to check every text/surface pair at 4.5:1 in both themes (FR-092) - so every
  * colour here stays a 6-digit hex, one per line.
  *
- * The ground is neutral with a slight cool cast; the one accent is a deep teal; success, warning
- * and danger are their own hues and never the accent. Only the agent build imports this file: the
- * narrow build's `styles.css` is untouched (FR-090).
+ * 020 FR-322, D-020-2 (palette "indigo"): a white ground with cool grey surfaces in light and a
+ * near-black blue-grey ground in dark; one indigo accent that carries the selected state, the
+ * primary action and the focus ring; success, warning and danger are their own hues and never the
+ * accent, each warning and danger with a soft ground of its own for banners. `--text-3` is meta copy
+ * and placeholders and is held to the same 4.5:1 as body copy. Only the agent build imports this
+ * file: the narrow build's `styles.css` is untouched (FR-090).
  */
 :root {
-  --bg: #f3f5f8;
-  --surface: #ffffff;
-  --surface-2: #e9edf2;
-  --text: #1b2430;
-  --text-2: #4f5b6b;
-  --line: #d3d9e1;
-  --accent: #1f6f78;
+  --bg: #ffffff;
+  --surface: #f6f7f9;
+  --surface-2: #eef0f3;
+  --code: #f3f4f6;
+  --line: #e1e4e9;
+  --line-strong: #d3d7de;
+  --text: #16181d;
+  --text-2: #4a505c;
+  --text-3: #646b78;
+  --accent: #4448c8;
   --accent-text: #ffffff;
-  --ok: #1f7a4d;
-  --warn: #8a5300;
-  --danger: #b3261e;
-  --focus: #1f6f78;
+  --accent-soft: #ecedfd;
+  --accent-line: #c5c7f4;
+  --ok: #157f3c;
+  --warn: #a54c06;
+  --warn-soft: #fff3e2;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --focus: #4448c8;
 
   /*
    * 016 FR-225, R-206: the session colours, Chrome's own tab-group palette, so a card's stripe and
@@ -47,22 +57,33 @@
 
   --r-1: 4px;
   --r-2: 8px;
+  --r-3: 12px;
+  /* T605: the message box card and the owner's bubble, and a pill (chips). */
+  --r-4: 14px;
+  --r-pill: 999px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #12161c;
-    --surface: #1a1f27;
-    --surface-2: #242a34;
-    --text: #e6eaf0;
-    --text-2: #a3adbb;
-    --line: #333b47;
-    --accent: #5fb7c0;
-    --accent-text: #0b1517;
-    --ok: #5cc48a;
-    --warn: #e3a94b;
-    --danger: #f08a82;
-    --focus: #7fd0d8;
+    --bg: #15171c;
+    --surface: #1d2027;
+    --surface-2: #272b34;
+    --code: #1f232b;
+    --line: #323743;
+    --line-strong: #3a404d;
+    --text: #eceef2;
+    --text-2: #b9bfcb;
+    --text-3: #959cab;
+    --accent: #9a9df7;
+    --accent-text: #11132b;
+    --accent-soft: #272a4f;
+    --accent-line: #4a4e8f;
+    --ok: #74d18f;
+    --warn: #f2b35c;
+    --warn-soft: #3a2b14;
+    --danger: #f4938a;
+    --danger-soft: #3a1d1b;
+    --focus: #9a9df7;
 
     --group-cyan: #78d9ec;
     --group-green: #81c995;

@@ -272,7 +272,7 @@ async function cardOf(panel: SidePanelDriver, sessionId: string): Promise<CardVi
     `(()=>{const card=document.querySelector('section[data-session-id=${JSON.stringify(sessionId)}]');` +
       `if(!card)return null;const interrupt=card.querySelector('button.agent-interrupt');` +
       `return {sessionId:card.getAttribute('data-session-id'),state:card.getAttribute('data-session-state'),` +
-      `title:(card.querySelector('h2')?.textContent??'').replace(/\\s+/g,' ').trim(),` +
+      `title:[(card.querySelector('.agent-session-meta')?.textContent??'').split(' · ')[0],(card.querySelector('h2')?.textContent??'')].join(' · ').replace(/\\s+/g,' ').trim(),` +
       `label:card.querySelector('.agent-session-label')?.getAttribute('title')??null,` +
       `colour:card.querySelector('.agent-session-stripe')?.getAttribute('data-colour')??null,` +
       `stateText:(card.querySelector('.agent-session-state')?.textContent??'').trim(),` +
@@ -322,14 +322,16 @@ function pageAt(context: BrowserContext, url: string): Page {
 async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
   await panel.waitForText(site);
   const set = await panel.evaluatePanel(
-    `(()=>{const sel=document.querySelector('[data-site=${JSON.stringify(site)}] select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
+    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
+      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
+      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
+      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
+      `if(!item)return false;item.click();return true})()`,
     true,
   );
   expect(set, `the panel offers no mode control for ${site}`).toBe(true);
   await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] select')?.value ?? null`), {
+    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
       timeout: 15_000,
     })
     .toBe(mode);

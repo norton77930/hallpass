@@ -161,6 +161,7 @@ test.describe("agent panel screenshots", () => {
       await ok(beta, "tabs_close", { tabId: tabB });
       openTabs.length = 0;
       // The diagnostics grant and the `ask` row were this run's own; forget them for the next gate.
+      await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE_ASK)}] .agent-site-more-button')?.click(), true`, true);
       await clickLabelled(panel, lookup("agent.siteRevoke", LOCALES[LOCALES.length - 1]!).replace("{site}", SITE_ASK));
     } finally {
       for (const tabId of openTabs) {
@@ -270,14 +271,16 @@ async function groupOf(
 async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
   await panel.waitForText(site);
   const set = await panel.evaluatePanel(
-    `(()=>{const sel=document.querySelector('[data-site=${JSON.stringify(site)}] select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
+    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
+      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
+      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
+      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
+      `if(!item)return false;item.click();return true})()`,
     true,
   );
   expect(set, `the panel offers no mode control for ${site}`).toBe(true);
   await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] select')?.value ?? null`), {
+    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
       timeout: 15_000,
     })
     .toBe(mode);
@@ -287,6 +290,12 @@ async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): 
 async function setDiagnostics(panel: SidePanelDriver, site: string, granted: boolean): Promise<void> {
   await panel.waitForText(site);
   const checked = `document.querySelector('[data-site=${JSON.stringify(site)}] input[type=checkbox]')`;
+  // T606: the diagnostics grant is behind the row's "more" button; open it when it is shut.
+  await panel.evaluatePanel(
+    `(()=>{const row=document.querySelector('[data-site=${JSON.stringify(site)}]');if(row&&!row.querySelector('.agent-site-more'))row.querySelector('.agent-site-more-button')?.click();return true})()`,
+    true,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
   const clicked = await panel.evaluatePanel(
     `(()=>{const box=${checked};if(!box)return false;if(box.checked===${String(granted)})return true;box.click();return true})()`,
     true,
