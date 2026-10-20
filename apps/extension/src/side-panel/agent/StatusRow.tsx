@@ -1,6 +1,9 @@
-import { useState, type ReactElement } from "react";
+import { useId, useRef, useState, type ReactElement } from "react";
 import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
+import { MoreIcon } from "./conversation/icons.js";
+import { useExclusiveMenu } from "./conversation/exclusive-menu.js";
+import { useOutsidePress } from "./conversation/outside-press.js";
 
 /**
  * The status row (006 FR-083, D-006-4): a state dot, "connected", how many sessions are live, and an
@@ -20,8 +23,17 @@ export function StatusRow(props: {
   paired: AgentPanelState["paired"];
   locale: string;
   onUnpair: (agentId: string) => void;
+  /** T606 (B2): the upload folders' list file, when the host reported one (014 FR-191). */
+  uploadListPath?: string | undefined;
 }): ReactElement {
   const [open, setOpen] = useState(false);
+  const menuId = useId();
+  const menu = useRef<HTMLDivElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
+  // T606: a press anywhere else closes the menu, as Escape does (which also gives the focus back).
+  useOutsidePress(menu, menuId, () => setOpen(false));
+  // T607 (S1): opening a site's menu closes this one.
+  useExclusiveMenu(menuId, open, () => setOpen(false));
   const t = (key: string): string => lookup(key, props.locale);
   const count =
     props.sessionCount === 0
@@ -38,19 +50,35 @@ export function StatusRow(props: {
         <span aria-hidden="true"> · </span>
         <span className="agent-status-count">{count}</span>
       </span>
+      {/* T605: an icon button; its name stays the words, for assistive technology and a hover. */}
       <button
+        ref={button}
         type="button"
-        className="agent-menu-button"
+        className="agent-icon-button agent-menu-button"
+        title={t("agent.status.menu")}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
         onClick={() => {
           setOpen((current) => !current);
         }}
       >
-        {t("agent.status.menu")}
+        <MoreIcon />
+        <span className="agent-sr-only">{t("agent.status.menu")}</span>
       </button>
       {open ? (
-        <div role="menu" className="agent-menu">
+        <div
+          ref={menu}
+          id={menuId}
+          role="menu"
+          className="agent-menu"
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            setOpen(false);
+            button.current?.focus();
+          }}
+        >
           {props.paired.map((agent) => (
             // One row per paired agent: its stated name as inert text (remote input), and an
             // unpair whose accessible name carries that name, so two rows never read the same.
@@ -69,6 +97,13 @@ export function StatusRow(props: {
               </button>
             </div>
           ))}
+          {/* T606 (B2): where the upload folders' list file is, for an owner who edits it by hand -
+              a fact about their machine, out of the way until asked for. */}
+          {props.uploadListPath === undefined ? null : (
+            <div role="group" aria-label={t("agent.uploadRootsTitle")} className="agent-menu-row">
+              <p className="agent-upload-roots-path">{t("agent.uploadRootsPath").replace("{path}", () => props.uploadListPath ?? "")}</p>
+            </div>
+          )}
         </div>
       ) : null}
     </div>

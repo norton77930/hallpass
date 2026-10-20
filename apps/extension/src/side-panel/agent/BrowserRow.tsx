@@ -102,6 +102,7 @@ export function BrowserRow(props: {
           <button
             ref={renameRef}
             type="button"
+            className="agent-link"
             aria-label={t("agent.browser.renameLabel")}
             onClick={() => {
               setDraft(name);

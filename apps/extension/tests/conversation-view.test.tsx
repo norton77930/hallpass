@@ -37,7 +37,17 @@ const settle = async () => {
   });
 };
 const header = () => screen.getByRole("region", { name: ui("conversation.header.label") });
+const modeChip = (mode: "strict" | "agent-review") =>
+  screen.getByRole("button", { name: ui("conversation.chip.mode").replace("{mode}", ui(`conversation.mode.${mode}`)) });
+/** 020 FR-312, FR-314: no conversation open - type into the empty conversation and send. */
+const composeAndSend = (words = "hello") => {
+  fireEvent.change(document.querySelector(".agent-conversation-composer textarea")!, { target: { value: words } });
+  fireEvent.click(screen.getByRole("button", { name: ui("conversation.composer.send") }));
+};
 const log = () => screen.getByRole("log", { name: ui("conversation.messages.label") });
+/** 020 FR-320: the mode chip (strict until a mode event says otherwise) opens the modes. */
+const openModeMenu = () =>
+  fireEvent.click(screen.getByRole("button", { name: ui("conversation.chip.mode").replace("{mode}", ui("conversation.mode.strict")) }));
 const expectValidCommands = (port: FakeAgentPort) => {
   for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
 };
@@ -64,13 +74,16 @@ describe("T545 the Conversation tab", () => {
   it("offers both agents with their availability, and starts a scratch conversation with a ready one", async () => {
     await open({ ...CONVERSATION_READY, agents: [CONVERSATION_READY.agents[0]!, { agent: "codex", availability: "missing" }] });
 
-    const agents = screen.getByRole("group", { name: ui("conversation.picker.agentsLabel") });
-    const claude = within(agents).getByRole("button", { name: /^Claude Code/ });
-    const codex = within(agents).getByRole("button", { name: /^Codex/ });
+    // 020 FR-313: the agents are the agent chip's menu; sending starts the conversation (FR-314).
+    fireEvent.click(screen.getByRole("button", { name: /^Agent: / }));
+    const agents = screen.getByRole("menu", { name: ui("conversation.agentMenu.label") });
+    const claude = within(agents).getByRole("menuitemradio", { name: /^Claude Code/ });
+    const codex = within(agents).getByRole("menuitemradio", { name: /^Codex/ });
     expect(claude.textContent).toContain(ui("conversation.availability.ready"));
     expect(codex.textContent).toContain(ui("conversation.availability.missing"));
 
     fireEvent.click(claude);
+    composeAndSend();
 
     expect(commandsSent(port)).toEqual([
       { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } },
@@ -81,19 +94,21 @@ describe("T545 the Conversation tab", () => {
   it("says why there is no conversation when the host is too old or its helper is not there", async () => {
     await open({ ...CONVERSATION_READY, available: false, reason: "host-outdated" });
     expect(screen.getByText(ui("conversation.unavailable.host-outdated"))).toBeTruthy();
-    expect(screen.queryByRole("group", { name: ui("conversation.picker.agentsLabel") })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
     cleanup();
 
     await open({ ...CONVERSATION_READY, available: false, reason: "broker-unavailable" });
     expect(screen.getByText(ui("conversation.unavailable.broker-unavailable"))).toBeTruthy();
   });
 
-  it("shows the agent, the folder and the mode in the header", async () => {
+  // 020 FR-320, FR-321 (T598): the header keeps the agent and the folder; the mode is its chip's.
+  it("shows the agent and the folder in the header, and the mode on its chip", async () => {
     await open();
     const region = header();
     expect(region.textContent).toContain("Claude Code");
     expect(region.textContent).toContain(ui("conversation.folder.scratch"));
-    expect(region.textContent).toContain(ui("conversation.mode.strict"));
+    expect(region.textContent).not.toContain(ui("conversation.mode.strict"));
+    expect(modeChip("strict")).toBeTruthy();
     cleanup();
 
     await open({
@@ -101,14 +116,16 @@ describe("T545 the Conversation tab", () => {
       conversations: [{ ...VIEW, agent: "codex", folder: { kind: "project", path: "D:\\work\\shop" }, mode: "agent-review" }],
     });
     expect(header().textContent).toContain("Codex");
-    expect(header().textContent).toContain("D:\\work\\shop");
-    expect(header().textContent).toContain(ui("conversation.mode.agent-review"));
+    // T607 (A1): the folder's name; the whole path is its title.
+    expect(header().querySelector(".agent-conversation-folder")?.textContent).toBe("shop");
+    expect(header().querySelector(".agent-conversation-folder")?.getAttribute("title")).toBe("D:\\work\\shop");
+    expect(modeChip("agent-review")).toBeTruthy();
   });
 
-  it("follows a mode event in the header", async () => {
+  it("follows a mode event on the mode chip", async () => {
     await open();
     emitEvent(port, 1, { type: "mode", mode: "agent-review" });
-    expect(header().textContent).toContain(ui("conversation.mode.agent-review"));
+    expect(modeChip("agent-review")).toBeTruthy();
   });
 
   it("appends streamed text to one message in a polite live log, and keeps the owner's words apart", async () => {
@@ -143,16 +160,22 @@ describe("T545 the Conversation tab", () => {
     emitEvent(port, 3, { type: "tool", toolCallId: "t-1", kind: "read", title: "Read page", inputSummary: "https://shop.test/", status: "done" });
     emitEvent(port, 4, { type: "tool", toolCallId: "t-3", kind: "execute", title: "Run rm", inputSummary: "rm table.csv", status: "refused" });
 
+    // 020 FR-318: the turn is over (the conversation is idle), so the steps are folded and the
+    // refused action stays in view beside them; expanding shows FR-287's detail.
+    const refused = screen.getByRole("list", { name: ui("conversation.turn.problems") });
+    expect(within(refused).getAllByRole("listitem")).toHaveLength(1);
+    expect(refused.textContent).toContain(ui("conversation.action.status.refused"));
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.turn.steps").replace("{count}", "2") }));
+
     const list = screen.getByRole("list", { name: ui("conversation.actions.label") });
     const rows = within(list).getAllByRole("listitem");
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(2);
     expect(rows[0]?.textContent).toContain("Read page");
     expect(rows[0]?.textContent).toContain("https://shop.test/");
     expect(rows[0]?.getAttribute("data-status")).toBe("done");
     expect(rows[0]?.textContent).toContain(ui("conversation.action.status.done"));
     expect(rows[1]?.textContent).toContain(ui("conversation.action.byRule"));
     expect(rows[0]?.textContent).not.toContain(ui("conversation.action.byRule"));
-    expect(rows[2]?.textContent).toContain(ui("conversation.action.status.refused"));
   });
 
   it("offers Stop while the agent works, and sends it for this conversation", async () => {
@@ -177,10 +200,11 @@ describe("T545 the Conversation tab", () => {
     const card = screen.getByRole("group", { name: /Write table\.csv/ });
     expect(card.textContent).toContain("+3 lines");
     const answers = within(card).getAllByRole("button");
+    // T606 (C5): allow once, allow for this conversation, reject.
     expect(answers.map((button) => button.textContent)).toEqual([
       ui("conversation.permission.allow-once"),
-      ui("conversation.permission.reject"),
       ui("conversation.permission.allow-conversation"),
+      ui("conversation.permission.reject"),
     ]);
 
     fireEvent.click(within(card).getByRole("button", { name: ui("conversation.permission.allow-conversation") }));
@@ -209,6 +233,8 @@ describe("T545 the Conversation tab", () => {
 
   it("offers exactly two modes, and sends the switch", async () => {
     await open();
+    // 020 FR-320: the modes are the mode chip's menu.
+    openModeMenu();
     const switcher = screen.getByRole("radiogroup", { name: ui("conversation.mode.label") });
     const radios = within(switcher).getAllByRole("radio");
     expect(radios).toHaveLength(2);
@@ -224,16 +250,18 @@ describe("T545 the Conversation tab", () => {
     expectValidCommands(port);
   });
 
-  it("says Codex works read-only and asks, and what its own rules still allow, in strict mode only (FR-293)", async () => {
+  it("says Codex works read-only and asks, and what its own rules still allow, with the strict mode (FR-293)", async () => {
+    // 020 FR-320: the note is in the mode chip's menu, under the strict choice, for Codex only.
+    // FR-293 stays on screen without opening the menu: a disclosure, not a detail.
     await open({ ...CONVERSATION_OPEN, conversations: [{ ...VIEW, agent: "codex" }] });
-    expect(screen.getByText(ui("conversation.mode.codexStrictNote"))).toBeTruthy();
-    cleanup();
-
-    await open({ ...CONVERSATION_OPEN, conversations: [{ ...VIEW, agent: "codex", mode: "agent-review" }] });
-    expect(screen.queryByText(ui("conversation.mode.codexStrictNote"))).toBeNull();
+    expect(screen.getByText(ui("conversation.mode.codexStrictNote")).closest(".agent-conversation-mode")).toBeNull();
+    openModeMenu();
+    const note = screen.getByText(ui("conversation.mode.codexStrictNote"));
+    expect(note.closest(".agent-conversation-mode-option")?.querySelector("input")?.value).toBe("strict");
     cleanup();
 
     await open();
+    openModeMenu();
     expect(screen.queryByText(ui("conversation.mode.codexStrictNote"))).toBeNull();
   });
 
@@ -288,11 +316,14 @@ describe("T545 the Conversation tab", () => {
   it("reads in zh-TW", async () => {
     await open(CONVERSATION_OPEN, "zh-TW");
     const zh = (key: string) => lookup(key, "zh-TW");
-    expect(screen.getByRole("region", { name: "對話資訊" }).textContent).toContain("變更前先問");
+    expect(screen.getByRole("region", { name: "對話資訊" }).textContent).toContain("暫存資料夾");
+    expect(screen.getByRole("button", { name: "查看對話清單" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: zh("conversation.chip.mode").replace("{mode}", "變更前先問") })).toBeTruthy();
     expect(screen.getByRole("textbox", { name: "給 Claude Code 的訊息" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "傳送" })).toBeTruthy();
     emitEvent(port, 1, { type: "permission", requestId: "r-1", toolCallId: "t-9", kind: "execute", title: "npm test", detail: "npm test" });
     expect(screen.getByRole("button", { name: zh("conversation.permission.allow-once") }).textContent).toBe("允許一次");
+    fireEvent.click(screen.getByRole("button", { name: zh("conversation.chip.mode").replace("{mode}", zh("conversation.mode.strict")) }));
     expect(screen.getByRole("radiogroup", { name: zh("conversation.mode.label") })).toBeTruthy();
   });
 });
@@ -326,7 +357,7 @@ describe("T547 the panel's side of the forwarding", () => {
     renderShell();
     project(port, withConversation(CONVERSATION_READY));
     await act(async () => undefined);
-    fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+    composeAndSend();
     const first = lastCommandId(port);
     expect(first).toMatch(/.+/u);
     expect(agentPanelCommandSchema.safeParse(port.sent.at(-1)).success).toBe(true);
@@ -339,7 +370,8 @@ describe("T547 the panel's side of the forwarding", () => {
     expect(screen.getByText(ui("conversation.error.too-many-running"))).toBeTruthy();
     expect(screen.getByText("Three are running.")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /^Claude Code/ }));
+    // The refused start gave the words back; sending them again is a new command.
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.composer.send") }));
     const second = lastCommandId(port);
     expect(second).not.toBe(first);
     result({ commandId: second, ok: true, value: { conversationId: CONVERSATION_ID } });

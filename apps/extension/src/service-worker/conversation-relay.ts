@@ -84,7 +84,15 @@ type Pending = {
   conversationId?: string;
   /** The consent command's answer, so the projection can show it before the next overview. */
   granted?: boolean;
+  /**
+   * T610: an open that switched the panel at once - the conversation that was open before it (none:
+   * `to` undefined), which the panel goes back to if the broker refuses the open.
+   */
+  back?: { to: string | undefined };
 };
+
+/** T610: states with no agent running, which an open under way shows as `starting` (it resumes the agent). */
+const NOT_RUNNING = new Set<string>(["stopped", "crashed", "gone"]);
 
 type Overview = Pick<ConversationPanelState, "conversations" | "agents" | "folders"> & {
   consent?: ConversationPanelState["consent"];
@@ -135,6 +143,12 @@ export function createConversationRelay(options: {
   let consentAnswer: ConversationPanelState["consent"] | undefined;
   let active: string | undefined;
   const pending = new Map<string, Pending>();
+  /**
+   * T610: conversations whose open the broker refused with `cannot-resume`, shown as not resumable
+   * until the broker's overview says so itself (it marks the entry after the result has gone) - or
+   * until the owner tries to open it again.
+   */
+  const refusedResume = new Set<string>();
   /** The last seq forwarded per conversation: a number, never the event (R-318). */
   const lastSeq = new Map<string, number>();
   /**
@@ -151,10 +165,24 @@ export function createConversationRelay(options: {
     payload: { commandId, ok: false, error: { code: "broker-unavailable", detail } },
   });
 
+  /**
+   * T610: a refused open that had switched the panel goes back to the conversation open before it -
+   * and an open chosen after it, still under way, goes back there too rather than to the refused one.
+   */
+  const switchBack = (command: Pending): void => {
+    const refused = command.conversationId;
+    if (command.back === undefined || refused === undefined) return;
+    if (active === refused) active = command.back.to;
+    for (const other of pending.values()) {
+      if (other.back !== undefined && other.back.to === refused) other.back = command.back;
+    }
+  };
+
   /** The commands no broker will answer now: said to the panels, so none waits in vain. */
   const failPending = (): void => {
     for (const [commandId, command] of pending) {
       if (command.type === "worker.conversation.page") continue;
+      switchBack(command);
       toPanels(failure(commandId, "Hallpass's helper on this computer stopped before it answered."));
     }
     pending.clear();
@@ -201,12 +229,16 @@ export function createConversationRelay(options: {
       }
       return;
     }
-    if (frame.ok) {
+    if (command.type === "ui.conversation.open") {
+      // T610: the panel switched when the open left; an answer only ends its `starting` - or, refused,
+      // shows the chosen conversation's end (cannot-resume) or goes back to the one open before.
+      if (!frame.ok && frame.error.code === "cannot-resume") refusedResume.add(command.conversationId!);
+      else if (!frame.ok) switchBack(command);
+      changed();
+    } else if (frame.ok) {
       let moved = true;
       if (command.type === "ui.conversation.start" && frame.value?.conversationId !== undefined) {
         active = frame.value.conversationId;
-      } else if (command.type === "ui.conversation.open") {
-        active = command.conversationId;
       } else if (command.type === "ui.conversation.remove" && active === command.conversationId) {
         active = undefined;
       } else if (command.type === "ui.conversation.consent") {
@@ -251,6 +283,7 @@ export function createConversationRelay(options: {
       if (broker === undefined || broker !== sessionId) return false;
       broker = undefined;
       overview = undefined;
+      refusedResume.clear();
       failPending();
       changed();
       return true;
@@ -258,6 +291,7 @@ export function createConversationRelay(options: {
     relayStarted() {
       broker = undefined;
       overview = undefined;
+      refusedResume.clear();
       greetedThisRun = false;
       relayStartedAt = now();
       failPending();
@@ -275,6 +309,11 @@ export function createConversationRelay(options: {
       switch (frame.type) {
         case "conversation-overview": {
           const { conversations, agents, folders, consent, notice } = frame;
+          // T610: a refusal the broker now shows itself (or an entry no longer listed) needs no stand-in.
+          for (const conversationId of refusedResume) {
+            const listed = conversations.find((entry) => entry.conversationId === conversationId);
+            if (listed === undefined || !listed.resumable) refusedResume.delete(conversationId);
+          }
           overview = {
             conversations,
             agents,
@@ -328,12 +367,21 @@ export function createConversationRelay(options: {
         return;
       }
       const payload = forwarded.payload as { conversationId?: string; granted?: boolean };
+      // T610: the chosen conversation is shown at once; the broker answers only once its replay ends.
+      const switching = forwarded.type === "ui.conversation.open" && payload.conversationId !== active;
       pending.set(commandId, {
         type: forwarded.type,
         ...(payload.conversationId === undefined ? {} : { conversationId: payload.conversationId }),
         ...(payload.granted === undefined ? {} : { granted: payload.granted }),
+        ...(switching ? { back: { to: active } } : {}),
       });
       options.sendFrame({ type: "conversation-command", sessionId: broker, commandId, command: forwarded });
+      if (forwarded.type === "ui.conversation.open") {
+        // Opening it again is trying again: the broker's answer decides anew.
+        refusedResume.delete(payload.conversationId!);
+        if (switching) active = payload.conversationId;
+        changed();
+      }
     },
     /**
      * T572: `epoch` is the attached broker's session id, so a panel that sees it change knows the
@@ -359,11 +407,22 @@ export function createConversationRelay(options: {
           folders: [],
         };
       }
+      // T610: an open under way shows its conversation starting; a refused resume shows its end.
+      const opening = new Set<string>();
+      for (const command of pending.values()) {
+        if (command.type === "ui.conversation.open" && command.conversationId !== undefined) opening.add(command.conversationId);
+      }
+      const conversations = (overview?.conversations ?? []).map((entry) => {
+        const starting = opening.has(entry.conversationId) && NOT_RUNNING.has(entry.state);
+        const ended = refusedResume.has(entry.conversationId);
+        if (!starting && !ended) return entry;
+        return { ...entry, ...(starting ? { state: "starting" as const } : {}), ...(ended ? { resumable: false } : {}) };
+      });
       return {
         available: true,
         epoch: broker!,
         consent,
-        conversations: overview?.conversations ?? [],
+        conversations,
         ...(active === undefined ? {} : { active }),
         agents: overview?.agents ?? [],
         folders: overview?.folders ?? [],

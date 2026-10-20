@@ -12,8 +12,18 @@ export type OwnerAnswer = (typeof CONVERSATION_OWNER_ANSWERS)[number];
  */
 export function permissionAnswers(kind: PermissionEvent["kind"]): readonly OwnerAnswer[] {
   const ruled = (CONVERSATION_RULE_KINDS as readonly string[]).includes(kind);
-  return ruled ? CONVERSATION_OWNER_ANSWERS : CONVERSATION_OWNER_ANSWERS.filter((answer) => answer !== "allow-conversation");
+  // T606 (C5): the card's order - allow once, allow for this conversation, reject.
+  const ordered = [...CONVERSATION_OWNER_ANSWERS].sort((a, b) => ANSWER_ORDER.indexOf(a) - ANSWER_ORDER.indexOf(b));
+  return ruled ? ordered : ordered.filter((answer) => answer !== "allow-conversation");
 }
+
+const ANSWER_ORDER: readonly OwnerAnswer[] = ["allow-once", "allow-conversation", "reject"];
+
+/** T606 (C5): a detail that only repeats the title ("table.csv" under "Write table.csv") is not shown. */
+const detailAdds = (title: string, detail: string): boolean => {
+  const words = detail.trim();
+  return words !== "" && !title.includes(words);
+};
 
 /**
  * 019 FR-290, FR-291, FR-294, US2 scenario 2: the agent asks before a change; the card names the
@@ -37,11 +47,17 @@ export function PermissionCard(props: {
           .replace("{agent}", () => props.agentName)
           .replace("{title}", () => permission.title)}
       </h3>
-      {permission.detail === "" ? null : <pre className="agent-conversation-permission-detail">{permission.detail}</pre>}
+      {!detailAdds(permission.title, permission.detail) ? null : <pre className="agent-conversation-permission-detail">{permission.detail}</pre>}
       <p>{t("conversation.permission.waiting")}</p>
       <div className="agent-prompt-actions">
         {permissionAnswers(permission.kind).map((answer) => (
-          <button key={answer} type="button" onClick={() => props.onAnswer(answer)}>
+          // T605: allowing once is the answer the card leads with, filled in the accent.
+          <button
+            key={answer}
+            type="button"
+            className={answer === "allow-once" ? "agent-primary" : undefined}
+            onClick={() => props.onAnswer(answer)}
+          >
             {t(`conversation.permission.${answer}`)}
           </button>
         ))}

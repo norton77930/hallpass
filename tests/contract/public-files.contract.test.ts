@@ -123,7 +123,7 @@ describe("T257 the notices name every dependency the artifacts ship", () => {
   it("names each runtime dependency with the version the manifest pins", () => {
     const deps = shippedDependencies();
     expect(deps.map((dep) => dep.name).sort()).toEqual(
-      ["@agentclientprotocol/sdk", "@modelcontextprotocol/sdk", "gifenc", "koffi", "react", "react-dom", "zod"],
+      ["@agentclientprotocol/sdk", "@modelcontextprotocol/sdk", "gifenc", "koffi", "react", "react-dom", "react-markdown", "remark-gfm", "zod"],
     );
     for (const { name, version } of deps) {
       expect(notices, `${name} is not in the notices`).toContain(name);

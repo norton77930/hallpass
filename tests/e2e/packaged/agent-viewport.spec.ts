@@ -476,14 +476,16 @@ async function releaseTabsViaPanel(panel: SidePanelDriver): Promise<void> {
 async function setSiteModeViaPanel(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
   await panel.waitForText(site);
   const set = await panel.evaluatePanel(
-    `(()=>{const sel=document.querySelector('[data-site=${JSON.stringify(site)}] select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
+    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
+      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
+      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
+      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
+      `if(!item)return false;item.click();return true})()`,
     true,
   );
   expect(set, `the panel offers no mode control for ${site}`).toBe(true);
   await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] select')?.value ?? null`), {
+    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
       timeout: 15_000,
     })
     .toBe(mode);

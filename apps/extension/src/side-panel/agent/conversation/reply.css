@@ -1,0 +1,120 @@
+/*
+ * 020 FR-316, R-332: an agent reply rendered from Markdown. Tokens only (tokens.css), no colour of
+ * its own. The shell resets lists and paragraphs for its cards; a reply puts back what Markdown
+ * means. Wide tables and code scroll inside their own box so a reply never widens the panel.
+ */
+
+.agent-reply {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* A paragraph flows as Markdown says, not as the plain-text message's pre-wrap. */
+.agent-conversation-message .agent-reply p {
+  white-space: normal;
+}
+
+.agent-shell .agent-reply > :first-child {
+  margin-top: 0;
+}
+
+.agent-shell .agent-reply > :last-child {
+  margin-bottom: 0;
+}
+
+.agent-shell .agent-reply :is(h1, h2, h3, h4, h5, h6) {
+  margin: var(--sp-3) 0 var(--sp-2);
+  font-size: var(--fs-3);
+  font-weight: 600;
+}
+
+.agent-shell .agent-reply h1 {
+  font-size: var(--fs-4);
+}
+
+.agent-shell .agent-reply ul,
+.agent-shell .agent-reply ol {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-4);
+}
+
+.agent-shell .agent-reply ul {
+  list-style: disc;
+}
+
+.agent-shell .agent-reply ol {
+  list-style: decimal;
+}
+
+.agent-shell .agent-reply li > :is(ul, ol) {
+  margin-bottom: 0;
+}
+
+.agent-reply a {
+  color: var(--accent);
+}
+
+.agent-reply code {
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-1);
+}
+
+.agent-reply .agent-reply-code {
+  max-width: 100%;
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2);
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  white-space: pre;
+}
+
+.agent-reply .agent-reply-code code {
+  padding: 0;
+  background: none;
+}
+
+.agent-reply .agent-reply-table {
+  max-width: 100%;
+  margin: 0 0 var(--sp-2);
+  overflow-x: auto;
+}
+
+.agent-reply table {
+  border-collapse: collapse;
+}
+
+.agent-reply th,
+.agent-reply td {
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--line);
+  text-align: start;
+  vertical-align: top;
+}
+
+.agent-reply th {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.agent-reply blockquote {
+  margin: 0 0 var(--sp-2);
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--line);
+  color: var(--text-2);
+}
+
+.agent-reply hr {
+  margin: var(--sp-2) 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.agent-shell .agent-reply-copy {
+  margin-top: var(--sp-1);
+}

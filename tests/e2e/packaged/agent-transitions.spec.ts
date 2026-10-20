@@ -419,6 +419,7 @@ async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): 
 
 /** The site list's own revoke, so the next run of this gate starts from an undecided site. */
 async function clearSiteMode(panel: SidePanelDriver, site: string): Promise<void> {
+  await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] .agent-site-more-button')?.click(), true`, true);
   await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", site));
 }
 

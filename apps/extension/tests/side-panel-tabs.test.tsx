@@ -78,7 +78,8 @@ describe("T543 the side panel's two tabs", () => {
     expect(within(panel).getByText(ui("agent.sitesNone"))).toBeTruthy();
     expect(within(panel).getByRole("button", { name: ui("agent.status.menu") })).toBeTruthy();
     // Nothing of the Conversation tab.
-    expect(within(panel).queryByText(ui("conversation.picker.title"))).toBeNull();
+    expect(within(panel).queryByRole("group", { name: ui("conversation.chips.label") })).toBeNull();
+    expect(within(panel).queryByRole("button", { name: ui("conversation.header.list") })).toBeNull();
   });
 
   it("keeps an external consent card above the tab bar on both tabs", async () => {

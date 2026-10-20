@@ -128,9 +128,11 @@ describe("T198 every control has a name and a place in the tab order", () => {
     // 016 FR-223: each paired agent's unpair carries that agent's name.
     expect(screen.getByRole("menuitem", { name: ui("agent.status.unpairAgent").replace("{agent}", PAIRED.displayName) })).toBeTruthy();
     expectNamedAndReachable();
-    // The three-way switch and the diagnostics grant are labelled with the site they are about.
-    expect(screen.getByRole("combobox", { name: ui("agent.siteModeLabel").replace("{site}", SHOP) })).toBeTruthy();
+    // The mode chip, "more" and the diagnostics grant behind it are labelled with the site they are about (T606 B1).
+    expect(screen.getByRole("button", { name: ui("agent.siteModeLabel").replace("{site}", SHOP) })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.siteMore").replace("{site}", LONG_SITE) }));
     expect(screen.getByRole("checkbox", { name: ui("agent.diagnosticsLabel").replace("{site}", LONG_SITE) })).toBeTruthy();
+    expectNamedAndReachable();
   });
 
   it("two session cards, each a labelled section with only the controls that apply (016 FR-232 – FR-234)", () => {
@@ -212,10 +214,27 @@ const TEXT_ON_SURFACE: ReadonlyArray<[text: string, surface: string, where: stri
   ["danger", "surface", "the outlined Stop button on a card"],
   ["ok", "surface", "the connected state on a card"],
   ["ok", "bg", "the connected state on the panel ground"],
+  // 020 FR-322, D-020-2: the indigo set. Meta copy (text-3) is held to the same bar as body copy.
+  ["text-3", "bg", "meta copy and placeholders on the panel ground"],
+  ["text-3", "surface", "meta copy on a card"],
+  ["text-3", "surface-2", "meta copy on a bubble, chip or hover ground"],
+  ["accent", "bg", "accent used as text on the panel ground"],
+  ["accent", "accent-soft", "accent used as text on its own soft ground (selected chip)"],
+  ["warn", "bg", "a warning line on the panel ground"],
+  ["warn", "warn-soft", "a warning banner"],
+  // 020 FR-320 (T597): the agent's own review, on, in the mode chip and its menu.
+  ["text", "warn-soft", "the mode chip while the agent's own review is on"],
+  ["text-2", "warn-soft", "a mode's explanation while the agent's own review is on"],
+  ["danger", "bg", "an error line on the panel ground"],
+  ["danger", "danger-soft", "an error banner"],
+  // T602: a disabled primary button (Send with an empty box); above the 3:1 asked of it.
+  ["text-3", "surface-2", "the label of a disabled primary button"],
 ];
 
 const REQUIRED_TOKENS = [
   "bg", "surface", "surface-2", "text", "text-2", "line", "accent", "accent-text", "ok", "warn", "danger", "focus",
+  // 020 FR-322: the indigo set's extra names.
+  "code", "line-strong", "text-3", "accent-soft", "accent-line", "warn-soft", "danger-soft",
   // 016 FR-225: the session stripes, Chrome's tab-group palette in each theme (decoration, not text).
   "group-cyan", "group-green", "group-purple", "group-pink", "group-orange", "group-grey", "group-blue",
 ];

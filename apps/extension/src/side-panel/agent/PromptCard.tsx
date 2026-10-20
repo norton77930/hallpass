@@ -40,6 +40,12 @@ export function questionOnTop(
   // A stable sort: two questions with the same stamp keep the fixed order above.
   return candidates.sort((left, right) => stamp(left.at) - stamp(right.at))[0]?.kind;
 }
+/** T606 (P5): how many questions share the slot - the one on top and those waiting behind it. */
+function waitingQuestions(state: Pick<AgentPanelState, "pending" | "prompt" | "plan" | "sitePlan" | "browserChoice">): number {
+  // Present the way `questionOnTop` reads it.
+  return [state.pending, state.prompt, state.plan, state.sitePlan, state.browserChoice].filter(Boolean).length;
+}
+
 /** How long the pairing card stays highlighted after another connection joins it (item 2, 2026-09-24). */
 export const PAIRING_JOINED_HIGHLIGHT_MS = 1500;
 
@@ -93,13 +99,35 @@ export function NoticeCard(props: {
   );
 }
 
-export function PromptCard(props: {
+type PromptCardProps = {
   state: AgentPanelState;
   locale: string;
   /** The name of the agent the consent is about: the waiting session's, or the paired agent's. */
   promptAgent: string;
   send: SendCommand;
-}): ReactElement | null {
+};
+
+/**
+ * 020 T606 (P5): the one question on screen, and under it how many more wait behind it - the other
+ * questions of the projection, each shown once this one is answered. A queue the worker keeps behind
+ * a single consent is not in the projection, so it is not counted here.
+ */
+export function PromptCard(props: PromptCardProps): ReactElement | null {
+  const more = waitingQuestions(props.state) - 1;
+  const t = (key: string): string => lookup(key, props.locale);
+  return (
+    <>
+      <QuestionCard {...props} />
+      {more <= 0 ? null : (
+        <p className="agent-prompt-more" aria-live="polite">
+          {more === 1 ? t("agent.moreWaitingOne") : t("agent.moreWaiting").replace("{n}", () => String(more))}
+        </p>
+      )}
+    </>
+  );
+}
+
+function QuestionCard(props: PromptCardProps): ReactElement | null {
   const t = (key: string): string => lookup(key, props.locale);
   const { pending, prompt, plan, sitePlan, browserChoice } = props.state;
   /**

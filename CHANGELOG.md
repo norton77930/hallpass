@@ -5,6 +5,25 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.14.0 — 2026-10-21
+
+**A redesigned conversation in the side panel.**
+
+- **Composer first.** The message box sits at the bottom in every state, with the agent, folder and
+  mode as chips inside it and Send/Stop beside them; their menus open upwards. The header is a
+  compact row with the conversation list and a new-conversation button. A new look (palette A),
+  light and dark.
+- **Easier to follow.** Your messages are bubbles on the right, the agent's replies run on the page,
+  steps fold into one "N steps" line (a failed step stands out), an answered permission card stays as
+  one line saying how you answered, and a "Jump to latest" button appears when you scroll up.
+- **A conversation chosen from the list opens at once**, showing that it is starting and then its
+  history, or its own "cannot be continued" page; an unsent draft stays with its conversation.
+- **Messages in your language.** Refusals and notices from the helper are shown in the panel's
+  language; what the agent itself writes is shown as written.
+- **Connections & sites, tidied.** Section headings, one row per site with its mode as a chip, a
+  "⋯" menu per row, upload folders shown by name over their path, sites without `https://`, and a
+  clear page with a fix when the helper cannot be reached.
+
 ## 0.13.1 — 2026-10-20
 
 **Side-panel agent stability.**

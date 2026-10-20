@@ -1,8 +1,12 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactElement, type ReactNode } from "react";
 import type { AgentPanelState, SiteMode, SiteModeRecord } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { MODE_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
+import { useExclusiveMenu } from "./conversation/exclusive-menu.js";
+import { folderName } from "./conversation/folder-name.js";
+import { useOutsidePress } from "./conversation/outside-press.js";
+import { CloseIcon, DownIcon, MoreIcon } from "./conversation/icons.js";
 import { displayOrigin } from "./display-origin.js";
 
 /**
@@ -63,69 +67,16 @@ export function SiteList(props: {
 
   return (
     <section className="agent-sites" aria-labelledby="agent-sites-title">
-      <h2 id="agent-sites-title">{t("agent.sitesTitle")}</h2>
+      {/* T606 (B3): a small heading and a separator, as the sessions have, and no box. */}
+      <h2 id="agent-sites-title" className="agent-section-heading">
+        {t("agent.sitesTitle")}
+      </h2>
       {props.sites.length === 0 ? (
         <p>{t("agent.sitesNone")}</p>
       ) : (
         <ul>
           {props.sites.map((record) => (
-            <li key={record.site} data-site={record.site} className="agent-site">
-              <div className="agent-site-head">
-                <span className="agent-site-name">{displayOrigin(record.site)}</span>
-                {/* 019 FR-308, R-328: who made the last change - the side-panel agent's card, an
-                    external agent's, or the owner here. A record from before 019 names nobody. */}
-                {record.changedBy === undefined ? null : (
-                  <span className="agent-site-author">{t(`agent.siteChangedBy.${record.changedBy}`)}</span>
-                )}
-              </div>
-              {/* The label names the control for assistive technology; on screen the site name
-                  above it already says which site, so the text is visually hidden. */}
-              <label className="agent-site-mode">
-                <span className="agent-sr-only">{t("agent.siteModeLabel").replace("{site}", () => displayOrigin(record.site))}</span>
-                <select
-                  value={record.mode}
-                  data-permissive={record.mode === "skip-checks" ? "true" : undefined}
-                  onChange={(event) => {
-                    props.send({
-                      type: "ui.agent.site-mode",
-                      payload: { site: record.site, mode: event.target.value as SiteMode },
-                    });
-                  }}
-                >
-                  {MODE_ORDER.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {t(MODE_KEYS[mode])}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="agent-site-tools">
-                <label className="agent-site-diagnostics">
-                  <input
-                    type="checkbox"
-                    aria-label={t("agent.diagnosticsLabel").replace("{site}", () => displayOrigin(record.site))}
-                    checked={record.diagnosticsGranted}
-                    onChange={(event) => {
-                      props.send({
-                        type: "ui.agent.set-diagnostics",
-                        payload: { site: record.site, granted: event.target.checked },
-                      });
-                    }}
-                  />
-                  {t("agent.diagnosticsText")}
-                </label>
-                <button
-                  type="button"
-                  className="agent-quiet"
-                  aria-label={t("agent.siteRevoke").replace("{site}", () => displayOrigin(record.site))}
-                  onClick={() => {
-                    props.send({ type: "ui.agent.site-clear", payload: { site: record.site } });
-                  }}
-                >
-                  {t("agent.siteRevokeText")}
-                </button>
-              </div>
-            </li>
+            <SiteRow key={record.site} record={record} t={t} send={props.send} />
           ))}
         </ul>
       )}
@@ -182,7 +133,9 @@ export function SiteList(props: {
       */}
       {roots === undefined ? null : (
         <section className="agent-upload-roots" aria-labelledby="agent-upload-roots-title">
-          <h3 id="agent-upload-roots-title">{t("agent.uploadRootsTitle")}</h3>
+          <h3 id="agent-upload-roots-title" className="agent-section-heading">
+            {t("agent.uploadRootsTitle")}
+          </h3>
           {/* 0.9.0 owner check: what the list governs, and - when it is empty - that nothing is
               allowed and how a directory gets here. A bare title over a file path said neither. */}
           <p className="agent-upload-roots-intro">{t("agent.uploadRootsIntro")}</p>
@@ -213,24 +166,211 @@ export function SiteList(props: {
           <ul>
             {roots.roots.map((root) => (
               <li key={root} data-upload-root={root} className="agent-upload-root">
-                <span className="agent-upload-root-path">{root}</span>
+                {/* T607 (S3): the folder's name on one line, its path under it on one ellipsized line. */}
+                <span className="agent-upload-root-text">
+                  <span className="agent-upload-root-name">{folderName(root)}</span>
+                  <span className="agent-upload-root-path" title={root}>
+                    {root}
+                  </span>
+                </span>
+                {/* T606 (B4): an x at the line's end; its name is still the words. */}
                 <button
                   type="button"
-                  className="agent-quiet"
+                  className="agent-icon-button agent-upload-root-forget"
+                  title={t("agent.uploadRootRevoke").replace("{root}", () => root)}
                   onClick={() => {
                     setPending((waiting) => (waiting.includes(root) ? waiting : [...waiting, root]));
                     props.send({ type: "ui.agent.upload-root-clear", payload: { root } });
                   }}
                 >
-                  {t("agent.uploadRootRevoke").replace("{root}", () => root)}
+                  <CloseIcon size={14} />
+                  <span className="agent-sr-only">{t("agent.uploadRootRevoke").replace("{root}", () => root)}</span>
                 </button>
                 {pending.includes(root) ? <span className="agent-upload-root-pending">{t("agent.uploadRootPending")}</span> : null}
               </li>
             ))}
           </ul>
-          <p className="agent-upload-roots-path">{t("agent.uploadRootsPath").replace("{path}", () => roots.path)}</p>
         </section>
       )}
     </section>
+  );
+}
+
+/**
+ * 020 T606 (B1): one site on one line - its name in monospace, its mode as a chip, and a "more"
+ * button. The chip opens a menu of the three modes; "more" opens the rest of the row: the diagnostics
+ * grant (still its own consent, 004 US6), who changed the site last (019 FR-308) and Revoke. Both
+ * close on Escape (the focus goes back to their button) and on a press anywhere else. The commands
+ * and the accessible names are the ones the row always had.
+ */
+function SiteRow(props: { record: SiteModeRecord; t: (key: string) => string; send: SendCommand }): ReactElement {
+  const { record, t } = props;
+  const [open, setOpen] = useState<"mode" | "more" | undefined>(undefined);
+  const modeChip = useRef<HTMLButtonElement>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const ids = { mode: useId(), more: useId(), text: useId(), row: useId() };
+  const site = displayOrigin(record.site);
+  // T607 (S4): https is the ordinary case and says nothing; http, and any port, stay visible.
+  const shownSite = site.startsWith("https://") ? site.slice("https://".length) : site;
+  // T607 (S1): one menu open in the tab - this row's (the mode menu or "more") closes when another opens.
+  useExclusiveMenu(ids.row, open !== undefined, () => setOpen(undefined));
+  const close = (focus: boolean): void => {
+    const was = open;
+    setOpen(undefined);
+    if (focus) (was === "more" ? moreButton : modeChip).current?.focus();
+  };
+  const toggle = (which: "mode" | "more"): void => setOpen((current) => (current === which ? undefined : which));
+
+  return (
+    <li data-site={record.site} className="agent-site">
+      <span className="agent-site-name" title={site}>
+        {shownSite}
+      </span>
+      <span className="agent-site-controls">
+        <button
+          ref={modeChip}
+          type="button"
+          className="agent-site-mode-chip"
+          data-site-mode=""
+          data-mode={record.mode}
+          // 016 FR-235: acting without asking is marked on the control itself, in the warning colour.
+          data-permissive={record.mode === "skip-checks" ? "true" : undefined}
+          aria-label={t("agent.siteModeLabel").replace("{site}", () => site)}
+          aria-describedby={ids.text}
+          aria-haspopup="menu"
+          aria-expanded={open === "mode"}
+          aria-controls={open === "mode" ? ids.mode : undefined}
+          onClick={() => toggle("mode")}
+        >
+          <span id={ids.text}>{t(MODE_KEYS[record.mode])}</span>
+          <DownIcon />
+        </button>
+        <button
+          ref={moreButton}
+          type="button"
+          className="agent-icon-button agent-site-more-button"
+          title={t("agent.siteMore").replace("{site}", () => site)}
+          aria-expanded={open === "more"}
+          aria-controls={open === "more" ? ids.more : undefined}
+          onClick={() => toggle("more")}
+        >
+          <MoreIcon size={16} />
+          <span className="agent-sr-only">{t("agent.siteMore").replace("{site}", () => site)}</span>
+        </button>
+      </span>
+      {open === "mode" ? (
+        <SiteModeMenu
+          id={ids.mode}
+          mode={record.mode}
+          t={t}
+          onChoose={(mode) => {
+            close(true);
+            if (mode !== record.mode) props.send({ type: "ui.agent.site-mode", payload: { site: record.site, mode } });
+          }}
+          onClose={() => close(true)}
+          onDismiss={() => close(false)}
+        />
+      ) : null}
+      {open === "more" ? (
+        <SiteMore id={ids.more} onClose={() => close(true)} onDismiss={() => close(false)}>
+          <label className="agent-site-diagnostics">
+            <input
+              type="checkbox"
+              aria-label={t("agent.diagnosticsLabel").replace("{site}", () => site)}
+              checked={record.diagnosticsGranted}
+              onChange={(event) => {
+                props.send({ type: "ui.agent.set-diagnostics", payload: { site: record.site, granted: event.target.checked } });
+              }}
+            />
+            {t("agent.diagnosticsText")}
+          </label>
+          {/* 019 FR-308, R-328: who made the last change; a record from before 019 names nobody. */}
+          {record.changedBy === undefined ? null : (
+            <span className="agent-site-author">{t(`agent.siteChangedBy.${record.changedBy}`)}</span>
+          )}
+          <button
+            type="button"
+            className="agent-quiet agent-site-revoke"
+            aria-label={t("agent.siteRevoke").replace("{site}", () => site)}
+            onClick={() => {
+              close(false);
+              props.send({ type: "ui.agent.site-clear", payload: { site: record.site } });
+            }}
+          >
+            {t("agent.siteRevokeText")}
+          </button>
+        </SiteMore>
+      ) : null}
+    </li>
+  );
+}
+
+function SiteModeMenu(props: {
+  id: string;
+  mode: SiteMode;
+  t: (key: string) => string;
+  onChoose: (mode: SiteMode) => void;
+  onClose: () => void;
+  onDismiss: () => void;
+}): ReactElement {
+  const menu = useRef<HTMLUListElement>(null);
+  useOutsidePress(menu, props.id, props.onDismiss);
+  const items = (): HTMLButtonElement[] => [...(menu.current?.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]") ?? [])];
+  useEffect(() => {
+    // The site's mode has the focus when the menu opens, as a menu button's menu does.
+    const all = items();
+    (all.find((item) => item.getAttribute("aria-checked") === "true") ?? all[0])?.focus();
+  }, []);
+  const onKey = (event: KeyboardEvent<HTMLUListElement>): void => {
+    if (event.key === "Escape" || event.key === "Tab") {
+      event.preventDefault();
+      props.onClose();
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    const all = items();
+    const at = all.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      event.key === "Home" ? 0
+      : event.key === "End" ? all.length - 1
+      : event.key === "ArrowDown" ? (at + 1) % all.length
+      : (at - 1 + all.length) % all.length;
+    all[next]?.focus();
+  };
+  return (
+    <ul ref={menu} id={props.id} role="menu" className="agent-site-popup agent-site-mode-menu" onKeyDown={onKey}>
+      {MODE_ORDER.map((mode) => (
+        <li key={mode} role="none">
+          <button type="button" role="menuitemradio" aria-checked={props.mode === mode} data-mode={mode} onClick={() => props.onChoose(mode)}>
+            {props.t(MODE_KEYS[mode])}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The rest of a site's row, shown on "more": a small group of controls, not a menu of commands. */
+function SiteMore(props: { id: string; onClose: () => void; onDismiss: () => void; children: ReactNode }): ReactElement {
+  const panel = useRef<HTMLDivElement>(null);
+  useOutsidePress(panel, props.id, props.onDismiss);
+  useEffect(() => {
+    panel.current?.querySelector<HTMLElement>("input, button")?.focus();
+  }, []);
+  return (
+    <div
+      ref={panel}
+      id={props.id}
+      role="group"
+      className="agent-site-popup agent-site-more"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        props.onClose();
+      }}
+    >
+      {props.children}
+    </div>
   );
 }

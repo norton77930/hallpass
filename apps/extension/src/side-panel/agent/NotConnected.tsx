@@ -6,11 +6,14 @@ import { lookup } from "../../locales/catalog.js";
  * The one page shown while nothing can be done (006 FR-082, D-006-3): what happened, what to do,
  * a retry, and the technical facts folded away.
  *
- * Two copy variants on one layout. `not-paired` is a browser no agent has ever paired with, whatever
+ * Three copy variants on one layout. `not-paired` is a browser no agent has ever paired with, whatever
  * the link is doing - the owner's next step is to start an agent, not to retry a bridge. `bridge-lost`
  * is a paired browser whose link is down, which is the case the retry and the details are for.
+ * T607 (Q1): `helper-down` is a browser nobody paired with whose helper (the broker the side panel's
+ * own agent runs through) cannot be reached - the panel says that, rather than "no agent is
+ * connected", which would send the owner to pair an agent when the helper is what is missing.
  */
-export type NotConnectedVariant = "not-paired" | "bridge-lost";
+export type NotConnectedVariant = "not-paired" | "bridge-lost" | "helper-down";
 
 export function NotConnected(props: {
   variant: NotConnectedVariant;
@@ -24,7 +27,9 @@ export function NotConnected(props: {
   const copy =
     props.variant === "not-paired"
       ? { title: t("agent.notPaired.title"), body: t("agent.notPaired.body") }
-      : { title: t("agent.bridgeLost.title"), body: t("agent.bridgeLost.body") };
+      : props.variant === "helper-down"
+        ? { title: t("agent.helperDown.title"), body: t("agent.helperDown.body") }
+        : { title: t("agent.bridgeLost.title"), body: t("agent.bridgeLost.body") };
   const { relayPid, recordPath, lastDisconnect } = props.diagnostics;
   const known = relayPid !== undefined || recordPath !== undefined || lastDisconnect !== undefined;
 

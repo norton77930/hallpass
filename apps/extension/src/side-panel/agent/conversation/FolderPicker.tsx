@@ -1,18 +1,19 @@
 import { useEffect, useId, useState, type FormEvent, type ReactElement } from "react";
 import type {
-  ConversationAgent,
   ConversationError,
   ConversationFolder,
   ConversationFolderEntry,
 } from "@hallpass/contracts";
 import type { SendCommand } from "../AgentShell.js";
+import { folderName } from "./folder-name.js";
 
 /**
  * 019 US5, FR-303, T563: where a new conversation works - the scratch folder unless the owner picks
  * one of their own - and the owner's folder list.
  *
- * A conversation's folder never changes, so this only ever feeds a *new* conversation: choosing a
- * folder and pressing Start sends `ui.conversation.start { agent, folder }`. Adding a folder asks the
+ * A conversation's folder never changes, so this only ever feeds a *new* conversation: 020 opens it
+ * from the folder chip under the message box (FR-312), and Send then starts the conversation in the
+ * chosen folder with `ui.conversation.start { agent, folder }`. Adding a folder asks the
  * broker to open its folder dialog (no path); where the dialog cannot open on this desktop the broker
  * answers `path-entry`, and only then is a typed path offered - which the broker checks exactly like
  * a chosen one, so nothing is decided here. The field stays until a folder is added, so a path the
@@ -28,13 +29,13 @@ export function FolderPicker(props: {
   folders: readonly ConversationFolderEntry[];
   /** The folder a new conversation would start in; the scratch folder unless the owner chose one. */
   selected: ConversationFolder;
-  agents: readonly { agent: ConversationAgent; name: string }[];
   /** The last command's failure, when it is fresh: `path-entry` turns the typed field on. */
   error?: ConversationError;
   t: T;
   send: SendCommand;
   onSelect: (folder: ConversationFolder) => void;
-  onStart: (agent: ConversationAgent, folder: ConversationFolder) => void;
+  /** The region's id, so the folder chip can name what it opened. */
+  id?: string;
 }): ReactElement {
   const { t, send } = props;
   const name = useId();
@@ -61,7 +62,7 @@ export function FolderPicker(props: {
   const isScratch = props.selected.kind === "scratch";
 
   return (
-    <section className="agent-conversation-folders" aria-label={t("conversation.folders.label")}>
+    <section id={props.id} className="agent-conversation-folders" aria-label={t("conversation.folders.label")}>
       <div role="radiogroup" aria-label={t("conversation.folders.label")} className="agent-conversation-folder-choices">
         <label>
           <input
@@ -78,10 +79,17 @@ export function FolderPicker(props: {
               <input
                 type="radio"
                 name={name}
+                aria-label={folder.path}
                 checked={props.selected.kind === "project" && props.selected.path === folder.path}
                 onChange={() => props.onSelect({ kind: "project", path: folder.path })}
               />
-              <span className="agent-conversation-folder">{folder.path}</span>
+              {/* T607 (J1): the name on one line, the path under it on one line (the title has it all). */}
+              <span className="agent-conversation-folder-text">
+                <span className="agent-conversation-folder-name">{folderName(folder.path)}</span>
+                <span className="agent-conversation-folder-full" title={folder.path}>
+                  {folder.path}
+                </span>
+              </span>
             </label>
             <button
               type="button"
@@ -114,18 +122,6 @@ export function FolderPicker(props: {
           </button>
         </form>
       ) : null}
-      <div role="group" aria-label={t("conversation.folders.startLabel")} className="agent-conversation-agents">
-        {props.agents.map((agent) => (
-          <button
-            key={agent.agent}
-            type="button"
-            className="agent-primary"
-            onClick={() => props.onStart(agent.agent, props.selected)}
-          >
-            {t("conversation.folders.start").replace("{agent}", () => agent.name)}
-          </button>
-        ))}
-      </div>
     </section>
   );
 }

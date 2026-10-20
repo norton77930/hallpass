@@ -522,11 +522,12 @@ describe("016 T437 session card", () => {
   };
   const buttons = (): string[] => within(only()).getAllByRole("button").map((button) => button.textContent ?? "");
 
-  it("titles the card with the agent and its folder, as inert text", () => {
+  it("titles the card with its folder, the agent under it, as inert text (T606 B3)", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...base, label: "shop-frontend" }] });
 
-    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code · shop-frontend");
+    expect(within(only()).getByRole("heading").textContent).toBe("shop-frontend");
+    expect(only().querySelector(".agent-session-meta")?.textContent).toBe("Claude Code · started 14:02");
   });
 
   it("cuts a long folder name with an ellipsis and keeps the full text in the title", () => {
@@ -540,37 +541,44 @@ describe("016 T437 session card", () => {
     expect(heading.querySelector(`[title="${long}"]`)).not.toBeNull();
   });
 
-  it("falls back to the start time when no folder was reported, in both locales", () => {
+  it("falls back to the agent and the start time when no folder was reported, in both locales", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [base] });
-    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code · started 14:02");
+    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code");
+    expect(only().querySelector(".agent-session-meta")?.textContent).toBe("started 14:02");
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [base] });
-    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code · 14:02 開始");
+    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code");
+    expect(only().querySelector(".agent-session-meta")?.textContent).toBe("14:02 開始");
   });
 
   it("says when it started and what it holds, or that it holds nothing, in both locales", () => {
+    // T606 (B3): when it started is under the name; the line under the head is what it holds.
     const labelled = { ...base, label: "shop-frontend" };
+    const sites = () => only().querySelector(".agent-session-sites")?.textContent;
+    const meta = () => only().querySelector(".agent-session-meta")?.textContent;
     renderShell();
     project(port, { ...IDLE, sessions: [labelled] });
-    expect(only().textContent).toContain("started 14:02 · holds 2 tabs: shop.test, localhost:3100");
+    expect(meta()).toBe("Claude Code · started 14:02");
+    expect(sites()).toBe("holds 2 tabs: shop.test, localhost:3100");
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [labelled] });
-    expect(only().textContent).toContain("14:02 開始 · 持有 2 個分頁：shop.test、localhost:3100");
+    expect(meta()).toBe("Claude Code · 14:02 開始");
+    expect(sites()).toBe("持有 2 個分頁：shop.test、localhost:3100");
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [], sites: [] }] });
-    expect(only().textContent).toContain("14:02 開始 · 沒有持有分頁");
+    expect(sites()).toBe("沒有持有分頁");
     cleanup();
 
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [], sites: [] }] });
-    expect(only().textContent).toContain("started 14:02 · holds no tabs");
+    expect(sites()).toBe("holds no tabs");
   });
 
   // 0.9.0 owner check: without a folder the title already ends in the start time, so the subtitle

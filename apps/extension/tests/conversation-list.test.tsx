@@ -26,6 +26,9 @@ import {
  * The panel holds neither list: both are the worker's `conversation` projection, and every press
  * leaves as one `ui.conversation.*` command (checked against the panel command schema). The removal
  * copy is part of the contract here: it must never say the agent's own record is deleted.
+ *
+ * 020/T598 (FR-321): the list lives in the header's drawer now; the drawer's own behaviour (groups,
+ * search, focus) is in conversation-drawer.test.tsx.
  */
 
 const OTHER_ID = "conv-aaaaaaaaaaaaaaaa";
@@ -59,8 +62,18 @@ const result = (port: FakeAgentPort, payload: Record<string, unknown>) =>
 const expectValidCommands = (port: FakeAgentPort) => {
   for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
 };
-const list = () => screen.getByRole("list", { name: ui("conversation.list.label") });
+/** 020 FR-321: the list is the drawer the header's list button opens. */
+const list = () => {
+  if (screen.queryByRole("dialog") === null) fireEvent.click(screen.getByRole("button", { name: ui("conversation.header.list") }));
+  return screen.getByRole("dialog", { name: ui("conversation.list.label") });
+};
 const folderPicker = () => screen.getByRole("region", { name: ui("conversation.folders.label") });
+/** 020 FR-312: the folder chooser opens from the folder chip under the message box. */
+const folderChip = () => screen.getByRole("button", { name: /^Folder: / });
+const composeAndSend = (words = "hello") => {
+  fireEvent.change(document.querySelector(".agent-conversation-composer textarea")!, { target: { value: words } });
+  fireEvent.click(screen.getByRole("button", { name: ui("conversation.composer.send") }));
+};
 
 describe("T563 the list of conversations", () => {
   let port: FakeAgentPort;
@@ -88,14 +101,18 @@ describe("T563 the list of conversations", () => {
     expect(rows.map((row) => row.getAttribute("data-conversation-id"))).toEqual([OTHER_ID, THIRD_ID, CONVERSATION_ID]);
     expect(rows[0]?.textContent).toContain("Newest chat");
     expect(rows[0]?.textContent).toContain("Codex");
-    expect(rows[0]?.textContent).toContain("D:\\work\\shop");
+    // T607 (G2): the folder's name; the whole path is its title.
+    expect(rows[0]?.querySelector(".agent-conversation-folder")?.textContent).toBe("shop");
+    expect(rows[0]?.querySelector(".agent-conversation-folder")?.getAttribute("title")).toBe("D:\\work\\shop");
     expect(rows[1]?.textContent).toContain("Claude Code");
     expect(rows[1]?.textContent).toContain(ui("conversation.folder.scratch"));
   });
 
   it("shows no list while there is nothing to list", async () => {
     await open(CONVERSATION_READY);
-    expect(screen.queryByRole("list", { name: ui("conversation.list.label") })).toBeNull();
+    expect(screen.queryByRole("list")).toBeNull();
+    expect(within(list()).queryByRole("listitem")).toBeNull();
+    expect(within(list()).getByText(ui("conversation.drawer.empty"))).toBeTruthy();
   });
 
   it("opens an entry on a click", async () => {
@@ -109,10 +126,10 @@ describe("T563 the list of conversations", () => {
 
   it("removes only the entry, and says the agent's own record stays", async () => {
     await open(LISTED);
-    expect(screen.getByText(ui("conversation.list.removeNote"))).toBeTruthy();
+    expect(within(list()).getByText(ui("conversation.list.removeNote"))).toBeTruthy();
     expect(ui("conversation.list.removeNote").toLowerCase()).not.toMatch(/delet/);
 
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.list.remove").replace("{title}", "Newest chat") }));
+    fireEvent.click(within(list()).getByRole("button", { name: ui("conversation.list.remove").replace("{title}", "Newest chat") }));
 
     expect(commandsSent(port)).toEqual([{ type: "ui.conversation.remove", payload: { conversationId: OTHER_ID } }]);
     expectValidCommands(port);
@@ -136,31 +153,35 @@ describe("T563 the list of conversations", () => {
     expect(row("Plain chat").textContent).not.toContain(ui("conversation.list.inUseElsewhere"));
   });
 
-  it("says in the owner's words that the list could not be read, without blocking the agents", async () => {
+  it("says in the owner's words that the list could not be read, without blocking the message box", async () => {
     await open({ ...CONVERSATION_READY, notice: "index-unreadable" });
 
     expect(screen.getByRole("status", { name: ui("conversation.list.label") }).textContent).toContain(
       ui("conversation.list.notice.index-unreadable"),
     );
-    expect(screen.getByRole("button", { name: /^Claude Code/ })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: ui("conversation.composer.label").replace("{agent}", "Claude Code") })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Agent: Claude Code/ })).toBeTruthy();
   });
 
   it("reads in zh-TW", async () => {
     await open({ ...LISTED, conversations: [view({ title: "舊對話", resumable: false })], notice: "index-unreadable" }, "zh-TW");
 
-    expect(screen.getByRole("list", { name: "對話清單" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看對話清單" }));
+    expect(screen.getByRole("dialog", { name: "對話清單" })).toBeTruthy();
     expect(screen.getByText("這個對話已無法繼續")).toBeTruthy();
     expect(screen.getByRole("button", { name: "從清單移除「舊對話」" })).toBeTruthy();
   });
 
   it("is reachable from an open conversation, which keeps its folder", async () => {
     await open({ ...LISTED, active: CONVERSATION_ID });
-    expect(screen.queryByRole("list", { name: ui("conversation.list.label") })).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.list.show") }));
-    expect(list()).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.header.list") }));
+    expect(within(list()).getAllByRole("listitem")).toHaveLength(3);
 
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.back") }));
+    // 020 FR-321: the drawer closes over the conversation, which stayed open behind it.
+    fireEvent.click(within(list()).getByRole("button", { name: ui("conversation.drawer.close") }));
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.getByRole("region", { name: ui("conversation.header.label") })).toBeTruthy();
     expect(commandsSent(port)).toEqual([]);
   });
@@ -168,7 +189,9 @@ describe("T563 the list of conversations", () => {
   it("offers a new conversation in another folder from an open conversation", async () => {
     await open({ ...CONVERSATION_OPEN, folders: [{ path: "D:\\work\\shop", addedAt: "2026-10-18T00:00:00.000Z" }] });
 
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.list.newInFolder") }));
+    // 020 FR-315: a new conversation, then its folder chip.
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.new") }));
+    fireEvent.click(folderChip());
 
     expect(folderPicker()).toBeTruthy();
     expect(screen.getByRole("radio", { name: "D:\\work\\shop" })).toBeTruthy();
@@ -197,7 +220,7 @@ describe("T563 the folder chooser", () => {
     renderShell();
     project(port, withConversation(conversation));
     await settle();
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.list.newInFolder") }));
+    fireEvent.click(folderChip());
   }
 
   it("offers the scratch folder, chosen by default, and the owner's folders", async () => {
@@ -212,19 +235,21 @@ describe("T563 the folder chooser", () => {
     expect(radios[0]?.checked).toBe(true);
   });
 
-  it("starts a conversation in the scratch folder by default, and in a listed folder once chosen", async () => {
+  it("starts a conversation in the scratch folder by default", async () => {
     await openChooser();
-    const start = (agent: string) => within(folderPicker()).getByRole("button", { name: ui("conversation.folders.start").replace("{agent}", agent) });
+    composeAndSend();
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } }]);
+  });
 
-    fireEvent.click(start("Codex"));
-    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.start", payload: { agent: "codex", folder: { kind: "scratch" } } }]);
-
+  it("starts a conversation in a listed folder once chosen, and the chip says which", async () => {
+    await openChooser();
     fireEvent.click(screen.getByRole("radio", { name: "D:\\work\\blog" }));
-    fireEvent.click(start("Claude Code"));
-    expect(commandsSent(port).at(-1)).toEqual({
-      type: "ui.conversation.start",
-      payload: { agent: "claude-code", folder: { kind: "project", path: "D:\\work\\blog" } },
-    });
+    expect(screen.getByRole("button", { name: ui("conversation.chip.folder").replace("{folder}", "blog") })).toBeTruthy();
+
+    composeAndSend();
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "project", path: "D:\\work\\blog" } } },
+    ]);
     expectValidCommands(port);
   });
 
@@ -238,8 +263,8 @@ describe("T563 the folder chooser", () => {
 
     // The worker drops it from the list; the choice goes with it.
     project(port, withConversation({ ...LISTED, folders: [FOLDERS[0]!] }));
-    fireEvent.click(within(folderPicker()).getByRole("button", { name: ui("conversation.folders.start").replace("{agent}", "Codex") }));
-    expect(commandsSent(port).at(-1)).toEqual({ type: "ui.conversation.start", payload: { agent: "codex", folder: { kind: "scratch" } } });
+    composeAndSend();
+    expect(commandsSent(port).at(-1)).toEqual({ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } });
   });
 
   it("asks the broker to open its folder dialog for Add folder", async () => {
@@ -296,7 +321,7 @@ describe("T563 the folder chooser", () => {
     renderShell("zh-TW");
     project(port, withConversation({ ...LISTED, folders: FOLDERS }));
     await settle();
-    fireEvent.click(screen.getByRole("button", { name: "在其他資料夾開新對話" }));
+    fireEvent.click(screen.getByRole("button", { name: "資料夾：暫存資料夾" }));
 
     expect(screen.getByRole("region", { name: "新對話的資料夾" })).toBeTruthy();
     expect(screen.getByRole("radio", { name: "暫存資料夾（預設）" })).toBeTruthy();

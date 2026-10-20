@@ -569,6 +569,91 @@ describe("T547 conversation relay: forwarding (pure)", () => {
     expect(frames).toEqual([]);
     expect(relay.panelState(true).epoch).toBe(OTHER_BROKER);
   });
+
+  /** T610: the list with an open conversation (`VIEW`) and a stopped one the owner chooses next. */
+  const STOPPED = { ...VIEW, conversationId: SECOND, title: "Explain the relay handshake", state: "stopped" };
+  const withBoth = (conversations: unknown[] = [VIEW, STOPPED]) => ({ ...fullOverview(), conversations });
+  function opened(relay: ReturnType<typeof createConversationRelay>): void {
+    relay.relayStarted();
+    relay.announce(BROKER);
+    relay.receive(withBoth() as never);
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: CONVERSATION }, commandId: "p-0" });
+    relay.receive({ type: "conversation-result", sessionId: BROKER, commandId: "p-0", ok: true } as never);
+  }
+  const viewOf = (relay: ReturnType<typeof createConversationRelay>, conversationId: string) =>
+    relay.panelState(true).conversations.find((entry) => entry.conversationId === conversationId);
+
+  it("T610: an open switches to the chosen conversation at once, shown starting until the broker answers", () => {
+    const { relay } = harness();
+    opened(relay);
+
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-1" });
+
+    expect(relay.panelState(true).active, "before the replay ends").toBe(SECOND);
+    expect(viewOf(relay, SECOND)?.state).toBe("starting");
+    expect(agentPanelStateSchema.shape.conversation.safeParse(relay.panelState(true)).success).toBe(true);
+
+    relay.receive({ ...withBoth([VIEW, { ...STOPPED, state: "idle" }]) } as never);
+    relay.receive({ type: "conversation-result", sessionId: BROKER, commandId: "p-1", ok: true } as never);
+    expect(relay.panelState(true).active).toBe(SECOND);
+    expect(viewOf(relay, SECOND)?.state).toBe("idle");
+  });
+
+  it("T610: an open refused with cannot-resume stays on the chosen conversation, shown ended before the broker's overview says so", () => {
+    const { relay, panels } = harness();
+    opened(relay);
+
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-1" });
+    relay.receive({
+      type: "conversation-result",
+      sessionId: BROKER,
+      commandId: "p-1",
+      ok: false,
+      error: { code: "cannot-resume", detail: "Claude Code no longer has this conversation." },
+    } as never);
+
+    expect(relay.panelState(true).active).toBe(SECOND);
+    expect(viewOf(relay, SECOND)).toMatchObject({ resumable: false, state: "stopped" });
+    expect(panels.at(-1)).toMatchObject({ type: "conversation-result", payload: { commandId: "p-1", ok: false } });
+    // An overview read before the broker marked the entry still says resumable: the end stays.
+    relay.receive(withBoth() as never);
+    expect(viewOf(relay, SECOND)?.resumable).toBe(false);
+    relay.receive(withBoth([VIEW, { ...STOPPED, resumable: false }]) as never);
+    expect(viewOf(relay, SECOND)?.resumable).toBe(false);
+    expect(relay.panelState(true).active).toBe(SECOND);
+  });
+
+  it("T610: any other refused open goes back to the conversation open before it, or to none", () => {
+    const { relay } = harness();
+    opened(relay);
+    const refuse = (commandId: string, code: string) =>
+      relay.receive({ type: "conversation-result", sessionId: BROKER, commandId, ok: false, error: { code, detail: "No." } } as never);
+
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-1" });
+    refuse("p-1", "too-many-running");
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+    expect(viewOf(relay, SECOND)).toMatchObject({ state: "stopped", resumable: true });
+
+    // Two opens under way: the later one refused goes back past the earlier one only once that is refused too.
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-2" });
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: CONVERSATION }, commandId: "p-3" });
+    refuse("p-2", "busy");
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+    refuse("p-3", "in-use-elsewhere");
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+
+    // With nothing open before, a refusal leaves nothing open; a broker that leaves refuses the same way.
+    relay.command({ type: "ui.conversation.remove", payload: { conversationId: CONVERSATION }, commandId: "p-4" });
+    relay.receive({ type: "conversation-result", sessionId: BROKER, commandId: "p-4", ok: true } as never);
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-5" });
+    expect(relay.panelState(true).active).toBe(SECOND);
+    refuse("p-5", "not-found");
+    expect(relay.panelState(true).active).toBeUndefined();
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-6" });
+    relay.ended(BROKER);
+    relay.announce(BROKER);
+    expect(relay.panelState(true).active).toBeUndefined();
+  });
 });
 
 const EXTENSION_ID = "adgpccmmbgnchnphfaoabfflfcepbopd";

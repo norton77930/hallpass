@@ -37,13 +37,18 @@ describe("T191 site list", () => {
     uninstallAgentPort();
   });
 
+  /** T606 (B1): what used to sit on the row is behind its "more" button. */
+  const openMore = (site: string) => fireEvent.click(screen.getByRole("button", { name: ui("agent.siteMore").replace("{site}", site) }));
+
   it("switches a site's mode with the closed command", () => {
     renderShell();
     project(port, { ...IDLE, sites: [ask] });
 
-    const select = screen.getByLabelText(ui("agent.siteModeLabel").replace("{site}", ask.site)) as HTMLSelectElement;
-    expect(select.value).toBe("ask");
-    fireEvent.change(select, { target: { value: "follow-a-plan" } });
+    // T606 (B1): the mode is a chip that opens the three modes.
+    const chip = screen.getByRole("button", { name: ui("agent.siteModeLabel").replace("{site}", ask.site) });
+    expect(chip.getAttribute("data-mode")).toBe("ask");
+    fireEvent.click(chip);
+    fireEvent.click(screen.getByRole("menuitemradio", { name: ui("agent.modeFollowAPlan") }));
 
     expect(port.sent).toEqual([{ type: "ui.agent.site-mode", payload: { site: ask.site, mode: "follow-a-plan" } }]);
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
@@ -61,8 +66,12 @@ describe("T191 site list", () => {
     });
 
     const row = (site: string) => document.querySelector(`[data-site="${site}"]`) as HTMLElement;
+    openMore(open.site);
     expect(within(row(open.site)).getByText(ui("agent.siteChangedBy.panel-agent"))).toBeTruthy();
+    openMore("https://owner.test");
     expect(within(row("https://owner.test")).getByText(ui("agent.siteChangedBy.owner"))).toBeTruthy();
+    openMore("https://older.test");
+    expect(row("https://older.test").querySelector(".agent-site-more")).not.toBeNull();
     expect(row("https://older.test").querySelector(".agent-site-author")).toBeNull();
   });
 
@@ -70,6 +79,7 @@ describe("T191 site list", () => {
     renderShell();
     project(port, { ...IDLE, sites: [ask, open] });
 
+    openMore(open.site);
     fireEvent.click(screen.getByRole("button", { name: ui("agent.siteRevoke").replace("{site}", open.site) }));
 
     expect(port.sent).toEqual([{ type: "ui.agent.site-clear", payload: { site: open.site } }]);
@@ -83,7 +93,10 @@ describe("T191 site list", () => {
     project(port, { ...IDLE, sites: [idn] });
 
     const row = document.querySelector(`li[data-site="${idn.site}"]`) as HTMLElement;
-    expect(row.querySelector(".agent-site-name")?.textContent).toBe(shown);
+    expect(row.querySelector(".agent-site-name")?.textContent).toBe("例え.jp (xn--r8jz45g.jp)");
+    // The name is cut short with an ellipsis on a narrow panel; the whole of it is the title.
+    expect(row.querySelector(".agent-site-name")?.getAttribute("title")).toBe(shown);
+    openMore(shown);
     fireEvent.click(screen.getByRole("button", { name: ui("agent.siteRevoke").replace("{site}", shown) }));
     expect(port.sent).toEqual([{ type: "ui.agent.site-clear", payload: { site: idn.site } }]);
   });
@@ -102,21 +115,22 @@ describe("T191 site list", () => {
 
     const rows = [...document.querySelectorAll<HTMLElement>("[data-site]")];
     expect(rows.map((row) => row.getAttribute("data-site"))).toEqual([ask.site, open.site]);
-    expect(rows[0]?.querySelector("select")?.getAttribute("data-permissive")).toBeNull();
-    expect(rows[1]?.querySelector("select")?.getAttribute("data-permissive")).toBe("true");
+    expect(rows[0]?.querySelector("[data-site-mode]")?.getAttribute("data-permissive")).toBeNull();
+    expect(rows[1]?.querySelector("[data-site-mode]")?.getAttribute("data-permissive")).toBe("true");
     expect(document.querySelector(".agent-site-flag")).toBeNull();
-    // The mode's own option still says it; nothing else on the row does.
+    // The mode's own chip says it; nothing else on the row does.
     const permissive = ui("agent.modeSkipChecks");
-    const optionText = [...(rows[1]?.querySelectorAll("option") ?? [])].map((option) => option.textContent).join("");
-    expect((rows[1]?.textContent ?? "").replace(optionText, "")).not.toContain(permissive);
+    const chipText = rows[1]?.querySelector("[data-site-mode]")?.textContent ?? "";
+    expect(chipText).toBe(permissive);
+    expect((rows[1]?.textContent ?? "").replace(chipText, "")).not.toContain(permissive);
   });
 
-  it("draws the permissive switch's border from the warning token (FR-235)", () => {
+  it("draws the permissive chip from the warning token (FR-235)", () => {
     const css = readFileSync(
       resolve(dirname(fileURLToPath(import.meta.url)), "../src/side-panel/agent/agent.css"),
       "utf8",
     );
-    expect(css).toMatch(/select\[data-permissive="true"\]\s*\{[^}]*border:\s*2px solid var\(--warn\)/);
+    expect(css).toMatch(/\[data-site-mode\]\[data-permissive="true"\]\s*\{[^}]*border-color:\s*var\(--warn\)/);
   });
 
   it.each([
@@ -127,6 +141,7 @@ describe("T191 site list", () => {
     project(port, { ...IDLE, sites: [{ ...ask, diagnosticsGranted: true }] });
     const row = document.querySelector<HTMLElement>("[data-site]") as HTMLElement;
     const t = (key: string): string => lookup(key, locale);
+    fireEvent.click(within(row).getByRole("button", { name: t("agent.siteMore").replace("{site}", ask.site) }));
 
     const checkbox = within(row).getByRole("checkbox", { name: t("agent.diagnosticsLabel").replace("{site}", ask.site) });
     expect(checkbox.getAttribute("aria-label")).toContain(ask.site);
@@ -144,6 +159,7 @@ describe("T191 site list", () => {
     renderShell();
     project(port, { ...IDLE, sites: [ask] });
 
+    openMore(ask.site);
     fireEvent.click(screen.getByLabelText(ui("agent.diagnosticsLabel").replace("{site}", ask.site)));
 
     expect(port.sent).toEqual([{ type: "ui.agent.set-diagnostics", payload: { site: ask.site, granted: true } }]);
@@ -228,7 +244,9 @@ describe("T191 site list", () => {
 
     const rows = [...document.querySelectorAll("[data-upload-root]")];
     expect(rows.map((row) => row.getAttribute("data-upload-root"))).toEqual([docs, "D:\\photos"]);
-    // Where the file is, because the owner may want to edit it by hand: a fact about their machine.
+    // Where the file is, because the owner may want to edit it by hand: a fact about their machine
+    // (T606 B2: in the status row's menu).
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
     expect(screen.getByText(ui("agent.uploadRootsPath").replace("{path}", CONFIG))).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: ui("agent.uploadRootRevoke").replace("{root}", docs) }));
@@ -262,19 +280,15 @@ describe("T191 site list", () => {
     project(port, { ...IDLE, uploadRoots: { roots: [], path: CONFIG } });
     const section = (): Element | null => document.querySelector(".agent-upload-roots");
     expect(section()?.textContent).toContain(ui("agent.uploadRootsIntro"));
-    expect(section()?.textContent).toContain(
-      'None yet. When the agent needs a file from anywhere else it asks you first; a directory you answer "These directories from now on" for is listed here.',
-    );
-    expect(section()?.lastElementChild?.textContent).toBe(`List file: ${CONFIG}`);
+    expect(section()?.textContent).toContain('None yet. Folders you allow "from now on" are listed here.');
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, uploadRoots: { roots: [], path: CONFIG } });
-    expect(section()?.textContent).toContain("agent 只能從這些資料夾，把你電腦上的檔案放進網頁。");
-    expect(section()?.textContent).toContain(
-      "目前沒有。agent 需要其他地方的檔案時會先問你；你回答「這些資料夾以後都可以」的資料夾會列在這裡。",
-    );
-    expect(section()?.lastElementChild?.textContent).toBe(`清單檔案：${CONFIG}`);
+    expect(section()?.textContent).toContain("只有這些資料夾的檔案能放進網頁；其他位置會先問你。");
+    expect(section()?.textContent).toContain("目前沒有。你回答「以後都可以」的資料夾會列在這裡。");
+    // T606 (B2): the list file is named in the status row's menu, not under the folders.
+    expect(section()?.querySelector(".agent-upload-roots-path")).toBeNull();
     cleanup();
 
     renderShell();

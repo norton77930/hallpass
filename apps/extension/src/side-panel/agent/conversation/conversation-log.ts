@@ -37,11 +37,14 @@ export function appendLogEntry(logs: ConversationLogs, payload: ConversationEven
 type ToolEvent = Extract<ConversationEvent, { type: "tool" }>;
 type PermissionEvent = Extract<ConversationEvent, { type: "permission" }>;
 type NoticeEvent = Extract<ConversationEvent, { type: "notice" }>;
+type PermissionClosedEvent = Extract<ConversationEvent, { type: "permission-closed" }>;
 
 export type TimelineItem =
   | { kind: "text"; key: string; role: "agent" | "owner"; text: string }
   | { kind: "actions"; key: string; actions: ToolEvent[] }
-  | { kind: "notice"; key: string; notice: NoticeEvent };
+  | { kind: "notice"; key: string; notice: NoticeEvent }
+  /** 020 FR-319: how a card this panel showed was closed, as the broker reported it. */
+  | { kind: "answer"; key: string; title: string; answer: PermissionClosedEvent["answer"] };
 
 export type ConversationPicture = {
   timeline: TimelineItem[];
@@ -56,7 +59,8 @@ export type ConversationPicture = {
 /**
  * The events in order, folded into what is on screen: consecutive text from the same speaker is one
  * message that grows as it streams (FR-285); an action keeps its first place and takes its latest
- * status (FR-287); a card leaves when the broker says it closed, whoever answered it (FR-288).
+ * status (FR-287); a card leaves when the broker says it closed, whoever answered it (FR-288), and
+ * leaves one line saying how (020 FR-319).
  */
 export function pictureOf(entries: readonly ConversationLogEntry[]): ConversationPicture {
   const timeline: TimelineItem[] = [];
@@ -92,9 +96,16 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
       case "permission":
         permissions.set(event.requestId, event);
         break;
-      case "permission-closed":
+      case "permission-closed": {
+        // 020 FR-319: the answer stays as one line where the conversation stood when it came -
+        // the broker's own word for how the card ended, whichever panel document answered it.
+        const closed = permissions.get(event.requestId);
+        if (closed !== undefined) {
+          timeline.push({ kind: "answer", key: `answer-${seq}`, title: closed.title, answer: event.answer });
+        }
         permissions.delete(event.requestId);
         break;
+      }
       case "mode":
         picture.mode = event.mode;
         if (event.note === undefined) delete picture.modeNote;
@@ -110,4 +121,63 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
   }
   picture.permissions = [...permissions.values()];
   return picture;
+}
+
+/** 020 FR-318: one turn's actions, as the conversation shows them. */
+export type TurnActionGroup = {
+  kind: "turn-actions";
+  key: string;
+  /** The turn is the last one and the conversation says it is still under way. */
+  running: boolean;
+  /** What the turn did that did not go wrong, in order - the "N steps". */
+  steps: ToolEvent[];
+  /** Failed and refused actions, never folded away. */
+  problems: ToolEvent[];
+  /** While the turn runs: the newest running action, else the newest still waiting to start. */
+  live?: ToolEvent;
+};
+export type TurnTimelineItem = Exclude<TimelineItem, { kind: "actions" }> | TurnActionGroup;
+
+const isProblem = (action: ToolEvent): boolean => action.status === "failed" || action.status === "refused";
+
+/**
+ * 020 T594, R-334: a turn is everything between one owner message and the next. Every action of a
+ * turn goes into one group, placed where the turn's last actions were, so the turn's closing words
+ * follow it; the group keeps the key of the turn's first actions, so it does not remount as the turn
+ * grows. Only the last turn can be running, and only while `turnUnderWay`.
+ */
+export function groupTurns(timeline: readonly TimelineItem[], turnUnderWay: boolean): TurnTimelineItem[] {
+  const turns: TimelineItem[][] = [[]];
+  for (const item of timeline) {
+    if (item.kind === "text" && item.role === "owner") turns.push([]);
+    turns[turns.length - 1]!.push(item);
+  }
+  const out: TurnTimelineItem[] = [];
+  turns.forEach((turn, index) => {
+    const batches = turn.filter((item): item is Extract<TimelineItem, { kind: "actions" }> => item.kind === "actions");
+    const lastBatch = batches[batches.length - 1];
+    const running = turnUnderWay && index === turns.length - 1;
+    for (const item of turn) {
+      if (item.kind !== "actions") {
+        out.push(item);
+        continue;
+      }
+      if (item !== lastBatch) continue;
+      const actions = batches.flatMap((batch) => batch.actions);
+      const group: TurnActionGroup = {
+        kind: "turn-actions",
+        key: batches[0]!.key,
+        running,
+        steps: actions.filter((action) => !isProblem(action)),
+        problems: actions.filter(isProblem),
+      };
+      if (running) {
+        const newest = (status: ToolEvent["status"]) => [...actions].reverse().find((action) => action.status === status);
+        const live = newest("running") ?? newest("pending");
+        if (live !== undefined) group.live = live;
+      }
+      out.push(group);
+    }
+  });
+  return out;
 }
