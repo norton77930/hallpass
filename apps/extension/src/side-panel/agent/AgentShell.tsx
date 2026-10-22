@@ -5,12 +5,16 @@ import {
   type AgentPanelCommand,
   type AgentPanelState,
   type ConversationError,
+  type ConversationPanelCommand,
+  type ConversationPanelResult,
   type ConversationPanelState,
+  type TabCaptureResult,
 } from "@hallpass/contracts";
 import { reportTestDiagnostic } from "../../diagnostics.js";
 import { lookup } from "../../locales/catalog.js";
 import { appendLogEntry, type ConversationLogs } from "./conversation/conversation-log.js";
 import { ConversationTab } from "./conversation/ConversationTab.js";
+import { useComposerMemory } from "./conversation/attachments/drafts.js";
 import { panelWindowMessage } from "../../panel-window.js";
 import { BrowserRow } from "./BrowserRow.js";
 import { NotConnected } from "./NotConnected.js";
@@ -72,6 +76,28 @@ export function deriveComposition(state: AgentPanelState): AgentComposition {
 
 export type SendCommand = (command: AgentPanelCommand) => void;
 
+/** 022 R-337: a `ui.conversation.*` command whose own result the caller waits for. */
+export type ConversationRequest = Exclude<ConversationPanelCommand, { type: "ui.conversation.resync" }>;
+/**
+ * 022 R-337: send one conversation command and wait for the broker's answer to it - matched by the
+ * commandId minted here (T547). It does not touch the shell's last-error line: the caller says what
+ * the answer means. A connection that drops first answers `broker-unavailable` (nothing more will
+ * come for it); the caller bounds the wait (30 s, transfer.ts).
+ */
+export type RequestCommand = (command: ConversationRequest) => Promise<ConversationPanelResult>;
+/** 022 R-342: ask the worker for the tab the owner is looking at (the composer's tab entries). */
+export type CaptureTab = (tabId: number, what: "screenshot" | "page") => Promise<TabCaptureResult>;
+
+/** What a pending request is answered with when the connection it left on is gone. */
+const CONNECTION_LOST = "The side panel lost its connection to Hallpass before the answer came.";
+
+/**
+ * T633: how long the composer waits for the worker's capture before saying it failed. A page's text
+ * (every frame) or a PDF's fetch can take longer than a picture of what the window shows.
+ */
+const CAPTURE_TIMEOUT_MS: Record<"screenshot" | "page", number> = { screenshot: 30_000, page: 90_000 };
+const CAPTURE_TIMED_OUT = "The tab was not captured in time.";
+
 /** 019 T547: how many of this document's own commandIds are remembered while their results are due. */
 const OWN_COMMANDS_KEPT = 64;
 
@@ -100,6 +126,8 @@ function useAgentPort(): {
   state: AgentPanelState;
   logs: ConversationLogs;
   send: SendCommand;
+  request: RequestCommand;
+  captureTab: CaptureTab;
   lastError: ConversationError | undefined;
 } {
   const [state, setState] = useState<AgentPanelState>(EMPTY_STATE);
@@ -128,6 +156,15 @@ function useAgentPort(): {
   const portRef = useRef<chrome.runtime.Port | undefined>(undefined);
   /** A fresh connection on the owner's word, for after the backoff has given up. */
   const reconnectRef = useRef<(() => void) | undefined>(undefined);
+  /** 022 R-337: requests waiting for their own result, by the commandId minted for them. */
+  const requests = useRef(new Map<string, (result: ConversationPanelResult) => void>());
+  /** 022 R-342: tab captures waiting for the worker, by requestId. */
+  const captures = useRef(new Map<string, (result: TabCaptureResult) => void>());
+  /**
+   * 022 (S1 architecture review): attachments whose first piece left and that were neither sent nor
+   * cancelled, with their conversation - cancelled, best effort, when this document goes away.
+   */
+  const begun = useRef(new Map<string, string>());
 
   useEffect(() => {
     if (typeof chrome === "undefined" || !chrome.runtime?.connect) {
@@ -155,12 +192,28 @@ function useAgentPort(): {
         return;
       }
       if (parsed.data.type === "conversation-result") {
-        // 019 T547 (G1): only this document's own commands; the latest one decides.
         const result = parsed.data.payload;
+        // 022 R-337: a request's answer goes to the one waiting for it, and only there.
+        const waiting = requests.current.get(result.commandId);
+        if (waiting !== undefined) {
+          requests.current.delete(result.commandId);
+          waiting(result);
+          return;
+        }
+        // 019 T547 (G1): only this document's own commands; the latest one decides.
         const index = ownCommands.current.indexOf(result.commandId);
         if (index < 0) return;
         ownCommands.current.splice(index, 1);
         setLastError(result.ok ? undefined : result.error);
+        return;
+      }
+      // 022 R-342: the viewed tab's capture is answered to the composer that asked; not a projection.
+      if (parsed.data.type === "tab-capture-result") {
+        const waiting = captures.current.get(parsed.data.requestId);
+        if (waiting !== undefined) {
+          captures.current.delete(parsed.data.requestId);
+          waiting(parsed.data.result);
+        }
         return;
       }
       const projected = parsed.data.payload;
@@ -243,6 +296,8 @@ function useAgentPort(): {
         // that cannot start.
         const reason = chrome.runtime.lastError?.message;
         reportTestDiagnostic(`agent.panel.disconnected${reason ? `: ${reason}` : ""}`);
+        // 022: nothing that was waiting on this connection will be answered on the next one.
+        failWaiting();
         if (disposed) {
           return;
         }
@@ -280,6 +335,23 @@ function useAgentPort(): {
         clearTimeout(retryTimer);
       }
       const port = portRef.current;
+      // 022: the panel closing gives up every transfer under way - its staged pieces are cancelled,
+      // best effort (the broker also drops them after 120 s without a piece, R-340).
+      if (port) {
+        for (const [attachmentId, conversationId] of begun.current) {
+          try {
+            port.postMessage({
+              type: "ui.conversation.attach-cancel",
+              commandId: mintCommandId(),
+              payload: { conversationId, attachmentId },
+            } satisfies AgentPanelCommand);
+          } catch {
+            reportTestDiagnostic("agent.panel.send-failed");
+          }
+        }
+      }
+      begun.current.clear();
+      failWaiting();
       portRef.current = undefined;
       if (port) {
         port.onMessage.removeListener(onMessage);
@@ -297,6 +369,34 @@ function useAgentPort(): {
       ownCommands.current.push(commandId);
       if (ownCommands.current.length > OWN_COMMANDS_KEPT) ownCommands.current.shift();
     }
+    post(command);
+  };
+
+  /** 022: every request and capture still waiting is answered as failed (the connection is gone). */
+  function failWaiting(): void {
+    const waitingRequests = [...requests.current];
+    requests.current.clear();
+    for (const [commandId, resolve] of waitingRequests) {
+      resolve({ commandId, ok: false, error: { code: "broker-unavailable", detail: CONNECTION_LOST } });
+    }
+    const waitingCaptures = [...captures.current.values()];
+    captures.current.clear();
+    for (const resolve of waitingCaptures) resolve({ ok: false, code: "failed", message: CONNECTION_LOST });
+  }
+
+  /** 022: which staged attachments a command begins or ends, for the cancel on close. */
+  function track(command: AgentPanelCommand): void {
+    if (command.type === "ui.conversation.attach" && command.payload.index === 0) {
+      begun.current.set(command.payload.attachmentId, command.payload.conversationId);
+    } else if (command.type === "ui.conversation.attach-cancel") {
+      begun.current.delete(command.payload.attachmentId);
+    } else if (command.type === "ui.conversation.send") {
+      for (const attachmentId of command.payload.attachments ?? []) begun.current.delete(attachmentId);
+    }
+  }
+
+  /** Posts one command on the current port; false when it could not leave. */
+  function post(command: AgentPanelCommand): boolean {
     const port = portRef.current;
     if (!port) {
       // This press is lost - the projection it answered may not survive the reconnect anyway -
@@ -304,18 +404,49 @@ function useAgentPort(): {
       // give-up page's Retry would be a button that can never work.
       reportTestDiagnostic("agent.panel.message-dropped");
       reconnectRef.current?.();
-      return;
+      return false;
     }
     try {
       port.postMessage(command);
+      track(command);
+      return true;
     } catch {
       // The worker can idle out between the last projection and this click.
       reportTestDiagnostic("agent.panel.send-failed");
       portRef.current = undefined;
+      return false;
     }
-  };
+  }
 
-  return { state, logs, send, lastError };
+  const request: RequestCommand = (command) =>
+    new Promise<ConversationPanelResult>((resolve) => {
+      const commandId = mintCommandId();
+      requests.current.set(commandId, resolve);
+      if (!post({ ...command, commandId } as AgentPanelCommand)) {
+        requests.current.delete(commandId);
+        resolve({ commandId, ok: false, error: { code: "broker-unavailable", detail: CONNECTION_LOST } });
+      }
+    });
+
+  const captureTab: CaptureTab = (tabId, what) =>
+    new Promise<TabCaptureResult>((resolve) => {
+      const requestId = mintCommandId();
+      // T633: bounded, and a late answer finds nobody waiting (the resolver goes with the bound).
+      const timer = setTimeout(() => {
+        if (captures.current.delete(requestId)) resolve({ ok: false, code: "failed", message: CAPTURE_TIMED_OUT });
+      }, CAPTURE_TIMEOUT_MS[what]);
+      captures.current.set(requestId, (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      });
+      if (!post({ type: "ui.tab.capture", requestId, payload: { tabId, what } })) {
+        clearTimeout(timer);
+        captures.current.delete(requestId);
+        resolve({ ok: false, code: "failed", message: CONNECTION_LOST });
+      }
+    });
+
+  return { state, logs, send, request, captureTab, lastError };
 }
 
 /** 019 D-019-3, FR-284: the two tabs, and the key the last one is remembered under. */
@@ -384,8 +515,8 @@ export function connectionsAttentionCount(state: AgentPanelState): number {
  * The worker decides what the id is worth: a tab another session holds, or a browser page, is not
  * placed (the claim path refuses it).
  */
-function useActiveTabId(): number | undefined {
-  const [activeTabId, setActiveTabId] = useState<number | undefined>(undefined);
+function useActiveTab(): { id?: number; url?: string } {
+  const [activeTab, setActiveTab] = useState<{ id?: number; url?: string }>({});
   useEffect(() => {
     let disposed = false;
     const read = (): void => {
@@ -393,7 +524,11 @@ function useActiveTabId(): number | undefined {
         const query = chrome.tabs?.query?.({ active: true, currentWindow: true }) as Promise<chrome.tabs.Tab[]> | undefined;
         void Promise.resolve(query)
           .then((tabs) => {
-            if (!disposed) setActiveTabId(tabs?.[0]?.id);
+            // 022 FR-334: the address too, so "Attach this tab" can tell a PDF tab.
+            const tab = tabs?.[0];
+            if (!disposed) {
+              setActiveTab({ ...(tab?.id === undefined ? {} : { id: tab.id }), ...(tab?.url === undefined ? {} : { url: tab.url }) });
+            }
           })
           .catch(() => reportTestDiagnostic("agent.panel.active-tab-unread"));
       } catch {
@@ -403,12 +538,19 @@ function useActiveTabId(): number | undefined {
     read();
     const activated = chrome.tabs?.onActivated;
     activated?.addListener(read);
+    // T633: the viewed tab going to another address (a PDF, a restricted page) is read again too.
+    const updated = chrome.tabs?.onUpdated;
+    const onUpdated = (_tabId: number, change: { url?: string }, tab: chrome.tabs.Tab): void => {
+      if (change.url !== undefined && tab.active) read();
+    };
+    updated?.addListener(onUpdated);
     return () => {
       disposed = true;
       activated?.removeListener(read);
+      updated?.removeListener(onUpdated);
     };
   }, []);
-  return activeTabId;
+  return activeTab;
 }
 
 /** How often the cards' "last action" words are measured again (016 FR-230). */
@@ -431,11 +573,24 @@ function useMinuteClock(): number {
 }
 
 export function AgentShell(props: { locale: string }): ReactElement {
-  const { state, logs, send, lastError } = useAgentPort();
+  const { state, logs, send, request, captureTab, lastError } = useAgentPort();
+  /**
+   * T633 (FR-335): the composer's drafts and transfers live here, above the tab switch, so showing
+   * Connections & sites gives up nothing; only this document going away does (with the cancel of
+   * every begun attachment in `useAgentPort`).
+   */
+  const composer = useComposerMemory();
+  useEffect(() => {
+    const running = composer.transfers;
+    return () => {
+      for (const controller of running.values()) controller.abort();
+    };
+  }, []);
   const now = useMinuteClock();
   const t = (key: string): string => lookup(key, props.locale);
   const [tab, chooseTab] = usePanelTab();
-  const activeTabId = useActiveTabId();
+  const activeTab = useActiveTab();
+  const activeTabId = activeTab.id;
   const tabRefs = useRef<Partial<Record<AgentPanelTabName, HTMLButtonElement | null>>>({});
   const composition = deriveComposition(state);
 
@@ -635,7 +790,11 @@ export function AgentShell(props: { locale: string }): ReactElement {
                 logs={logs}
                 locale={props.locale}
                 send={send}
+                request={request}
+                captureTab={captureTab}
+                composer={composer}
                 {...(activeTabId === undefined ? {} : { activeTabId })}
+                {...(activeTab.url === undefined ? {} : { activeTabUrl: activeTab.url })}
                 {...(lastError === undefined ? {} : { lastError })}
                 onGoConnections={() => chooseTab("connections")}
               />

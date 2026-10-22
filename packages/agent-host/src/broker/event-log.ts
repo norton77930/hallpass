@@ -67,7 +67,8 @@ export class ConversationEventLog {
   /**
    * The entries from `fromSeq` on, as many as fit `maxBytes` of JSON and 4096 entries; `more` when
    * entries remain after them. The first entry always goes out even if it alone were larger (it
-   * cannot be: one event is at most ~17 KB), so a reader always makes progress.
+   * cannot be: one event is at most ~90 KB - an owner message with five 12 000-character thumbnails
+   * and its other attachments (022) - well under the 256 KiB page), so a reader always makes progress.
    */
   page(fromSeq: number, maxBytes: number = CONVERSATION_PAGE_MAX_BYTES): ConversationPage {
     const start = this.list.findIndex((entry) => entry.seq >= fromSeq);
@@ -127,6 +128,8 @@ export class ConversationEventLog {
       const older = this.list[index]!.event;
       const newer = this.list[index + 1]!.event;
       if (older.type !== "text" || newer.type !== "text" || older.role !== newer.role) continue;
+      // 022: a message with attachments is never merged (that would strip them); it can only go whole.
+      if (older.attachments !== undefined || newer.attachments !== undefined) continue;
       const merged = older.text + newer.text;
       // Keep the newer end; over one event's bound, and in any case shrinking when merged would not
       // shrink the log (two entries' JSON overhead is small), cut the older half's words.

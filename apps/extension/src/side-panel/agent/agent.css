@@ -1523,6 +1523,25 @@
   padding: 0 var(--sp-1);
 }
 
+/* 021 FR-354: "Starting <agent>…", the slow-start sentence and Cancel, on one wrapping row. */
+.agent-conversation-starting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+}
+
+.agent-conversation-starting p {
+  margin: 0;
+}
+
+/* 021 FR-357: the note above a conversation the agent continues without replaying. */
+.agent-conversation-replay-note {
+  flex: none;
+  margin: 0;
+  padding: 0 var(--sp-1);
+}
+
 /* ---------- the footer: cards over the box, the box, what stays under it ---------- */
 
 /*
@@ -1716,6 +1735,38 @@
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
+}
+
+/*
+ * T633 (live shots): 022's + beside Send took the room the folder chip gave way into ("Sc…", a lone
+ * "暫"). In a narrow card the chips and the buttons sit a little tighter - the same chips, the same
+ * row - and the folder chip keeps room for the start of its short name and the ellipsis.
+ */
+.agent-conversation-composer {
+  container-type: inline-size;
+  container-name: agent-composer;
+}
+
+@container agent-composer (max-width: 440px) {
+  .agent-conversation-chips {
+    gap: 2px;
+  }
+
+  .agent-conversation-composer-row {
+    gap: var(--sp-1);
+  }
+
+  .agent-conversation-composer-actions {
+    gap: 2px;
+  }
+
+  .agent-shell .agent-conversation-chip {
+    padding: 2px 4px;
+  }
+
+  .agent-shell .agent-conversation-chip[data-chip="folder"] {
+    min-width: 5em;
+  }
 }
 
 .agent-conversation-chip-short {
@@ -2197,4 +2248,176 @@
 .agent-conversation-entry-label {
   color: var(--warn);
   font-size: var(--fs-1);
+}
+
+/* ---------- 022 attachments: the + menu, the chips, the refusal, the bubble (FR-325 - FR-341) ---------- */
+
+/* The + sits before Send, the same size as Send and Stop. */
+.agent-shell button.agent-conversation-attach {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+}
+
+.agent-shell button.agent-conversation-attach[aria-expanded="true"] {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* Its menu opens from the right, where the + is. */
+.agent-conversation-popup.agent-conversation-attach-popup {
+  right: 0;
+  left: auto;
+}
+
+/* An entry that cannot be used here: still read and reachable, quieter, with its reason under it. */
+.agent-shell .agent-conversation-attach-item[aria-disabled="true"] {
+  color: var(--text-3);
+  cursor: default;
+}
+
+.agent-shell .agent-conversation-attach-item[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.agent-conversation-attach-hint {
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+/* The chips: above the words inside the card, wrapping. */
+.agent-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/*
+ * T633 (live shots): two chips share a row - each at most half of it - so they no longer stack one
+ * per row; a chip alone (a tab with a long title) uses the whole row for its name.
+ */
+.agent-attachment {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: calc(50% - 2px);
+  padding: 3px 3px 3px 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--fs-1);
+}
+
+.agent-attachment:only-child {
+  max-width: 100%;
+}
+
+.agent-attachment[data-attachment-state="refused"] {
+  border-color: var(--danger);
+}
+
+.agent-attachment-thumb,
+.agent-attachment-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-1);
+}
+
+.agent-attachment-thumb {
+  object-fit: cover;
+}
+
+.agent-attachment-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+
+.agent-attachment-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 16px;
+}
+
+.agent-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-attachment-meta {
+  display: flex;
+  gap: var(--sp-1);
+  overflow: hidden;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-attachment[data-attachment-state="refused"] .agent-attachment-meta {
+  color: var(--danger);
+  white-space: normal;
+}
+
+/* "cut": the tab's text was shortened. */
+.agent-attachment-cut {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.agent-shell button.agent-attachment-remove {
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  border-radius: var(--r-1);
+}
+
+/* The refusal, over the card: what happened and what to do. */
+.agent-attach-refusal {
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--fs-2);
+}
+
+.agent-attach-refusal p {
+  margin: 0;
+}
+
+/* The owner's bubble: under the words; chips on the panel ground, pictures as thumbnails. */
+.agent-attachments-sent {
+  margin-top: var(--sp-1);
+}
+
+.agent-conversation-message[data-message-role="owner"] .agent-attachment {
+  background: var(--bg);
+}
+
+.agent-conversation-message[data-message-role="owner"] .agent-attachment-meta {
+  color: var(--warn);
+}
+
+.agent-attachment-picture img {
+  display: block;
+  max-width: 96px;
+  max-height: 72px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  object-fit: cover;
 }

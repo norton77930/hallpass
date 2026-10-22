@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import {
+  CONVERSATION_ATTACHMENT_PIECE_MAX_CHARS,
+  CONVERSATION_THUMBNAIL_MAX_CHARS,
+  conversationCommandFrameSchema,
+} from "@hallpass/contracts";
 import { encodeFrame, FrameDecoder, NATIVE_FRAME_MAX_BYTES } from "../src/native-frame.js";
 
 /**
@@ -87,5 +92,36 @@ describe("native messaging framing", () => {
     const prefix = new Uint8Array(4);
     new DataView(prefix.buffer).setUint32(0, body.length, true);
     expect(() => new FrameDecoder().push(concat(prefix, body))).toThrow("frame-invalid");
+  });
+});
+
+describe("022 R-337 an attachment piece fits one frame", () => {
+  it("the largest first piece the contract allows encodes under 1 MiB", () => {
+    // Every field at its bound, the names in three-byte characters so UTF-8 costs the most.
+    const frame = {
+      type: "conversation-command",
+      sessionId: "s".repeat(128),
+      commandId: "c".repeat(128),
+      command: {
+        type: "ui.conversation.attach",
+        payload: {
+          conversationId: "c".repeat(64),
+          attachmentId: "a".repeat(64),
+          index: 0,
+          final: false,
+          kind: "tab",
+          name: "漢".repeat(255),
+          size: 25 * 1024 * 1024,
+          mimeType: "m".repeat(100),
+          thumbnail: "A".repeat(CONVERSATION_THUMBNAIL_MAX_CHARS),
+          tab: { url: "漢".repeat(2048), title: "漢".repeat(512), cut: true },
+          data: "A".repeat(CONVERSATION_ATTACHMENT_PIECE_MAX_CHARS),
+        },
+      },
+    };
+    expect(conversationCommandFrameSchema.safeParse(frame).success).toBe(true);
+    const encoded = encodeFrame(frame);
+    expect(encoded.length - 4).toBeLessThan(NATIVE_FRAME_MAX_BYTES);
+    expect(new FrameDecoder().push(encoded)).toEqual([frame]);
   });
 });

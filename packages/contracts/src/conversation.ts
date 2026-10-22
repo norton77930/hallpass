@@ -14,8 +14,12 @@ import { z } from "zod";
  * every schema that takes a mode takes that enum (FR-292, SC-140).
  */
 
-/** The two connectors 019 ships (D-019-1); a third agent is a spec amendment, not a payload. */
-export const CONVERSATION_AGENTS = ["claude-code", "codex"] as const;
+/**
+ * The agents the panel can run (019 D-019-1; 021 contracts/agents.md adds Hermes and DeepSeek). The
+ * order is the panel's list order and the default-agent fallback order (first ready). Another agent
+ * is a spec amendment, not a payload.
+ */
+export const CONVERSATION_AGENTS = ["claude-code", "codex", "hermes", "deepseek"] as const;
 export const conversationAgentSchema = z.enum(CONVERSATION_AGENTS);
 export type ConversationAgent = z.infer<typeof conversationAgentSchema>;
 
@@ -26,6 +30,13 @@ export type ConversationAgent = z.infer<typeof conversationAgentSchema>;
 export const CONVERSATION_MODES = ["strict", "agent-review"] as const;
 export const conversationModeSchema = z.enum(CONVERSATION_MODES);
 export type ConversationMode = z.infer<typeof conversationModeSchema>;
+
+/**
+ * 021 D-021-16 (R-359, FR-360): the agents whose mode is fixed once a conversation has started -
+ * DeepSeek keeps the permission mode its session was created with. Their mode is chosen with the
+ * start (`ui.conversation.start`'s `mode`), a resume keeps it, and a change is refused `mode-fixed`.
+ */
+export const CONVERSATION_MODE_FIXED_AGENTS = ["deepseek"] as const satisfies readonly ConversationAgent[];
 
 /**
  * Where a conversation lives, fixed for its life (FR-303). The scratch path is derived from the
@@ -93,6 +104,14 @@ export const conversationStateSchema = z.enum(CONVERSATION_STATES);
 export type ConversationState = z.infer<typeof conversationStateSchema>;
 
 /**
+ * 022 R-336 / R-344: which content kinds an agent takes in a prompt besides text, as its
+ * `initialize` said (`promptCapabilities.image` / `.embeddedContext`). Optional wherever it appears:
+ * unknown means the panel offers the entries and the broker decides.
+ */
+export const conversationAcceptsSchema = z.strictObject({ image: z.boolean(), context: z.boolean() });
+export type ConversationAccepts = z.infer<typeof conversationAcceptsSchema>;
+
+/**
  * An index entry as the panel sees it: no content, no agent session id (the panel has no use for the
  * agent's own id and nothing here needs to reach it), no lease detail (only whether another browser
  * holds it), plus the live state.
@@ -108,6 +127,10 @@ export const conversationViewSchema = z.strictObject({
   resumable: z.boolean(),
   state: conversationStateSchema,
   inUseElsewhere: z.boolean().optional(),
+  /** 022 R-344: what this conversation's running agent said it accepts; absent when not known. */
+  accepts: conversationAcceptsSchema.optional(),
+  /** 021 R-352: the agent continues this conversation without replaying it (DeepSeek's `session/resume`). */
+  replay: z.literal("none").optional(),
 });
 export type ConversationView = z.infer<typeof conversationViewSchema>;
 
@@ -119,6 +142,13 @@ export const CONVERSATION_AVAILABILITIES = ["missing", "needs-install", "ready",
  */
 export const CONVERSATION_INSTALL_PHASES = ["preparing", "downloading", "finishing"] as const;
 export type ConversationInstallPhase = (typeof CONVERSATION_INSTALL_PHASES)[number];
+/**
+ * 021 R-348 / contracts/agents.md: what the panel says beside an agent's state. `git-missing` - Hermes
+ * found no Git Bash (its command tool needs it; strict switches that tool off, so it stays usable);
+ * `pre-release` - the pinned DeepSeek package is a pre-release.
+ */
+export const CONVERSATION_AGENT_NOTES = ["git-missing", "pre-release"] as const;
+export type ConversationAgentNote = (typeof CONVERSATION_AGENT_NOTES)[number];
 export const conversationAgentAvailabilitySchema = z.strictObject({
   agent: conversationAgentSchema,
   availability: z.enum(CONVERSATION_AVAILABILITIES),
@@ -127,6 +157,10 @@ export const conversationAgentAvailabilitySchema = z.strictObject({
   detail: z.string().min(1).max(600).optional(),
   /** T547 (G2): present only while the broker is downloading this agent's connector. */
   installing: z.enum(CONVERSATION_INSTALL_PHASES).optional(),
+  /** 022 R-344: what this agent last said it accepts, at its last `initialize` in this broker. */
+  accepts: conversationAcceptsSchema.optional(),
+  /** 021: notes beside the state; absent or empty when there are none. */
+  notes: z.array(z.enum(CONVERSATION_AGENT_NOTES)).max(CONVERSATION_AGENT_NOTES.length).optional(),
 });
 export type ConversationAgentAvailability = z.infer<typeof conversationAgentAvailabilitySchema>;
 
@@ -153,6 +187,26 @@ export const CONVERSATION_ERROR_CODES = [
   // T563: the folder dialog cannot open here (no desktop to show it on); the panel offers a typed
   // path instead, which the broker checks exactly like a chosen one.
   "path-entry",
+  // 022 (contracts/attachments.md, R-339, R-340, R-344): a piece or a send with attachments refused.
+  "attachment-too-large",
+  "attachment-too-many",
+  "attachment-type",
+  "attachment-order",
+  "attachment-unknown",
+  "attachment-incomplete",
+  "attachment-not-accepted",
+  "attachment-folder-gone",
+  "attachment-write-failed",
+  // 022 T618 follow-up: a command whose commandId is readable but that did not validate (not an
+  // attachment piece); the panel and broker disagree, so a reload - not a retry - is the remedy.
+  "invalid-command",
+  // 021 R-354: the owner stopped a conversation that was still starting.
+  "start-cancelled",
+  // 021 R-356: the agent could not reach its own model (setup guidance, never a key prompt).
+  "agent-model-unreachable",
+  // 021 D-021-16 (R-359): the agent keeps the mode its conversation started with; another mode is a
+  // new conversation.
+  "mode-fixed",
 ] as const;
 export const conversationErrorSchema = z.strictObject({
   code: z.enum(CONVERSATION_ERROR_CODES),
@@ -209,17 +263,88 @@ export const CONVERSATION_MESSAGE_MAX_CHARS = 32 * 1024;
 /** One page of a running conversation's log (R-318); the 1 MB link cap leaves room for the frame. */
 export const CONVERSATION_PAGE_MAX_BYTES = 256 * 1024;
 
+/* ------------------------------------------------------------------------------------------- */
+/* 022 attachments (contracts/attachments.md, R-336 - R-344)                                     */
+/* ------------------------------------------------------------------------------------------- */
+
+/** What a message can carry besides its text: a picture, a file copied into the folder, the viewed tab. */
+export const CONVERSATION_ATTACHMENT_KINDS = ["image", "file", "tab"] as const;
+export const conversationAttachmentKindSchema = z.enum(CONVERSATION_ATTACHMENT_KINDS);
+export type ConversationAttachmentKind = z.infer<typeof conversationAttachmentKindSchema>;
+
+/** The picture types the panel sends (D-022-1); it re-encodes GIF and WebP, the broker still takes them. */
+export const CONVERSATION_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+
+/** R-337: one piece is at most 512 KiB of raw bytes, as base64 (4 * ceil(524 288 / 3)). */
+export const CONVERSATION_ATTACHMENT_PIECE_MAX_CHARS = 699_052;
+/** R-340 / D-022-1: one picture as base64, the same bound the screenshot path keeps. */
+export const CONVERSATION_IMAGE_MAX_CHARS = 700_000;
+/** R-341 / R-343: a picture's thumbnail for the owner's bubble, as base64. */
+export const CONVERSATION_THUMBNAIL_MAX_CHARS = 12_000;
+/** R-340 / D-022-3: the tab's visible text, in characters (address and title come on top). */
+export const CONVERSATION_TAB_TEXT_MAX_CHARS = 50_000;
+export const CONVERSATION_TAB_URL_MAX_CHARS = 2048;
+export const CONVERSATION_TAB_TITLE_MAX_CHARS = 512;
+/** R-340 / D-022-4: per file, and all files of one message together. */
+export const CONVERSATION_FILE_MAX_BYTES = 25 * 1024 * 1024;
+export const CONVERSATION_FILES_TOTAL_MAX_BYTES = 25 * 1024 * 1024;
+export const CONVERSATION_MAX_IMAGES = 5;
+export const CONVERSATION_MAX_FILES = 5;
+export const CONVERSATION_MAX_TABS = 1;
+/** 5 images + 5 files + 1 tab. */
+export const CONVERSATION_MAX_ATTACHMENTS = CONVERSATION_MAX_IMAGES + CONVERSATION_MAX_FILES + CONVERSATION_MAX_TABS;
+
+/** Panel-minted; safe in a file name (`.<id>.part`, R-339). */
+export const conversationAttachmentIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{1,64}$/, { message: "expected 1-64 letters, digits, underscores and hyphens" });
+
+/** Standard base64 with its padding; the bound is the caller's. */
+export const base64Schema = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/, { message: "expected base64" });
+
+/**
+ * R-343: an attachment as the owner's bubble shows it. `thumbnail` for pictures only (a replayed
+ * picture has none: the broker cannot shrink one), `path` the final file path of a copied file,
+ * `cut` a tab whose text was shortened.
+ */
+export const conversationAttachmentSummarySchema = z.strictObject({
+  kind: conversationAttachmentKindSchema,
+  name: z.string().min(1).max(255),
+  size: z.number().int().nonnegative().optional(),
+  thumbnail: base64Schema(CONVERSATION_THUMBNAIL_MAX_CHARS).optional(),
+  path: z.string().min(1).max(2048).optional(),
+  cut: z.boolean().optional(),
+});
+export type ConversationAttachmentSummary = z.infer<typeof conversationAttachmentSummarySchema>;
+
 /**
  * One thing that happened in a conversation. `type` names the kind of event; `kind` on a tool or a
  * permission event is the *tool's* kind, which is why the discriminator is not called `kind`.
  */
 export const conversationEventSchema = z.discriminatedUnion("type", [
-  /** Coalesced text (R-318): the agent's words, or the owner's own message echoed back. */
-  z.strictObject({
-    type: z.literal("text"),
-    role: z.enum(["agent", "owner"]),
-    text: z.string().max(CONVERSATION_TEXT_MAX_CHARS),
-  }),
+  /**
+   * Coalesced text (R-318): the agent's words, or the owner's own message echoed back. 022 R-343:
+   * the owner's message may carry its attachments, and then its text may be empty.
+   */
+  z
+    .strictObject({
+      type: z.literal("text"),
+      role: z.enum(["agent", "owner"]),
+      text: z.string().max(CONVERSATION_TEXT_MAX_CHARS),
+      attachments: z.array(conversationAttachmentSummarySchema).min(1).max(CONVERSATION_MAX_ATTACHMENTS).optional(),
+    })
+    .refine((event) => event.attachments === undefined || event.role === "owner", {
+      message: "only the owner's message carries attachments",
+      path: ["attachments"],
+    })
+    .refine((event) => event.role !== "owner" || event.text.length > 0 || event.attachments !== undefined, {
+      message: "the owner's message has text or attachments",
+      path: ["text"],
+    }),
   z.strictObject({
     type: z.literal("tool"),
     toolCallId: z.string().min(1).max(128),
@@ -237,6 +362,8 @@ export const conversationEventSchema = z.discriminatedUnion("type", [
     kind: conversationToolKindSchema,
     title: z.string().max(200),
     detail: z.string().max(2048),
+    /** 021 R-353: neither the request nor the announced action says what it is; only Reject may be offered and answered. */
+    rejectOnly: z.literal(true).optional(),
   }),
   z.strictObject({
     type: z.literal("permission-closed"),
@@ -251,6 +378,8 @@ export const conversationEventSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("state"),
     state: conversationStateSchema,
+    /** 021 R-354: on `stopped`, the owner stopped the conversation while it was still starting. */
+    code: z.literal("start-cancelled").optional(),
   }),
   z.strictObject({
     type: z.literal("notice"),
@@ -284,7 +413,7 @@ export type ConversationEventPayload = z.infer<typeof conversationEventPayloadSc
 const conversationTarget = z.strictObject({ conversationId: conversationIdSchema });
 
 /*
- * The twelve things the owner can do from the Conversation tab, as shapes, so the two unions below
+ * The things the owner can do from the Conversation tab (twelve in 019, attach and attach-cancel in 022), as shapes, so the two unions below
  * are built from one definition: the panel's (which may name the commandId the panel minted, T547)
  * and the broker's (which never does - the worker strips it and puts it on the frame).
  *
@@ -292,18 +421,77 @@ const conversationTarget = z.strictObject({ conversationId: conversationIdSchema
  * the broker records, never things the panel says. `install` is sent only after the consent card's
  * Download (FR-299); the schema cannot tell, so the broker checks its consent record first.
  */
+/**
+ * 021 FR-361: `mode` is the mode chosen before the first message, which the agent starts in (absent:
+ * strict). For an agent in `CONVERSATION_MODE_FIXED_AGENTS` it is the conversation's mode for good
+ * (D-021-16); every other agent switches later with `ui.conversation.set-mode`.
+ */
 const START = {
   type: z.literal("ui.conversation.start"),
-  payload: z.strictObject({ agent: conversationAgentSchema, folder: conversationFolderSchema }),
+  payload: z.strictObject({ agent: conversationAgentSchema, folder: conversationFolderSchema, mode: conversationModeSchema.optional() }),
 };
 const SEND = {
   type: z.literal("ui.conversation.send"),
-  payload: z.strictObject({
-    conversationId: conversationIdSchema,
-    text: z.string().min(1).max(CONVERSATION_MESSAGE_MAX_CHARS),
-    /** The tab the owner is looking at, so the agent's tab group can start there (R-321). */
-    activeTabId: z.number().int().nonnegative().optional(),
-  }),
+  payload: z
+    .strictObject({
+      conversationId: conversationIdSchema,
+      text: z.string().max(CONVERSATION_MESSAGE_MAX_CHARS),
+      /** The tab the owner is looking at, so the agent's tab group can start there (R-321). */
+      activeTabId: z.number().int().nonnegative().optional(),
+      /** 022 R-337: the attachments staged by `ui.conversation.attach`, in the order the owner added them. */
+      attachments: z.array(conversationAttachmentIdSchema).min(1).max(CONVERSATION_MAX_ATTACHMENTS).optional(),
+    })
+    .refine((payload) => payload.text.length > 0 || payload.attachments !== undefined, {
+      message: "a message has text or attachments",
+      path: ["text"],
+    }),
+};
+/**
+ * 022 R-337: one piece of an attachment, at most 512 KiB of raw bytes, pieces in order from 0. The
+ * first piece says what it is (`kind`, `name`, the total `size` in bytes; a picture its type and
+ * thumbnail, the tab its address and title) and no later piece repeats it. Images and the tab's
+ * text travel this way too, so `send` stays small. The limits, the order and the declared size are
+ * the broker's to enforce (`attachments.ts`), each with its own error code.
+ */
+const ATTACH = {
+  type: z.literal("ui.conversation.attach"),
+  payload: z
+    .strictObject({
+      conversationId: conversationIdSchema,
+      attachmentId: conversationAttachmentIdSchema,
+      index: z.number().int().nonnegative(),
+      final: z.boolean(),
+      kind: conversationAttachmentKindSchema.optional(),
+      name: z.string().min(1).max(255).optional(),
+      size: z.number().int().nonnegative().optional(),
+      mimeType: z.string().min(1).max(100).optional(),
+      thumbnail: base64Schema(CONVERSATION_THUMBNAIL_MAX_CHARS).optional(),
+      tab: z
+        .strictObject({
+          url: z.string().max(CONVERSATION_TAB_URL_MAX_CHARS),
+          title: z.string().max(CONVERSATION_TAB_TITLE_MAX_CHARS),
+          cut: z.boolean(),
+        })
+        .optional(),
+      data: base64Schema(CONVERSATION_ATTACHMENT_PIECE_MAX_CHARS),
+    })
+    .refine(
+      (piece) =>
+        piece.index === 0
+          ? piece.kind !== undefined && piece.name !== undefined && piece.size !== undefined
+          : piece.kind === undefined &&
+            piece.name === undefined &&
+            piece.size === undefined &&
+            piece.mimeType === undefined &&
+            piece.thumbnail === undefined &&
+            piece.tab === undefined,
+      { message: "the first piece, and only the first, says what the attachment is", path: ["index"] },
+    ),
+};
+/** 022 R-340: drop a staged attachment and its part file; ok when there is none. */
+const ATTACH_CANCEL = {
+  type: z.literal("ui.conversation.attach-cancel"),
+  payload: z.strictObject({ conversationId: conversationIdSchema, attachmentId: conversationAttachmentIdSchema }),
 };
 const STOP = { type: z.literal("ui.conversation.stop"), payload: conversationTarget };
 const ANSWER = {
@@ -351,6 +539,8 @@ export const conversationCommandSchema = z.discriminatedUnion("type", [
   z.strictObject(OPEN_FOLDER),
   z.strictObject(INSTALL),
   z.strictObject(CONSENT),
+  z.strictObject(ATTACH),
+  z.strictObject(ATTACH_CANCEL),
 ]);
 export type ConversationCommand = z.infer<typeof conversationCommandSchema>;
 
@@ -385,6 +575,8 @@ export const conversationPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ ...OPEN_FOLDER, ...COMMAND_ID }),
   z.strictObject({ ...INSTALL, ...COMMAND_ID }),
   z.strictObject({ ...CONSENT, ...COMMAND_ID }),
+  z.strictObject({ ...ATTACH, ...COMMAND_ID }),
+  z.strictObject({ ...ATTACH_CANCEL, ...COMMAND_ID }),
   z.strictObject(RESYNC),
 ]);
 export type ConversationPanelCommand = z.infer<typeof conversationPanelCommandSchema>;

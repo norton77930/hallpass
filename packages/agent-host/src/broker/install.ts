@@ -4,18 +4,21 @@ import { copyFile, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/pr
 import { join, win32 } from "node:path";
 import { CONVERSATION_AGENTS, type ConversationAgent, type ConversationError } from "@hallpass/contracts";
 import { isProcessAlive } from "../bridge-link.js";
-import { AGENT_ADAPTERS, adapterDirectory } from "./agents.js";
+import { ADAPTER_NPM_CI_ARGS, AGENT_DESCRIPTIONS, adapterDirectory, packagePin } from "./agents.js";
 import { redactedTail } from "./redact.js";
 import type { runCommand } from "./run-command.js";
 
 /**
- * The first-use install of the pinned ACP adapter (019/T532, T533; R-314), on the owner's consent.
+ * The first-use install of the pinned ACP adapter (019/T532, T533; R-314), on the owner's consent -
+ * and, the same way, of a fetched ACP agent (021 R-345: DeepSeek). An installed program (Hermes) is
+ * never downloaded.
  *
  * Hallpass writes no download or hashing code of its own: the installed Node's npm runs
  * `npm ci` against the `package.json` + `package-lock.json` Hallpass ships, which checks every
  * tarball against the lockfile's `integrity` hash and so refuses anything altered or unpinned.
- * `--omit=optional` leaves out the adapter's bundled CLI (the owner's own CLI is used, R-315) and
- * `--ignore-scripts` means no install script runs.
+ * The command line is the agent's (`npmCiArgs`): for an adapter `--omit=optional` leaves out its
+ * bundled CLI (the owner's own CLI is used, R-315); a fetched agent keeps its optional dependencies,
+ * which hold its platform native bindings (R-357). `--ignore-scripts` means no install script runs.
  *
  * The work happens in `agents\<agent>\.staging-<broker pid>-<random>` and the folder is renamed to
  * `agents\<agent>\<adapter version>` only after the pinned adapter is verified inside it, so a
@@ -26,10 +29,9 @@ import type { runCommand } from "./run-command.js";
  * bar with the expected size (R-314); `InstallProgress.bytes` is there for a runner that can tell.
  */
 
-export const NPM_CI_ARGS = ["ci", "--omit=optional", "--ignore-scripts", "--no-audit", "--no-fund"];
+/** The adapters' `npm ci` command line (R-314); a fetched agent's is its own (R-357). */
+export const NPM_CI_ARGS: readonly string[] = ADAPTER_NPM_CI_ARGS;
 
-/** Generous: the slim adapters are 57-77 MB, but the owner's connection may be poor. */
-const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const STAGING_PREFIX = ".staging-";
 const DETAIL_MAX = 600;
 
@@ -76,9 +78,10 @@ const isFile = (path: string) =>
 
 const removeTree = (path: string) => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 
-/** The pinned adapter's package.json inside an `npm ci` tree, or undefined. */
+/** The pinned package's package.json inside an `npm ci` tree, or undefined. */
 async function pinnedAdapterPresent(agent: ConversationAgent, tree: string): Promise<boolean> {
-  const adapter = AGENT_ADAPTERS[agent];
+  const adapter = packagePin(agent);
+  if (adapter === undefined) return false;
   try {
     const manifest = JSON.parse(
       await readFile(win32.join(tree, "node_modules", ...adapter.package.split("/"), "package.json"), "utf8"),
@@ -102,6 +105,10 @@ export async function installAgent(
   ports: InstallPorts,
   onProgress?: (progress: InstallProgress) => void,
 ): Promise<InstallResult> {
+  const description = AGENT_DESCRIPTIONS[agent];
+  // 021 R-345: an installed program (Hermes) comes from its own installer; Hallpass downloads nothing for it.
+  if (description.kind === "installed") return failure(`${description.label} is installed with its own installer; Hallpass downloads nothing for it.`);
+  const pin = { package: description.package, version: description.version };
   onProgress?.({ phase: "preparing" });
   const agentDir = win32.join(ports.dataDir, "agents", agent);
   const finalDir = adapterDirectory(ports.dataDir, agent);
@@ -122,16 +129,17 @@ export async function installAgent(
       try {
         await copyFile(win32.join(ports.manifestsDir, agent, name), win32.join(staging, name));
       } catch {
-        return failure(`The pinned ${name} for ${AGENT_ADAPTERS[agent].label} is missing from this Hallpass install.`);
+        return failure(`The pinned ${name} for ${description.label} is missing from this Hallpass install.`);
       }
     }
 
     onProgress?.({ phase: "downloading" });
     let run;
     try {
-      run = await ports.run(await npmCommand(ports.nodePath), NPM_CI_ARGS, {
+      run = await ports.run(await npmCommand(ports.nodePath), description.npmCiArgs, {
         cwd: staging,
-        timeoutMs: INSTALL_TIMEOUT_MS,
+        // R-346: 10 minutes for the slim adapters (57-77 MB on a poor connection), 30 for DeepSeek's 611 packages.
+        timeoutMs: description.installTimeoutMs,
       });
     } catch (error) {
       return failure(`npm could not be started: ${redactedTail(messageOf(error), 400)}`);
@@ -142,7 +150,7 @@ export async function installAgent(
       return failure(head + redactedTail(run.stderr || run.stdout, DETAIL_MAX - head.length));
     }
     if (!(await pinnedAdapterPresent(agent, staging))) {
-      return failure(`npm finished, but ${AGENT_ADAPTERS[agent].package} ${AGENT_ADAPTERS[agent].version} is not in the result.`);
+      return failure(`npm finished, but ${pin.package} ${pin.version} is not in the result.`);
     }
 
     onProgress?.({ phase: "finishing" });

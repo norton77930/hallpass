@@ -20,6 +20,14 @@ import type { StorageAreaLike } from "./browser-run.js";
 /** Where the identity lives: `chrome.storage.local`, per profile and kept across restarts. */
 export const AGENT_BROWSER_IDENTITY_KEY = "agentBrowserIdentity";
 
+/**
+ * How long one read of the identity (with its mint, for an empty storage) may take before it is
+ * abandoned - hardening of R-279. On a fresh profile under load `chrome.storage.local.get` has been
+ * measured not answering for a long time; held for the worker's life, that one read made every later
+ * ask hang and every relay ack wait out its own bound. Abandoned, the next ask reads storage again.
+ */
+export const AGENT_BROWSER_IDENTITY_READ_BOUND_MS = 5_000;
+
 export type BrowserIdentity = { browserId: string; kind: AgentBrowserKind; name?: string };
 
 export type BrowserIdentityStore = {
@@ -107,13 +115,59 @@ export function createBrowserIdentity(
    * write is chained onto it, so a rename and a re-mint never overtake each other.
    */
   let settled: Promise<Stored | undefined> | undefined;
+  /**
+   * The id this worker minted for a storage that held none (hardening of R-279). A read abandoned at
+   * the bound may leave its write in flight; the retry then finds storage still empty and writes
+   * this same id again rather than a second one, so a worker writes at most one minted id for an
+   * empty storage. (`chrome.storage` applies one extension's writes in order, so the abandoned write
+   * cannot land after a later rename.)
+   */
+  let mintedForEmpty: string | undefined;
 
-  async function readOrMint(): Promise<Stored | undefined> {
+  async function readOrMint(abandoned: () => boolean): Promise<Stored | undefined> {
     if (!area) return undefined;
     const stored = readStored((await area.get([AGENT_BROWSER_IDENTITY_KEY]))[AGENT_BROWSER_IDENTITY_KEY]);
     if (stored.browserId !== undefined) return { browserId: stored.browserId, ...(stored.name ? { name: stored.name } : {}) };
+    // A read that answered after the bound has nobody to answer: it mints and writes nothing.
+    if (abandoned()) throw new Error("browser identity read abandoned");
     // No id, or one that does not fit the rule: mint, and keep a name the owner already gave.
-    return write({ browserId: mint(), ...(stored.name ? { name: stored.name } : {}) });
+    mintedForEmpty ??= mint();
+    return write({ browserId: mintedForEmpty, ...(stored.name ? { name: stored.name } : {}) });
+  }
+
+  /**
+   * One storage read (and, for an empty storage, its mint), bounded (hardening of R-279): a read
+   * that has not answered in time rejects, so `settled` is cleared and the next ask reads storage
+   * again instead of every ask hanging on it for the worker's life.
+   */
+  function boundedReadOrMint(): Promise<Stored | undefined> {
+    let abandoned = false;
+    return new Promise<Stored | undefined>((resolve, reject) => {
+      const bound = setTimeout(() => {
+        abandoned = true;
+        reject(new Error("browser identity read did not answer in time"));
+      }, AGENT_BROWSER_IDENTITY_READ_BOUND_MS);
+      readOrMint(() => abandoned).then(
+        (value) => {
+          clearTimeout(bound);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(bound);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  /** Holds `attempt` as the current identity; a failure clears it, unless something newer is held. */
+  function hold(attempt: Promise<Stored | undefined>): Promise<Stored | undefined> {
+    const held: Promise<Stored | undefined> = attempt.catch((error: unknown) => {
+      if (settled === held) settled = undefined;
+      throw error;
+    });
+    settled = held;
+    return held;
   }
 
   async function write(next: Stored): Promise<Stored> {
@@ -122,22 +176,15 @@ export function createBrowserIdentity(
   }
 
   function current(): Promise<Stored | undefined> {
-    settled ??= readOrMint().catch((error: unknown) => {
-      // A failed read is not an identity, and must not be the answer for the worker's life.
-      settled = undefined;
-      throw error;
-    });
-    return settled;
+    // A failed or unanswered read is not an identity, and must not be the answer for the worker's life.
+    return settled ?? hold(boundedReadOrMint());
   }
 
   function update(change: (stored: Stored) => Stored): Promise<BrowserIdentity | undefined> {
     const next = current().then((stored) => (stored === undefined ? undefined : write(change(stored))));
-    // A failed write leaves the next ask to read storage again rather than trust memory.
-    settled = next.catch((error: unknown) => {
-      settled = undefined;
-      throw error;
-    });
-    return next.then(withKind);
+    // A failed write leaves the next ask to read storage again rather than trust memory; the caller's
+    // handler hangs off the held chain, so a failure is never left unhandled.
+    return hold(next).then(withKind);
   }
 
   function withKind(stored: Stored | undefined): BrowserIdentity | undefined {

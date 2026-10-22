@@ -243,6 +243,23 @@ async function resolveBoundPage(tab: number | undefined): Promise<ActivePageBind
 }
 
 function bindSupportedTab(tab: chrome.tabs.Tab | undefined): ActivePageBinding {
+  const { tabId, url, supportInput } = tabSupportInput(tab);
+  if (classifyPageSupport(supportInput) !== "supported") throw new Error("unsupported-page");
+  return { tabId, canonicalOrigin: url.origin, supportInput };
+}
+
+/**
+ * What the support classification is asked about one tab: the facts read off its address.
+ *
+ * Exported so the owner's "Attach this tab" (022 R-342) refuses exactly the pages the page binding
+ * refuses - browser pages, the Web Store, other extensions, files, incognito - without a second
+ * list beside this one. Throws `no-active-tab` for a tab with no id or no address.
+ */
+export function tabSupportInput(tab: chrome.tabs.Tab | undefined): {
+  tabId: number;
+  url: URL;
+  supportInput: PageSupportInput;
+} {
   // The committed address, or - while the document has not committed yet - the one the tab is on
   // its way to (004/T165). A tab created a moment ago reads `url: ""` until its document commits,
   // and a PDF's viewer commits late; classifying it on nothing called it absent (`stale`) where the
@@ -263,8 +280,7 @@ function bindSupportedTab(tab: chrome.tabs.Tab | undefined): ActivePageBinding {
       url.hostname === "chromewebstore.google.com" ||
       (url.hostname === "chrome.google.com" && url.pathname.startsWith("/webstore")),
   };
-  if (classifyPageSupport(supportInput) !== "supported") throw new Error("unsupported-page");
-  return { tabId: tab.id, canonicalOrigin: url.origin, supportInput };
+  return { tabId: tab.id, url, supportInput };
 }
 
 /**

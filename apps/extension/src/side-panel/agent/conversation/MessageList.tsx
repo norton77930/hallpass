@@ -1,9 +1,11 @@
 import { useRef, type ReactElement } from "react";
-import { CONVERSATION_ERROR_CODES, type ConversationState } from "@hallpass/contracts";
+import { CONVERSATION_ERROR_CODES, type ConversationAgent, type ConversationState } from "@hallpass/contracts";
 import { CONVERSATION_NOTICE_KEYS } from "../../agent-panel-keys.js";
+import { actionWords } from "./action-words.js";
+import { SentAttachments } from "./attachments/AttachmentChips.js";
 import { groupTurns, type TimelineItem } from "./conversation-log.js";
 import { useFollowEnd } from "./follow-end.js";
-import { errorDetailWords, noticeWords } from "./broker-words.js";
+import { errorDetailWords, modelUnreachableHint, noticeWords } from "./broker-words.js";
 import { DownIcon } from "./icons.js";
 import { InlineCode } from "./inline-code.js";
 import { Reply } from "./Reply.js";
@@ -45,6 +47,8 @@ const noticeKey = (code: string): string | undefined =>
 export function MessageList(props: {
   timeline: readonly TimelineItem[];
   agentName: string;
+  /** 021 FR-355: the agent, for the hint on a model it could not reach. */
+  agent?: ConversationAgent;
   /** The conversation's latest state; while the turn is under way the last reply may still grow. */
   state?: ConversationState | undefined;
   /** T606 (C3): the title of the permission card that waits for the owner, if one does. */
@@ -83,7 +87,11 @@ export function MessageList(props: {
                   {item.role === "owner" ? t("conversation.role.owner") : props.agentName}
                 </span>
                 {item.role === "owner" ? (
-                  <p>{item.text}</p>
+                  <>
+                    {/* 022 R-343: a message may be attachments only. */}
+                    {item.text === "" && item.attachments !== undefined ? null : <p>{item.text}</p>}
+                    {item.attachments === undefined ? null : <SentAttachments attachments={item.attachments} t={t} />}
+                  </>
                 ) : (
                   <Reply text={item.text} finished={index !== lastIndex || !turnUnderWay} t={t} />
                 )}
@@ -97,7 +105,7 @@ export function MessageList(props: {
             // 020 FR-319: one line for a card's answer; the title is the agent's words, inert text.
             return (
               <p key={item.key} className="agent-conversation-answer" data-answer={item.answer}>
-                <InlineCode text={t(`conversation.answered.${item.answer}`).replace("{title}", () => item.title)} />
+                <InlineCode text={t(`conversation.answered.${item.answer}`).replace("{title}", () => actionWords(item.title, t))} />
               </p>
             );
           }
@@ -136,12 +144,14 @@ export function MessageList(props: {
             );
           }
           // T609: the broker's templates are said from the locale (or left out when they only repeat the title).
+          const hint = modelUnreachableHint(props.agent, t);
           const words = text === "" ? undefined : isErrorCode(code) ? errorDetailWords(text, t) : noticeWords(code, text, t);
           return (
             <div key={item.key} className="agent-conversation-notice" data-notice-code={code}>
               {isErrorCode(code) ?<p>{t(`conversation.error.${code}`)}</p> : null}
               {own === undefined ? null : <p>{t(own)}</p>}
               {words === undefined ? null : <p className="agent-conversation-detail">{words}</p>}
+              {code === "agent-model-unreachable" && hint !== undefined ? <p className="agent-conversation-detail">{hint}</p> : null}
             </div>
           );
         })}

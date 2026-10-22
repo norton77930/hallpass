@@ -654,6 +654,125 @@ describe("T547 conversation relay: forwarding (pure)", () => {
     relay.announce(BROKER);
     expect(relay.panelState(true).active).toBeUndefined();
   });
+
+  /**
+   * T692 (021 R-354, FR-354): the broker lists a new conversation as `starting` from the moment its
+   * start begins and answers the start only once the agent is up (minutes for DeepSeek). The panel
+   * can stop a start only from the open conversation, so the listed entry is the open one at once.
+   */
+  const NEW_A = "conv-cccccccccccccccc3";
+  const NEW_B = "conv-dddddddddddddddd4";
+  const firstStart = (conversationId: string, agent: string, folder: unknown = { kind: "scratch" }) => ({
+    ...VIEW,
+    conversationId,
+    agent,
+    folder,
+    title: "New conversation",
+    resumable: false,
+    state: "starting",
+  });
+  const start = (relay: ReturnType<typeof createConversationRelay>, commandId: string, agent: string, folder: unknown = { kind: "scratch" }) =>
+    relay.command({ type: "ui.conversation.start", payload: { agent, folder }, commandId } as never);
+  const result = (relay: ReturnType<typeof createConversationRelay>, commandId: string, outcome: { conversationId: string } | { code: string }) =>
+    relay.receive(
+      ("code" in outcome
+        ? { type: "conversation-result", sessionId: BROKER, commandId, ok: false, error: { code: outcome.code, detail: "No." } }
+        : { type: "conversation-result", sessionId: BROKER, commandId, ok: true, value: outcome }) as never,
+    );
+
+  it("T692: a start whose new conversation is listed while it runs makes that one open at once; the result agrees", () => {
+    const { relay } = harness();
+    opened(relay);
+    const seen: Array<string | undefined> = [];
+
+    start(relay, "p-1", "deepseek");
+    relay.receive(withBoth([firstStart(NEW_A, "deepseek"), VIEW, STOPPED]) as never);
+    expect(relay.panelState(true).active, "listed while the start is pending").toBe(NEW_A);
+    expect(viewOf(relay, NEW_A)?.state).toBe("starting");
+    expect(agentPanelStateSchema.shape.conversation.safeParse(relay.panelState(true)).success).toBe(true);
+
+    seen.push(relay.panelState(true).active);
+    relay.receive(withBoth([{ ...firstStart(NEW_A, "deepseek"), state: "idle" }, VIEW, STOPPED]) as never);
+    seen.push(relay.panelState(true).active);
+    result(relay, "p-1", { conversationId: NEW_A });
+    seen.push(relay.panelState(true).active);
+    expect(seen, "no switch to any other id on the way").toEqual([NEW_A, NEW_A, NEW_A]);
+  });
+
+  it("T692: a listed start that is cancelled, refused or left unanswered goes back to the conversation open before it", () => {
+    const { relay } = harness();
+    opened(relay);
+
+    start(relay, "p-1", "deepseek");
+    relay.receive(withBoth([firstStart(NEW_A, "deepseek"), VIEW, STOPPED]) as never);
+    expect(relay.panelState(true).active).toBe(NEW_A);
+    // The broker drops the entry and answers start-cancelled.
+    relay.receive(withBoth() as never);
+    result(relay, "p-1", { code: "start-cancelled" });
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+
+    start(relay, "p-2", "hermes");
+    relay.receive(withBoth([firstStart(NEW_B, "hermes"), VIEW, STOPPED]) as never);
+    expect(relay.panelState(true).active).toBe(NEW_B);
+    result(relay, "p-2", { code: "agent-model-unreachable" });
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+
+    // Chosen away from it meanwhile: the refusal does not pull the owner back.
+    start(relay, "p-3", "hermes");
+    relay.receive(withBoth([firstStart(NEW_B, "hermes"), VIEW, STOPPED]) as never);
+    relay.command({ type: "ui.conversation.open", payload: { conversationId: SECOND }, commandId: "p-4" });
+    result(relay, "p-3", { code: "start-cancelled" });
+    expect(relay.panelState(true).active).toBe(SECOND);
+    result(relay, "p-4", { code: "busy" });
+    expect(relay.panelState(true).active, "the open refused goes back past the cancelled start").toBe(CONVERSATION);
+
+    start(relay, "p-5", "hermes");
+    relay.receive(withBoth([firstStart(NEW_B, "hermes"), VIEW, STOPPED]) as never);
+    relay.ended(BROKER);
+    relay.announce(BROKER);
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+  });
+
+  it("T692: an entry listed before the start was sent, or the same agent and folder started twice at once, is not taken for it", () => {
+    const { relay } = harness();
+    opened(relay);
+
+    // Already listed (another panel's start under way): not this start's.
+    relay.receive(withBoth([firstStart(NEW_A, "hermes"), VIEW, STOPPED]) as never);
+    start(relay, "p-1", "hermes");
+    relay.receive(withBoth([firstStart(NEW_A, "hermes"), VIEW, STOPPED]) as never);
+    expect(relay.panelState(true).active).toBe(CONVERSATION);
+    relay.receive(withBoth([firstStart(NEW_B, "hermes"), firstStart(NEW_A, "hermes"), VIEW, STOPPED]) as never);
+    expect(relay.panelState(true).active).toBe(NEW_B);
+    result(relay, "p-1", { conversationId: NEW_B });
+    expect(relay.panelState(true).active).toBe(NEW_B);
+
+    // Two starts of Hermes in the scratch folder from two panels: the list cannot tell whose is whose.
+    const two = harness();
+    opened(two.relay);
+    start(two.relay, "p-a", "hermes");
+    start(two.relay, "p-b", "hermes");
+    two.relay.receive(withBoth([firstStart(NEW_A, "hermes"), VIEW, STOPPED]) as never);
+    expect(two.relay.panelState(true).active).toBe(CONVERSATION);
+    two.relay.receive(withBoth([firstStart(NEW_B, "hermes"), firstStart(NEW_A, "hermes"), VIEW, STOPPED]) as never);
+    expect(two.relay.panelState(true).active).toBe(CONVERSATION);
+    result(two.relay, "p-a", { conversationId: NEW_A });
+    expect(two.relay.panelState(true).active).toBe(NEW_A);
+
+    // Different agents (or folders) can be told apart: each start takes its own entry, never the other's.
+    const apart = harness();
+    opened(apart.relay);
+    start(apart.relay, "p-a", "hermes");
+    start(apart.relay, "p-b", "deepseek");
+    apart.relay.receive(withBoth([firstStart(NEW_B, "deepseek"), VIEW, STOPPED]) as never);
+    expect(apart.relay.panelState(true).active).toBe(NEW_B);
+    apart.relay.receive(withBoth([firstStart(NEW_A, "hermes"), firstStart(NEW_B, "deepseek"), VIEW, STOPPED]) as never);
+    expect(apart.relay.panelState(true).active).toBe(NEW_A);
+    result(apart.relay, "p-b", { code: "start-cancelled" });
+    expect(apart.relay.panelState(true).active, "B's refusal does not move off A").toBe(NEW_A);
+    result(apart.relay, "p-a", { conversationId: NEW_A });
+    expect(apart.relay.panelState(true).active).toBe(NEW_A);
+  });
 });
 
 const EXTENSION_ID = "adgpccmmbgnchnphfaoabfflfcepbopd";

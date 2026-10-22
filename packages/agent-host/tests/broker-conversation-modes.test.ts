@@ -102,13 +102,17 @@ describe("T535 allow-list", () => {
     expect(MODE_ALLOW_LIST).toEqual({
       "claude-code": { strict: "default", "agent-review": "auto" },
       codex: { strict: "read-only", "agent-review": "agent" },
+      // 021 T657 (R-351): from the agent descriptions - Hermes' own modes (never `dont_ask`); DeepSeek
+      // has no ACP modes, its mode is the launch environment, so nothing is ever sent to it.
+      hermes: { strict: "default", "agent-review": "accept_edits" },
+      deepseek: {},
     });
   });
 
   it.each([
     ["claude-code", ["default", "auto", "default"]],
     ["codex", ["read-only", "agent", "read-only"]],
-  ] as const)("set-mode on %s sends only allow-listed ids", async (agent: ConversationAgent, expected) => {
+  ] as const)("set-mode on %s sends only allow-listed ids", async (agent: Extract<ConversationAgent, "claude-code" | "codex">, expected) => {
     h = await poolHarness();
     const id = await h.start(agent);
     expect((await h.pool.setMode(id, "agent-review")).ok).toBe(true);

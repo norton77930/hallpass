@@ -4,6 +4,7 @@ import {
   type AgentPanelCommand,
   type AgentPanelMessage,
   type ConversationPanelCommand,
+  type TabCaptureResult,
 } from "@hallpass/contracts";
 import { isPanelWindowType, parsePanelWindowMessage } from "../panel-window.js";
 import { isTrustedControlSender } from "./shared-port.js";
@@ -55,6 +56,11 @@ export type AgentPanelPortInput = {
    * written under. `agent-entry.ts` always passes it.
    */
   watchFocusedWindow?: (listener: (windowId: number) => void) => void;
+  /**
+   * 022 R-342: the viewed tab, captured for the panel document that asked (`tab-attach.ts`). The
+   * owner's own action - no consent card, no site mode. Absent, the panel is told `failed`.
+   */
+  tabCapture?: (request: { tabId: number; what: "screenshot" | "page" }) => Promise<TabCaptureResult>;
 };
 
 export type AgentPanelPort = {
@@ -205,6 +211,35 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
   input.runtime.conversation.onPanelMessage((message) => {
     postToAll(message);
   });
+
+  /**
+   * 022 R-342: the capture goes to the document that asked, under its `requestId`, and to no other:
+   * it is that composer's attachment, not a picture every panel should hold.
+   */
+  async function answerTabCapture(
+    port: AgentPanelPortLike,
+    requestId: string,
+    request: { tabId: number; what: "screenshot" | "page" },
+  ): Promise<void> {
+    let result: TabCaptureResult;
+    try {
+      result = input.tabCapture
+        ? await input.tabCapture(request)
+        : { ok: false, code: "failed", message: "this worker cannot capture tabs" };
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.length > 0 ? error.message : "the tab could not be captured";
+      result = { ok: false, code: "failed", message: message.slice(0, 600) };
+    }
+    // The document may have gone while the page was read; nobody is left to tell.
+    if (!connected.has(port)) return;
+    const reply: AgentPanelMessage = { type: "tab-capture-result", requestId, result };
+    try {
+      port.postMessage(reply);
+    } catch {
+      input.reportDiagnostic?.("agent.panel.send-failed");
+    }
+  }
 
   return {
     accept(port: AgentPanelPortLike): { accepted: boolean } {
@@ -364,6 +399,9 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
             // The press goes to the host; the row goes when the host answers (014 FR-192). Nothing
             // is awaited here - the panel is told by the next projection, as it is for everything.
             void input.runtime.clearUploadRoot(command.payload.root);
+            return;
+          case "ui.tab.capture":
+            void answerTabCapture(port, command.requestId, command.payload);
             return;
           case "ui.agent.session-interrupt": {
             const ended = input.runtime.interruptSession(command.payload.sessionId);

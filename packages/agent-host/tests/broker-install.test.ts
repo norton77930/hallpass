@@ -7,7 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AGENT_ADAPTERS, adapterDirectory } from "../src/broker/agents.js";
+import { AGENT_ADAPTERS, AGENT_DESCRIPTIONS, adapterDirectory } from "../src/broker/agents.js";
 import {
   NPM_CI_ARGS,
   cleanStaging,
@@ -74,7 +74,7 @@ const exists = (path: string) =>
   );
 const list = (path: string) => readdir(path).catch(() => [] as string[]);
 
-type Call = { file: string; args: string[]; cwd: string | undefined; staged: string[]; lock: string };
+type Call = { file: string; args: string[]; cwd: string | undefined; staged: string[]; lock: string; timeoutMs: number | undefined };
 
 /** What a successful `npm ci` leaves in the folder it ran in. */
 async function writeAdapterTree(cwd: string, version: string = ADAPTER.version) {
@@ -103,6 +103,7 @@ function ports(
           cwd: options?.cwd,
           staged: await list(cwd),
           lock: await readFile(join(cwd, "package-lock.json"), "utf8").catch(() => ""),
+          timeoutMs: options?.timeoutMs,
         };
         calls.push(call);
         return { code: 0, stdout: "", stderr: "", timedOut: false, ...(await behave(cwd, call)) };
@@ -248,6 +249,45 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     });
     expect(await installAgent("codex", p)).toEqual({ ok: true, directory: adapterDirectory(data, "codex") });
     expect(calls[0]!.cwd).toBe(join(data, "agents", "codex", `.staging-${process.pid}-abc123`));
+  });
+});
+
+describe("installAgent per agent (021 T646, R-345, R-346)", () => {
+  const DSH = AGENT_DESCRIPTIONS.deepseek;
+  const writeDshTree = async (cwd: string) => {
+    const dir = join(cwd, "node_modules", ...DSH.package.split("/"));
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "package.json"), JSON.stringify({ name: DSH.package, version: DSH.version, bin: { dsh: "lib/bin.js" } }));
+  };
+
+  it("bounds an adapter's npm ci at 10 minutes", async () => {
+    const { ports: p, calls } = ports(async (cwd) => {
+      await writeAdapterTree(cwd);
+      return {};
+    });
+    await installAgent(AGENT, p);
+    expect(calls[0]!.timeoutMs).toBe(10 * 60 * 1000);
+  });
+
+  it("fetches DeepSeek from its shipped manifest and lock with its optional platform bindings kept, bounded at 30 minutes", async () => {
+    const { ports: p, calls } = ports(async (cwd) => {
+      await writeDshTree(cwd);
+      return {};
+    });
+    expect(await installAgent("deepseek", p)).toEqual({ ok: true, directory: join(data, "agents", "deepseek", "0.2.1-rc.2") });
+    expect(calls).toHaveLength(1);
+    // R-357: dsh's native bindings are optionalDependencies; `--omit=optional` left it unable to boot.
+    expect(calls[0]!.args).toEqual(["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
+    expect(calls[0]!.timeoutMs).toBe(30 * 60 * 1000);
+    expect(calls[0]!.lock).toBe(await readFile(join(SHIPPED, "deepseek", "package-lock.json"), "utf8"));
+  });
+
+  it("downloads nothing for Hermes, which the owner installs with its own installer", async () => {
+    const { ports: p, calls } = ports(() => ({}));
+    const result = await installAgent("hermes", p);
+    expect(result).toMatchObject({ ok: false, error: { code: "install-failed" } });
+    expect(calls).toEqual([]);
+    expect(await exists(join(data, "agents", "hermes"))).toBe(false);
   });
 });
 

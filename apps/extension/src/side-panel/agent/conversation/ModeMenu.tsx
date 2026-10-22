@@ -18,6 +18,8 @@ import { useOutsidePress } from "./outside-press.js";
 export function ModeMenu(props: {
   id: string;
   agent: ConversationAgent;
+  /** The agent's name in the panel's language, for the restart note. */
+  agentName: string;
   mode: ConversationMode;
   t: (key: string) => string;
   onChange: (mode: ConversationMode) => void;
@@ -28,6 +30,10 @@ export function ModeMenu(props: {
   const { t } = props;
   const name = useId();
   const explainId = useId();
+  const restartId = useId();
+  // 021 D-021-8: Hermes takes its mode at launch, so changing it restarts the agent. DeepSeek's mode is
+  // fixed once its conversation started (D-021-16): its menu is only ever offered before the start.
+  const restarts = props.agent === "hermes";
   const root = useRef<HTMLDivElement>(null);
   useOutsidePress(root, props.id, props.onDismiss);
 
@@ -47,6 +53,9 @@ export function ModeMenu(props: {
         {CONVERSATION_MODES.map((mode) => {
           const explained = `${explainId}-${mode}`;
           const codexNote = mode === "strict" && props.agent === "codex";
+          // 021 D-021-5: Hermes has no folder boundary for commands once it runs without asking first.
+          const hermesNote = mode === "agent-review" && props.agent === "hermes";
+          const described = [explained, ...(codexNote ? [`${explained}-codex`] : []), ...(hermesNote ? [`${explained}-hermes`] : []), ...(restarts ? [restartId] : [])];
           return (
             <div
               key={mode}
@@ -60,7 +69,7 @@ export function ModeMenu(props: {
                   name={name}
                   value={mode}
                   checked={props.mode === mode}
-                  aria-describedby={codexNote ? `${explained} ${explained}-codex` : explained}
+                  aria-describedby={described.join(" ")}
                   onChange={() => {
                     if (mode !== props.mode) props.onChange(mode);
                   }}
@@ -75,10 +84,20 @@ export function ModeMenu(props: {
                   {t("conversation.mode.codexStrictNote")}
                 </p>
               ) : null}
+              {hermesNote ? (
+                <p id={`${explained}-hermes`} className="agent-conversation-note">
+                  {t("conversation.mode.hermesAutomaticNote")}
+                </p>
+              ) : null}
             </div>
           );
         })}
       </div>
+      {restarts ? (
+        <p id={restartId} className="agent-conversation-note">
+          {t("conversation.mode.restartNote").replace("{agent}", () => props.agentName)}
+        </p>
+      ) : null}
     </div>
   );
 }

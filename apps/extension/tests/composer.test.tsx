@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { agentPanelCommandSchema, type ConversationPanelState } from "@hallpass/contracts";
+import { agentPanelCommandSchema, type ConversationPanelState, type ConversationView } from "@hallpass/contracts";
 import {
   installAgentPort,
   project,
@@ -166,7 +166,8 @@ describe("T587 the composer comes first", () => {
     expect(commandsSent(port)).toEqual([{ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } }]);
   });
 
-  it("starts in the folder chosen on the folder chip, and applies the mode chosen on the mode chip once open", async () => {
+  // 021 FR-361: the chosen mode goes with the start; a switch sent beside the first message raced it.
+  it("starts in the folder chosen on the folder chip and in the mode chosen on the mode chip", async () => {
     await open({ ...CONVERSATION_READY, folders: [{ path: "D:\\work\\shop", addedAt: "2026-10-18T00:00:00.000Z" }] });
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.chip.folder").replace("{folder}", ui("conversation.folder.scratch")) }));
     fireEvent.click(screen.getByRole("radio", { name: "D:\\work\\shop" }));
@@ -177,12 +178,11 @@ describe("T587 the composer comes first", () => {
     type("fix the tests");
     fireEvent.click(sendButton());
     expect(commandsSent(port)).toEqual([
-      { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "project", path: "D:\\work\\shop" } } },
+      { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "project", path: "D:\\work\\shop" }, mode: "agent-review" } },
     ]);
 
     project(port, withConversation(opened({ ...CONVERSATION_READY, folders: [{ path: "D:\\work\\shop", addedAt: "2026-10-18T00:00:00.000Z" }] })));
     expect(commandsSent(port).slice(1)).toEqual([
-      { type: "ui.conversation.set-mode", payload: { conversationId: NEW_ID, mode: "agent-review" } },
       { type: "ui.conversation.send", payload: { conversationId: NEW_ID, text: "fix the tests" } },
     ]);
     expectValidCommands(port);
@@ -331,7 +331,7 @@ describe("T588 the agent menu (scenario 4, FR-313)", () => {
 
     const menu = screen.getByRole("menu", { name: ui("conversation.agentMenu.label") });
     const items = within(menu).getAllByRole("menuitemradio");
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(4); // 021: every contract agent is listed; S3 (T669) pins the new rows.
     expect(items[0]?.textContent).toContain("Claude Code");
     expect(items[0]?.textContent).toContain(ui("conversation.availability.version-problem"));
     expect(items[0]?.textContent).toContain(ui("conversation.version.installed").replace("{version}", "1.0.0"));
@@ -534,7 +534,7 @@ describe("T605 the planned layout", () => {
     await open();
     fireEvent.click(agentChip());
     const badges = [...document.querySelectorAll(".agent-conversation-agent-badge")];
-    expect(badges.map((badge) => badge.textContent)).toEqual(["C", "X"]);
+    expect(badges.map((badge) => badge.textContent)).toEqual(["C", "X", "H", "D"]);
     for (const badge of badges) expect(badge.getAttribute("aria-hidden")).toBe("true");
   });
 
@@ -576,5 +576,347 @@ describe("T605 the planned layout", () => {
     const header = screen.getByRole("region", { name: ui("conversation.header.label") });
     expect(header.querySelector(".agent-conversation-title")?.textContent).toBe(ui("conversation.new"));
     expect(within(header).getByRole("button", { name: ui("conversation.header.list") })).toBeTruthy();
+  });
+});
+
+const FOUR_AGENTS = (
+  accepts: { hermes?: { image: boolean; context: boolean }; deepseek?: { image: boolean; context: boolean } } = {},
+): ConversationPanelState => ({
+  ...CONVERSATION_READY,
+  agents: [
+    { agent: "claude-code", availability: "ready", version: "2.1.0" },
+    { agent: "codex", availability: "ready", version: "0.50.0" },
+    { agent: "hermes", availability: "ready", version: "0.22.2", ...(accepts.hermes === undefined ? {} : { accepts: accepts.hermes }) },
+    { agent: "deepseek", availability: "ready", version: "0.2.1-rc.2", ...(accepts.deepseek === undefined ? {} : { accepts: accepts.deepseek }) },
+  ],
+});
+const withHermesOrDeepSeek = (agent: "hermes" | "deepseek", mode: "strict" | "agent-review" = "strict", extra: Partial<ConversationView> = {}): ConversationPanelState => ({
+  ...FOUR_AGENTS(),
+  conversations: [{ ...VIEW, agent, mode, ...extra }],
+  active: CONVERSATION_ID,
+});
+
+describe("T679 the mode menu for Hermes and DeepSeek (US3, D-021-5, D-021-8, FR-358)", () => {
+  let port: FakeAgentPort;
+
+  beforeEach(() => {
+    port = installAgentPort();
+    installStorage();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  async function open(conversation: ConversationPanelState, locale: "en-US" | "zh-TW" = "en-US") {
+    renderShell(locale);
+    project(port, withConversation(conversation));
+    await settle();
+  }
+  const modeChipButton = () => document.querySelector<HTMLButtonElement>("button[data-chip=mode]")!;
+  const menuText = () => document.querySelector(".agent-conversation-mode")?.textContent ?? "";
+
+  it("tells a Hermes owner that automatic mode runs commands without a folder boundary", async () => {
+    await open(withHermesOrDeepSeek("hermes"));
+    fireEvent.click(modeChipButton());
+
+    const reviewOption = document.querySelector('[data-mode="agent-review"]')!;
+    expect(reviewOption.textContent).toContain("Hermes runs commands without a folder boundary");
+    expect(document.querySelector('[data-mode="strict"]')?.textContent).not.toContain("folder boundary");
+    // It is part of the radio's description, so a screen reader reads it with the choice.
+    const radio = within(reviewOption as HTMLElement).getByRole("radio");
+    const described = (radio.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent ?? "");
+    expect(described.join(" ")).toContain("folder boundary");
+  });
+
+  // D-021-16: a started DeepSeek conversation offers no switch at all (below), so only Hermes restarts.
+  it("tells a Hermes owner that switching the mode restarts the agent", async () => {
+    await open(withHermesOrDeepSeek("hermes"));
+    fireEvent.click(modeChipButton());
+    expect(menuText()).toContain("Changing the mode restarts Hermes");
+  });
+
+  it("carries neither note for Claude Code or Codex", async () => {
+    await open(CONVERSATION_OPEN);
+    fireEvent.click(modeChipButton());
+    expect(menuText()).not.toContain("restarts");
+    expect(menuText()).not.toContain("folder boundary");
+  });
+
+  it("shows them on the empty conversation's chip for the agent chosen, in the panel's language", async () => {
+    await open(FOUR_AGENTS(), "zh-TW");
+    fireEvent.click(document.querySelector<HTMLButtonElement>("button[data-chip=agent]")!);
+    fireEvent.click(screen.getAllByRole("menuitemradio")[2]!);
+    fireEvent.click(modeChipButton());
+
+    const text = menuText();
+    expect(text).toContain(lookup("conversation.mode.hermesAutomaticNote", "zh-TW"));
+    expect(text).toContain(lookup("conversation.mode.restartNote", "zh-TW").replace("{agent}", "Hermes"));
+    expect(text).not.toContain("restarts");
+    expect(text).not.toContain("folder boundary");
+  });
+
+  it("has no English left in zh-TW for any new key", () => {
+    const keys = [
+      "conversation.mode.hermesAutomaticNote",
+      "conversation.mode.restartNote",
+      "conversation.note.git-missing",
+      "conversation.note.pre-release",
+      "conversation.missing.hermes",
+      "conversation.missing.deepseek",
+      "conversation.state.starting",
+      "conversation.state.startingSlow",
+      "conversation.state.cancelStart",
+      "conversation.state.cancelStartLabel",
+      "conversation.state.start-cancelled",
+      "conversation.permission.rejectOnly",
+      "conversation.noReplay",
+      "conversation.version.mismatch",
+      "conversation.firstUse.what.deepseek",
+      "conversation.firstUse.settings.hermes",
+      "conversation.firstUse.settings.deepseek",
+      "conversation.error.start-cancelled",
+      "conversation.error.agent-model-unreachable",
+      "conversation.hint.agent-model-unreachable.hermes",
+      "conversation.hint.agent-model-unreachable.deepseek",
+      "conversation.mode.fixedNote",
+      "conversation.error.mode-fixed",
+    ];
+    for (const key of keys) {
+      const en = lookup(key, "en-US");
+      const zh = lookup(key, "zh-TW");
+      expect(en, key).not.toBe(lookup("workspace.title", "en-US")); // the key exists
+      expect(zh, key).not.toBe(en);
+      expect(zh, key).toMatch(/[一-鿿]/u);
+    }
+  });
+});
+
+describe("D-021-16 DeepSeek's mode is fixed once its conversation has started (FR-360)", () => {
+  let port: FakeAgentPort;
+
+  beforeEach(() => {
+    port = installAgentPort();
+    installStorage();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  async function open(conversation: ConversationPanelState, locale: "en-US" | "zh-TW" = "en-US") {
+    renderShell(locale);
+    project(port, withConversation(conversation));
+    await settle();
+  }
+  const modeChipButton = () => document.querySelector<HTMLButtonElement>("button[data-chip=mode]")!;
+  const description = (chip: HTMLElement) =>
+    (chip.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ");
+
+  it("a started DeepSeek conversation's mode chip is unavailable, says why on screen, and opens nothing", async () => {
+    await open(withHermesOrDeepSeek("deepseek", "agent-review"));
+    const chip = modeChipButton();
+    // Still reachable by keyboard, so a screen reader meets it and its reason.
+    expect(chip.disabled).toBe(false);
+    expect(chip.getAttribute("aria-disabled")).toBe("true");
+    expect(chip.getAttribute("aria-label")).toBe(ui("conversation.chip.mode").replace("{mode}", ui("conversation.mode.agent-review")));
+    const why = "DeepSeek keeps the mode it started with. To use another mode, start a new conversation.";
+    expect(description(chip)).toBe(why);
+    const line = [...document.querySelectorAll(".agent-conversation-note")].find((note) => note.textContent === why);
+    expect(line).toBeDefined();
+    expect(line?.classList.contains("agent-sr-only")).toBe(false);
+
+    fireEvent.click(chip);
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(chip.getAttribute("aria-expanded")).toBe("false");
+    expect(commandsSent(port)).toEqual([]);
+  });
+
+  it("says why in zh-TW", async () => {
+    await open(withHermesOrDeepSeek("deepseek"), "zh-TW");
+    expect(description(modeChipButton())).toBe("DeepSeek 會沿用開始時的模式。要換模式，請開新對話。");
+  });
+
+  it("Claude Code and Hermes conversations keep a switchable chip", async () => {
+    for (const conversation of [CONVERSATION_OPEN, withHermesOrDeepSeek("hermes")]) {
+      await open(conversation);
+      const chip = modeChipButton();
+      expect(chip.hasAttribute("aria-disabled")).toBe(false);
+      expect(document.body.textContent).not.toContain("keeps the mode it started with");
+      fireEvent.click(chip);
+      expect(screen.getByRole("radiogroup")).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it("before the start the DeepSeek chip offers the choice, with no restart note", async () => {
+    await open(FOUR_AGENTS());
+    fireEvent.click(document.querySelector<HTMLButtonElement>("button[data-chip=agent]")!);
+    fireEvent.click(screen.getAllByRole("menuitemradio")[3]!);
+    const chip = modeChipButton();
+    expect(chip.hasAttribute("aria-disabled")).toBe(false);
+    fireEvent.click(chip);
+    expect(screen.getByRole("radiogroup")).toBeTruthy();
+    expect(document.querySelector(".agent-conversation-mode")?.textContent).not.toContain("restarts");
+  });
+
+  // FR-361: for every agent the mode chosen before the first message is the first start's, and the
+  // open conversation shows it; nothing is switched beside the first message.
+  it.each([
+    [0, "claude-code"],
+    [1, "codex"],
+    [2, "hermes"],
+    [3, "deepseek"],
+  ] as const)("the empty conversation's mode goes with the start (%i: %s) and the opened conversation shows it", async (index, agent) => {
+    await open(FOUR_AGENTS());
+    fireEvent.click(document.querySelector<HTMLButtonElement>("button[data-chip=agent]")!);
+    fireEvent.click(screen.getAllByRole("menuitemradio")[index]!);
+    fireEvent.click(modeChipButton());
+    fireEvent.click(screen.getByRole("radio", { name: ui("conversation.mode.agent-review") }));
+
+    type("tidy the invoices");
+    fireEvent.click(sendButton());
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.start", payload: { agent, folder: { kind: "scratch" }, mode: "agent-review" } }]);
+
+    // What the broker reports for that start: listed in automatic, and its first mode event says so.
+    project(
+      port,
+      withConversation({
+        ...FOUR_AGENTS(),
+        consent: "granted",
+        conversations: [{ ...VIEW, conversationId: NEW_ID, agent, mode: "agent-review", title: "New" }],
+        active: NEW_ID,
+      }),
+    );
+    emitEvent(port, 1, { type: "mode", mode: "agent-review" }, NEW_ID);
+    await settle();
+    expect(commandsSent(port).slice(1)).toEqual([{ type: "ui.conversation.send", payload: { conversationId: NEW_ID, text: "tidy the invoices" } }]);
+    expect(modeChipButton().getAttribute("aria-label")).toBe(ui("conversation.chip.mode").replace("{mode}", ui("conversation.mode.agent-review")));
+    expectValidCommands(port);
+  });
+
+  // T701: the choice is that conversation's only - the next new conversation starts strict again.
+  it("the next new conversation opened after an Agent review start is back on Ask first and starts strict", async () => {
+    await open(FOUR_AGENTS());
+    fireEvent.click(modeChipButton());
+    fireEvent.click(screen.getByRole("radio", { name: ui("conversation.mode.agent-review") }));
+    type("tidy the invoices");
+    fireEvent.click(sendButton());
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" }, mode: "agent-review" } }]);
+    project(
+      port,
+      withConversation({
+        ...FOUR_AGENTS(),
+        consent: "granted",
+        conversations: [{ ...VIEW, conversationId: NEW_ID, mode: "agent-review", title: "New" }],
+        active: NEW_ID,
+      }),
+    );
+    await settle();
+    expect(commandsSent(port)).toHaveLength(2);
+
+    const header = screen.getByRole("region", { name: ui("conversation.header.label") });
+    fireEvent.click(within(header).getByRole("button", { name: ui("conversation.new") }));
+    expect(modeChipButton().getAttribute("aria-label")).toBe(ui("conversation.chip.mode").replace("{mode}", ui("conversation.mode.strict")));
+    fireEvent.click(document.querySelector<HTMLButtonElement>("button[data-chip=agent]")!);
+    fireEvent.click(screen.getAllByRole("menuitemradio")[2]!);
+    type("and the receipts");
+    fireEvent.click(sendButton());
+    expect(commandsSent(port).slice(2)).toEqual([{ type: "ui.conversation.start", payload: { agent: "hermes", folder: { kind: "scratch" } } }]);
+  });
+
+  it("keeps the choice while the owner changes agent and folder on the same unsent new conversation", async () => {
+    await open({ ...FOUR_AGENTS(), folders: [{ path: "D:\\work\\shop", addedAt: "2026-10-18T00:00:00.000Z" }] });
+    fireEvent.click(modeChipButton());
+    fireEvent.click(screen.getByRole("radio", { name: ui("conversation.mode.agent-review") }));
+    fireEvent.click(document.querySelector<HTMLButtonElement>("button[data-chip=agent]")!);
+    fireEvent.click(screen.getAllByRole("menuitemradio")[3]!);
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.chip.folder").replace("{folder}", ui("conversation.folder.scratch")) }));
+    fireEvent.click(screen.getByRole("radio", { name: "D:\\work\\shop" }));
+    expect(modeChipButton().getAttribute("aria-label")).toBe(ui("conversation.chip.mode").replace("{mode}", ui("conversation.mode.agent-review")));
+    type("go");
+    fireEvent.click(sendButton());
+    expect(commandsSent(port)).toEqual([
+      { type: "ui.conversation.start", payload: { agent: "deepseek", folder: { kind: "project", path: "D:\\work\\shop" }, mode: "agent-review" } },
+    ]);
+  });
+
+  it("a strict start names no mode, as before", async () => {
+    await open(FOUR_AGENTS());
+    type("hello");
+    fireEvent.click(sendButton());
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } }]);
+  });
+});
+
+describe("T680 the + menu follows what Hermes and DeepSeek say they accept (US5, FR-356, D-022-6)", () => {
+  let port: FakeAgentPort;
+
+  beforeEach(() => {
+    port = installAgentPort();
+    installStorage();
+    const chromeGlobal = (globalThis as { chrome?: Record<string, unknown> }).chrome ?? {};
+    chromeGlobal.tabs = {
+      query: () => Promise.resolve([{ id: 7, url: "https://example.test/" }]),
+      onActivated: { addListener: () => undefined, removeListener: () => undefined },
+    };
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  async function open(conversation: ConversationPanelState) {
+    renderShell();
+    project(port, withConversation(conversation));
+    await settle();
+  }
+  const plus = () => screen.getByRole("button", { name: ui("conversation.attach.button") });
+  const entry = (key: string) => screen.getByRole("menuitem", { name: new RegExp(ui(key)) });
+  const off = (key: string) => entry(key).getAttribute("aria-disabled") === "true";
+
+  it("before the start, follows the descriptor's expectation for the agent on the chip", async () => {
+    await open(FOUR_AGENTS({ hermes: { image: true, context: true }, deepseek: { image: false, context: false } }));
+
+    fireEvent.click(agentChip());
+    fireEvent.click(screen.getAllByRole("menuitemradio")[3]!);
+    fireEvent.click(plus());
+    expect(off("conversation.attach.screenshot")).toBe(true);
+    expect(entry("conversation.attach.screenshot").textContent).toContain("DeepSeek does not take images. Files still work.");
+    expect(off("conversation.attach.tab")).toBe(true);
+    expect(entry("conversation.attach.tab").textContent).toContain("DeepSeek does not take page text.");
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
+    fireEvent.click(agentChip());
+    fireEvent.click(screen.getAllByRole("menuitemradio")[2]!);
+    fireEvent.click(plus());
+    expect(off("conversation.attach.screenshot")).toBe(false);
+    expect(off("conversation.attach.tab")).toBe(false);
+  });
+
+  it("after the start, the value the running agent reported wins over the expectation", async () => {
+    const conversation = (agent: "hermes" | "deepseek", accepts: { image: boolean; context: boolean }): ConversationPanelState => ({
+      ...FOUR_AGENTS({ hermes: { image: true, context: true }, deepseek: { image: false, context: false } }),
+      conversations: [{ ...VIEW, agent, accepts }],
+      active: CONVERSATION_ID,
+    });
+
+    await open(conversation("hermes", { image: false, context: true }));
+    fireEvent.click(plus());
+    expect(off("conversation.attach.screenshot")).toBe(true);
+    expect(entry("conversation.attach.screenshot").textContent).toContain("Hermes does not take images.");
+    expect(off("conversation.attach.tab")).toBe(false);
+    cleanup();
+
+    await open(conversation("deepseek", { image: true, context: true }));
+    fireEvent.click(plus());
+    expect(off("conversation.attach.screenshot")).toBe(false);
+    expect(off("conversation.attach.tab")).toBe(false);
   });
 });

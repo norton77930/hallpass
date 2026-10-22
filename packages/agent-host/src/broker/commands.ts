@@ -12,12 +12,15 @@ import {
   type ConversationInstallPhase,
   type ConversationLinkCommand,
   type ConversationEventPayload,
+  type ConversationMode,
 } from "@hallpass/contracts";
+import { launchSettings, writeLaunchFiles } from "./agent-launch-settings.js";
 import type { ConversationListNotice } from "./index-store.js";
 import { writeHostFileAtomically } from "../bridge-link.js";
 import { isWindowsDeviceName } from "../host-paths.js";
 import {
   AGENT_ADAPTERS,
+  AGENT_DESCRIPTIONS,
   TESTED_AGENT_VERSIONS,
   adapterLaunchSpec,
   agentAvailability,
@@ -101,15 +104,19 @@ export function fileConsentStore(dataDir: string, browserId: string): ConsentSto
 /* ------------------------------------------------------------------------------------------- */
 
 export type AgentLauncher = {
-  resolveLaunch: (agent: ConversationAgent) => Promise<LaunchResolution>;
+  /** The launch for a panel mode (default strict): launch-time agents start differently per mode (021 R-351). */
+  resolveLaunch: (agent: ConversationAgent, mode?: ConversationMode) => Promise<LaunchResolution>;
   availability: (agent: ConversationAgent) => Promise<ConversationAgentAvailability>;
 };
 
 /**
- * Discovery (R-315) turned into a launch: the installed adapter with the owner's CLI, or the reason
- * there is none - `agent-missing`, `agent-version` (a CLI whose `--version` says nothing usable),
- * `install-needed`. `testAgent` replaces discovery with one fixed command; the broker passes it only
- * under `HALLPASS_TEST_MODE=1` (`broker.ts`).
+ * Discovery (R-315) turned into a launch: the installed adapter with the owner's CLI, Hermes' own
+ * program, or DeepSeek's fetched package, each in the panel mode asked for - or the reason there is
+ * none: `agent-missing`, `agent-version` (a version Hallpass cannot use), `install-needed`.
+ * `testAgent` replaces discovery with one fixed command for every agent; the broker passes it only
+ * under `HALLPASS_TEST_MODE=1` (`broker.ts`). The mode's launch settings still apply on top of it
+ * (021: Hermes' managed layer is written and named, DeepSeek's environment is set), so a test sees
+ * what a real launch would hand the agent.
  */
 export function createAgentLauncher(options: { ports: AgentPorts; testAgent?: AdapterLaunchSpec }): AgentLauncher {
   const { ports, testAgent } = options;
@@ -118,11 +125,18 @@ export function createAgentLauncher(options: { ports: AgentPorts; testAgent?: Ad
       if (testAgent !== undefined) return { agent, availability: "ready", version: "0.0.0-test" };
       return (await agentAvailability(agent, ports)).availability;
     },
-    async resolveLaunch(agent) {
+    async resolveLaunch(agent, mode = "strict") {
       const label = AGENT_ADAPTERS[agent].label;
       const tested = TESTED_AGENT_VERSIONS[agent];
       if (testAgent !== undefined) {
-        return { ok: true, spec: testAgent, versions: { agent, tested, found: "0.0.0-test" } };
+        const settings = launchSettings(agent, mode, ports.dataDir);
+        try {
+          await writeLaunchFiles(settings.files, ports.fs);
+        } catch (error) {
+          return failure("broker-unavailable", `Hallpass could not prepare ${label}'s settings: ${error instanceof Error ? error.message : ""}`);
+        }
+        const spec = Object.keys(settings.env).length === 0 ? testAgent : { ...testAgent, env: { ...testAgent.env, ...settings.env } };
+        return { ok: true, spec, versions: { agent, tested, found: "0.0.0-test" } };
       }
       const status = await agentAvailability(agent, ports);
       const { availability, version, detail } = status.availability;
@@ -132,15 +146,25 @@ export function createAgentLauncher(options: { ports: AgentPorts; testAgent?: Ad
         case "version-problem":
           return failure("agent-version", detail ?? `${label} was found, but its version could not be read (tested with ${tested}).`);
         case "needs-install":
-          return failure("install-needed", `The ${label} connector has not been downloaded yet.`);
+          return failure(
+            "install-needed",
+            AGENT_DESCRIPTIONS[agent].kind === "fetched"
+              ? `${label} has not been downloaded yet.`
+              : `The ${label} connector has not been downloaded yet.`,
+          );
         case "ready":
           break;
       }
       try {
-        const spec = await adapterLaunchSpec(agent, status.cliPath!, ports);
+        const spec = await adapterLaunchSpec(agent, status.cliPath, ports, mode);
         return { ok: true, spec, versions: { agent, tested, ...(version === undefined ? {} : { found: version }) } };
       } catch (error) {
-        return failure("install-needed", `The ${label} connector needs to be downloaded again: ${error instanceof Error ? error.message : ""}`);
+        const reason = error instanceof Error ? error.message : "";
+        // Hermes downloads nothing: what can fail here is writing its managed settings layer.
+        if (AGENT_DESCRIPTIONS[agent].kind === "installed") {
+          return failure("broker-unavailable", `Hallpass could not prepare ${label}'s settings: ${reason}`);
+        }
+        return failure("install-needed", `The ${label} connector needs to be downloaded again: ${reason}`);
       }
     },
   };
@@ -153,7 +177,20 @@ export function createAgentLauncher(options: { ports: AgentPorts; testAgent?: Ad
 /** What the handler needs of the pool; `ConversationPool` is it, a test may stand in. */
 export type ConversationPoolPort = Pick<
   ConversationPool,
-  "start" | "send" | "stop" | "answer" | "setMode" | "open" | "remove" | "page" | "views" | "folderOf" | "revokeBrowserTokens"
+  | "start"
+  | "send"
+  | "stop"
+  | "answer"
+  | "setMode"
+  | "open"
+  | "remove"
+  | "page"
+  | "views"
+  | "folderOf"
+  | "revokeBrowserTokens"
+  | "attach"
+  | "cancelAttachment"
+  | "agentAccepts"
 >;
 
 export type CommandHandlerOptions = {
@@ -233,7 +270,13 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
     const notice = options.listNotice?.();
     const listed = agents.map((entry) => {
       const phase = installPhases.get(entry.agent);
-      return phase === undefined ? entry : { ...entry, installing: phase };
+      // 022 R-344: what the agent said it accepts when it last started here, so the panel can tell before a start.
+      const accepts = pool.agentAccepts(entry.agent);
+      return {
+        ...entry,
+        ...(phase === undefined ? {} : { installing: phase }),
+        ...(accepts === undefined ? {} : { accepts }),
+      };
     });
     options.send({
       type: "conversation-overview",
@@ -341,7 +384,8 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       case "ui.conversation.start": {
         if ((await consent.read()) !== "granted") return { outcome: needsConsent() };
         // T572: asked again by the pool after discovery, right before the agent is launched.
-        const started = await pool.start(command.payload.agent, command.payload.folder, consentGate);
+        // 021 FR-361: the mode chosen before the first message goes with the start (D-021-16: for good).
+        const started = await pool.start(command.payload.agent, command.payload.folder, consentGate, command.payload.mode);
         if (!started.ok && (started.error.code === "agent-missing" || started.error.code === "agent-version" || started.error.code === "install-needed")) {
           await refreshAgents();
         }
@@ -350,15 +394,30 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       case "ui.conversation.send":
         // FR-306 (T552): the tab the owner was viewing goes with the run's token as the turn's start tab.
         // A stopped conversation's agent starts again only with the consent, as a start does (FR-299).
+        // 022: with the attachments the panel staged first (`ui.conversation.attach`), if any.
         return {
-          outcome: await pool.send(command.payload.conversationId, command.payload.text, command.payload.activeTabId, consentGate),
+          outcome: await pool.send(
+            command.payload.conversationId,
+            command.payload.text,
+            command.payload.activeTabId,
+            consentGate,
+            command.payload.attachments,
+          ),
         };
+      case "ui.conversation.attach": {
+        // 022 R-337: one piece; its result is the panel's go-ahead for the next.
+        const { conversationId, ...piece } = command.payload;
+        return { outcome: await pool.attach(conversationId, piece) };
+      }
+      case "ui.conversation.attach-cancel":
+        return { outcome: await pool.cancelAttachment(command.payload.conversationId, command.payload.attachmentId) };
       case "ui.conversation.stop":
         return { outcome: await pool.stop(command.payload.conversationId) };
       case "ui.conversation.answer":
         return { outcome: await pool.answer(command.payload.conversationId, command.payload.requestId, command.payload.answer) };
       case "ui.conversation.set-mode":
-        return { outcome: await pool.setMode(command.payload.conversationId, command.payload.mode) };
+        // 021 R-351: a launch-time mode change starts a new agent run, so it needs the consent as a start does.
+        return { outcome: await pool.setMode(command.payload.conversationId, command.payload.mode, consentGate) };
       case "ui.conversation.open": {
         const { conversationId } = command.payload;
         const opened = await pool.open(conversationId, consentGate);
@@ -404,6 +463,10 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       if (!parsed.success) {
         // Codes only: the frame may carry the owner's words (contracts README §2).
         log("broker.command-invalid", parsed.error.issues[0]?.path.join(".") ?? "");
+        // T618: a sender that gave a commandId waits for its answer (the panel's next attachment
+        // piece does), so it gets a refusal rather than silence.
+        const commandId = readableCommandId(frame);
+        if (commandId !== undefined) reply(commandId, invalidCommand(frame, parsed.error.issues));
         return;
       }
       const { commandId, command } = parsed.data;
@@ -422,6 +485,32 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
     refreshAgents,
     eventFrame: (payload) => ({ type: "conversation-event", sessionId, ...payload }),
   };
+}
+
+/** T618: the commandId of a frame that failed validation, when it is one a result can carry. */
+function readableCommandId(frame: unknown): string | undefined {
+  if (frame === null || typeof frame !== "object") return undefined;
+  const { type, commandId } = frame as { type?: unknown; commandId?: unknown };
+  if (type !== "conversation-command" || typeof commandId !== "string") return undefined;
+  return commandId.length >= 1 && commandId.length <= 128 ? commandId : undefined;
+}
+
+/**
+ * T618: the refusal of a command that did not validate. An attachment piece is refused in the
+ * attachment words the panel already shows - `attachment-too-large` when a bound was exceeded (its
+ * data, name or thumbnail), else `attachment-type` (not a piece Hallpass takes). Any other command
+ * gets `invalid-command`: a retry of the same frame cannot succeed (unlike `busy`), so the owner is
+ * told to reload the side panel.
+ */
+function invalidCommand(frame: unknown, issues: readonly { code: string }[]): { ok: false; error: ConversationError } {
+  const command = (frame as { command?: unknown }).command;
+  const type = command !== null && typeof command === "object" ? (command as { type?: unknown }).type : undefined;
+  if (type === "ui.conversation.attach" || type === "ui.conversation.attach-cancel") {
+    return issues.some((issue) => issue.code === "too_big")
+      ? failure("attachment-too-large", "Hallpass could not take this piece of the attachment: it is larger than a piece can be.")
+      : failure("attachment-type", "Hallpass could not take this piece of the attachment; add it again.");
+  }
+  return failure("invalid-command", "Hallpass could not read this command; reload the side panel.");
 }
 
 const needsConsent = () =>

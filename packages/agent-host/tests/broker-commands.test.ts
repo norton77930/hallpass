@@ -58,7 +58,7 @@ type Machine = { cli?: boolean; version?: string; adapter?: boolean };
 
 /** What `where.exe`, `--version` and the adapter's package.json say on the test's "machine". */
 function machinePorts(machine: Machine): AgentPorts {
-  const adapterManifest = (agent: keyof typeof AGENT_ADAPTERS) =>
+  const adapterManifest = (agent: "claude-code" | "codex") =>
     JSON.stringify({ name: AGENT_ADAPTERS[agent].package, version: AGENT_ADAPTERS[agent].version, bin: "dist/index.js" });
   return {
     dataDir: data,
@@ -381,6 +381,17 @@ describe("T540 commands on one conversation", () => {
     expect(await (await setup({ entries: [entry()] })).run(setMode)).toMatchObject(refusal("agent-exited"));
   });
 
+  // D-021-16: DeepSeek's mode is fixed once its conversation started; it is chosen with the start.
+  it("set-mode: a started DeepSeek conversation is refused `mode-fixed`; a start's mode reaches the pool", async () => {
+    const setMode: ConversationCommand = { type: "ui.conversation.set-mode", payload: { ...target, mode: "agent-review" } };
+    expect(await (await setup({ entries: [entry({ agent: "deepseek" })] })).run(setMode)).toMatchObject(refusal("mode-fixed"));
+    // FR-361: the start's mode reaches the pool, for every agent.
+    const { run, pool } = await setup();
+    const started = await run({ type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" }, mode: "agent-review" } });
+    expect(started).toMatchObject({ ok: true });
+    expect((await pool.views()).find((view) => view.conversationId === started.value!.conversationId)?.mode).toBe("agent-review");
+  });
+
   it("open: unknown conversation, another browser's, and a live one answered with its pages", async () => {
     expect(await (await setup()).run({ type: "ui.conversation.open", payload: target })).toMatchObject(refusal("not-found"));
     expect(
@@ -556,12 +567,16 @@ describe("T540 install", () => {
 });
 
 describe("T540 the frame itself", () => {
-  it("drops a frame that is not a valid command, with a log line and no reply", async () => {
+  it("refuses a command that is not valid under its commandId (T618), with a log line; a frame without one gets no reply", async () => {
     const { handler } = await setup();
     await handler.handle({ type: "conversation-command", sessionId: SESSION, commandId: "bad", command: { type: "ui.conversation.start" } });
     await handler.handle({ type: "conversation-command", sessionId: SESSION, commandId: "bad-2", command: { type: "ui.conversation.set-mode", payload: { conversationId: ID, mode: "bypassPermissions" } } });
-    expect(sent.filter((frame) => frame.type === "conversation-result")).toEqual([]);
-    expect(logs.filter((line) => line.startsWith("broker.command-invalid"))).toHaveLength(2);
+    await handler.handle({ type: "conversation-command", sessionId: SESSION, command: { type: "ui.conversation.start" } });
+    expect(sent.filter((frame) => frame.type === "conversation-result")).toEqual([
+      { type: "conversation-result", sessionId: SESSION, commandId: "bad", ok: false, error: { code: "invalid-command", detail: expect.any(String) } },
+      { type: "conversation-result", sessionId: SESSION, commandId: "bad-2", ok: false, error: { code: "invalid-command", detail: expect.any(String) } },
+    ]);
+    expect(logs.filter((line) => line.startsWith("broker.command-invalid"))).toHaveLength(3);
   });
 });
 
@@ -657,6 +672,86 @@ describe("T547 the gaps S4 left for the panel", () => {
     expect(await run({ type: "worker.conversation.page", payload: { conversationId: ID, fromSeq: 0 } })).toMatchObject(
       refusal("not-found"),
     );
+  });
+});
+
+/**
+ * 021/T645 (R-345, R-351): the launcher starts an agent in the panel mode it is asked for. DeepSeek
+ * has no program of the owner's to find; the test agent stands in for every agent's program, while
+ * each mode's launch settings (Hermes' managed layer, DeepSeek's environment) still apply.
+ */
+describe("021 createAgentLauncher: a launch for a panel mode (T645)", () => {
+  const DSH = () => win32.join(data, "agents", "deepseek", "0.2.1-rc.2", "node_modules", "@deepseek-ai", "dsh", "package.json");
+  const managed = (mode: string) => win32.join(data, "agents", "hermes", "managed", mode);
+
+  function launcherPorts(files: Record<string, string> = {}): AgentPorts & { writes: string[] } {
+    const content = { ...files };
+    const writes: string[] = [];
+    return {
+      writes,
+      dataDir: data,
+      env: {},
+      nodePath: process.execPath,
+      codexShimEntry: win32.join(data, "codex-app-server-shim.js"),
+      fs: {
+        exists: async (path) => path in content,
+        readText: async (path) => {
+          if (!(path in content)) throw new Error("ENOENT");
+          return content[path]!;
+        },
+        writeText: async (path, text) => {
+          writes.push(path);
+          content[path] = text;
+        },
+      },
+      exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+    };
+  }
+
+  it("starts DeepSeek, which has no program to find, in the mode it is asked for", async () => {
+    const launcher = createAgentLauncher({
+      ports: launcherPorts({ [DSH()]: JSON.stringify({ name: "@deepseek-ai/dsh", version: "0.2.1-rc.2", bin: { dsh: "lib/bin.js" } }) }),
+    });
+    expect(await launcher.resolveLaunch("deepseek")).toMatchObject({
+      ok: true,
+      spec: { env: { DSH_PERMISSION_MODE: "read-only", DSH_TELEMETRY_MODE: "DISABLED" } },
+      versions: { agent: "deepseek", tested: "0.2.1-rc.2", found: "0.2.1-rc.2" },
+    });
+    expect(await launcher.resolveLaunch("deepseek", "agent-review")).toMatchObject({
+      ok: true,
+      spec: { env: { DSH_PERMISSION_MODE: "workspace-write", DSH_TELEMETRY_MODE: "DISABLED" } },
+    });
+  });
+
+  it("says DeepSeek needs its download before its package is there, and Hermes is missing without its program", async () => {
+    const launcher = createAgentLauncher({ ports: launcherPorts() });
+    expect(await launcher.resolveLaunch("deepseek")).toMatchObject({ ok: false, error: { code: "install-needed" } });
+    expect(await launcher.resolveLaunch("hermes")).toMatchObject({ ok: false, error: { code: "agent-missing" } });
+  });
+
+  it("keeps the test agent for all four agents, with each mode's launch settings on top", async () => {
+    const testAgent = { command: "node", args: ["fake-agent.js"], env: { FAKE_ACP_LOG: "log" } };
+    const p = launcherPorts();
+    const launcher = createAgentLauncher({ ports: p, testAgent });
+    for (const agent of ["claude-code", "codex", "hermes", "deepseek"] as const) {
+      expect(await launcher.availability(agent)).toEqual({ agent, availability: "ready", version: "0.0.0-test" });
+    }
+    expect(await launcher.resolveLaunch("claude-code", "agent-review")).toEqual({
+      ok: true,
+      spec: testAgent,
+      versions: { agent: "claude-code", tested: "2.1.302", found: "0.0.0-test" },
+    });
+    expect(await launcher.resolveLaunch("codex")).toMatchObject({ ok: true, spec: testAgent });
+    expect(await launcher.resolveLaunch("hermes", "agent-review")).toEqual({
+      ok: true,
+      spec: { ...testAgent, env: { FAKE_ACP_LOG: "log", HERMES_MANAGED_DIR: managed("agent-review") } },
+      versions: { agent: "hermes", tested: "0.22.2", found: "0.0.0-test" },
+    });
+    expect(p.writes).toEqual([win32.join(managed("agent-review"), "config.yaml")]);
+    expect(await launcher.resolveLaunch("deepseek")).toMatchObject({
+      ok: true,
+      spec: { env: { FAKE_ACP_LOG: "log", DSH_PERMISSION_MODE: "read-only", DSH_TELEMETRY_MODE: "DISABLED" } },
+    });
   });
 });
 

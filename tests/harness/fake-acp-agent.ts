@@ -27,6 +27,25 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  * - FAKE_ACP_SCENARIO     `claude` (default): modes default / acceptEdits / plan / auto /
  *                         bypassPermissions, current `auto`. `codex`: read-only / agent /
  *                         agent-full-access, current `agent`.
+ *                         021 (T653), shaped like the measured agents:
+ *                         `hermes`: loadSession, image yes / embedded context no, modes default /
+ *                         accept_edits / dont_ask (current `default`); a tool is announced, then
+ *                         its permission request carries title and kind, options `allow_once`
+ *                         (allow_once) and `deny` (reject_once).
+ *                         `deepseek`: no modes, no loadSession, `sessionCapabilities` list / resume /
+ *                         close (`session/resume` continues a session without replaying it), image
+ *                         yes / embedded context no; every tool is announced as kind `other` with
+ *                         `rawInput { command, justification }` and its permission request carries
+ *                         only the `toolCallId`, options `allow-once` (allow_once) and `reject-once`
+ *                         (reject_once).
+ *                         The `start` log line names every environment variable the process got
+ *                         (`envNames`, names only) and the values of Hallpass's own launch settings
+ *                         (`launch`: HERMES_MANAGED_DIR, DSH_PERMISSION_MODE, DSH_TELEMETRY_MODE).
+ * - FAKE_ACP_HANG_AT=initialize|new   never answer that request (a start that takes forever, T658).
+ * - FAKE_ACP_RESET_ERROR  (021) after a `drift:`, refuse the session/set_mode that puts the mode back
+ *                         with this text; `{env:NAME}` in it is replaced by that variable's value.
+ * - FAKE_ACP_TURN_ERROR   the message `fail:turn` fails the turn with (T660); `{env:NAME}` in it
+ *                         becomes the value of that variable.
  * - FAKE_ACP_LOG=<path>   append one JSON line per received request:
  *                         `{ method, params }` with a summary of the params (session/new and
  *                         session/load include the `_meta` they received as `meta`, null when
@@ -43,6 +62,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  *                         the way an adapter that cannot start does (T534); `new` lets initialize
  *                         succeed and fails session/new.
  * - FAKE_ACP_FAIL_MESSAGE the error text for FAKE_ACP_FAIL_AT (default `fake agent failed at <step>`).
+ * - FAKE_ACP_EXIT_AT=initialize   (021 R-358) exit with code 1 on `initialize` without answering, so the
+ *                         connection closes - an agent that crashes at boot (dsh without its bindings).
  *
  * Prompt keywords (whitespace-separated, executed left to right; text with none is echoed)
  * - chunks:N          N `agent_message_chunk` updates, text `part-1;` ... `part-N;`.
@@ -61,6 +82,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  *                     `allow_permissions_session` (allow_always) and `reject_permissions`
  *                     (reject_once). Then one chunk `granted:<id>` or `declined:<id>`.
  * - drift:<modeId>    the agent itself emits `current_mode_update` to <modeId> mid-turn.
+ * - tool:unannounced  (021) a permission request for an id no `tool_call` announced, carrying only
+ *                     that id, with the scenario's options; then one chunk `done:<id>` or `refused:<id>`.
+ * - fail:turn         (021) the turn fails with a JSON-RPC internal error, text FAKE_ACP_TURN_ERROR.
  * - crash             the process exits with code 3 mid-turn.
  * - hang              the turn never ends until `session/cancel` (then stopReason `cancelled`).
  * - /rename <title>   (the whole prompt) answered locally: one chunk `renamed:<title>`, no tool
@@ -102,7 +126,21 @@ const MODE_SETS: Record<string, { modes: Mode[]; current: string }> = {
     ],
     current: "agent",
   },
+  hermes: {
+    modes: [
+      { id: "default", name: "Default" },
+      { id: "accept_edits", name: "Accept edits" },
+      { id: "dont_ask", name: "Don't ask" },
+    ],
+    current: "default",
+  },
 };
+
+type Scenario = "claude" | "codex" | "hermes" | "deepseek";
+const SCENARIOS: readonly Scenario[] = ["claude", "codex", "hermes", "deepseek"];
+
+/** Hallpass's own launch settings (021): logged with their values, unlike every other variable. */
+const LAUNCH_VARIABLES = ["HERMES_MANAGED_DIR", "DSH_PERMISSION_MODE", "DSH_TELEMETRY_MODE"];
 
 type TranscriptEntry = { role: "user" | "agent"; text: string };
 type StoredSession = { cwd: string; scenario: string; modeId: string; transcript: TranscriptEntry[] };
@@ -122,7 +160,7 @@ const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptions = {}): Promise<void> {
   const env = options.env ?? process.env;
   const exit = options.exit ?? ((code: number) => process.exit(code));
-  const scenario = env.FAKE_ACP_SCENARIO === "codex" ? "codex" : "claude";
+  const scenario: Scenario = SCENARIOS.find((name) => name === env.FAKE_ACP_SCENARIO) ?? "claude";
   const logPath = env.FAKE_ACP_LOG;
   const storePath = env.FAKE_ACP_STORE;
   const chunkDelay = Number(env.FAKE_ACP_CHUNK_DELAY_MS ?? 0);
@@ -132,6 +170,8 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
   };
 
   const sessions = new Map<string, StoredSession>();
+  /** Sessions whose agent switched its own mode (`drift:`), for FAKE_ACP_RESET_ERROR. */
+  const drifted = new Set<string>();
   const aborts = new Map<string, AbortController>();
   /** The `hallpass` stdio entry each session was handed, and its client once started (T557). */
   const browserServers = new Map<string, acp.McpServer>();
@@ -157,8 +197,12 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       name: mode.name,
     })),
   });
+  /** DeepSeek has no ACP modes: nothing about modes in its answers. */
+  const modesOf = (session: StoredSession) => (scenario === "deepseek" ? {} : { modes: modeState(session) });
 
-  log({ event: "start", pid: process.pid, scenario });
+  const launch: Record<string, string> = {};
+  for (const name of LAUNCH_VARIABLES) if (env[name] !== undefined) launch[name] = env[name]!;
+  log({ event: "start", pid: process.pid, scenario, envNames: Object.keys(env).sort(), launch });
   if (env.FAKE_ACP_SPAWN_CHILD === "1" || env.FAKE_ACP_SPAWN_DETACHED === "1") {
     const idle = ["-e", "setInterval(() => {}, 1000)"];
     if (env.FAKE_ACP_SPAWN_CHILD === "1") {
@@ -210,31 +254,53 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     },
   };
 
+  /** The permission options each scenario offers (021: Hermes' and DeepSeek's as measured). */
+  const permissionOptions = (): acp.PermissionOption[] => {
+    switch (scenario) {
+      case "hermes":
+        return [
+          { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ];
+      case "deepseek":
+        return [
+          { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+          { optionId: "reject-once", name: "Reject once", kind: "reject_once" },
+        ];
+      default:
+        return [
+          { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+          { optionId: "allow-always", name: "Always allow", kind: "allow_always" },
+          { optionId: "reject-once", name: "Reject once", kind: "reject_once" },
+          { optionId: "reject-always", name: "Always reject", kind: "reject_always" },
+        ];
+    }
+  };
+
+  /** DeepSeek announces every action as `other` with the command and its reason (021, measured). */
+  const DEEPSEEK_INPUT: Record<string, { command: string; justification: string }> = {
+    edit: { command: "write_file src/app.ts", justification: "Update the greeting in src/app.ts" },
+    execute: { command: "npm test", justification: "Run the tests to check the change" },
+    mcp: { command: "hallpass read_page", justification: "Read the page" },
+  };
+
   const runTool = async (sessionId: string, name: string, signal: AbortSignal) => {
     const tool = TOOLS[name]!;
     const toolCallId = `call-${++toolCounter}`;
-    await update(sessionId, {
-      sessionUpdate: "tool_call",
-      toolCallId,
-      title: tool.title,
-      kind: tool.kind,
-      status: "pending",
-      rawInput: tool.rawInput,
-    });
-    const options: acp.PermissionOption[] = [
-      { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
-      { optionId: "allow-always", name: "Always allow", kind: "allow_always" },
-      { optionId: "reject-once", name: "Reject once", kind: "reject_once" },
-      { optionId: "reject-always", name: "Always reject", kind: "reject_always" },
-    ];
-    const answer = await unlessCancelled(
-      signal,
-      connection.requestPermission({
-        sessionId,
-        toolCall: { toolCallId, title: tool.title, kind: tool.kind, status: "pending", rawInput: tool.rawInput },
-        options,
-      }),
-    );
+    const deepseek = scenario === "deepseek";
+    const announced = deepseek
+      ? { title: "", kind: "other" as const, rawInput: DEEPSEEK_INPUT[name] }
+      : { title: tool.title, kind: tool.kind, rawInput: tool.rawInput };
+    await update(sessionId, { sessionUpdate: "tool_call", toolCallId, status: "pending", ...announced });
+    const options = permissionOptions();
+    // What the request itself carries: everything (Claude, Codex), title and kind (Hermes), the id only (DeepSeek).
+    const toolCall: acp.ToolCallUpdate =
+      scenario === "hermes"
+        ? { toolCallId, title: tool.title, kind: tool.kind }
+        : deepseek
+          ? { toolCallId }
+          : { toolCallId, title: tool.title, kind: tool.kind, status: "pending", rawInput: tool.rawInput };
+    const answer = await unlessCancelled(signal, connection.requestPermission({ sessionId, toolCall, options }));
     const outcome = answer.outcome;
     const chosen =
       outcome.outcome === "selected" ? options.find((option) => option.optionId === outcome.optionId) : undefined;
@@ -242,7 +308,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       event: "permission-answer",
       sessionId,
       toolCallId,
-      kind: tool.kind,
+      kind: announced.kind,
       outcome: outcome.outcome,
       optionId: chosen?.optionId ?? null,
       optionKind: chosen?.kind ?? null,
@@ -266,6 +332,27 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       });
       await chunk(sessionId, `refused:${toolCallId}`);
     }
+  };
+
+  /** `tool:unannounced` (021): a request for an id no `tool_call` named, carrying only that id. */
+  const askUnannounced = async (sessionId: string, signal: AbortSignal) => {
+    const toolCallId = `call-${++toolCounter}`;
+    const options = permissionOptions();
+    const answer = await unlessCancelled(signal, connection.requestPermission({ sessionId, toolCall: { toolCallId }, options }));
+    const outcome = answer.outcome;
+    const chosen =
+      outcome.outcome === "selected" ? options.find((option) => option.optionId === outcome.optionId) : undefined;
+    log({
+      event: "permission-answer",
+      sessionId,
+      toolCallId,
+      kind: null,
+      outcome: outcome.outcome,
+      optionId: chosen?.optionId ?? null,
+      optionKind: chosen?.kind ?? null,
+    });
+    if (outcome.outcome === "cancelled") throw new Cancelled();
+    await chunk(sessionId, `${chosen?.kind === "allow_once" ? "done" : "refused"}:${toolCallId}`);
   };
 
   /** `grant:permissions`: the Codex adapter's request for wider sandbox permissions (019 R-317). */
@@ -426,6 +513,13 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       } else if (tool) {
         matched = true;
         await runTool(sessionId, tool[1]!, signal);
+      } else if (token === "tool:unannounced") {
+        matched = true;
+        await askUnannounced(sessionId, signal);
+      } else if (token === "fail:turn") {
+        // `{env:NAME}` in the text becomes that variable's value, the way an agent's error may quote it.
+        const message = (env.FAKE_ACP_TURN_ERROR ?? "fake agent turn failed").replace(/\{env:([A-Za-z0-9_]+)\}/g, (_all, name: string) => env[name] ?? "");
+        throw new acp.RequestError(-32603, message);
       } else if (token === "grant:permissions") {
         matched = true;
         await askForPermissions(sessionId, signal);
@@ -435,6 +529,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       } else if (drift) {
         matched = true;
         session.modeId = drift[1]!;
+        drifted.add(sessionId);
         save(sessionId);
         await update(sessionId, { sessionUpdate: "current_mode_update", currentModeId: drift[1]! });
       } else if (token === "crash") {
@@ -461,24 +556,63 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     throw new acp.RequestError(-32603, message);
   };
 
+  /** FAKE_ACP_HANG_AT: that request is never answered (T658: a start that never ends). */
+  const hangIfAsked = async (step: "initialize" | "new") => {
+    if (env.FAKE_ACP_HANG_AT !== step) return;
+    log({ event: "hang", step });
+    await new Promise<never>(() => {});
+  };
+
+  /** 021: what each scenario says at `initialize` (Hermes and DeepSeek as measured). */
+  const capabilities = (): acp.AgentCapabilities => {
+    switch (scenario) {
+      case "hermes":
+        return { loadSession: true, promptCapabilities: { image: true, embeddedContext: false } };
+      case "deepseek":
+        return {
+          promptCapabilities: { image: true, embeddedContext: false },
+          sessionCapabilities: { list: {}, resume: {}, close: {} },
+        };
+      default:
+        return { loadSession: true };
+    }
+  };
+
+  const findSession = (sessionId: string): StoredSession => {
+    let session = sessions.get(sessionId);
+    if (!session) {
+      session = readStore()[sessionId];
+      if (session) sessions.set(sessionId, session);
+    }
+    if (!session) throw new acp.RequestError(-32002, `Session not found: ${sessionId}`);
+    return session;
+  };
+
   const agent: acp.Agent = {
-    initialize(params) {
+    async initialize(params) {
       log({ method: "initialize", params: { protocolVersion: params.protocolVersion } });
+      await hangIfAsked("initialize");
+      if (env.FAKE_ACP_EXIT_AT === "initialize") {
+        log({ event: "exit", step: "initialize" });
+        exit(1);
+      }
       failIfAsked("initialize");
       return {
         protocolVersion: acp.PROTOCOL_VERSION,
-        agentCapabilities: { loadSession: true },
+        agentCapabilities: capabilities(),
         agentInfo: { name: `fake-acp-agent-${scenario}`, version: "0.0.0" },
       };
     },
     authenticate() {
       return {};
     },
-    newSession(params) {
+    async newSession(params) {
+      log({ event: "session/new-received" });
+      await hangIfAsked("new");
       failIfAsked("new");
       const sessionId = `fake-${scenario}-${randomBytes(6).toString("hex")}`;
-      const set = MODE_SETS[scenario]!;
-      const session: StoredSession = { cwd: params.cwd, scenario, modeId: set.current, transcript: [] };
+      const set = MODE_SETS[scenario];
+      const session: StoredSession = { cwd: params.cwd, scenario, modeId: set?.current ?? "", transcript: [] };
       sessions.set(sessionId, session);
       save(sessionId);
       rememberBrowserServer(sessionId, params.mcpServers);
@@ -492,19 +626,16 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
           meta: params._meta ?? null,
         },
       });
-      return { sessionId, modes: modeState(session) };
+      return { sessionId, ...modesOf(session) };
     },
     async loadSession(params) {
       log({
         method: "session/load",
         params: { sessionId: params.sessionId, cwd: params.cwd, servers: params.mcpServers, meta: params._meta ?? null },
       });
-      let session = sessions.get(params.sessionId);
-      if (!session) {
-        session = readStore()[params.sessionId];
-        if (session) sessions.set(params.sessionId, session);
-      }
-      if (!session) throw new acp.RequestError(-32002, `Session not found: ${params.sessionId}`);
+      // DeepSeek does not offer `session/load` (no `loadSession` at initialize).
+      if (scenario === "deepseek") throw acp.RequestError.methodNotFound("session/load");
+      const session = findSession(params.sessionId);
       rememberBrowserServer(params.sessionId, params.mcpServers);
       for (const entry of session.transcript) {
         await update(params.sessionId, {
@@ -512,12 +643,24 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
           content: { type: "text", text: entry.text },
         });
       }
-      return { modes: modeState(session) };
+      return { ...modesOf(session) };
+    },
+    /** 021: DeepSeek continues a session without replaying it; the other scenarios do not offer it. */
+    async resumeSession(params) {
+      log({ method: "session/resume", params: { sessionId: params.sessionId, cwd: params.cwd, servers: params.mcpServers ?? [] } });
+      if (scenario !== "deepseek") throw acp.RequestError.methodNotFound("session/resume");
+      findSession(params.sessionId);
+      rememberBrowserServer(params.sessionId, params.mcpServers ?? []);
+      return {};
     },
     async setSessionMode(params) {
       log({ method: "session/set_mode", params: { sessionId: params.sessionId, modeId: params.modeId } });
+      if (scenario === "deepseek") throw acp.RequestError.methodNotFound("session/set_mode");
       const session = sessions.get(params.sessionId);
       if (!session) throw new acp.RequestError(-32002, `Session not found: ${params.sessionId}`);
+      if (env.FAKE_ACP_RESET_ERROR !== undefined && drifted.has(params.sessionId)) {
+        throw acp.RequestError.internalError(undefined, env.FAKE_ACP_RESET_ERROR.replace(/\{env:([A-Za-z0-9_]+)\}/g, (_all, name: string) => env[name] ?? ""));
+      }
       if (!modeState(session).availableModes.some((mode) => mode.id === params.modeId)) {
         throw acp.RequestError.invalidParams({ modeId: params.modeId }, "Unknown mode");
       }

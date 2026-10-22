@@ -58,7 +58,7 @@ describe("T610 a conversation chosen from the list is shown at once", () => {
     await settle();
 
     expect(title()).toBe("Explain the relay handshake");
-    expect(screen.getByText(ui("conversation.state.starting"))).toBeTruthy();
+    expect(screen.getByText(ui("conversation.state.starting").replace("{agent}", "Claude Code"))).toBeTruthy();
     expect(notices()).toEqual([]);
   });
 

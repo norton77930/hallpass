@@ -5,6 +5,32 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.15.0 — 2026-10-23
+
+**Attachments in the composer, and two more side-panel agents: Hermes and DeepSeek.**
+
+- **Attach things to a message.** A "+" button in the composer adds images (picked, pasted or dropped;
+  large ones are scaled down), other files (copied into the conversation folder and named to the agent;
+  up to 25 MB), a screenshot of the tab you are looking at, or the current tab as text (a PDF tab is
+  saved as a file). Entries an agent cannot accept are disabled with the reason. Attachments show as
+  chips above the text and stay with their conversation.
+- **Hermes Agent** (tested 0.22.2) joins Claude and Codex. Hallpass does not install it: it finds the
+  Hermes you set up and shows how to install the tested version otherwise. Ask first makes Hermes ask
+  before every edit and gives it no command tool; Agent review restarts Hermes in place and keeps the
+  conversation. Running commands needs Git for Windows.
+- **DeepSeek Harness** (the official `@deepseek-ai/dsh`, pre-release 0.2.1-rc.2) joins too. Hallpass
+  downloads it on first use, which can take about 30 minutes; the panel says so and offers Cancel.
+  Ask first is read-only, Agent review is workspace-write, and full access is never used. Usage
+  reporting is switched off. Its mode is fixed once a conversation has started (start a new one to
+  change it). Opening an old DeepSeek conversation says its earlier messages cannot be shown. A card for
+  an action DeepSeek did not describe offers only Reject.
+- **Keys stay with the agents.** Hallpass never asks for, reads or stores a model key; Hermes and
+  DeepSeek use their own settings, and the panel says where to set one when it is missing.
+- **A new conversation always starts on Ask first**, unless you pick another mode for it before the
+  first message.
+- Known limitations: DeepSeek Harness is a pre-release; a resumed Hermes conversation may still believe
+  its earlier tool limits after you change mode.
+
 ## 0.14.0 — 2026-10-21
 
 **A redesigned conversation in the side panel.**

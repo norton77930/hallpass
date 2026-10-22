@@ -367,6 +367,31 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "conversation.jumpLatest",
   // H3: the broker's turn-stopped / turn-failed notices, said in the panel's locale (stopped reuses the state's sentence).
   "conversation.state.stopped",
+  // 021 US1 - US5, FR-343 - FR-358: Hermes and DeepSeek - notes, first use, starting and Cancel,
+  // a card with nothing to allow, the mode notes, a conversation that cannot be replayed, and where
+  // the agents' own model settings live.
+  "conversation.missing.body.hermes",
+  "conversation.note.git-missing",
+  "conversation.note.pre-release",
+  "conversation.version.mismatch",
+  "conversation.firstUse.what.deepseek",
+  "conversation.firstUse.settings.hermes",
+  "conversation.firstUse.settings.deepseek",
+  "conversation.state.starting",
+  "conversation.state.startingSlow",
+  "conversation.state.cancelStart",
+  "conversation.state.cancelStartLabel",
+  "conversation.state.start-cancelled",
+  "conversation.permission.rejectOnly",
+  "conversation.permission.unnamed",
+  "conversation.mode.hermesAutomaticNote",
+  "conversation.mode.restartNote",
+  // D-021-16: DeepSeek keeps the mode it started with; the refusal of a switch says so too.
+  "conversation.mode.fixedNote",
+  "conversation.error.mode-fixed",
+  "conversation.noReplay",
+  "conversation.hint.agent-model-unreachable.hermes",
+  "conversation.hint.agent-model-unreachable.deepseek",
   "conversation.notice.turn-failed",
   // T607 (K1): the broker's crash notice, said in the panel's locale, its exit code kept as a value.
   "conversation.notice.agent-exited.exit",

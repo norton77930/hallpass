@@ -6,6 +6,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AGENT_ADAPTERS,
+  AGENT_DESCRIPTIONS,
   TESTED_AGENT_VERSIONS,
   adapterDirectory,
   adapterLaunchSpec,
@@ -17,6 +18,7 @@ import {
   type AgentPorts,
   type ExecResult,
 } from "../src/broker/agents.js";
+import { CONVERSATION_MODE_FIXED_AGENTS } from "@hallpass/contracts";
 import { CODEX_SHIM_COMMAND } from "../src/broker/codex-strict.js";
 
 /**
@@ -33,6 +35,11 @@ const HOME = "C:\\Users\\someone";
 const APPDATA = "C:\\Users\\someone\\AppData\\Roaming";
 const CLAUDE_EXE = win32.join(HOME, ".local", "bin", "claude.exe");
 const CODEX_CMD = win32.join(APPDATA, "npm", "codex.cmd");
+const PROGRAM_FILES = "C:\\Program Files";
+const HERMES_EXE = win32.join(HOME, ".local", "bin", "hermes.exe");
+/** Where Git for Windows puts the bash Hermes' command tool needs (R-348). */
+const GIT_BASH = win32.join(PROGRAM_FILES, "Git", "bin", "bash.exe");
+const DSH_MANIFEST = win32.join(DATA, "agents", "deepseek", "0.2.1-rc.2", "node_modules", "@deepseek-ai", "dsh", "package.json");
 /** Where the broker's shim entry is: beside broker.js, in a checkout whose path has a space and dots. */
 const SHIM_ENTRY = win32.join("D:\\", "OSS", "Some Ext.v2", "packages", "agent-host", "dist", "codex-app-server-shim.js");
 const SHIM_CMD = win32.join(DATA, "agents", "codex", "app-server-shim.cmd");
@@ -54,7 +61,7 @@ function ports(machine: Machine = {}): AgentPorts & { calls: string[]; writes: s
     calls,
     writes,
     dataDir: DATA,
-    env: { USERPROFILE: HOME, APPDATA },
+    env: { USERPROFILE: HOME, APPDATA, ProgramFiles: PROGRAM_FILES },
     nodePath: "C:\\node\\node.exe",
     codexShimEntry: SHIM_ENTRY,
     fs: {
@@ -82,8 +89,8 @@ function ports(machine: Machine = {}): AgentPorts & { calls: string[]; writes: s
 }
 
 const ok = (stdout: string): ExecResult => ({ code: 0, stdout, stderr: "" });
-const adapterManifest = (agent: keyof typeof AGENT_ADAPTERS, extra: Record<string, unknown> = {}) => {
-  const adapter = AGENT_ADAPTERS[agent];
+const adapterManifest = (agent: "claude-code" | "codex" | "deepseek", extra: Record<string, unknown> = {}) => {
+  const adapter = AGENT_DESCRIPTIONS[agent];
   const dir = adapterDirectory(DATA, agent);
   return {
     [win32.join(dir, "node_modules", ...adapter.package.split("/"), "package.json")]: JSON.stringify({
@@ -109,17 +116,17 @@ const codexInstalled = (bin = "./bin/codex-acp.js", code = MEASURED_CODEX_MODES)
 
 describe("pinned versions (R-314, R-315)", () => {
   it("names the versions the connectors were tested with", () => {
-    expect(TESTED_AGENT_VERSIONS).toEqual({ "claude-code": "2.1.302", codex: "0.163.0" });
+    expect(TESTED_AGENT_VERSIONS).toEqual({ "claude-code": "2.1.302", codex: "0.163.0", hermes: "0.22.2", deepseek: "0.2.1-rc.2" });
     expect(AGENT_ADAPTERS["claude-code"]).toMatchObject({ package: "@agentclientprotocol/claude-agent-acp", version: "0.81.2" });
     expect(AGENT_ADAPTERS.codex).toMatchObject({ package: "@agentclientprotocol/codex-acp", version: "1.13.1" });
   });
 
-  it("keeps the adapter pins in step with the manifests the package ships", async () => {
+  it("keeps the package pins in step with the manifests the package ships", async () => {
     const { readFileSync } = await import("node:fs");
     const here = dirname(fileURLToPath(import.meta.url));
-    for (const agent of ["claude-code", "codex"] as const) {
+    for (const agent of ["claude-code", "codex", "deepseek"] as const) {
       const manifest = JSON.parse(readFileSync(resolve(here, "..", "agents", agent, "package.json"), "utf8"));
-      expect(manifest.dependencies).toEqual({ [AGENT_ADAPTERS[agent].package]: AGENT_ADAPTERS[agent].version });
+      expect(manifest.dependencies).toEqual({ [AGENT_DESCRIPTIONS[agent].package]: AGENT_DESCRIPTIONS[agent].version });
     }
   });
 
@@ -250,6 +257,140 @@ describe("agentAvailability (T530, T531)", () => {
   });
 });
 
+describe("agent descriptions (021 T640, R-345, R-351, R-355)", () => {
+  it("describes the four agents in contract order, with how each is obtained", () => {
+    expect(Object.keys(AGENT_DESCRIPTIONS)).toEqual(["claude-code", "codex", "hermes", "deepseek"]);
+    expect(Object.fromEntries(Object.entries(AGENT_DESCRIPTIONS).map(([agent, d]) => [agent, d.kind]))).toEqual({
+      "claude-code": "adapter",
+      codex: "adapter",
+      hermes: "installed",
+      deepseek: "fetched",
+    });
+    expect(AGENT_DESCRIPTIONS.hermes).toMatchObject({ label: "Hermes", cliFile: "hermes", tested: "0.22.2", launchArgs: ["acp"] });
+    expect(AGENT_DESCRIPTIONS.deepseek).toMatchObject({
+      label: "DeepSeek",
+      package: "@deepseek-ai/dsh",
+      version: "0.2.1-rc.2",
+      launchArgs: ["--profile", "acp"],
+    });
+  });
+
+  it("maps each panel mode to an agent mode or to launch settings, never to a full-access mode", () => {
+    expect(Object.fromEntries(Object.entries(AGENT_DESCRIPTIONS).map(([agent, d]) => [agent, d.modes]))).toEqual({
+      "claude-code": { strict: { agentMode: "default", atLaunch: false }, "agent-review": { agentMode: "auto", atLaunch: false } },
+      codex: { strict: { agentMode: "read-only", atLaunch: false }, "agent-review": { agentMode: "agent", atLaunch: false } },
+      hermes: { strict: { agentMode: "default", atLaunch: true }, "agent-review": { agentMode: "accept_edits", atLaunch: true } },
+      deepseek: { strict: { atLaunch: true }, "agent-review": { atLaunch: true } },
+    });
+  });
+
+  it("continues a DeepSeek session with session/resume and every other with session/load", () => {
+    expect(Object.fromEntries(Object.entries(AGENT_DESCRIPTIONS).map(([agent, d]) => [agent, d.continueWith]))).toEqual({
+      "claude-code": "session/load",
+      codex: "session/load",
+      hermes: "session/load",
+      deepseek: "session/resume",
+    });
+  });
+
+  it("D-021-16: only DeepSeek's mode is fixed once started, as the contract tells the panel", () => {
+    const fixed = Object.entries(AGENT_DESCRIPTIONS).flatMap(([agent, d]) => (d.modeFixedOnceStarted ? [agent] : []));
+    expect(fixed).toEqual(["deepseek"]);
+    expect(fixed).toEqual([...CONVERSATION_MODE_FIXED_AGENTS]);
+  });
+
+  it("expects pictures and no page context from Hermes and DeepSeek before their first start", () => {
+    expect(AGENT_DESCRIPTIONS.hermes.expectedAccepts).toEqual({ image: true, context: false });
+    expect(AGENT_DESCRIPTIONS.deepseek.expectedAccepts).toEqual({ image: true, context: false });
+    expect("expectedAccepts" in AGENT_DESCRIPTIONS["claude-code"]).toBe(false);
+    expect("expectedAccepts" in AGENT_DESCRIPTIONS.codex).toBe(false);
+  });
+});
+
+describe("Hermes: an installed ACP program (021 T640, R-345, R-348)", () => {
+  const hermesAt = (path: string, version: string | "throws", extra: Machine = {}): Machine => ({
+    ...extra,
+    files: { [path]: "", ...extra.files },
+    versions: { [path]: version === "throws" ? "throws" : ok(`Hermes Agent v${version}\n`), ...extra.versions },
+  });
+  const gitBash = { files: { [GIT_BASH]: "" } };
+
+  it("is found by where.exe hermes first", async () => {
+    const onPath = "D:\\tools\\hermes.exe";
+    const p = ports({ files: { [onPath]: "", [HERMES_EXE]: "" }, where: { hermes: [onPath] } });
+    expect(await discoverCli("hermes", p)).toBe(onPath);
+    expect(p.calls).toEqual(["where.exe hermes"]);
+  });
+
+  it("falls back to %USERPROFILE%\\.local\\bin\\hermes.exe", async () => {
+    expect(await discoverCli("hermes", ports({ files: { [HERMES_EXE]: "" } }))).toBe(HERMES_EXE);
+  });
+
+  it("is missing when neither route finds it", async () => {
+    expect(await agentAvailability("hermes", ports(gitBash))).toEqual({ availability: { agent: "hermes", availability: "missing" } });
+  });
+
+  it("is ready at exactly 0.22.2 with Git Bash present, and needs no download", async () => {
+    const p = ports(hermesAt(HERMES_EXE, "0.22.2", gitBash));
+    expect(await agentAvailability("hermes", p)).toEqual({
+      availability: { agent: "hermes", availability: "ready", version: "0.22.2" },
+      cliPath: HERMES_EXE,
+    });
+  });
+
+  it("is a version problem at 0.22.1, naming both versions", async () => {
+    const status = await agentAvailability("hermes", ports(hermesAt(HERMES_EXE, "0.22.1", gitBash)));
+    expect(status.availability).toMatchObject({ agent: "hermes", availability: "version-problem", version: "0.22.1" });
+    expect(status.availability.detail).toContain("0.22.2");
+    expect(status.availability.detail).toContain("0.22.1");
+    expect(status.cliPath).toBe(HERMES_EXE);
+  });
+
+  it("is a version problem when --version says nothing usable", async () => {
+    const status = await agentAvailability("hermes", ports(hermesAt(HERMES_EXE, "throws", gitBash)));
+    expect(status.availability).toMatchObject({ agent: "hermes", availability: "version-problem" });
+    expect(status.availability.version).toBeUndefined();
+  });
+
+  it("stays ready with the git-missing note when no Git Bash is found", async () => {
+    const status = await agentAvailability("hermes", ports(hermesAt(HERMES_EXE, "0.22.2")));
+    expect(status.availability).toEqual({ agent: "hermes", availability: "ready", version: "0.22.2", notes: ["git-missing"] });
+  });
+
+  it("takes a Git Bash that where.exe finds inside a Git install, and not another bash", async () => {
+    const gitUsr = "D:\\Apps\\Git\\usr\\bin\\bash.exe";
+    const found = await agentAvailability("hermes", ports(hermesAt(HERMES_EXE, "0.22.2", { files: { [gitUsr]: "" }, where: { bash: [gitUsr] } })));
+    expect(found.availability.notes).toBeUndefined();
+    // WSL's launcher is a bash.exe on the PATH, but not the Git Bash Hermes needs.
+    const wsl = "C:\\Windows\\System32\\bash.exe";
+    const other = await agentAvailability("hermes", ports(hermesAt(HERMES_EXE, "0.22.2", { files: { [wsl]: "" }, where: { bash: [wsl] } })));
+    expect(other.availability.notes).toEqual(["git-missing"]);
+  });
+});
+
+describe("DeepSeek: a fetched ACP package (021 T640, R-345)", () => {
+  it("needs the download until its package is in the agent folder, with the pre-release note, and looks for no CLI", async () => {
+    const p = ports();
+    expect(await agentAvailability("deepseek", p)).toEqual({
+      availability: { agent: "deepseek", availability: "needs-install", notes: ["pre-release"] },
+    });
+    expect(p.calls).toEqual([]);
+  });
+
+  it("needs the download when the folder holds another version", async () => {
+    const p = ports({ files: { [DSH_MANIFEST]: JSON.stringify({ name: "@deepseek-ai/dsh", version: "0.2.0" }) } });
+    expect((await agentAvailability("deepseek", p)).availability.availability).toBe("needs-install");
+  });
+
+  it("is ready when the folder's package.json says 0.2.1-rc.2", async () => {
+    const p = ports({ files: { [DSH_MANIFEST]: JSON.stringify({ name: "@deepseek-ai/dsh", version: "0.2.1-rc.2" }) } });
+    expect(await agentAvailability("deepseek", p)).toEqual({
+      availability: { agent: "deepseek", availability: "ready", version: "0.2.1-rc.2", notes: ["pre-release"] },
+    });
+    expect(adapterDirectory(DATA, "deepseek")).toBe(win32.join(DATA, "agents", "deepseek", "0.2.1-rc.2"));
+  });
+});
+
 describe("adapterLaunchSpec (T531, R-315, R-322)", () => {
   it("starts the adapter's bin entry under the broker's node with CLAUDE_CODE_EXECUTABLE set", async () => {
     const p = ports({ files: adapterManifest("claude-code", { bin: { "claude-agent-acp": "dist/index.js" } }) });
@@ -319,6 +460,81 @@ describe("adapterLaunchSpec (T531, R-315, R-322)", () => {
     await expect(
       adapterLaunchSpec("codex", CODEX_CMD, ports({ files: adapterManifest("codex", { bin: "..\\..\\..\\evil.js" }) })),
     ).rejects.toThrow(/outside/);
+  });
+});
+
+describe("adapterLaunchSpec for Hermes and DeepSeek (021 T644, R-345, R-347, R-349)", () => {
+  const HERMES_MANAGED = (mode: string) => win32.join(DATA, "agents", "hermes", "managed", mode);
+  const DSH_DIR = win32.dirname(DSH_MANIFEST);
+  const dshInstalled = (bin: unknown = { dsh: "lib/bin.js" }) => ({
+    [DSH_MANIFEST]: JSON.stringify({ name: "@deepseek-ai/dsh", version: "0.2.1-rc.2", bin }),
+  });
+
+  it("starts hermes acp itself with the strict managed layer, written before the launch", async () => {
+    const p = ports({ files: { [HERMES_EXE]: "" } });
+    expect(await adapterLaunchSpec("hermes", HERMES_EXE, p, "strict")).toEqual({
+      command: HERMES_EXE,
+      args: ["acp"],
+      env: { HERMES_MANAGED_DIR: HERMES_MANAGED("strict") },
+    });
+    expect(p.writes).toEqual([win32.join(HERMES_MANAGED("strict"), "config.yaml")]);
+    expect(await p.fs.readText(win32.join(HERMES_MANAGED("strict"), "config.yaml"))).toContain("terminal");
+  });
+
+  it("starts Hermes strict when no mode is named, and with the agent-review layer when it is", async () => {
+    const p = ports({ files: { [HERMES_EXE]: "" } });
+    expect((await adapterLaunchSpec("hermes", HERMES_EXE, p)).env).toEqual({ HERMES_MANAGED_DIR: HERMES_MANAGED("strict") });
+    expect((await adapterLaunchSpec("hermes", HERMES_EXE, p, "agent-review")).env).toEqual({
+      HERMES_MANAGED_DIR: HERMES_MANAGED("agent-review"),
+    });
+  });
+
+  it("starts a .cmd Hermes through cmd.exe /d /s /c with verbatim arguments, as run-command.ts does", async () => {
+    const shim = "D:\\My Tools\\hermes.cmd";
+    const spec = await adapterLaunchSpec("hermes", shim, ports({ files: { [shim]: "" } }), "strict");
+    expect(spec).toEqual({
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", `""${shim}" acp"`],
+      env: { HERMES_MANAGED_DIR: HERMES_MANAGED("strict") },
+      windowsVerbatimArguments: true,
+    });
+    const withComSpec = { ...ports({ files: { [shim]: "" } }) };
+    withComSpec.env = { ...withComSpec.env, ComSpec: "C:\\Windows\\system32\\cmd.exe" };
+    expect((await adapterLaunchSpec("hermes", shim, withComSpec)).command).toBe("C:\\Windows\\system32\\cmd.exe");
+  });
+
+  it("refuses to start Hermes without its program", async () => {
+    await expect(adapterLaunchSpec("hermes", undefined, ports())).rejects.toThrow(/Hermes/);
+  });
+
+  it("starts DeepSeek's bin under the broker's node with --profile acp and its environment, writing nothing", async () => {
+    const p = ports({ files: dshInstalled() });
+    expect(await adapterLaunchSpec("deepseek", undefined, p, "strict")).toEqual({
+      command: "C:\\node\\node.exe",
+      args: [win32.join(DSH_DIR, "lib", "bin.js"), "--profile", "acp"],
+      env: { DSH_PERMISSION_MODE: "read-only", DSH_TELEMETRY_MODE: "DISABLED" },
+    });
+    expect((await adapterLaunchSpec("deepseek", undefined, p, "agent-review")).env).toEqual({
+      DSH_PERMISSION_MODE: "workspace-write",
+      DSH_TELEMETRY_MODE: "DISABLED",
+    });
+    expect(p.writes).toEqual([]);
+  });
+
+  it("refuses DeepSeek when its package is missing or its bin points outside it", async () => {
+    await expect(adapterLaunchSpec("deepseek", undefined, ports())).rejects.toThrow(/not installed/);
+    await expect(adapterLaunchSpec("deepseek", undefined, ports({ files: dshInstalled({ dsh: "..\\..\\evil.js" }) }))).rejects.toThrow(
+      /outside/,
+    );
+  });
+
+  it("gives Claude Code and Codex the same spec in either mode", async () => {
+    const claude = ports({ files: adapterManifest("claude-code", { bin: "dist/index.js" }) });
+    expect(await adapterLaunchSpec("claude-code", CLAUDE_EXE, claude, "agent-review")).toEqual(
+      await adapterLaunchSpec("claude-code", CLAUDE_EXE, claude, "strict"),
+    );
+    const codex = ports({ files: codexInstalled() });
+    expect(await adapterLaunchSpec("codex", CODEX_CMD, codex, "agent-review")).toEqual(await adapterLaunchSpec("codex", CODEX_CMD, codex));
   });
 });
 

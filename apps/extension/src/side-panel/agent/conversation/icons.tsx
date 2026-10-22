@@ -114,6 +114,45 @@ export function CheckIcon({ size = 16 }: IconProps): ReactElement {
   );
 }
 
+/** 022 FR-325: the composer's "+" (attachments). */
+export function PlusIcon({ size = 18 }: IconProps): ReactElement {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" {...line} strokeWidth={2}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+/** 022 FR-335: a file attachment's chip - a page with a folded corner. */
+export function FileIcon({ size = 14 }: IconProps): ReactElement {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" {...line} strokeWidth={1.8}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 3v5h5" />
+    </svg>
+  );
+}
+
+/** 022 FR-335: a picture without a thumbnail (a replayed one) - a frame with a hill. */
+export function ImageIcon({ size = 14 }: IconProps): ReactElement {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" {...line} strokeWidth={1.8}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 16 5-5 4 4 3-3 6 6" />
+    </svg>
+  );
+}
+
+/** 022 FR-335: the attached tab - a window with its tab strip. */
+export function TabIcon({ size = 14 }: IconProps): ReactElement {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" {...line} strokeWidth={1.8}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 9h18M9 4v5" />
+    </svg>
+  );
+}
+
 /** The welcome's mark: a pass with notched sides, in the accent. */
 export function PassIcon({ size = 44 }: IconProps): ReactElement {
   return (

@@ -1,61 +1,222 @@
 import { randomBytes } from "node:crypto";
 import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { win32 } from "node:path";
-import type { ConversationAgent, ConversationAgentAvailability, ConversationError } from "@hallpass/contracts";
+import {
+  CONVERSATION_AGENTS,
+  type ConversationAccepts,
+  type ConversationAgent,
+  type ConversationAgentAvailability,
+  type ConversationAgentNote,
+  type ConversationError,
+  type ConversationMode,
+} from "@hallpass/contracts";
 import { hostDataDirectory } from "../host-paths.js";
+import { HERMES_AGENT_MODES, launchSettings, writeLaunchFiles } from "./agent-launch-settings.js";
 import { CODEX_SHIM_COMMAND, CODEX_SHIM_ENV, codexAdapterModesAsMeasured } from "./codex-strict.js";
-import { redact } from "./redact.js";
+import { redact, withoutEnvironmentValues } from "./redact.js";
 import { runCommand } from "./run-command.js";
 
 /**
- * Finding the owner's coding agent and the connector that speaks ACP to it (019/T530, T531, T534;
- * R-314, R-315, R-322). The broker never installs the agent's CLI - the owner has it already - but
- * it installs the slim adapter beside it (install.ts) and starts the adapter with the CLI's absolute
- * path in an environment variable, so the adapter does not need its own bundled copy.
+ * Finding the owner's coding agent and what speaks ACP to it (019/T530, T531, T534; R-314, R-315,
+ * R-322; 021 R-345, R-348). An agent is obtained one of three ways (`AgentKind`):
+ *
+ * - `adapter` (Claude Code, Codex): the owner has the CLI; the broker installs the slim ACP adapter
+ *   beside it (install.ts) and starts the adapter with the CLI's absolute path in an environment
+ *   variable, so the adapter does not need its own bundled copy;
+ * - `installed` (Hermes): the owner installed a program that speaks ACP itself; the broker only finds
+ *   it, checks its exact version and starts it;
+ * - `fetched` (DeepSeek): an ACP package the broker fetches into the agent folder from the manifest and
+ *   lockfile Hallpass ships, like an adapter, and starts under its own node.
  *
  * Everything that touches the machine (running a command, reading a file) goes through `AgentPorts`
  * so the tests decide what "the machine" holds.
  */
 
-/** The CLI versions the connectors were tested with (R-315). Later versions are accepted; this is for the message. */
-export const TESTED_AGENT_VERSIONS: Readonly<Record<ConversationAgent, string>> = {
-  "claude-code": "2.1.302",
-  codex: "0.163.0",
+export type AgentKind = "adapter" | "installed" | "fetched";
+
+/**
+ * R-316 / R-351: what a panel mode is for one agent. `agentMode` is the agent's own mode id, set with
+ * `session/set_mode` (for a launch-time agent, after `session/new`); absent when the agent has none.
+ * `atLaunch` means the mode is fixed when the agent starts (environment and settings layer,
+ * agent-launch-settings.ts), so changing it restarts the agent.
+ */
+export type AgentModeSetting = { agentMode?: string; atLaunch: boolean };
+
+type DescriptionCommon = {
+  /** What the owner sees in sentences. */
+  label: string;
+  /**
+   * The version Hallpass was tested with (R-315): the CLI's (adapter; later ones are accepted), the
+   * program's (installed; required exactly), or the package's (fetched; pinned exactly).
+   */
+  tested: string;
+  modes: Readonly<Record<ConversationMode, AgentModeSetting>>;
+  /**
+   * D-021-16 (R-359): the agent keeps the mode its session was created with, whatever a later launch
+   * says, so the mode is chosen with the start and never changed (`CONVERSATION_MODE_FIXED_AGENTS`).
+   */
+  modeFixedOnceStarted: boolean;
+  /** How a stopped conversation continues (R-352): with replay (`session/load`) or without (`session/resume`). */
+  continueWith: "session/load" | "session/resume";
 };
 
-/** The adapters Hallpass pins (R-314) - the same names and versions as `agents/<agent>/package.json`. */
-export const AGENT_ADAPTERS: Readonly<
-  Record<
-    ConversationAgent,
-    {
-      /** npm package name of the ACP adapter. */
-      package: string;
-      version: string;
-      /** The CLI file `where.exe` is asked for. */
-      cliFile: string;
-      /** What the owner sees in sentences. */
-      label: string;
-    }
-  >
-> = {
+export type AdapterDescription = DescriptionCommon & {
+  kind: "adapter";
+  /** npm package name of the ACP adapter, as in `agents/<agent>/package.json`. */
+  package: string;
+  version: string;
+  /** The CLI file `where.exe` is asked for. */
+  cliFile: string;
+  /** How long its `npm ci` may take (R-346). */
+  installTimeoutMs: number;
+  /** Its `npm ci` command line (R-314, R-357). */
+  npmCiArgs: readonly string[];
+};
+
+export type InstalledDescription = DescriptionCommon & {
+  kind: "installed";
+  /** The program `where.exe` is asked for. */
+  cliFile: string;
+  /** Its ACP command line after the program (R-345). */
+  launchArgs: readonly string[];
+  /** R-355: what it is expected to accept before its first start; the start's own answer wins. */
+  expectedAccepts: ConversationAccepts;
+};
+
+export type FetchedDescription = DescriptionCommon & {
+  kind: "fetched";
+  /** npm package name, as in `agents/<agent>/package.json`; pinned exactly. */
+  package: string;
+  version: string;
+  /** After the package's bin entry, run by the broker's node (R-345). */
+  launchArgs: readonly string[];
+  installTimeoutMs: number;
+  /** Its `npm ci` command line (R-357). */
+  npmCiArgs: readonly string[];
+  expectedAccepts: ConversationAccepts;
+  /** Always said beside its state. */
+  notes: readonly ConversationAgentNote[];
+};
+
+export type AgentDescription = AdapterDescription | InstalledDescription | FetchedDescription;
+
+const TEN_MINUTES = 10 * 60 * 1000;
+
+/**
+ * R-314 / R-315: an adapter's `npm ci` leaves out its optional dependencies - the adapter's bundled CLI,
+ * since the owner's own CLI is used. No install script runs either way.
+ */
+export const ADAPTER_NPM_CI_ARGS = ["ci", "--omit=optional", "--ignore-scripts", "--no-audit", "--no-fund"] as const;
+
+/**
+ * R-357: a fetched agent keeps its optional dependencies - DeepSeek's platform native bindings are
+ * optionalDependencies, and without them it cannot boot ("No usable native binding found").
+ */
+export const FETCHED_NPM_CI_ARGS = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"] as const;
+
+/**
+ * The agents (data-model "Agent description"), in contract order. Claude Code and Codex are exactly
+ * the 019 pins; every mode maps to something the owner can see in the panel, and no mode maps to an
+ * agent's full-access mode (Codex `agent-full-access`, Hermes `dont_ask`, DeepSeek
+ * `danger-full-access`).
+ */
+export const AGENT_DESCRIPTIONS = {
   "claude-code": {
+    kind: "adapter",
+    label: "Claude Code",
+    tested: "2.1.302",
     package: "@agentclientprotocol/claude-agent-acp",
     version: "0.81.2",
     cliFile: "claude.exe",
-    label: "Claude Code",
+    installTimeoutMs: TEN_MINUTES,
+    npmCiArgs: ADAPTER_NPM_CI_ARGS,
+    modes: { strict: { agentMode: "default", atLaunch: false }, "agent-review": { agentMode: "auto", atLaunch: false } },
+    modeFixedOnceStarted: false,
+    continueWith: "session/load",
   },
   // Codex strict mode rests on this exact adapter (codex-strict.ts): a version bump means measuring
   // T573 again (does `read-only` still ask before every in-folder write through the shim?) and
   // updating `codexAdapterModesAsMeasured`; until then a launch refuses an adapter whose modes differ.
-  codex: { package: "@agentclientprotocol/codex-acp", version: "1.13.1", cliFile: "codex.cmd", label: "Codex" },
-};
+  codex: {
+    kind: "adapter",
+    label: "Codex",
+    tested: "0.163.0",
+    package: "@agentclientprotocol/codex-acp",
+    version: "1.13.1",
+    cliFile: "codex.cmd",
+    installTimeoutMs: TEN_MINUTES,
+    npmCiArgs: ADAPTER_NPM_CI_ARGS,
+    modes: { strict: { agentMode: "read-only", atLaunch: false }, "agent-review": { agentMode: "agent", atLaunch: false } },
+    modeFixedOnceStarted: false,
+    continueWith: "session/load",
+  },
+  // R-347: strict is Hermes' `default` mode under a managed layer that switches its command,
+  // code-running, helper-agent and saved-login tools off; never `dont_ask`.
+  hermes: {
+    kind: "installed",
+    label: "Hermes",
+    tested: "0.22.2",
+    cliFile: "hermes",
+    launchArgs: ["acp"],
+    modes: {
+      strict: { agentMode: HERMES_AGENT_MODES.strict, atLaunch: true },
+      "agent-review": { agentMode: HERMES_AGENT_MODES["agent-review"], atLaunch: true },
+    },
+    // Restarted into the new mode's launch settings, and its session takes the mode set after the load.
+    modeFixedOnceStarted: false,
+    continueWith: "session/load",
+    expectedAccepts: { image: true, context: false },
+  },
+  // R-346, R-349: 611 packages measured at 9-13 minutes, so a longer bound; its permission mode is an
+  // environment variable fixed at start (no ACP modes), never `danger-full-access`.
+  deepseek: {
+    kind: "fetched",
+    label: "DeepSeek",
+    tested: "0.2.1-rc.2",
+    package: "@deepseek-ai/dsh",
+    version: "0.2.1-rc.2",
+    launchArgs: ["--profile", "acp"],
+    installTimeoutMs: 30 * 60 * 1000,
+    npmCiArgs: FETCHED_NPM_CI_ARGS,
+    modes: { strict: { atLaunch: true }, "agent-review": { atLaunch: true } },
+    // D-021-16 (R-359): its session keeps the permission mode of its `session/new`; a resumed session
+    // ignores the launch environment, so a restart cannot change it.
+    modeFixedOnceStarted: true,
+    continueWith: "session/resume",
+    expectedAccepts: { image: true, context: false },
+    notes: ["pre-release"],
+  },
+} as const satisfies Readonly<Record<ConversationAgent, AgentDescription>>;
+
+/** The 019 name of the table, kept for the callers that only need an agent's `label`. */
+export const AGENT_ADAPTERS = AGENT_DESCRIPTIONS;
+
+const describeAgent = (agent: ConversationAgent): AgentDescription => AGENT_DESCRIPTIONS[agent];
+
+/** The versions each agent was tested with (R-315, R-345); for the messages. */
+export const TESTED_AGENT_VERSIONS: Readonly<Record<ConversationAgent, string>> = Object.fromEntries(
+  CONVERSATION_AGENTS.map((agent) => [agent, AGENT_DESCRIPTIONS[agent].tested]),
+) as Record<ConversationAgent, string>;
+
+/** The npm package an agent's folder holds (adapter, fetched); undefined for an installed program. */
+export function packagePin(agent: ConversationAgent): { package: string; version: string } | undefined {
+  const description = describeAgent(agent);
+  return description.kind === "installed" ? undefined : { package: description.package, version: description.version };
+}
 
 export type ExecResult = { code: number | null; stdout: string; stderr: string };
 
 export type AgentPorts = {
   /** `%LOCALAPPDATA%\hallpass`. */
   dataDir: string;
-  env: { USERPROFILE?: string | undefined; APPDATA?: string | undefined };
+  env: {
+    USERPROFILE?: string | undefined;
+    APPDATA?: string | undefined;
+    /** Where Git for Windows usually is (R-348). */
+    ProgramFiles?: string | undefined;
+    /** cmd.exe, for an agent program that is a batch file. */
+    ComSpec?: string | undefined;
+  };
   /** The node that runs the adapter: the broker's own (`process.execPath`). */
   nodePath: string;
   /** `codex-app-server-shim.js` beside the broker's entry (codex-strict.ts; SC-135). */
@@ -74,7 +235,7 @@ export type AgentPorts = {
 export function defaultAgentPorts(codexShimEntry: string, env: NodeJS.ProcessEnv = process.env): AgentPorts {
   return {
     dataDir: hostDataDirectory(env),
-    env: { USERPROFILE: env.USERPROFILE, APPDATA: env.APPDATA },
+    env: { USERPROFILE: env.USERPROFILE, APPDATA: env.APPDATA, ProgramFiles: env.ProgramFiles, ComSpec: env.ComSpec },
     nodePath: process.execPath,
     codexShimEntry,
     fs: {
@@ -102,13 +263,22 @@ export function defaultAgentPorts(codexShimEntry: string, env: NodeJS.ProcessEnv
   };
 }
 
-/** `<data>\agents\<agent>\<adapter version>` - where the pinned adapter's `npm ci` tree lives. */
+function requirePackage(agent: ConversationAgent): { package: string; version: string } {
+  const pin = packagePin(agent);
+  if (pin === undefined) throw new Error(`${describeAgent(agent).label} is not fetched by Hallpass`);
+  return pin;
+}
+
+/**
+ * `<data>\agents\<agent>\<package version>` - where the pinned package's `npm ci` tree lives (an
+ * adapter or a fetched agent). An installed program has none: this throws for it.
+ */
 export function adapterDirectory(dataDir: string, agent: ConversationAgent): string {
-  return win32.join(dataDir, "agents", agent, AGENT_ADAPTERS[agent].version);
+  return win32.join(dataDir, "agents", agent, requirePackage(agent).version);
 }
 
 const adapterPackageDirectory = (dataDir: string, agent: ConversationAgent) =>
-  win32.join(adapterDirectory(dataDir, agent), "node_modules", ...AGENT_ADAPTERS[agent].package.split("/"));
+  win32.join(adapterDirectory(dataDir, agent), "node_modules", ...requirePackage(agent).package.split("/"));
 
 /** The first semver in a CLI's `--version` output (`2.1.302 (Claude Code)`, `codex-cli 0.162.1`). */
 export function parseVersion(text: string): string | undefined {
@@ -118,26 +288,58 @@ export function parseVersion(text: string): string | undefined {
 /** A path later handed to cmd.exe must not carry a quote or a percent sign (run-command.ts). */
 const shellSafe = (path: string) => !/["%\r\n\0]/.test(path);
 
-/** Where the CLI usually is when it is not on the PATH. */
+/** Where the program usually is when it is not on the PATH (R-315, R-345). */
 function knownLocations(agent: ConversationAgent, env: AgentPorts["env"]): string[] {
-  if (agent === "claude-code") return env.USERPROFILE ? [win32.join(env.USERPROFILE, ".local", "bin", "claude.exe")] : [];
-  return env.APPDATA ? [win32.join(env.APPDATA, "npm", "codex.cmd")] : [];
+  const userBin = (file: string) => (env.USERPROFILE ? [win32.join(env.USERPROFILE, ".local", "bin", file)] : []);
+  switch (agent) {
+    case "claude-code":
+      return userBin("claude.exe");
+    case "codex":
+      return env.APPDATA ? [win32.join(env.APPDATA, "npm", "codex.cmd")] : [];
+    case "hermes":
+      return userBin("hermes.exe");
+    case "deepseek":
+      return [];
+  }
 }
 
-/**
- * The absolute path of the owner's CLI: `where.exe` on the PATH first, then the known per-user
- * locations (R-315). Undefined means the CLI is not installed as far as the broker can tell.
- */
-export async function discoverCli(agent: ConversationAgent, ports: AgentPorts): Promise<string | undefined> {
-  const found: string[] = [];
+/** `where.exe <name>`, the lines it printed; none when it fails or cannot run. */
+async function whereAll(name: string, ports: AgentPorts): Promise<string[]> {
   try {
-    const where = await ports.exec("where.exe", [AGENT_ADAPTERS[agent].cliFile]);
-    if (where.code === 0) found.push(...where.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    const where = await ports.exec("where.exe", [name]);
+    if (where.code === 0) return where.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   } catch {
     // where.exe missing or blocked: the known locations are the only route left.
   }
+  return [];
+}
+
+/**
+ * The absolute path of the owner's CLI or program: `where.exe` on the PATH first, then the known
+ * per-user locations (R-315, R-345). Undefined means it is not installed as far as the broker can
+ * tell - and always for a fetched agent, which has no program of the owner's.
+ */
+export async function discoverCli(agent: ConversationAgent, ports: AgentPorts): Promise<string | undefined> {
+  const description = describeAgent(agent);
+  if (description.kind === "fetched") return undefined;
+  const found = await whereAll(description.cliFile, ports);
   for (const candidate of [...found, ...knownLocations(agent, ports.env)]) {
     if (shellSafe(candidate) && (await ports.fs.exists(candidate))) return candidate;
+  }
+  return undefined;
+}
+
+/** A bash that is Git for Windows' own (`...\Git\bin\bash.exe`, `...\Git\usr\bin\bash.exe`), not WSL's launcher. */
+const GIT_BASH = /\\Git\\(?:usr\\)?bin\\bash\.exe$/i;
+
+/**
+ * R-348: whether Git Bash is on this machine - Hermes' command tool needs it. A `bash` on the PATH
+ * counts only inside a Git install; otherwise `%ProgramFiles%\Git\bin\bash.exe`.
+ */
+export async function findGitBash(ports: AgentPorts): Promise<string | undefined> {
+  const fallback = ports.env.ProgramFiles ? [win32.join(ports.env.ProgramFiles, "Git", "bin", "bash.exe")] : [];
+  for (const candidate of [...(await whereAll("bash", ports)).filter((line) => GIT_BASH.test(line)), ...fallback]) {
+    if (await ports.fs.exists(candidate)) return candidate;
   }
   return undefined;
 }
@@ -157,6 +359,7 @@ async function readAdapterManifest(
   agent: ConversationAgent,
   ports: AgentPorts,
 ): Promise<{ name?: unknown; version?: unknown; bin?: unknown } | undefined> {
+  if (packagePin(agent) === undefined) return undefined;
   try {
     const manifest: unknown = JSON.parse(
       await ports.fs.readText(win32.join(adapterPackageDirectory(ports.dataDir, agent), "package.json")),
@@ -167,15 +370,17 @@ async function readAdapterManifest(
   }
 }
 
-/** Installed = the pinned adapter's own package.json is there, at the pinned version (data-model). */
+/** Installed = the pinned package's own package.json is there, at the pinned version (data-model). */
 export async function isAdapterInstalled(agent: ConversationAgent, ports: AgentPorts): Promise<boolean> {
+  const pin = packagePin(agent);
+  if (pin === undefined) return false;
   const manifest = await readAdapterManifest(agent, ports);
-  return manifest?.version === AGENT_ADAPTERS[agent].version;
+  return manifest?.version === pin.version;
 }
 
 export type AgentStatus = {
   availability: ConversationAgentAvailability;
-  /** Present whenever the CLI was found. Never sent to the panel. */
+  /** Present whenever the CLI or program was found. Never sent to the panel. */
   cliPath?: string;
 };
 
@@ -183,8 +388,25 @@ export type AgentStatus = {
  * missing (no CLI) | version-problem (found, but `--version` gives nothing usable) | needs-install
  * (the pinned adapter is not there) | ready. A CLI newer than the tested one is still ready: there
  * is no hard range, a start failure is what says "different version" (classifyStartFailure).
+ *
+ * 021: an installed program (Hermes) must be exactly the tested version - another one is a version
+ * problem naming both - and needs nothing downloaded; without Git Bash it stays ready with the
+ * `git-missing` note (R-348). A fetched agent (DeepSeek) has no program to find: it needs the
+ * download until its pinned package is in the agent folder, and always carries its notes.
  */
 export async function agentAvailability(agent: ConversationAgent, ports: AgentPorts): Promise<AgentStatus> {
+  const description = describeAgent(agent);
+  if (description.kind === "fetched") {
+    const installed = await isAdapterInstalled(agent, ports);
+    return {
+      availability: {
+        agent,
+        availability: installed ? "ready" : "needs-install",
+        ...(installed ? { version: description.version } : {}),
+        ...(description.notes.length > 0 ? { notes: [...description.notes] } : {}),
+      },
+    };
+  }
   const cliPath = await discoverCli(agent, ports);
   if (!cliPath) return { availability: { agent, availability: "missing" } };
   const version = await readCliVersion(cliPath, ports);
@@ -193,10 +415,25 @@ export async function agentAvailability(agent: ConversationAgent, ports: AgentPo
       availability: {
         agent,
         availability: "version-problem",
-        detail: `${AGENT_ADAPTERS[agent].label} was found, but \`--version\` did not print a version number.`,
+        detail: `${description.label} was found, but \`--version\` did not print a version number.`,
       },
       cliPath,
     };
+  }
+  if (description.kind === "installed") {
+    if (version !== description.tested) {
+      return {
+        availability: {
+          agent,
+          availability: "version-problem",
+          version,
+          detail: `Hallpass works with ${description.label} ${description.tested}; this computer has ${description.label} ${version}.`,
+        },
+        cliPath,
+      };
+    }
+    const gitMissing = (await findGitBash(ports)) === undefined;
+    return { availability: { agent, availability: "ready", version, ...(gitMissing ? { notes: ["git-missing"] } : {}) }, cliPath };
   }
   const installed = await isAdapterInstalled(agent, ports);
   return { availability: { agent, availability: installed ? "ready" : "needs-install", version }, cliPath };
@@ -229,23 +466,66 @@ export type AdapterLaunchSpec = {
   args: string[];
   /** Added to the environment the broker passes on - not the whole environment. */
   env: Record<string, string>;
+  /**
+   * The arguments are one command line already quoted for cmd.exe (a batch-file program, as
+   * run-command.ts starts one): spawn them with `windowsVerbatimArguments`.
+   */
+  windowsVerbatimArguments?: true;
 };
 
+const isBatch = (file: string) => /\.(cmd|bat)$/i.test(file);
+
 /**
- * How to start the installed adapter: the broker's node on the adapter's `bin` entry, with the CLI's
- * absolute path in `CLAUDE_CODE_EXECUTABLE` (R-315). Codex also gets
- * `DISABLE_MCP_CONFIG_FILTERING=true`, so the session's `hallpass` entry wins over the owner's own
- * (R-322), and its `CODEX_PATH` is Hallpass's app-server shim, never the CLI itself: the shim starts
- * the CLI and makes strict mode's turns read-only (codex-strict.ts; D-019-12, R-317, SC-135).
+ * A program's own command line: the program itself, or - for a `.cmd` / `.bat`, which Node refuses
+ * to spawn without a shell since 20.12 (CVE-2024-27980) - `cmd.exe /d /s /c "<file> <args>"` with
+ * verbatim arguments, exactly as run-command.ts builds it. `discoverCli` already refused a path with a
+ * quote, a percent sign or a line break, and the arguments are fixed ones.
+ */
+function programLaunch(file: string, args: readonly string[], env: Record<string, string>, ports: AgentPorts): AdapterLaunchSpec {
+  if (!isBatch(file)) return { command: file, args: [...args], env };
+  if ([file, ...args].some((part) => !shellSafe(part))) throw new Error("refusing to pass a quote, percent sign or line break to cmd.exe");
+  const quote = (part: string) => (/[\s&|<>^()]/.test(part) ? `"${part}"` : part);
+  return {
+    command: ports.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/c", `"${[file, ...args].map(quote).join(" ")}"`],
+    env,
+    windowsVerbatimArguments: true,
+  };
+}
+
+/**
+ * How to start an agent in a panel mode (default strict).
+ *
+ * - An adapter (Claude Code, Codex): the broker's node on the adapter's `bin` entry, with the CLI's
+ *   absolute path in `CLAUDE_CODE_EXECUTABLE` (R-315). Codex also gets
+ *   `DISABLE_MCP_CONFIG_FILTERING=true`, so the session's `hallpass` entry wins over the owner's own
+ *   (R-322), and its `CODEX_PATH` is Hallpass's app-server shim, never the CLI itself: the shim starts
+ *   the CLI and makes strict mode's turns read-only (codex-strict.ts; D-019-12, R-317, SC-135). Their
+ *   modes are agent modes, so the mode does not change the spec.
+ * - Hermes: `hermes acp` itself, after the mode's managed layer is written, with `HERMES_MANAGED_DIR`
+ *   naming it (agent-launch-settings.ts; R-347).
+ * - DeepSeek: the broker's node on the fetched package's `bin` entry with `--profile acp`, and the
+ *   mode's permission mode and telemetry off in the environment (R-349, R-350).
  */
 export async function adapterLaunchSpec(
   agent: ConversationAgent,
-  cliPath: string,
+  cliPath: string | undefined,
   ports: AgentPorts,
+  mode: ConversationMode = "strict",
 ): Promise<AdapterLaunchSpec> {
+  const description = describeAgent(agent);
+  const settings = launchSettings(agent, mode, ports.dataDir);
+  if (description.kind === "installed") {
+    if (cliPath === undefined) throw new Error(`${description.label} was not found`);
+    await writeLaunchFiles(settings.files, ports.fs);
+    return programLaunch(cliPath, description.launchArgs, { ...settings.env }, ports);
+  }
+  if (description.kind === "adapter" && cliPath === undefined) throw new Error(`${description.label} was not found`);
   const manifest = await readAdapterManifest(agent, ports);
-  if (!manifest) throw new Error(`the ${AGENT_ADAPTERS[agent].label} adapter is not installed`);
-  const unscoped = AGENT_ADAPTERS[agent].package.split("/").pop();
+  if (!manifest) {
+    throw new Error(`the ${description.label} ${description.kind === "adapter" ? "adapter" : "package"} is not installed`);
+  }
+  const unscoped = requirePackage(agent).package.split("/").pop();
   const entries: [string, unknown][] =
     typeof manifest.bin === "string"
       ? [[unscoped ?? "", manifest.bin]]
@@ -261,6 +541,11 @@ export async function adapterLaunchSpec(
   if (!entry.toLowerCase().startsWith(`${packageDir.toLowerCase()}${win32.sep}`)) {
     throw new Error("the adapter's bin entry points outside the adapter folder");
   }
+  if (description.kind === "fetched") {
+    await writeLaunchFiles(settings.files, ports.fs);
+    return { command: ports.nodePath, args: [entry, ...description.launchArgs], env: { ...settings.env } };
+  }
+  if (cliPath === undefined) throw new Error(`${description.label} was not found`);
   if (agent === "claude-code") return { command: ports.nodePath, args: [entry], env: { CLAUDE_CODE_EXECUTABLE: cliPath } };
   // No shim, no Codex: the CLI behind CODEX_PATH directly would run strict turns with a writable sandbox.
   if (!(await ports.fs.exists(ports.codexShimEntry))) throw new Error("the Codex app-server shim is missing beside the broker");
@@ -325,25 +610,38 @@ const safeJson = (value: unknown) => {
 /**
  * Map a failure at `initialize` or the first `session/new` to the error the panel shows (T534,
  * R-315). No CLI to hand the adapter, or the adapter saying it has no usable executable, is
- * `agent-missing`; any other refusal with a CLI in hand is `agent-version` - "tested with X, found Y"
- * plus the agent's own words, redacted (R-326) and kept within the contract's 600 characters.
+ * `agent-missing`; a refusal from another version than the tested one is `agent-version` - "tested
+ * with X, found Y" - and one from the tested version itself is no version problem (R-358): it is the
+ * start failure `agent-exited`, "<agent> <version> could not start". Each carries the agent's own
+ * words, redacted (R-326) and kept within the contract's 600 characters.
+ * `env` (T692, SC-161): the environment the agent ran with; no value of it is said.
+ * `connectorMismatch`: the failure itself shows the connector does not fit (the modes it offers
+ * differ), so it is `agent-version` whatever the version.
  */
 export function classifyStartFailure(
   step: "initialize" | "session/new",
   error: unknown,
   versions: StartFailureVersions,
+  env: Readonly<Record<string, string | undefined>> = {},
+  connectorMismatch = false,
 ): ConversationError {
   const label = AGENT_ADAPTERS[versions.agent].label;
-  const said = redact(errorText(error)).replace(/\s+/g, " ").trim();
-  const missing = versions.found === undefined || MISSING_EXECUTABLE.test(said);
+  // Classified by the agent's own words; shown without any value of its environment.
+  const raw = errorText(error);
+  const said = redact(withoutEnvironmentValues(raw, env)).replace(/\s+/g, " ").trim();
+  const missing = versions.found === undefined || MISSING_EXECUTABLE.test(raw);
+  const versionProblem = connectorMismatch || versions.found !== versions.tested;
   const header = missing
     ? versions.found === undefined
       ? `${label} was not found (tested with ${label} ${versions.tested}).`
       : `${label} ${versions.found} could not be used by the connector (tested with ${versions.tested}).`
-    : `Tested with ${label} ${versions.tested}, found ${versions.found}.`;
+    : versionProblem
+      ? `Tested with ${label} ${versions.tested}, found ${versions.found}.`
+      : `${label} ${versions.found} could not start.`;
   const room = DETAIL_MAX - header.length - ` The agent said (${step}): `.length;
   const body = said
     ? ` The agent said (${step}): ${said.length > room ? `${said.slice(0, Math.max(room - 3, 0))}...` : said}`
     : ` The agent gave no reason at ${step}.`;
-  return { code: missing ? "agent-missing" : "agent-version", detail: `${header}${body}`.slice(0, DETAIL_MAX) };
+  const code = missing ? "agent-missing" : versionProblem ? "agent-version" : "agent-exited";
+  return { code, detail: `${header}${body}`.slice(0, DETAIL_MAX) };
 }

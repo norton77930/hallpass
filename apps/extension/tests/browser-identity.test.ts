@@ -5,6 +5,7 @@ import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import {
   AGENT_BROWSER_IDENTITY_KEY,
+  AGENT_BROWSER_IDENTITY_READ_BOUND_MS,
   createBrowserIdentity,
   detectBrowserKind,
   suffixedBrowserName,
@@ -101,6 +102,125 @@ describe("T499 browser identity store", () => {
     expect(detectBrowserKind(brands("Opera", "Chromium", "Not?A_Brand"))).toBe("unknown");
     expect(detectBrowserKind({})).toBe("unknown");
     expect(detectBrowserKind(undefined)).toBe("unknown");
+  });
+});
+
+/** A deferred answer the test releases when it chooses - or never. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+/**
+ * A storage area whose answers the test holds back: each `get`/`set` waits on the next queued gate,
+ * if any, and otherwise answers at once from its memory.
+ */
+function heldArea(initial: Record<string, unknown> = {}) {
+  const inner = memoryArea(initial);
+  const getGates: Array<Promise<void>> = [];
+  const setGates: Array<Promise<void>> = [];
+  return {
+    store: inner.store,
+    holdNextGet() {
+      const gate = deferred<void>();
+      getGates.push(gate.promise);
+      return gate.resolve;
+    },
+    holdNextSet() {
+      const gate = deferred<void>();
+      setGates.push(gate.promise);
+      return gate.resolve;
+    },
+    async get(keys: string[]) {
+      const gate = getGates.shift();
+      if (gate) await gate;
+      return inner.get(keys);
+    },
+    async set(values: Record<string, unknown>) {
+      const gate = setGates.shift();
+      if (gate) await gate;
+      return inner.set(values);
+    },
+  };
+}
+
+describe("browser identity read under a storage that does not answer (hardening of R-279)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("gives up within the bound, and the next read goes back to storage for the stored id", async () => {
+    const area = heldArea({ [AGENT_BROWSER_IDENTITY_KEY]: { browserId: "stored-id-1234" } });
+    area.holdNextGet(); // never released
+    const identity = createBrowserIdentity(area, { kind: "chrome", mint: () => "should-not-be-used" });
+
+    const first = identity.read();
+    const outcome = expect(first).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(AGENT_BROWSER_IDENTITY_READ_BOUND_MS);
+    await outcome;
+
+    // Storage has recovered: the next ask reads it rather than waiting on the abandoned read.
+    expect((await identity.read())?.browserId).toBe("stored-id-1234");
+  });
+
+  it("does not mint from an abandoned read that answers late", async () => {
+    const area = heldArea();
+    const late = area.holdNextGet();
+    let mints = 0;
+    const identity = createBrowserIdentity(area, { kind: "chrome", mint: () => `minted-id-${++mints}` });
+
+    const first = identity.read();
+    const outcome = expect(first).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(AGENT_BROWSER_IDENTITY_READ_BOUND_MS);
+    await outcome;
+
+    expect((await identity.read())?.browserId).toBe("minted-id-1");
+    late();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mints).toBe(1);
+    expect(area.store[AGENT_BROWSER_IDENTITY_KEY]).toEqual({ browserId: "minted-id-1" });
+    expect((await identity.read())?.browserId).toBe("minted-id-1");
+  });
+
+  it("an abandoned read that answers late, with nobody else asking, writes nothing", async () => {
+    const area = heldArea();
+    const late = area.holdNextGet();
+    let mints = 0;
+    const identity = createBrowserIdentity(area, { kind: "chrome", mint: () => `minted-id-${++mints}` });
+
+    const outcome = expect(identity.read()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(AGENT_BROWSER_IDENTITY_READ_BOUND_MS);
+    await outcome;
+    late();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mints).toBe(0);
+    expect(area.store[AGENT_BROWSER_IDENTITY_KEY]).toBeUndefined();
+  });
+
+  it("a mint whose write is still in flight at the bound is written again, never replaced by a second id", async () => {
+    const area = heldArea();
+    const landFirstWrite = area.holdNextSet();
+    let mints = 0;
+    const identity = createBrowserIdentity(area, { kind: "chrome", mint: () => `minted-id-${++mints}` });
+
+    const outcome = expect(identity.read()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(AGENT_BROWSER_IDENTITY_READ_BOUND_MS);
+    await outcome;
+
+    // Storage is still empty - the first write has not landed - yet the retry keeps the same id.
+    expect((await identity.read())?.browserId).toBe("minted-id-1");
+    landFirstWrite();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(mints).toBe(1);
+    expect(area.store[AGENT_BROWSER_IDENTITY_KEY]).toEqual({ browserId: "minted-id-1" });
   });
 });
 
@@ -232,5 +352,32 @@ describe("T501 the composed worker: panel projection and rename", () => {
     await runtime.renameBrowser(" \u0007 ");
     expect(framesOfType(port, "browser-name")).toHaveLength(1);
     expect((local[AGENT_BROWSER_IDENTITY_KEY] as { name?: string }).name).toBe("Lab box");
+  });
+});
+
+describe("a rename whose write fails (review of the R-279 hardening)", () => {
+  it("rejects to its caller only, leaves no unhandled rejection, and the next read goes back to storage", async () => {
+    const area = memoryArea({ [AGENT_BROWSER_IDENTITY_KEY]: { browserId: "b-1111111111111111" } });
+    const realSet = area.set.bind(area);
+    let failSet = true;
+    area.set = async (values: Record<string, unknown>) => {
+      if (failSet) throw new Error("quota");
+      return realSet(values);
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const identity = createBrowserIdentity(area, { kind: "chrome" });
+      const before = await identity.read();
+      expect(before).toBeDefined();
+      await expect(identity.rename("Lab")).rejects.toThrow("quota");
+      await new Promise((done) => setTimeout(done, 0));
+      expect(unhandled).toEqual([]);
+      failSet = false;
+      expect(await identity.read()).toEqual(before);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

@@ -3,6 +3,7 @@ import { watchLastFocusedWindow } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
 import { createAgentPanelPort, type AgentPanelPortLike } from "./agent-panel-port.js";
 import { composeAgentRuntime } from "./agent-runtime.js";
+import { createTabAttach } from "./tab-attach.js";
 
 /**
  * The one door into the agent path (003 M2 review A7).
@@ -36,6 +37,8 @@ export function startAgentPath(input: { extensionId: string; sidePanelUrl: strin
     // Which window the owner is in, so "a panel is open" means one they can see (fix 2026-09-23,
     // panel in another window).
     watchFocusedWindow: watchLastFocusedWindow,
+    // 022 R-342: "Screenshot of this tab" / "Attach this tab", the owner's own action.
+    tabCapture: createTabAttach().capture,
   });
   // The two halves are introduced here because neither can be built with the other in hand: the
   // panel port is built from the runtime, and the runtime needs to know whether anybody is looking
