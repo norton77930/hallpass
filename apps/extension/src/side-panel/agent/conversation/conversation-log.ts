@@ -1,4 +1,5 @@
 import type {
+  ConversationAttachmentSummary,
   ConversationEvent,
   ConversationEventPayload,
   ConversationMode,
@@ -40,7 +41,8 @@ type NoticeEvent = Extract<ConversationEvent, { type: "notice" }>;
 type PermissionClosedEvent = Extract<ConversationEvent, { type: "permission-closed" }>;
 
 export type TimelineItem =
-  | { kind: "text"; key: string; role: "agent" | "owner"; text: string }
+  /** 022 R-343: the owner's message may carry its attachments (as the broker summed them up). */
+  | { kind: "text"; key: string; role: "agent" | "owner"; text: string; attachments?: ConversationAttachmentSummary[] }
   | { kind: "actions"; key: string; actions: ToolEvent[] }
   | { kind: "notice"; key: string; notice: NoticeEvent }
   /** 020 FR-319: how a card this panel showed was closed, as the broker reported it. */
@@ -54,6 +56,8 @@ export type ConversationPicture = {
   mode?: ConversationMode;
   modeNote?: string;
   state?: ConversationState;
+  /** 021 R-354: the stop was the owner ending a start that was still under way. */
+  stateCode?: "start-cancelled";
 };
 
 /**
@@ -73,8 +77,15 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
         const last = timeline[timeline.length - 1];
         if (last?.kind === "text" && last.role === event.role) {
           last.text += event.text;
+          if (event.attachments !== undefined) last.attachments = [...(last.attachments ?? []), ...event.attachments];
         } else {
-          timeline.push({ kind: "text", key: `text-${seq}`, role: event.role, text: event.text });
+          timeline.push({
+            kind: "text",
+            key: `text-${seq}`,
+            role: event.role,
+            text: event.text,
+            ...(event.attachments === undefined ? {} : { attachments: [...event.attachments] }),
+          });
         }
         break;
       }
@@ -113,6 +124,8 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
         break;
       case "state":
         picture.state = event.state;
+        if (event.code === undefined) delete picture.stateCode;
+        else picture.stateCode = event.code;
         break;
       case "notice":
         timeline.push({ kind: "notice", key: `notice-${seq}`, notice: event });

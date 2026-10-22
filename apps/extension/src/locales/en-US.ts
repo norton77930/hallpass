@@ -416,6 +416,8 @@ export const messages = {
     "Conversations are not available right now: Hallpass cannot reach its helper on this computer. Check the connection under Connections & sites.",
   "conversation.agent.claude-code": "Claude Code",
   "conversation.agent.codex": "Codex",
+  "conversation.agent.hermes": "Hermes",
+  "conversation.agent.deepseek": "DeepSeek",
   "conversation.availability.ready": "Ready",
   "conversation.availability.needs-install": "Needs a one-time download",
   "conversation.availability.missing": "Not installed",
@@ -424,8 +426,18 @@ export const messages = {
   "conversation.missing.title": "{agent} is not installed on this computer",
   "conversation.missing.body":
     "The side panel talks to the {agent} you use in your terminal. Install it, sign in there, then pick it again. Nothing was downloaded.",
+  "conversation.missing.body.hermes":
+    "The side panel talks to the {agent} installed on this computer. Install it, set up its model in a terminal, then pick it again. Nothing was downloaded.",
   "conversation.missing.claude-code": "Install Claude Code by following its official setup guide, then run claude once in a terminal to sign in.",
   "conversation.missing.codex": "Install Codex by following its official setup guide, then run codex once in a terminal to sign in.",
+  "conversation.missing.hermes":
+    "Install Hermes 0.22.2 with Hermes' official Windows installer, then set up its model once in a terminal. Hallpass does not install it for you.",
+  "conversation.missing.deepseek": "DeepSeek is downloaded by Hallpass on first use.",
+  // 021 FR-345, FR-350: the worker's notes beside an agent's state.
+  "conversation.note.git-missing": "Git for Windows was not found. Hermes needs it to run commands in automatic mode.",
+  "conversation.note.pre-release": "Pre-release version. Hallpass keeps exactly the version it tested.",
+  // 021 FR-344: the tested version beside the installed one (the broker's sentence, said in the panel's language).
+  "conversation.version.mismatch": "Hallpass works with {agent} {tested}; this computer has {agent} {version}.",
   "conversation.version.title": "This version of {agent} does not work with the tested connector",
   "conversation.version.installed": "Installed version: {version}",
   "conversation.version.unreadable": "{agent} was found, but it did not report a version number.",
@@ -434,6 +446,13 @@ export const messages = {
   "conversation.firstUse.title": "Set up {agent} for the side panel",
   "conversation.firstUse.what":
     "Hallpass needs a small connector so the side panel can talk to the {agent} already installed on this computer. It is the version Hallpass tested, and it never updates itself.",
+  // 021 FR-350, FR-355: DeepSeek is fetched by Hallpass itself; Hermes is the owner's own install.
+  "conversation.firstUse.what.deepseek":
+    "Hallpass downloads {agent} itself so the side panel can run it. It is the exact version Hallpass tested, with every package pinned, and it never updates itself.",
+  "conversation.firstUse.settings.hermes":
+    "Hermes runs with its own settings and model (its settings folder is %LOCALAPPDATA%\\hermes, or HERMES_HOME if set). Hallpass never asks for or stores a key.",
+  "conversation.firstUse.settings.deepseek":
+    "DeepSeek runs with its own settings and the key variable its provider names in your environment. Hallpass never asks for or stores a key.",
   "conversation.firstUse.size": "Download size: about {size}.",
   "conversation.firstUse.registry":
     "Downloading it is a request to the npm registry your own npm is set up for. Hallpass adds no data of its own.",
@@ -446,6 +465,8 @@ export const messages = {
   "conversation.firstUse.cancel": "Cancel",
   "conversation.size.claude-code": "60 MB",
   "conversation.size.codex": "20 MB",
+  "conversation.size.hermes": "0 MB",
+  "conversation.size.deepseek": "700 MB",
   "conversation.install.label": "Connector download",
   "conversation.install.preparing": "Getting ready to download…",
   "conversation.install.finishing": "Checking the download and putting it in place…",
@@ -459,6 +480,12 @@ export const messages = {
   "conversation.mode.label": "How the agent asks",
   "conversation.mode.strict": "Ask first",
   "conversation.mode.agent-review": "Agent review",
+  // 021 D-021-5, D-021-8: Hermes has no folder boundary for commands; both new agents restart on a mode change.
+  "conversation.mode.hermesAutomaticNote":
+    "In automatic mode Hermes runs commands without a folder boundary. Only Hermes' own check for dangerous commands stands in the way.",
+  "conversation.mode.restartNote": "Changing the mode restarts {agent}; the conversation continues where it was.",
+  // 021 D-021-16: the agent keeps the mode its conversation started with.
+  "conversation.mode.fixedNote": "{agent} keeps the mode it started with. To use another mode, start a new conversation.",
   "conversation.mode.codexStrictNote": "Codex works read-only here and asks before changing files. Commands your own Codex rules allow still run without asking.",
   "conversation.messages.label": "Messages",
   "conversation.role.owner": "You",
@@ -475,8 +502,19 @@ export const messages = {
   "conversation.permission.waiting": "The agent waits until you answer.",
   "conversation.permission.allow-once": "Allow once",
   "conversation.permission.reject": "Reject",
+  // 021 FR-353, D-021-10: nobody described the action, so it can only be rejected.
+  "conversation.permission.rejectOnly": "Hallpass cannot tell what this action is, so you can only reject it.",
+  // T668: an `other` action with no title - no rule can name it, so each one asks.
+  // A permission with no title and no detail line to name it by: "{agent} asks to: an action it did not describe".
+  "conversation.permission.unnamed": "an action it did not describe",
+  "conversation.permission.onceOnly": "Hallpass cannot tell which tool this is, so you allow one action at a time.",
   "conversation.permission.allow-conversation": "Allow for this conversation",
-  "conversation.state.starting": "Starting the agent…",
+  "conversation.state.starting": "Starting {agent}…",
+  // 021 FR-354, R-354: a cold start can take minutes; Cancel ends it and nothing is left running.
+  "conversation.state.startingSlow": "The first start can take a few minutes.",
+  "conversation.state.cancelStart": "Cancel",
+  "conversation.state.cancelStartLabel": "Cancel starting {agent}",
+  "conversation.state.start-cancelled": "Start cancelled.",
   "conversation.state.running": "The agent is working…",
   "conversation.state.waiting-for-owner": "The agent is waiting for your answer.",
   "conversation.state.stopped": "Stopped. Nothing more from that turn will run.",
@@ -569,6 +607,8 @@ export const messages = {
   "conversation.turn.waiting": "Waiting for you: {title}",
   "conversation.reply.copyLabel": "Copy reply",
   "conversation.availability.readyLastUsed": "Ready · last used",
+  // 021 FR-357: DeepSeek continues a conversation without replaying it.
+  "conversation.noReplay": "{agent} cannot show the earlier messages of this conversation. You can continue it.",
   "conversation.cannotResume.body": "This conversation can't continue (the agent cleared its record). Removing it from the list doesn't touch the agent's own files.",
   "conversation.cannotResume.remove": "Remove from list",
   "conversation.cannotResume.placeholder": "This conversation can't continue",
@@ -602,6 +642,60 @@ export const messages = {
   "agent.siteMore": "More for {site}",
   "agent.moreWaitingOne": "1 more request waiting",
   "agent.moreWaiting": "{n} more requests waiting",
+  // 022 FR-325 - FR-341: attachments in the composer - the + menu, the chips, every refusal.
+  "conversation.attach.button": "Add attachments",
+  "conversation.attach.menu": "Attach",
+  "conversation.attach.files": "Add images or files…",
+  "conversation.attach.screenshot": "Screenshot of this tab",
+  "conversation.attach.tab": "Attach this tab",
+  "conversation.attach.hint": "Up to 5 images, 5 files (25 MB in all) and 1 tab per message.",
+  "conversation.attach.noTab": "No tab to use in this window.",
+  "conversation.attach.noImages": "{agent} does not take images. Files still work.",
+  "conversation.attach.noContext": "{agent} does not take page text. A PDF tab still works.",
+  "conversation.attach.refused.tooManyImages": "At most 5 images per message. Remove one to add another.",
+  "conversation.attach.refused.tooManyFiles": "At most 5 files per message. Remove one to add another.",
+  "conversation.attach.refused.fileTooLarge": "{name} is larger than 25 MB, so it was not added. Attach a smaller file.",
+  "conversation.attach.refused.filesTooLarge":
+    "The files of one message can be 25 MB in all. Remove a file, or send this one in its own message.",
+  "conversation.attach.refused.oneTab": "One tab per message. Remove the attached tab to add another.",
+  "conversation.attach.refused.notImage": "{name} is not an image the panel can read. Remove it, or attach another file.",
+  "conversation.attach.refused.imageTooLarge": "{name} could not be made small enough to send. Remove it, or attach a smaller image.",
+  "conversation.attach.refused.transfer":
+    "The attachments could not be handed to the agent, so nothing was sent. Your message and attachments are still here: send again.",
+  "conversation.attach.refused.notSent": "Nothing was sent. Your message and attachments are still here.",
+  "conversation.attach.capture.restricted":
+    "This page cannot be captured or attached: browser pages, the Web Store and other extensions are off limits. Open an ordinary page and try again.",
+  "conversation.attach.capture.not-active": "That tab is no longer the one in front. Show it and try again.",
+  "conversation.attach.capture.too-large": "This PDF is larger than 25 MB, so it cannot be attached.",
+  "conversation.attach.capture.failed": "The tab could not be captured. Try again.",
+  "conversation.attachments.label": "Attachments",
+  "conversation.attachment.remove": "Remove {name}",
+  "conversation.attachment.preparing": "Preparing…",
+  "conversation.attachment.cut": "cut",
+  "conversation.attachment.cutLong": "The page text was cut at 50,000 characters.",
+  "conversation.attachment.screenshotName": "Screenshot",
+  "conversation.attachment.tabName": "This tab",
+  "conversation.attachment.kind.image": "Image",
+  "conversation.attachment.kind.file": "File",
+  "conversation.attachment.kind.tab": "Tab",
+  "conversation.error.attachment-too-large": "An attachment is too large to send.",
+  "conversation.error.attachment-too-many": "The message has too many attachments.",
+  "conversation.error.attachment-type": "Hallpass cannot send this kind of attachment.",
+  "conversation.error.attachment-order": "An attachment arrived out of order.",
+  "conversation.error.attachment-unknown": "An attachment was no longer waiting to be sent.",
+  "conversation.error.attachment-incomplete": "An attachment did not arrive whole.",
+  "conversation.error.attachment-not-accepted": "The agent does not take this kind of attachment.",
+  "conversation.error.attachment-folder-gone": "The conversation's folder no longer exists, so the file could not be copied into it.",
+  "conversation.error.attachment-write-failed": "The file could not be copied into the conversation's folder.",
+  "conversation.error.invalid-command": "This request was not understood. Reload the side panel and try again.",
+  "conversation.error.start-cancelled": "You stopped the agent before it finished starting.",
+  "conversation.error.agent-model-unreachable": "The agent could not reach its model. Check the agent's own settings.",
+  "conversation.error.mode-fixed": "This agent keeps the mode it started with. To use another mode, start a new conversation.",
+  // 021 FR-355: where the agent's own setting lives. Hallpass has no key field and never reads a key.
+  "conversation.hint.agent-model-unreachable.hermes":
+    "Hermes reads its model settings from its own settings folder (%LOCALAPPDATA%\\hermes, or HERMES_HOME if set). Set it up in a terminal with `hermes model`; Hallpass never asks for a key.",
+  "conversation.hint.agent-model-unreachable.deepseek":
+    "DeepSeek reads its model settings from its own settings and from the environment variable its provider names. Set them up there; Hallpass never asks for a key.",
 } as const;
 
 export type MessageKey = keyof typeof messages;

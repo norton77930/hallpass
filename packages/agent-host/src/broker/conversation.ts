@@ -3,11 +3,17 @@ import { randomUUID } from "node:crypto";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
+  CONVERSATION_AGENTS,
+  CONVERSATION_MAX_ATTACHMENTS,
+  CONVERSATION_MODES,
   CONVERSATION_NOTICES,
   CONVERSATION_RULE_KINDS,
   CONVERSATION_TEXT_MAX_CHARS,
   CONVERSATION_TOOL_KINDS,
+  type ConversationAccepts,
   type ConversationAgent,
+  type ConversationAttachmentKind,
+  type ConversationAttachmentSummary,
   type ConversationEntry,
   type ConversationError,
   type ConversationEvent,
@@ -18,12 +24,21 @@ import {
   type ConversationView,
 } from "@hallpass/contracts";
 import { isProcessAlive } from "../bridge-link.js";
-import { AGENT_ADAPTERS, classifyStartFailure, type AdapterLaunchSpec, type StartFailureVersions } from "./agents.js";
+import {
+  AGENT_ADAPTERS,
+  AGENT_DESCRIPTIONS,
+  classifyStartFailure,
+  type AdapterLaunchSpec,
+  type AgentDescription,
+  type StartFailureVersions,
+} from "./agents.js";
+import { ATTACHMENT_IDLE_MS, AttachmentStore, type AttachPiece, type ReadyAttachment } from "./attachments.js";
 import { PANEL_SERVER_NAME, type ConversationBrowserAccess, type PanelServerName } from "./browser-token.js";
 import type { ConversationIndex, FolderList } from "./conversation-index.js";
 import { ConversationEventLog, type ConversationPage } from "./event-log.js";
 import { ensureScratchFolder, isDirectory, scratchFolderPath } from "./folders.js";
-import { redact } from "./redact.js";
+import { redact, withoutEnvironmentValues } from "./redact.js";
+import { killTree } from "./run-command.js";
 
 /**
  * One conversation with the owner's own coding agent, and the broker's pool of them (019 T539;
@@ -79,14 +94,45 @@ export const systemClock: Clock = {
 };
 
 /**
- * R-316: the panel's two modes and the agent mode behind each. An adapter's other modes (Claude's
- * `acceptEdits`, `plan`, `bypassPermissions`; Codex's `agent-full-access`) are never sent and never
- * shown; the panel only ever sees `strict` / `agent-review`.
+ * R-316 / R-351 (T657): the panel's two modes and the agent mode behind each, from the agent
+ * descriptions. An agent's other modes (Claude's `acceptEdits`, `plan`, `bypassPermissions`; Codex's
+ * `agent-full-access`; Hermes' `dont_ask`) are never sent and never shown; the panel only ever sees
+ * `strict` / `agent-review`. An agent without ACP modes (DeepSeek) has none here: its mode is the
+ * launch environment alone, and nothing is ever sent as `session/set_mode` to it.
  */
-export const MODE_ALLOW_LIST: Readonly<Record<ConversationAgent, Readonly<Record<ConversationMode, string>>>> = {
-  "claude-code": { strict: "default", "agent-review": "auto" },
-  codex: { strict: "read-only", "agent-review": "agent" },
-};
+export const MODE_ALLOW_LIST: Readonly<Record<ConversationAgent, Readonly<Partial<Record<ConversationMode, string>>>>> =
+  Object.fromEntries(
+    CONVERSATION_AGENTS.map((agent) => [
+      agent,
+      Object.fromEntries(
+        CONVERSATION_MODES.flatMap((mode) => {
+          const id = (AGENT_DESCRIPTIONS[agent] as AgentDescription).modes[mode].agentMode;
+          return id === undefined ? [] : [[mode, id]];
+        }),
+      ),
+    ]),
+  ) as Record<ConversationAgent, Partial<Record<ConversationMode, string>>>;
+
+/** The agent's own mode id behind a panel mode, if the agent has ACP modes. */
+const agentModeId = (agent: ConversationAgent, mode: ConversationMode): string | undefined => MODE_ALLOW_LIST[agent][mode];
+
+/** R-351: the agent's tools or sandbox are fixed when it starts, so this mode change restarts it. */
+export function restartsForMode(agent: ConversationAgent, from: ConversationMode, to: ConversationMode): boolean {
+  if (from === to) return false;
+  const modes = AGENT_DESCRIPTIONS[agent].modes;
+  return modes[from].atLaunch || modes[to].atLaunch;
+}
+
+/**
+ * D-021-16 (R-359): the agent keeps the mode its session was created with (DeepSeek), so the mode is
+ * chosen with the start, a resume continues in it, and a change is refused - never a restart.
+ */
+export function modeFixedOnceStarted(agent: ConversationAgent): boolean {
+  return AGENT_DESCRIPTIONS[agent].modeFixedOnceStarted;
+}
+
+const modeFixed = (agent: ConversationAgent): { ok: false; error: ConversationError } =>
+  failure("mode-fixed", `${AGENT_DESCRIPTIONS[agent].label} keeps the mode its conversation started with; start a new conversation for another mode.`);
 
 /**
  * D-019-12 (T542a; R-317 "Measured in S4"): the tools Claude must ask about in strict mode, whatever
@@ -112,12 +158,18 @@ export function sessionMeta(agent: ConversationAgent, mode: ConversationMode): {
  * it: the first message of a new session goes after `/rename <title>`, which the Codex adapter
  * answers itself (no model call). A loaded session never generates one, so a resume needs none.
  */
-const RENAME_FIRST: Readonly<Record<ConversationAgent, boolean>> = { "claude-code": false, codex: true };
+const RENAME_FIRST: Readonly<Record<ConversationAgent, boolean>> = { "claude-code": false, codex: true, hermes: false, deepseek: false };
 
 /** T542a: what the `mode` event says after a switch that reloaded the conversation. */
 const RELOAD_NOTE: Readonly<Record<ConversationMode, string>> = {
   strict: "Hallpass reloaded the conversation with its strict rules: edits and commands ask you first, whatever your own settings allow.",
   "agent-review": "Hallpass reloaded the conversation without its strict rules: your own agent settings and the agent's review apply.",
+};
+
+/** 021 R-351: what the `mode` event says after a switch that restarted a launch-time agent. */
+const RESTART_NOTE: Readonly<Record<ConversationMode, string>> = {
+  strict: "Hallpass restarted the agent with its strict settings: edits and commands ask you first.",
+  "agent-review": "Hallpass restarted the agent with its automatic settings: the agent's own review applies.",
 };
 
 export type CommandOutcome<T = undefined> = { ok: true; value?: T } | { ok: false; error: ConversationError };
@@ -159,7 +211,9 @@ function adapterToolName(meta: unknown): string | undefined {
 /**
  * R-317: what an "allow for this conversation" rule is keyed by. The tool's kind for the kinds that
  * change something; for `other` the tool's own name (finding 7: one MCP tool allowed must not allow
- * every MCP tool), else its title. `read`, `search`, `think` never get a rule.
+ * every MCP tool), else its title. `read`, `search`, `think` never get a rule. An `other` with neither
+ * a name nor a title (DeepSeek announces every action so) gets none either: one key for all of them
+ * would let one answer allow every later action, so "for this conversation" acts as allow-once (T668).
  */
 export function permissionRuleKey(toolCall: {
   toolCallId?: string;
@@ -170,7 +224,8 @@ export function permissionRuleKey(toolCall: {
   const kind = toolKind(toolCall.kind);
   if (!(CONVERSATION_RULE_KINDS as readonly string[]).includes(kind)) return undefined;
   if (kind !== "other") return kind;
-  return `other:${adapterToolName(toolCall._meta) ?? toolCall.title ?? ""}`;
+  const name = adapterToolName(toolCall._meta) ?? (toolCall.title?.trim() ? toolCall.title : undefined);
+  return name === undefined ? undefined : `other:${name}`;
 }
 
 /**
@@ -221,6 +276,16 @@ function permissionDetail(toolCall: acp.ToolCallUpdate): string {
   return parts.filter(Boolean).join("\n");
 }
 
+/**
+ * R-353 / FR-353: what an announced action says for a card that names only its id - the input, the
+ * change, and the agent's own reason for it (DeepSeek's `rawInput.justification`).
+ */
+function announcedDetail(update: acp.ToolCallUpdate): string {
+  const input = update.rawInput && typeof update.rawInput === "object" ? (update.rawInput as Record<string, unknown>) : undefined;
+  const reason = [input?.justification, input?.reason].find((value): value is string => typeof value === "string" && value.length > 0);
+  return [permissionDetail(update), reason ?? ""].filter(Boolean).join("\n");
+}
+
 const TOOL_STATUS: Record<string, "pending" | "running" | "done" | "failed"> = {
   pending: "pending",
   in_progress: "running",
@@ -238,6 +303,55 @@ const STOP_NOTICE_CODES: Readonly<Partial<Record<string, string>>> = {
   refusal: "stop-refusal",
 };
 
+/**
+ * 022 R-336 / FR-333: a message's prompt - its text (if any), each picture as an image, the tab as
+ * one text resource (its title, a blank line, its text), and one text block naming each file with
+ * its path. A message without attachments is the one text block it always was.
+ */
+export function promptBlocks(text: string, attachments: readonly ReadyAttachment[]): acp.ContentBlock[] {
+  const blocks: acp.ContentBlock[] = [];
+  if (text.length > 0 || attachments.length === 0) blocks.push({ type: "text", text });
+  for (const attachment of attachments) {
+    if (attachment.kind === "image") blocks.push({ type: "image", data: attachment.data, mimeType: attachment.mimeType });
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === "tab") {
+      blocks.push({
+        type: "resource",
+        resource: { uri: attachment.url, mimeType: "text/plain", text: `${attachment.title}\n\n${attachment.text}` },
+      });
+    }
+  }
+  const files = attachments.flatMap((attachment) => (attachment.kind === "file" ? [`- ${attachment.name}: ${attachment.path}`] : []));
+  if (files.length > 0) blocks.push({ type: "text", text: files.join("\n") });
+  return blocks;
+}
+
+/**
+ * R-343: the owner's bubble's attachments, in the order the owner added them (the send's ids), as
+ * the composer showed them - not the prompt's order; a thumbnail only for a picture.
+ */
+function attachmentSummaries(attachments: readonly ReadyAttachment[]): ConversationAttachmentSummary[] {
+  return attachments.map((attachment): ConversationAttachmentSummary => {
+    switch (attachment.kind) {
+      case "image":
+        return {
+          kind: "image",
+          name: attachment.name,
+          size: attachment.size,
+          ...(attachment.thumbnail === undefined ? {} : { thumbnail: attachment.thumbnail }),
+        };
+      case "tab":
+        return { kind: "tab", name: attachment.name, ...(attachment.cut ? { cut: true } : {}) };
+      case "file":
+        return { kind: "file", name: attachment.name, size: attachment.size, path: attachment.path };
+    }
+  });
+}
+
+/** R-343: a picture the agent replays of the owner's earlier message; the broker cannot shrink it. */
+const REPLAYED_IMAGE: ConversationAttachmentSummary = { kind: "image", name: "image" };
+
 type OwnerAnswer = "allow-once" | "reject" | "allow-conversation";
 type Closure = OwnerAnswer | "by-rule" | "cancelled" | "agent-exited";
 
@@ -246,8 +360,16 @@ type Card = {
   toolCallId: string;
   ruleKey: string | undefined;
   options: acp.PermissionOption[];
+  /** R-353: neither the request nor an announced action says what it is - only Reject may answer it. */
+  rejectOnly: boolean;
   resolve: (response: acp.RequestPermissionResponse) => void;
 };
+
+/** R-353: what the agent announced about an action (`tool_call` / `tool_call_update`) during this turn. */
+type Announced = { title?: string; kind?: ToolKind; detail?: string };
+
+/** What an owner's answer did (`Conversation.answer`). */
+export type AnswerResult = "answered" | "not-open" | "reject-only";
 
 /** `stopped`: the owner pressed Stop; the conversation says so when the turn ends (US1.4). */
 type Turn = { cancelled: boolean; stopped: boolean; rejected: Set<string> };
@@ -278,8 +400,15 @@ export type StartRequest = {
   cwd: string;
   spec: AdapterLaunchSpec;
   versions: StartFailureVersions;
-  /** The agent's own session id: resume with `session/load` instead of `session/new`. */
+  /**
+   * The agent's own session id: continue it instead of `session/new` - with `session/load` (replayed),
+   * or with `session/resume` (not replayed, R-352) when that is all the agent offers.
+   */
   resume?: string;
+  /** 021 R-351: the panel mode this run starts in - strict unless a restart for a launch-time mode. */
+  mode?: ConversationMode;
+  /** 021 R-351: this run replaces a live one of the same conversation for a mode change; its rules stay. */
+  restart?: true;
   /**
    * T579 (D-019-14, R-331): asked at the hand-out itself - nothing awaits between it and the token's mint -
    * whether no withdrawal came since the caller's consent check began; `false` starts nothing.
@@ -298,6 +427,8 @@ export function spawnAgentProcess(spec: AdapterLaunchSpec, cwd: string): ChildPr
     env: { ...process.env, ...spec.env },
     stdio: ["pipe", "pipe", "ignore"],
     windowsHide: true,
+    // 021: a batch-file agent (Hermes' hermes-acp.cmd) comes as one command line quoted for cmd.exe.
+    ...(spec.windowsVerbatimArguments === true ? { windowsVerbatimArguments: true } : {}),
   });
 }
 
@@ -314,8 +445,11 @@ export class Conversation {
   readonly log = new ConversationEventLog();
   private stateValue: ConversationState = "stopped";
   private modeValue: ConversationMode = "strict";
-  /** The agent's mode id the owner chose (through `mode`); anything else reported is drift. */
-  private ownerModeId: string;
+  /**
+   * The agent's mode id the owner chose (through `mode`); anything else reported is drift. None for
+   * an agent without ACP modes (DeepSeek): its mode is its launch environment (R-351).
+   */
+  private ownerModeId: string | undefined;
   /** R-316: drift is watched only once strict has been confirmed. */
   private watchingMode = false;
   /** The last mode the agent reported since it was last set, for the confirmation. */
@@ -338,13 +472,25 @@ export class Conversation {
   private muted = false;
   private connection: acp.ClientConnection | undefined;
   private exited: Promise<never> | undefined;
-  private closing: { target: "stopped" | "gone" } | undefined;
+  /** `starting`: closed for a restart (R-351) - the next run of the same conversation follows at once. */
+  private closing: { target: "stopped" | "gone" | "starting" } | undefined;
   private turn: Turn | undefined;
   private readonly cards = new Map<string, Card>();
   private cardCounter = 0;
   /** R-317: "for this conversation" rules, memory only and not resumed. */
   private readonly rules = new Set<string>();
   private readonly tools = new Map<string, ToolView>();
+  /** R-353: this turn's announced actions by `toolCallId`, for a card whose request names only the id. */
+  private readonly announced = new Map<string, Announced>();
+  /** R-354: the owner stopped this conversation while it was starting; the start ends `start-cancelled`. */
+  private cancelRequested = false;
+  /**
+   * R-352: this broker continued the conversation with `session/resume` before showing any of it, so
+   * the agent replayed none of its earlier turns (the projection's `replay: "none"`).
+   */
+  private replayNoneValue = false;
+  /** SC-161: the environment Hallpass added for this run; its values never reach a log or the panel. */
+  private launchEnv: Readonly<Record<string, string>> = {};
   /** `session/load` replay: shown when this broker has no log of it yet, dropped when it has. */
   private replay: "off" | "show" | "drop" = "off";
   /**
@@ -365,14 +511,21 @@ export class Conversation {
   private flushTimer: ClockTimer | undefined;
   private idleTimer: ClockTimer | undefined;
   private lastActivity: number;
+  /** 022 R-336: what this run's agent said at `initialize` it takes besides text. */
+  private acceptsValue: ConversationAccepts | undefined;
 
   constructor(
     readonly conversationId: string,
     readonly agent: ConversationAgent,
     private readonly deps: ConversationDeps,
   ) {
-    this.ownerModeId = MODE_ALLOW_LIST[agent].strict;
+    this.ownerModeId = agentModeId(agent, "strict");
     this.lastActivity = deps.clock.now();
+  }
+
+  /** R-352: the agent continued this conversation without replaying its earlier turns here. */
+  get replayNone(): boolean {
+    return this.replayNoneValue;
   }
 
   get state(): ConversationState {
@@ -396,6 +549,11 @@ export class Conversation {
     return this.lastActivity;
   }
 
+  /** 022 R-336 / R-344: pictures and page context, as the agent's last `initialize` said; unknown before one. */
+  get accepts(): ConversationAccepts | undefined {
+    return this.acceptsValue;
+  }
+
   /** Has an agent process (starting, idle, running or waiting). */
   get live(): boolean {
     return this.child !== undefined;
@@ -413,17 +571,24 @@ export class Conversation {
   async start(request: StartRequest): Promise<StartOutcome> {
     // T572: one agent process per conversation; a second would be orphaned and write into this log.
     if (this.child !== undefined) return failure("busy", "The agent of this conversation is already running.");
+    // R-354: stopped while it waited for its slot, its folder or the consent check - nothing is spawned.
+    if (this.cancelRequested) return this.startCancelled();
     if (request.mayHandOut?.() === false) {
       this.setState(request.resume ? "stopped" : "gone");
       return failure("consent-needed", "You withdrew the side-panel agent's access to this browser; the agent was not started.");
     }
+    // FR-289: every resume is strict; a first start is in the mode chosen before its first message
+    // (FR-361), a restart in its launch-time mode, and (D-021-16) a fixed-mode agent resumes in its own.
+    const mode = request.mode ?? "strict";
     this.closing = undefined;
-    this.rules.clear();
+    if (request.restart === undefined) this.rules.clear();
     this.watchingMode = false;
     this.reloading = false;
     this.cwd = request.cwd;
-    this.modeValue = "strict";
-    this.ownerModeId = MODE_ALLOW_LIST[this.agent].strict;
+    this.modeValue = mode;
+    this.ownerModeId = agentModeId(this.agent, mode);
+    this.announced.clear();
+    this.launchEnv = request.spec.env;
     this.renamePending = false;
     this.muted = false;
     this.inertToken = undefined;
@@ -439,7 +604,7 @@ export class Conversation {
       child = (this.deps.spawnAgent ?? spawnAgentProcess)(request.spec, request.cwd);
     } catch (error) {
       this.setState(request.resume ? "stopped" : "gone");
-      return { ok: false, error: classifyStartFailure("initialize", error, request.versions) };
+      return { ok: false, error: classifyStartFailure("initialize", error, request.versions, this.runEnv()) };
     }
     this.child = child;
     this.exited = new Promise<never>((_resolve, reject) => {
@@ -468,7 +633,7 @@ export class Conversation {
       );
     this.connection = connection;
 
-    let step: "initialize" | "session/new" | "session/load" | "session/set_mode" = "initialize";
+    let step: "initialize" | "session/new" | "session/load" | "session/resume" | "session/set_mode" = "initialize";
     try {
       const init = await this.request(() =>
         connection.agent.request("initialize", {
@@ -477,10 +642,24 @@ export class Conversation {
           clientInfo: { name: "hallpass", version: "0.0.0" },
         }),
       );
+      // 022 R-336: ACP's baseline is text only; pictures and embedded context are what it says it takes.
+      const promptCapabilities = init.agentCapabilities?.promptCapabilities;
+      this.acceptsValue = { image: promptCapabilities?.image === true, context: promptCapabilities?.embeddedContext === true };
       this.serverName = await naming;
       const mcpServers = this.mcpServers();
       let modes: acp.SessionModeState | null | undefined;
-      if (request.resume !== undefined) {
+      if (request.resume !== undefined && init.agentCapabilities?.loadSession !== true && init.agentCapabilities?.sessionCapabilities?.resume != null) {
+        // R-352 (T666): an agent without `session/load` that resumes (DeepSeek) continues the session
+        // without replaying it; what this broker never showed of it, the panel cannot show either.
+        step = "session/resume";
+        this.sessionId = request.resume;
+        const resumed = await this.request(() =>
+          connection.agent.request("session/resume", { sessionId: request.resume!, cwd: request.cwd, mcpServers }),
+        );
+        await settle();
+        if (!this.contentShown) this.replayNoneValue = true;
+        modes = resumed.modes;
+      } else if (request.resume !== undefined) {
         step = "session/load";
         if (init.agentCapabilities?.loadSession !== true) throw new Error("the agent cannot load a conversation");
         this.sessionId = request.resume;
@@ -492,7 +671,7 @@ export class Conversation {
             sessionId: request.resume!,
             cwd: request.cwd,
             mcpServers,
-            ...sessionMeta(this.agent, "strict"),
+            ...sessionMeta(this.agent, mode),
           }),
         );
         await settle();
@@ -502,32 +681,36 @@ export class Conversation {
       } else {
         step = "session/new";
         const created = await this.request(() =>
-          connection.agent.request("session/new", { cwd: request.cwd, mcpServers, ...sessionMeta(this.agent, "strict") }),
+          connection.agent.request("session/new", { cwd: request.cwd, mcpServers, ...sessionMeta(this.agent, mode) }),
         );
         this.sessionId = created.sessionId;
         modes = created.modes;
         this.renamePending = RENAME_FIRST[this.agent];
       }
 
-      // R-316 / FR-289: strict, set and confirmed, before anything of the owner's goes out.
-      step = "session/set_mode";
-      const strictId = MODE_ALLOW_LIST[this.agent].strict;
-      if (!modes?.availableModes.some((mode) => mode.id === strictId)) {
-        throw new Error(`the agent does not offer its "${strictId}" mode`);
-      }
-      this.reportedModeId = undefined;
-      await this.request(() => connection.agent.request("session/set_mode", { sessionId: this.sessionId!, modeId: strictId }));
-      await settle();
-      if (this.reportedModeId !== undefined && this.reportedModeId !== strictId) {
-        throw new Error(`the agent reported "${this.reportedModeId}" after being set to "${strictId}"`);
+      // R-316 / FR-289: the agent's mode, set and confirmed, before anything of the owner's goes out.
+      // R-351: an agent without ACP modes (DeepSeek) runs in its launch environment's mode; nothing is set.
+      const targetId = this.ownerModeId;
+      if (targetId !== undefined) {
+        step = "session/set_mode";
+        if (!modes?.availableModes.some((mode) => mode.id === targetId)) {
+          throw new Error(`the agent does not offer its "${targetId}" mode`);
+        }
+        this.reportedModeId = undefined;
+        await this.request(() => connection.agent.request("session/set_mode", { sessionId: this.sessionId!, modeId: targetId }));
+        await settle();
+        if (this.reportedModeId !== undefined && this.reportedModeId !== targetId) {
+          throw new Error(`the agent reported "${this.reportedModeId}" after being set to "${targetId}"`);
+        }
       }
       this.watchingMode = true;
     } catch (error) {
       this.replay = "off";
       await this.kill();
+      if (this.cancelRequested) return this.startCancelled();
       if (request.resume !== undefined) {
         this.setState("stopped");
-        if (step === "session/load") {
+        if (step === "session/load" || step === "session/resume") {
           const unknownSession = isUnknownSession(error);
           return {
             ok: false,
@@ -536,7 +719,7 @@ export class Conversation {
               "cannot-resume",
               unknownSession
                 ? `${AGENT_ADAPTERS[this.agent].label} no longer has this conversation.`
-                : `${AGENT_ADAPTERS[this.agent].label} could not continue this conversation: ${errorMessage(error)}`,
+                : `${AGENT_ADAPTERS[this.agent].label} could not continue this conversation: ${this.scrubbed(errorMessage(error))}`,
             ).error,
           };
         }
@@ -544,19 +727,35 @@ export class Conversation {
         this.setState("gone");
       }
       if (error instanceof AgentExited && step !== "initialize" && step !== "session/new") {
-        return failure("agent-exited", `${AGENT_ADAPTERS[this.agent].label} ${error.message} while starting.`);
+        return failure("agent-exited", `${AGENT_ADAPTERS[this.agent].label} ${this.scrubbed(error.message)} while starting.`);
       }
-      return {
-        ok: false,
-        error: classifyStartFailure(step === "initialize" ? "initialize" : "session/new", error, request.versions),
-      };
+      const failedAt = step === "initialize" || step === "session/set_mode" ? step : "session/new";
+      const refused = startFailure(this.agent, failedAt, error, request.versions, this.runEnv());
+      if (refused.code === MODEL_UNREACHABLE_NOTICE) this.deps.log?.("conversation.model-unreachable", `${this.conversationId} ${refused.detail}`);
+      return { ok: false, error: refused };
     }
 
-    this.enqueue({ type: "mode", mode: "strict" });
+    // R-354: stopped just as the start finished - the agent is already being killed.
+    if (this.cancelRequested) {
+      this.replay = "off";
+      await this.kill();
+      return this.startCancelled();
+    }
+    this.enqueue({ type: "mode", mode, ...(request.restart === undefined ? {} : { note: RESTART_NOTE[mode] }) });
     this.touch();
     this.setState("idle");
     this.armIdle();
     return { ok: true, agentSessionId: this.sessionId! };
+  }
+
+  /** SC-161: everything this run's agent was started with - the broker's environment and the launch's own. */
+  private runEnv(): Readonly<Record<string, string | undefined>> {
+    return { ...process.env, ...this.launchEnv };
+  }
+
+  /** SC-161 (T692): the agent's own words with no value of any variable it ran with, on every path that shows them. */
+  private scrubbed(text: string): string {
+    return withoutEnvironmentValues(text, this.runEnv());
   }
 
   /** R-322: this run's `hallpass` entry, or nothing without a browser connection. */
@@ -584,9 +783,40 @@ export class Conversation {
     this.inertToken = this.deps.browser?.mint();
   }
 
-  /** The pool's admission holds the slot from here until `start` settles (FR-311). */
+  /**
+   * The pool's admission holds the slot from here until `start` settles (FR-311). A Stop already
+   * recorded stays: `start` ends with it (T668) - only `startCancelled` clears it.
+   */
   reserve(): void {
     this.setState("starting");
+  }
+
+  /**
+   * R-354 (T659): Stop on a conversation that is still starting ends the start - the agent's process
+   * tree is killed (the broker sets no timeout of its own on a start, which may take minutes), and
+   * `start` ends `stopped` with `start-cancelled`. Before the agent is spawned, `start` sees the
+   * request and spawns nothing. `listed` (T668): a first start the pool lists, Stopped while it still
+   * waits for its slot - not `starting` yet, the Stop is recorded all the same.
+   */
+  async cancelStart(listed = false): Promise<void> {
+    if (this.stateValue !== "starting" && !(listed && this.child === undefined)) return;
+    this.cancelRequested = true;
+    const child = this.child;
+    if (child === undefined) return;
+    const gone = new Promise<void>((done) => {
+      if (child.exitCode !== null || child.signalCode !== null) done();
+      else child.once("exit", () => done());
+    });
+    killTree(child.pid);
+    child.kill();
+    await gone;
+  }
+
+  /** R-354: the start the owner stopped ends here: not started, said with `start-cancelled`. */
+  private startCancelled(): StartOutcome {
+    this.cancelRequested = false;
+    this.setState("stopped", "start-cancelled");
+    return failure("start-cancelled", `You stopped ${AGENT_ADAPTERS[this.agent].label} while it was starting.`);
   }
 
   /** A request that fails as soon as the agent exits, rather than whenever the stream notices. */
@@ -598,16 +828,26 @@ export class Conversation {
   /* The owner's commands                                                                        */
   /* ----------------------------------------------------------------------------------------- */
 
-  /** `startTabId`: the tab the owner was viewing, the turn's first browser target (FR-306). */
-  send(text: string, startTabId?: number): CommandOutcome {
-    const connection = this.connection;
-    if (connection === undefined || this.sessionId === undefined || !this.live) {
+  /** Whether a message could go now: a running agent, idle, no turn and no mode reload. */
+  canSend(): CommandOutcome {
+    if (this.connection === undefined || this.sessionId === undefined || !this.live) {
       return failure("agent-exited", "The agent is not running.");
     }
     if (this.stateValue !== "idle" || this.turn !== undefined || this.reloading) {
       // T547 (G3): its own code, so the panel can say "wait or stop" rather than "the helper is gone".
       return failure("busy", "The agent is still answering; stop it or wait for the end of its turn.");
     }
+    return { ok: true };
+  }
+
+  /**
+   * `startTabId`: the tab the owner was viewing, the turn's first browser target (FR-306).
+   * `attachments` (022): ready, files already in place; the pool checked them against `accepts`.
+   */
+  send(text: string, startTabId?: number, attachments: readonly ReadyAttachment[] = []): CommandOutcome {
+    const ready = this.canSend();
+    if (!ready.ok) return ready;
+    const connection = this.connection!;
     this.cancelIdle();
     this.touch();
     // R-321 / FR-306: the token again with this turn's start tab, before the prompt can use it.
@@ -619,17 +859,19 @@ export class Conversation {
         ...(startTabId === undefined ? {} : { startTabId }),
       });
     }
-    this.enqueue({ type: "text", role: "owner", text });
+    const summaries = attachmentSummaries(attachments);
+    this.enqueue({ type: "text", role: "owner", text, ...(summaries.length === 0 ? {} : { attachments: summaries }) });
     const turn: Turn = { cancelled: false, stopped: false, rejected: new Set() };
     this.turn = turn;
     this.setState("running");
-    const sessionId = this.sessionId;
-    const prompt = (body: string) => connection.agent.request("session/prompt", { sessionId, prompt: [{ type: "text", text: body }] });
+    const sessionId = this.sessionId!;
+    const blocks = promptBlocks(text, attachments);
+    const prompt = () => connection.agent.request("session/prompt", { sessionId, prompt: blocks });
     // R-322: a new session's title first - the list's own title for it (data-model) - then the message.
     const rename = this.renamePending ? `/rename ${titleOf(text) ?? NEW_TITLE}` : undefined;
     this.renamePending = false;
     (rename === undefined ? Promise.resolve() : this.renameFirst(connection, sessionId, rename))
-      .then((): Promise<acp.PromptResponse> => (turn.cancelled ? Promise.resolve({ stopReason: "cancelled" }) : prompt(text)))
+      .then((): Promise<acp.PromptResponse> => (turn.cancelled ? Promise.resolve({ stopReason: "cancelled" }) : prompt()))
       .then(
         async (response) => {
           await settle();
@@ -653,7 +895,16 @@ export class Conversation {
             this.child?.kill();
             return;
           }
-          this.enqueue({ type: "notice", code: "turn-failed", text: shown(`The agent's turn failed: ${errorMessage(error)}`, 2048) });
+          const said = errorMessage(error);
+          // SC-161: no value of any variable the agent ran with, whichever notice says it.
+          const clean = redact(this.scrubbed(said));
+          if (isModelUnreachable(said)) {
+            // R-356 / FR-355: where the agent's own setting lives.
+            this.deps.log?.("conversation.model-unreachable", `${this.conversationId} ${clip(clean, 600)}`);
+            this.enqueue({ type: "notice", code: MODEL_UNREACHABLE_NOTICE, text: shown(`${modelSetupHint(this.agent)} The agent said: ${clean}`, 2048) });
+          } else {
+            this.enqueue({ type: "notice", code: "turn-failed", text: shown(`The agent's turn failed: ${clean}`, 2048) });
+          }
           this.endTurn(turn);
         },
       );
@@ -688,10 +939,14 @@ export class Conversation {
     return { ok: true };
   }
 
-  /** `true` when a card was answered; `false` when it was not open (already answered elsewhere, FR-288). */
-  answer(requestId: string, answer: OwnerAnswer): boolean {
+  /**
+   * `answered`; `not-open` when the card was not open (already answered elsewhere, FR-288);
+   * `reject-only` when an allow answers a card whose action nobody described (R-353) - it stays open.
+   */
+  answer(requestId: string, answer: OwnerAnswer): AnswerResult {
     const card = this.cards.get(requestId);
-    if (card === undefined) return false;
+    if (card === undefined) return "not-open";
+    if (card.rejectOnly && answer !== "reject") return "reject-only";
     const wanted = answer === "reject" ? "reject_once" : "allow_once";
     // R-317: only *once* options are ever sent. An adapter without an allow-once option is declined.
     const once = card.options.find((option) => option.kind === wanted) ?? card.options.find((option) => option.kind === "reject_once");
@@ -710,7 +965,53 @@ export class Conversation {
       answer,
       once === undefined ? { outcome: { outcome: "cancelled" } } : { outcome: { outcome: "selected", optionId: once.optionId } },
     );
-    return true;
+    return "answered";
+  }
+
+  /**
+   * R-351 (T664): whether a restart for a launch-time mode may begin now - only between turns: a
+   * running agent, idle, no turn, no card, no mode switch under way (refused `busy` as a reload is).
+   */
+  canRestart(): CommandOutcome {
+    if (this.reloading) return failure("busy", "The conversation is already switching its mode; try again in a moment.");
+    if (this.connection === undefined || this.sessionId === undefined || !this.live || !this.watchingMode) {
+      return failure("agent-exited", "The agent is not running; it starts in strict mode when the conversation continues.");
+    }
+    if (this.stateValue !== "idle" || this.turn !== undefined || this.cards.size > 0 || this.modeReset !== undefined) {
+      return failure("busy", "The agent is still answering; stop it or wait for the end of its turn, then switch the mode.");
+    }
+    return { ok: true };
+  }
+
+  /**
+   * R-351 (T664): a mode fixed when the agent starts (Hermes' tool set, DeepSeek's sandbox) changes by
+   * closing the agent and starting it again with the new launch settings, then continuing the same
+   * session - Hermes with `session/load` (its replay is not shown again), DeepSeek with
+   * `session/resume`. The owner's "for this conversation" rules stay. A failed start leaves the
+   * conversation stopped; the next message resumes it strict (FR-289).
+   */
+  async restart(
+    mode: ConversationMode,
+    launch: { spec: AdapterLaunchSpec; versions: StartFailureVersions; mayHandOut?: () => boolean },
+  ): Promise<CommandOutcome> {
+    const ready = this.canRestart();
+    if (!ready.ok) return ready;
+    const sessionId = this.sessionId!;
+    const cwd = this.cwd!;
+    // Nothing else is sent meanwhile (`canSend` refuses `busy`).
+    this.reloading = true;
+    this.watchingMode = false;
+    await this.end("starting");
+    const started = await this.start({
+      cwd,
+      spec: launch.spec,
+      versions: launch.versions,
+      resume: sessionId,
+      mode,
+      restart: true,
+      ...(launch.mayHandOut === undefined ? {} : { mayHandOut: launch.mayHandOut }),
+    });
+    return started.ok ? { ok: true } : { ok: false, error: started.error };
   }
 
   async setMode(mode: ConversationMode): Promise<CommandOutcome> {
@@ -724,18 +1025,20 @@ export class Conversation {
     if (mode !== this.modeValue && hasRules(mode) !== hasRules(this.modeValue)) {
       return this.reload(connection, this.sessionId, mode);
     }
+    const targetId = agentModeId(this.agent, mode);
+    if (targetId === undefined) return failure("agent-version", "The agent has no mode Hallpass could set.");
     const previous = { mode: this.modeValue, id: this.ownerModeId };
     // Owner-caused: set before the request, so the agent's own echo of it is not drift.
     this.modeValue = mode;
-    this.ownerModeId = MODE_ALLOW_LIST[this.agent][mode];
+    this.ownerModeId = targetId;
     try {
-      await this.request(() => connection.agent.request("session/set_mode", { sessionId: this.sessionId!, modeId: this.ownerModeId }));
+      await this.request(() => connection.agent.request("session/set_mode", { sessionId: this.sessionId!, modeId: targetId }));
     } catch (error) {
       this.modeValue = previous.mode;
       this.ownerModeId = previous.id;
       return failure(
         error instanceof AgentExited ? "agent-exited" : "agent-version",
-        `The agent did not change its mode: ${errorMessage(error)}`,
+        `The agent did not change its mode: ${this.scrubbed(errorMessage(error))}`,
       );
     }
     this.enqueue({ type: "mode", mode });
@@ -756,7 +1059,8 @@ export class Conversation {
     if (this.stateValue !== "idle" || this.turn !== undefined || this.cards.size > 0 || this.modeReset !== undefined) {
       return failure("busy", "The agent is still answering; stop it or wait for the end of its turn, then switch the mode.");
     }
-    const targetId = MODE_ALLOW_LIST[this.agent][mode];
+    const targetId = agentModeId(this.agent, mode);
+    if (targetId === undefined) return failure("agent-version", "The agent has no mode Hallpass could set.");
     this.reloading = true;
     this.cancelIdle();
     this.watchingMode = false;
@@ -787,13 +1091,13 @@ export class Conversation {
         this.enqueue({
           type: "notice",
           code: "mode-reload-failed",
-          text: shown(`Hallpass could not reload the conversation in the new mode (${errorMessage(error)}); the agent was stopped.`, 2048),
+          text: shown(`Hallpass could not reload the conversation in the new mode (${this.scrubbed(errorMessage(error))}); the agent was stopped.`, 2048),
         });
         await this.close("stopped");
       }
       return failure(
         error instanceof AgentExited ? "agent-exited" : "agent-version",
-        `The agent did not change its mode: ${errorMessage(error)}`,
+        `The agent did not change its mode: ${this.scrubbed(errorMessage(error))}`,
       );
     }
     this.reloading = false;
@@ -812,6 +1116,11 @@ export class Conversation {
    * after the bound; the job is the backstop either way.
    */
   async close(target: "stopped" | "gone"): Promise<void> {
+    return this.end(target);
+  }
+
+  /** `close`, or for a restart (R-351) `starting`: the conversation shows that it is starting again. */
+  private async end(target: "stopped" | "gone" | "starting"): Promise<void> {
     this.cancelIdle();
     const child = this.child;
     if (child === undefined) {
@@ -846,6 +1155,12 @@ export class Conversation {
         if (this.replay === "drop" || this.muted) return;
         // Outside a replay the owner's words are the broker's own echo (`send`), not the agent's.
         if (update.sessionUpdate === "user_message_chunk" && this.replay !== "show") return;
+        if (update.sessionUpdate === "user_message_chunk" && update.content.type === "image") {
+          // 022 R-343: a picture of the owner's earlier message, shown as a chip without a thumbnail.
+          if (this.isRenameReplay(update.sessionUpdate, "")) return;
+          this.enqueue({ type: "text", role: "owner", text: "", attachments: [REPLAYED_IMAGE] });
+          return;
+        }
         if (update.content.type !== "text") return;
         if (this.replay === "show" && this.isRenameReplay(update.sessionUpdate, update.content.text)) return;
         this.enqueue({ type: "text", role: update.sessionUpdate === "agent_message_chunk" ? "agent" : "owner", text: update.content.text });
@@ -856,12 +1171,16 @@ export class Conversation {
         if (this.replay === "drop" || this.muted) return;
         // FR-285 / T537: after stop, nothing more of that turn's tools is shown.
         if (this.turn?.cancelled) return;
+        this.announce(update);
         this.showTool(update);
         return;
       }
       case "current_mode_update": {
         this.reportedModeId = update.currentModeId;
-        if (this.watchingMode && update.currentModeId !== this.ownerModeId) this.onDrift(update.currentModeId);
+        // An agent without ACP modes (R-351) has no mode of the owner's to drift from or to set back.
+        if (this.watchingMode && this.ownerModeId !== undefined && update.currentModeId !== this.ownerModeId) {
+          this.onDrift(update.currentModeId);
+        }
         return;
       }
       default:
@@ -910,13 +1229,35 @@ export class Conversation {
     this.enqueue({ type: "tool", toolCallId: id, ...view });
   }
 
+  /** R-353: what this turn's `tool_call` / `tool_call_update` said of an action, merged per id. */
+  private announce(update: acp.ToolCallUpdate & { kind?: acp.ToolKind | null }): void {
+    const before = this.announced.get(update.toolCallId);
+    const detail = announcedDetail(update);
+    this.announced.set(update.toolCallId, {
+      ...before,
+      ...(typeof update.title === "string" && update.title.length > 0 ? { title: update.title } : {}),
+      ...(update.kind ? { kind: toolKind(update.kind) } : {}),
+      ...(detail.length > 0 ? { detail } : {}),
+    });
+  }
+
   private onPermission(params: acp.RequestPermissionRequest): Promise<acp.RequestPermissionResponse> {
     const { toolCall, options } = params;
     // A request outside a live turn, or after the owner (or a drift) cancelled it, is answered cancelled.
     if (this.turn === undefined || this.turn.cancelled) return Promise.resolve({ outcome: { outcome: "cancelled" } });
     const known = this.tools.get(clip(toolCall.toolCallId, 128));
-    const kind = toolCall.kind ? toolKind(toolCall.kind) : (known?.kind ?? "other");
-    const title = toolCall.title ?? known?.title ?? "";
+    const announced = this.announced.get(toolCall.toolCallId);
+    const kind = toolCall.kind ? toolKind(toolCall.kind) : (announced?.kind ?? known?.kind ?? "other");
+    const title = toolCall.title ?? announced?.title ?? known?.title ?? "";
+    // R-353 / FR-353: the card's detail is the request's own, else the action announced with its id
+    // this turn (DeepSeek asks with the id alone). With neither, nobody knows what Allow would allow.
+    const requestDetail = permissionDetail(toolCall);
+    const detail = requestDetail.length > 0 ? requestDetail : (announced?.detail ?? "");
+    const rejectOnly =
+      !(typeof toolCall.title === "string" && toolCall.title.length > 0) &&
+      requestDetail.length === 0 &&
+      announced?.title === undefined &&
+      announced?.detail === undefined;
     const sandboxGrant = this.agent === "codex" && isCodexSandboxPermissionsRequest(params);
     if (sandboxGrant && this.modeValue === "strict") {
       // R-317 / SC-135: a grant for the rest of the turn is not one action; Codex asks for each instead.
@@ -926,7 +1267,8 @@ export class Conversation {
         reject === undefined ? { outcome: { outcome: "cancelled" } } : { outcome: { outcome: "selected", optionId: reject.optionId } },
       );
     }
-    const ruleKey = sandboxGrant ? undefined : permissionRuleKey({ kind, title, _meta: toolCall._meta });
+    // R-353: a reject-only card is never answered by an "allow for this conversation" rule, nor makes one.
+    const ruleKey = sandboxGrant || rejectOnly ? undefined : permissionRuleKey({ kind, title, _meta: toolCall._meta });
 
     if (ruleKey !== undefined && this.rules.has(ruleKey)) {
       const once = options.find((option) => option.kind === "allow_once");
@@ -939,14 +1281,15 @@ export class Conversation {
 
     const requestId = `perm-${++this.cardCounter}`;
     return new Promise((resolve) => {
-      this.cards.set(requestId, { requestId, toolCallId: toolCall.toolCallId, ruleKey, options, resolve });
+      this.cards.set(requestId, { requestId, toolCallId: toolCall.toolCallId, ruleKey, options, rejectOnly, resolve });
       this.enqueue({
         type: "permission",
         requestId,
         toolCallId: clip(toolCall.toolCallId, 128),
         kind,
         title: shown(title, 200),
-        detail: shown(permissionDetail(toolCall), 2048),
+        detail: shown(detail, 2048),
+        ...(rejectOnly ? { rejectOnly: true as const } : {}),
       });
       this.setState("waiting-for-owner");
     });
@@ -970,8 +1313,9 @@ export class Conversation {
     });
     const connection = this.connection;
     const sessionId = this.sessionId;
-    if (connection === undefined || sessionId === undefined) return;
-    const reset: Promise<void> = connection.agent.request("session/set_mode", { sessionId, modeId: this.ownerModeId }).then(
+    const ownerModeId = this.ownerModeId;
+    if (connection === undefined || sessionId === undefined || ownerModeId === undefined) return;
+    const reset: Promise<void> = connection.agent.request("session/set_mode", { sessionId, modeId: ownerModeId }).then(
       () => undefined,
       (error: unknown) => {
         if (!this.live) return;
@@ -979,7 +1323,7 @@ export class Conversation {
         this.enqueue({
           type: "notice",
           code: "mode-reset-failed",
-          text: shown(`Hallpass could not set the mode back (${errorMessage(error)}); the agent was stopped.`, 2048),
+          text: shown(`Hallpass could not set the mode back (${this.scrubbed(errorMessage(error))}); the agent was stopped.`, 2048),
         });
         void this.close("stopped");
       },
@@ -1005,6 +1349,7 @@ export class Conversation {
   private endTurn(turn: Turn): void {
     if (this.turn !== turn) return;
     this.turn = undefined;
+    this.announced.clear();
     if (turn.stopped) {
       this.enqueue({ type: "notice", code: "turn-stopped", text: "Stopped. Nothing more from that turn will run." });
     }
@@ -1030,6 +1375,7 @@ export class Conversation {
     this.watchingMode = false;
     this.cancelIdle();
     this.turn = undefined;
+    this.announced.clear();
     for (const card of [...this.cards.values()]) this.closeCard(card, "agent-exited", { outcome: { outcome: "cancelled" } });
     const closing = this.closing;
     this.closing = undefined;
@@ -1066,16 +1412,26 @@ export class Conversation {
   /* State, idle and the outgoing events                                                        */
   /* ----------------------------------------------------------------------------------------- */
 
-  private setState(state: ConversationState): void {
+  /** `code`: R-354's `start-cancelled`, on the `stopped` that ends a start the owner stopped. */
+  private setState(state: ConversationState, code?: "start-cancelled"): void {
     if (this.stateValue === state) return;
     this.stateValue = state;
     if (state !== "idle") this.cancelIdle();
-    this.enqueue({ type: "state", state });
+    this.enqueue({ type: "state", state, ...(code === undefined ? {} : { code }) });
     this.deps.onStateChange?.(this);
   }
 
   private touch(): void {
     this.lastActivity = this.deps.clock.now();
+  }
+
+  /**
+   * 022 T618: a piece of an attachment for its next message arrived - activity like a message: the
+   * idle stop counts from now, and eviction sees it as recently used.
+   */
+  noteActivity(): void {
+    this.touch();
+    if (this.idleTimer !== undefined) this.armIdle();
   }
 
   /** FR-297: only an idle conversation with no card counts down; a waiting card never expires (FR-294). */
@@ -1098,15 +1454,33 @@ export class Conversation {
    * waiting at the end of the outbox; anything else waits behind it, so order is never changed.
    */
   private enqueue(event: ConversationEvent): void {
-    if (event.type === "text" && event.text.length === 0) return;
+    if (event.type === "text" && event.text.length === 0 && event.attachments === undefined) return;
     if (event.type === "text" || event.type === "tool") this.contentShown = true;
     if (event.type === "text") {
       const last = this.outbox.at(-1);
-      if (last?.type === "text" && last.role === event.role && last.text.length + event.text.length <= CONVERSATION_TEXT_MAX_CHARS) {
-        this.outbox[this.outbox.length - 1] = { ...last, text: last.text + event.text };
+      // 022: the owner's attachments stay with the words they came with, at most 11 to one event.
+      const attachments = [...(last?.type === "text" ? (last.attachments ?? []) : []), ...(event.attachments ?? [])];
+      if (
+        last?.type === "text" &&
+        last.role === event.role &&
+        last.text.length + event.text.length <= CONVERSATION_TEXT_MAX_CHARS &&
+        attachments.length <= CONVERSATION_MAX_ATTACHMENTS
+      ) {
+        this.outbox[this.outbox.length - 1] = {
+          ...last,
+          text: last.text + event.text,
+          ...(attachments.length === 0 ? {} : { attachments }),
+        };
+      } else if (event.text.length === 0) {
+        this.outbox.push(event);
       } else {
         for (let start = 0; start < event.text.length; start += CONVERSATION_TEXT_MAX_CHARS) {
-          this.outbox.push({ type: "text", role: event.role, text: event.text.slice(start, start + CONVERSATION_TEXT_MAX_CHARS) });
+          this.outbox.push({
+            type: "text",
+            role: event.role,
+            text: event.text.slice(start, start + CONVERSATION_TEXT_MAX_CHARS),
+            ...(start === 0 && event.attachments !== undefined ? { attachments: event.attachments } : {}),
+          });
         }
       }
     } else {
@@ -1154,6 +1528,62 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** R-356: the notice code of a turn the agent could not run because its model was out of reach. */
+const MODEL_UNREACHABLE_NOTICE: ConversationError["code"] = "agent-model-unreachable";
+
+/**
+ * R-356: an agent's error that names its model endpoint or its key - the connection refused or not
+ * made, 401 / 403, or a key variable that is missing. Not a key prompt: the hint names where the
+ * agent's own setting lives (FR-355).
+ */
+const MODEL_UNREACHABLE: readonly RegExp[] = [
+  /\bECONNREFUSED\b|connection refused|\bENOTFOUND\b|\bETIMEDOUT\b|\bEAI_AGAIN\b|could not connect|failed to connect|fetch failed/iu,
+  /\b40[13]\b|unauthori[sz]ed|forbidden|authentication failed|invalid[ _-]?api[ _-]?key|incorrect api key/iu,
+  /\b[A-Z][A-Z0-9_]*_(?:API_KEY|KEY|TOKEN)\b[^\n]{0,40}\b(?:not set|missing|unset|required|empty)\b/u,
+  /\b(?:missing|no)\b[^\n]{0,20}\bapi[ _-]?key\b/iu,
+  // R-358: Hermes with no model chosen yet ("not connected to any AI provider yet. Run `hermes model`").
+  /not connected to any (?:ai )?provider|\bno (?:ai |model )?provider\b|\bhermes model\b/iu,
+];
+
+export function isModelUnreachable(text: string): boolean {
+  return MODEL_UNREACHABLE.some((pattern) => pattern.test(text));
+}
+
+/** FR-355: where each agent keeps its model and key - its own configuration, never Hallpass. */
+function modelSetupHint(agent: ConversationAgent): string {
+  const label = AGENT_ADAPTERS[agent].label;
+  const where: Record<ConversationAgent, string> = {
+    "claude-code": "Claude Code's own sign-in and model settings",
+    codex: "Codex's own sign-in and model settings",
+    hermes: "Hermes' own settings (run `hermes model` in a terminal; they live in %LOCALAPPDATA%\\hermes, or HERMES_HOME if set)",
+    deepseek: "DeepSeek's own settings or the environment variable it reads its key from",
+  };
+  return `${label} could not reach its model. Check ${where[agent]}; Hallpass never asks for or keeps a key.`;
+}
+
+export { withoutEnvironmentValues };
+
+/**
+ * T692 (R-356, FR-355): a start the agent refused because its model is out of reach (a 401, a refused
+ * connection, R-358: no provider chosen yet) says where the agent's own setting lives, as a turn does;
+ * any other refusal is `classifyStartFailure`'s - a version problem only when another version than the
+ * tested one was found, or the modes it offers do not fit (`session/set_mode`, said as `session/new`).
+ * `env` is everything the agent ran with: no value of it is said (SC-161).
+ */
+function startFailure(
+  agent: ConversationAgent,
+  step: "initialize" | "session/new" | "session/set_mode",
+  error: unknown,
+  versions: StartFailureVersions,
+  env: Readonly<Record<string, string | undefined>>,
+): ConversationError {
+  const shownStep = step === "initialize" ? "initialize" : "session/new";
+  const classified = classifyStartFailure(shownStep, error, versions, env, step === "session/set_mode");
+  const said = errorMessage(error);
+  if (classified.code === "agent-missing" || !isModelUnreachable(said)) return classified;
+  return failure(MODEL_UNREACHABLE_NOTICE, `${modelSetupHint(agent)} The agent said (${shownStep}): ${withoutEnvironmentValues(said, env)}`).error;
+}
+
 /** R-319: a `session/load` refused for an unknown session marks the entry "cannot continue" (FR-304). */
 function isUnknownSession(error: unknown): boolean {
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
@@ -1172,7 +1602,8 @@ export type ConversationPoolOptions = {
   brokerPid?: number;
   index: ConversationIndex;
   folders: FolderList;
-  resolveLaunch: (agent: ConversationAgent) => Promise<LaunchResolution>;
+  /** 021 R-351: the launch for a panel mode (default strict) - a launch-time agent starts differently per mode. */
+  resolveLaunch: (agent: ConversationAgent, mode?: ConversationMode) => Promise<LaunchResolution>;
   onEvent: (payload: ConversationEventPayload) => void;
   /** Something the overview shows changed (a state, the list). */
   onChange?: () => void;
@@ -1224,6 +1655,18 @@ export class ConversationPool {
    * that check is under way (a file read, then seconds of discovery) is never answered by a token.
    */
   private revocations = 0;
+  /** 022 R-340: each conversation's staged attachments, until its message is sent or they are dropped. */
+  private readonly attachments = new Map<string, AttachmentStore>();
+  /** T618: drops of staged attachments still removing their part files; `shutdown` waits for them. */
+  private readonly clearing = new Set<Promise<void>>();
+  /** 022 R-344: what each agent said it accepts at its last `initialize` in this broker. */
+  private readonly lastAccepts = new Map<ConversationAgent, ConversationAccepts>();
+  /**
+   * R-354: new conversations whose first start is under way. They have no index entry until the agent
+   * has a session, so the list shows them from here (state `starting`, not resumable); a cancelled or
+   * failed first start leaves nothing behind.
+   */
+  private readonly firstStarts = new Map<string, { agent: ConversationAgent; folder: ConversationFolder; mode: ConversationMode; at: string }>();
 
   constructor(private readonly options: ConversationPoolOptions) {
     this.clock = options.clock ?? systemClock;
@@ -1243,11 +1686,16 @@ export class ConversationPool {
   /**
    * `mayStart`: the consent (FR-299), asked again once the agent is found and right before it is
    * launched - discovery takes seconds, and a withdrawal meanwhile must start nothing (T572).
+   *
+   * `mode` (FR-361): the mode the owner chose before the first message; the agent is started in it
+   * and confirms it as on any start (R-316). For an agent whose mode is fixed once started (D-021-16)
+   * it is the conversation's mode for good.
    */
   async start(
     agent: ConversationAgent,
     folder: ConversationFolder,
     mayStart?: ResumeGate,
+    mode: ConversationMode = "strict",
   ): Promise<CommandOutcome<{ conversationId: string }>> {
     if (this.shuttingDown) return failure("broker-unavailable", "Hallpass is shutting down.");
     const mayHandOut = this.noWithdrawalSinceNow();
@@ -1255,11 +1703,32 @@ export class ConversationPool {
       if (!(await this.options.folders.has(folder.path))) return failure("folder-missing", "That folder is not in your folder list.");
       if (!(await this.folderExists(folder.path))) return failure("folder-missing", `The folder ${folder.path} does not exist any more.`);
     }
-    const launch = await this.options.resolveLaunch(agent);
+    const launch = await this.options.resolveLaunch(agent, mode);
     if (!launch.ok) return launch;
 
     const conversationId = (this.options.newConversationId ?? randomUUID)();
     const conversation = this.create(conversationId, agent);
+    // R-354: listed from here while it is starting, so the panel can stop the start by its id.
+    this.firstStarts.set(conversationId, { agent, folder, mode, at: this.iso() });
+    this.options.onChange?.();
+    try {
+      return await this.startNew(conversation, folder, mode, launch, mayStart, mayHandOut);
+    } finally {
+      // The list follows: the entry is now in the index, or gone with a failed or cancelled start.
+      this.firstStarts.delete(conversationId);
+      this.options.onChange?.();
+    }
+  }
+
+  private async startNew(
+    conversation: Conversation,
+    folder: ConversationFolder,
+    mode: ConversationMode,
+    launch: Extract<LaunchResolution, { ok: true }>,
+    mayStart: ResumeGate | undefined,
+    mayHandOut: () => boolean,
+  ): Promise<CommandOutcome<{ conversationId: string }>> {
+    const { conversationId, agent } = conversation;
     const admitted = await this.admit(conversation);
     if (!admitted.ok) {
       this.conversations.delete(conversationId);
@@ -1268,6 +1737,7 @@ export class ConversationPool {
     const cwd = await this.prepareFolder(conversationId, folder);
     if (cwd === undefined) {
       this.conversations.delete(conversationId);
+      this.options.onChange?.();
       return failure("folder-missing", "The conversation's scratch folder could not be created.");
     }
     if (mayStart !== undefined) {
@@ -1279,12 +1749,13 @@ export class ConversationPool {
       }
     }
     // Nothing awaits between the consent above and the spawn (and the token's mint) inside `start`.
-    const started = await conversation.start({ cwd, spec: launch.spec, versions: launch.versions, mayHandOut });
+    const started = await conversation.start({ cwd, spec: launch.spec, versions: launch.versions, mode, mayHandOut });
     if (!started.ok) {
       this.conversations.delete(conversationId);
       this.options.onChange?.();
       return { ok: false, error: started.error };
     }
+    this.noteAccepts(conversation);
     const at = this.iso();
     await this.write(async () =>
       this.options.index.put({
@@ -1293,7 +1764,7 @@ export class ConversationPool {
         agentSessionId: started.agentSessionId,
         title: NEW_TITLE,
         folder,
-        mode: "strict",
+        mode,
         createdAt: at,
         lastUsedAt: at,
         resumable: true,
@@ -1304,16 +1775,60 @@ export class ConversationPool {
     return { ok: true, value: { conversationId } };
   }
 
-  /** `mayResume`: asked before a stopped conversation's agent is started again (the consent, FR-299). */
-  async send(conversationId: string, text: string, activeTabId?: number, mayResume?: ResumeGate): Promise<CommandOutcome> {
+  /**
+   * `mayResume`: asked before a stopped conversation's agent is started again (the consent, FR-299).
+   * `attachmentIds` (022): attachments staged by `attach`, checked before an agent is resumed for
+   * them, against what the agent accepts once it runs (R-344), and only then given their place; a
+   * refused or failed send drops the attachments it named and removes any file it placed (R-340,
+   * FR-332). T618: nothing else staged goes with them, and a `busy` refusal keeps them all - the
+   * owner sends again once the turn ends, and the 10-minute expiry bounds what waits.
+   */
+  async send(
+    conversationId: string,
+    text: string,
+    activeTabId?: number,
+    mayResume?: ResumeGate,
+    attachmentIds: readonly string[] = [],
+  ): Promise<CommandOutcome> {
+    const withAttachments = attachmentIds.length > 0;
+    const refuse = async (outcome: { ok: false; error: ConversationError }): Promise<CommandOutcome> => {
+      if (withAttachments && outcome.error.code !== "busy") await this.attachments.get(conversationId)?.cancelMany(attachmentIds);
+      return outcome;
+    };
+    let kinds: ConversationAttachmentKind[] = [];
+    if (withAttachments) {
+      const checked = (await this.attachments.get(conversationId)?.check(attachmentIds)) ?? unknownAttachment();
+      if (!checked.ok) return refuse(checked);
+      kinds = checked.value!;
+    }
     let conversation = this.conversations.get(conversationId);
     if (conversation === undefined || !conversation.live) {
       const resumed = await this.resume(conversationId, "send", mayResume);
-      if (!resumed.ok) return resumed;
+      if (!resumed.ok) return refuse(resumed);
       conversation = resumed.value!;
     }
-    const sent = conversation.send(text, activeTabId);
-    if (!sent.ok) return sent;
+    let ready: ReadyAttachment[] = [];
+    const store = this.attachments.get(conversationId);
+    if (withAttachments) {
+      const accepts = conversation.accepts;
+      if (accepts !== undefined && !accepts.image && kinds.includes("image")) {
+        return refuse(failure("attachment-not-accepted", `${AGENT_ADAPTERS[conversation.agent].label} does not take pictures.`));
+      }
+      if (accepts !== undefined && !accepts.context && kinds.includes("tab")) {
+        return refuse(failure("attachment-not-accepted", `${AGENT_ADAPTERS[conversation.agent].label} does not take a page as context.`));
+      }
+      const can = conversation.canSend();
+      if (!can.ok) return refuse(can);
+      if (store === undefined) return refuse(unknownAttachment());
+      const taken = await store.take(attachmentIds);
+      if (!taken.ok) return taken;
+      ready = taken.value;
+    }
+    const sent = conversation.send(text, activeTabId, ready);
+    if (!sent.ok) {
+      if (store !== undefined) await store.discard(ready);
+      return refuse(sent);
+    }
     const title = titleOf(text);
     await this.update(conversationId, (entry) => ({
       ...entry,
@@ -1323,9 +1838,56 @@ export class ConversationPool {
     return { ok: true };
   }
 
+  /**
+   * 022 R-337: one piece of an attachment for the conversation's next message, staged in its folder
+   * (files) or in memory. The conversation need not be running: its folder is the index entry's.
+   */
+  async attach(conversationId: string, piece: AttachPiece): Promise<CommandOutcome> {
+    if (this.shuttingDown) return failure("broker-unavailable", "Hallpass is shutting down.");
+    const entry = await this.options.index.get(conversationId);
+    if (entry === undefined) return unknown();
+    if (this.foreign(entry)) return inUseElsewhere();
+    let store = this.attachments.get(conversationId);
+    if (store === undefined) {
+      store = new AttachmentStore({
+        folder: this.folderOf(entry),
+        clock: this.clock,
+        ...(this.options.log === undefined ? {} : { log: this.options.log }),
+      });
+      this.attachments.set(conversationId, store);
+    }
+    // T618: a transfer under way keeps its conversation from the idle stop (and, below, eviction).
+    this.conversations.get(conversationId)?.noteActivity();
+    return store.receive(piece);
+  }
+
+  /** T618: a piece reached this conversation within the attachment idle limit (a transfer under way). */
+  private receivingAttachment(conversationId: string): boolean {
+    const at = this.attachments.get(conversationId)?.lastPieceAt;
+    return at !== undefined && this.clock.now() - at < ATTACHMENT_IDLE_MS;
+  }
+
+  /** 022 R-340: the owner removed an attachment, or the panel gave its transfer up; ok when unknown. */
+  async cancelAttachment(conversationId: string, attachmentId: string): Promise<CommandOutcome> {
+    await this.attachments.get(conversationId)?.cancel(attachmentId);
+    return { ok: true };
+  }
+
+  /** 022 R-344: what this agent said it accepts at its last start in this broker, if it has started. */
+  agentAccepts(agent: ConversationAgent): ConversationAccepts | undefined {
+    return this.lastAccepts.get(agent);
+  }
+
   async stop(conversationId: string): Promise<CommandOutcome> {
     const conversation = this.conversations.get(conversationId);
     if (conversation === undefined) return (await this.known(conversationId)) ? { ok: true } : unknown();
+    // R-354 (T659): a start is stopped by ending it; its own result says `start-cancelled`. A first
+    // start is listed before its admission (T668): Stopped while it waits for its slot, it ends too.
+    const listed = this.firstStarts.has(conversationId) && !conversation.live;
+    if (conversation.state === "starting" || listed) {
+      await conversation.cancelStart(listed);
+      return { ok: true };
+    }
     return conversation.stop();
   }
 
@@ -1336,15 +1898,34 @@ export class ConversationPool {
       return failure("agent-exited", "The agent that asked is no longer running.");
     }
     // Not open any more (answered in another panel, FR-288) is not an error: the card is gone either way.
-    conversation.answer(requestId, answer);
+    if (conversation.answer(requestId, answer) === "reject-only") {
+      // R-353: the panel offered only Reject; an allow here is a command the card never offered.
+      return failure("invalid-command", "Hallpass cannot tell what this action is, so it can only be rejected.");
+    }
     return { ok: true };
   }
 
-  async setMode(conversationId: string, mode: ConversationMode): Promise<CommandOutcome> {
+  /**
+   * `mayRestart`: the consent (FR-299), asked before a launch-time mode change starts a new agent run
+   * (R-351) - that run is minted a browser token like any start or resume.
+   */
+  async setMode(conversationId: string, mode: ConversationMode, mayRestart?: ResumeGate): Promise<CommandOutcome> {
     const conversation = this.conversations.get(conversationId);
-    if (conversation === undefined && !(await this.known(conversationId))) return unknown();
+    const entry = conversation?.live ? undefined : await this.options.index.get(conversationId);
+    if (conversation === undefined && entry === undefined) return unknown();
+    const agent = conversation?.agent ?? entry!.agent;
+    if (modeFixedOnceStarted(agent)) {
+      // D-021-16: running, starting or stopped - its session has (or is getting) its mode for good.
+      return mode === (conversation?.live ? conversation.mode : entry?.mode) ? { ok: true } : modeFixed(agent);
+    }
     if (conversation === undefined || !conversation.live) {
       return failure("agent-exited", "The agent is not running; it starts in strict mode when the conversation continues.");
+    }
+    if (restartsForMode(conversation.agent, conversation.mode, mode)) {
+      const restarted = await this.restart(conversation, mode, mayRestart);
+      if (restarted.ok) await this.update(conversationId, (entry) => ({ ...entry, mode, lastUsedAt: this.iso() }));
+      this.options.onChange?.();
+      return restarted;
     }
     const changed = await conversation.setMode(mode);
     if (changed.ok) await this.update(conversationId, (entry) => ({ ...entry, mode }));
@@ -1367,6 +1948,8 @@ export class ConversationPool {
     if (entry !== undefined && this.foreign(entry)) return inUseElsewhere();
     if (conversation !== undefined) await conversation.close("gone");
     this.conversations.delete(conversationId);
+    // 022 R-340 / FR-340: what was staged goes; files already sent stay in the owner's folder.
+    await this.dropAttachments(conversationId);
     await this.write(() => this.options.index.remove(conversationId));
     this.options.onChange?.();
     return { ok: true };
@@ -1382,7 +1965,23 @@ export class ConversationPool {
   async views(): Promise<ConversationView[]> {
     const entries = await this.options.index.list();
     this.watchReleases(entries.filter((entry) => this.foreign(entry)).map((entry) => entry.conversationId));
-    return entries.map((entry) => {
+    // R-354: a first start under way, listed (newest first, as the index lists) until it ends.
+    const listed = new Set(entries.map((entry) => entry.conversationId));
+    const starting: ConversationView[] = [...this.firstStarts]
+      .filter(([conversationId]) => !listed.has(conversationId))
+      .reverse()
+      .map(([conversationId, pending]) => ({
+        conversationId,
+        agent: pending.agent,
+        title: NEW_TITLE,
+        folder: pending.folder,
+        mode: pending.mode,
+        createdAt: pending.at,
+        lastUsedAt: pending.at,
+        resumable: false,
+        state: "starting",
+      }));
+    return [...starting, ...entries.map((entry) => {
       const conversation = this.conversations.get(entry.conversationId);
       const { agentSessionId: _session, lease: _lease, ...shownEntry } = entry;
       return {
@@ -1390,8 +1989,12 @@ export class ConversationPool {
         mode: conversation?.live ? conversation.mode : entry.mode,
         state: conversation?.state ?? "stopped",
         ...(this.foreign(entry) ? { inUseElsewhere: true } : {}),
+        // 022 R-344: a running agent's own answer; otherwise the panel falls back to the agent's.
+        ...(conversation?.live && conversation.accepts !== undefined ? { accepts: conversation.accepts } : {}),
+        // 021 R-352 (T666): continued without a replay, so the earlier turns are not in the panel's log.
+        ...(conversation?.replayNone ? { replay: "none" as const } : {}),
       };
-    });
+    })];
   }
 
   folderOf(entry: ConversationEntry): string {
@@ -1425,7 +2028,48 @@ export class ConversationPool {
     this.releaseCheck?.cancel();
     this.releaseCheck = undefined;
     await Promise.all([...this.conversations.values()].map((conversation) => conversation.close("gone")));
+    await Promise.all([...this.attachments.keys()].map((conversationId) => this.dropAttachments(conversationId)));
+    // T618: drops begun by the agents' own ending (their state change) are awaited too.
+    await Promise.all([...this.clearing]);
     await this.writes.catch(() => undefined);
+  }
+
+  /** 022 R-340: a conversation's staged attachments, part files included, are dropped. */
+  private async dropAttachments(conversationId: string): Promise<void> {
+    const store = this.attachments.get(conversationId);
+    if (store === undefined) return;
+    this.attachments.delete(conversationId);
+    const cleared = store.clear().catch(() => undefined);
+    this.clearing.add(cleared);
+    try {
+      await cleared;
+    } finally {
+      this.clearing.delete(cleared);
+    }
+  }
+
+  /**
+   * R-351 (T664): checked between turns before anything is asked, then the consent and the mode's
+   * launch (Hermes' managed layer written); the conversation checks again before it closes the agent.
+   */
+  private async restart(conversation: Conversation, mode: ConversationMode, mayRestart?: ResumeGate): Promise<CommandOutcome> {
+    const ready = conversation.canRestart();
+    if (!ready.ok) return ready;
+    const mayHandOut = this.noWithdrawalSinceNow();
+    if (mayRestart !== undefined) {
+      const allowed = await mayRestart();
+      if (!allowed.ok) return allowed;
+    }
+    const launch = await this.options.resolveLaunch(conversation.agent, mode);
+    if (!launch.ok) return launch;
+    const restarted = await conversation.restart(mode, { spec: launch.spec, versions: launch.versions, mayHandOut });
+    if (restarted.ok) this.noteAccepts(conversation);
+    return restarted;
+  }
+
+  /** 022 R-344: the agent's answer at this start, remembered as its last seen; the overview follows. */
+  private noteAccepts(conversation: Conversation): void {
+    if (conversation.accepts !== undefined) this.lastAccepts.set(conversation.agent, conversation.accepts);
   }
 
   /* ----------------------------------------------------------------------------------------- */
@@ -1448,6 +2092,8 @@ export class ConversationPool {
   private onStateChange(conversation: Conversation): void {
     const state = conversation.state;
     if (state === "stopped" || state === "crashed" || state === "gone") {
+      // 022 R-340: what was staged for its next message goes with the agent's run.
+      void this.dropAttachments(conversation.conversationId);
       // R-319: the lease goes with the agent (idle stop, eviction, crash, shutdown).
       void this.update(conversation.conversationId, (entry) => {
         if (entry.lease === undefined || !this.mine(entry.lease)) return entry;
@@ -1479,7 +2125,9 @@ export class ConversationPool {
           : `The folder ${cwd} does not exist any more, so this conversation cannot continue.`,
       );
     }
-    const launch = await this.options.resolveLaunch(entry.agent);
+    // FR-289: every resume starts strict - except (D-021-16) an agent whose session keeps its first mode.
+    const mode: ConversationMode = modeFixedOnceStarted(entry.agent) ? entry.mode : "strict";
+    const launch = await this.options.resolveLaunch(entry.agent, mode);
     if (!launch.ok) return launch;
     const existing = this.conversations.get(conversationId);
     const created = existing ?? this.create(conversationId, entry.agent);
@@ -1502,6 +2150,7 @@ export class ConversationPool {
         spec: launch.spec,
         versions: launch.versions,
         resume: entry.agentSessionId,
+        mode,
         mayHandOut,
       });
       if (!started.ok) {
@@ -1510,8 +2159,8 @@ export class ConversationPool {
         outcome = { ok: false, error: started.error };
         return outcome;
       }
-      // FR-289: every resume starts strict again.
-      await this.update(conversationId, (current) => ({ ...current, mode: "strict", lastUsedAt: this.iso(), lease: this.lease() }));
+      this.noteAccepts(conversation);
+      await this.update(conversationId, (current) => ({ ...current, mode, lastUsedAt: this.iso(), lease: this.lease() }));
       this.options.onChange?.();
       outcome = { ok: true, value: conversation };
       return outcome;
@@ -1551,7 +2200,10 @@ export class ConversationPool {
         (other) => other !== target && (other.live || other.state === "starting"),
       );
       if (live.length >= this.cap) {
-        const victim = live.filter((other) => other.evictable).sort((a, b) => a.lastActivityAt - b.lastActivityAt)[0];
+        // T618: nor one an attachment is on its way to (a piece within the attachment idle limit).
+        const victim = live
+          .filter((other) => other.evictable && !this.receivingAttachment(other.conversationId))
+          .sort((a, b) => a.lastActivityAt - b.lastActivityAt)[0];
         if (victim === undefined) {
           return failure(
             "too-many-running",
@@ -1657,3 +2309,5 @@ const unknown = (): { ok: false; error: ConversationError } =>
   failure("not-found", "This conversation is not in the list any more.");
 const inUseElsewhere = (): { ok: false; error: ConversationError } =>
   failure("in-use-elsewhere", "This conversation is running in another browser.");
+const unknownAttachment = (): { ok: false; error: ConversationError } =>
+  failure("attachment-unknown", "An attachment of this message is no longer held; add it again.");

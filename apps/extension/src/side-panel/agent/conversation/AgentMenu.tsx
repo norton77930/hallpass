@@ -101,6 +101,12 @@ export function AgentMenu(props: {
                 {availability === "version-problem" && entry?.detail !== undefined ? (
                   <span className="agent-conversation-menu-note">{availabilityDetail(entry.detail, props.agentName(agent), t)}</span>
                 ) : null}
+                {/* 021 FR-345, FR-350: the worker's notes (Git for Windows missing, a pre-release) in words. */}
+                {(entry?.notes ?? []).map((note) => (
+                  <span key={note} className="agent-conversation-menu-note" data-note={note}>
+                    {t(`conversation.note.${note}`)}
+                  </span>
+                ))}
               </span>
             </button>
           </li>

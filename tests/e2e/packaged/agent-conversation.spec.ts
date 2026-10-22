@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { BrowserContext, Page } from "@playwright/test";
 import { hostDataDirectory } from "@hallpass/agent-host";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
@@ -31,6 +33,7 @@ const locale = localeFromEnv();
 const copy = copyFor(locale);
 const ui = (key: string): string => lookup(key, locale);
 const SITE = "https://127.0.0.1:19443";
+const execFileAsync = promisify(execFile);
 const AGENT_NAME = ui("conversation.agent.claude-code");
 const FAKE_LOG = process.env.FAKE_ACP_LOG;
 const FAKE_STORE = process.env.FAKE_ACP_STORE;
@@ -46,9 +49,20 @@ const SKIP_REASON =
   "attach mode with the fake agent: HALLPASS_CDP_ENDPOINT, HALLPASS_TEST_MODE=1, HALLPASS_BROKER_TEST_AGENT, " +
   "FAKE_ACP_LOG and FAKE_ACP_STORE, set alike for the browser under test and this runner";
 
+/**
+ * 021 T684: the runner's fake agent follows the agent it is launched for (Hermes, DeepSeek, Codex, Claude
+ * Code - `FAKE_ACP_PER_AGENT=1`) and hangs a start at `session/new` while the file `FAKE_ACP_HANG_FLAG`
+ * names exists. Without them the 021 cases below are skipped.
+ */
+const HANG_FLAG = process.env.FAKE_ACP_HANG_FLAG;
+const perAgent = process.env.FAKE_ACP_PER_AGENT === "1" && Boolean(HANG_FLAG);
+const PER_AGENT_SKIP = "the fake agent per agent: FAKE_ACP_PER_AGENT=1 and FAKE_ACP_HANG_FLAG (.scratch/t602/t602.mjs sets both)";
+const agentLabel = (agent: "claude-code" | "codex" | "hermes" | "deepseek"): string => ui(`conversation.agent.${agent}`);
+
 // The next test's broker starts at its fixture reset and reads the index then: leave it nothing.
 test.afterEach(async () => {
   if (!configured) return;
+  if (HANG_FLAG) await rm(HANG_FLAG, { force: true });
   await stopBrokers();
   await clearHostFiles();
 });
@@ -194,10 +208,12 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
     await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
     const [title] = await permissionTitles(panel);
     expect(title).toBe(ui("conversation.permission.title").replace("{agent}", AGENT_NAME).replace("{title}", "Edit src/app.ts"));
+    // 020 T606 (C5, specs/020-chat-ui/tasks.md): the card's order is allow once, allow for this
+    // conversation, reject (`PermissionCard.tsx` ANSWER_ORDER).
     expect(await buttonLabels(panel, ".agent-conversation-permission")).toEqual([
       ui("conversation.permission.allow-once"),
-      ui("conversation.permission.reject"),
       ui("conversation.permission.allow-conversation"),
+      ui("conversation.permission.reject"),
     ]);
     await answerPermission(panel, "reject");
     await expect.poll(() => logText(panel), { timeout: 20_000 }).toMatch(/refused:call-\d+/);
@@ -491,9 +507,12 @@ test.describe("019 side-panel conversation - part 3 (T564)", () => {
 
     const storeBefore = await fakeStoreSessions();
     const removing = entries.find((entry) => entry.id === first)!;
+    // 020 T605 (ConversationDrawer.tsx): the entry's remove button is an icon button whose name is
+    // its hidden words, "Remove “{title}” from the list" - found by that name, not an aria-label.
+    const removeName = ui("conversation.list.remove").replace("{title}", () => removing.title);
     expect(
       await panel.evaluatePanel(
-        `(()=>{const b=document.querySelector('.agent-conversation-entries li[data-conversation-id=${JSON.stringify(first)}] button[aria-label]');if(!b)return false;b.click();return true})()`,
+        `(()=>{const b=[...document.querySelectorAll('.agent-conversation-entries li[data-conversation-id=${JSON.stringify(first)}] button')].find((x)=>(x.textContent??'').trim()===${JSON.stringify(removeName)});if(!b)return false;b.click();return true})()`,
         true,
       ),
     ).toBe(true);
@@ -507,6 +526,196 @@ test.describe("019 side-panel conversation - part 3 (T564)", () => {
     expect(JSON.stringify(index)).not.toContain(first);
     expect(JSON.stringify(index)).toContain(second);
     await hideList(panel);
+  });
+});
+
+/* ------------------------------------------------------------------------------------------- */
+/* Part 4 (021 T684, T685): Hermes and DeepSeek, Cancel while starting, Claude Code and Codex   */
+/* ------------------------------------------------------------------------------------------- */
+
+test.describe("021 Hermes and DeepSeek - part 4 (T684, T685)", () => {
+  test.skip(!configured, SKIP_REASON);
+  test.skip(!perAgent, PER_AGENT_SKIP);
+
+  test("Hermes strict: an edit raises a card with its title; Reject writes nothing (SC-155)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(180_000);
+    await resetHostConversationState(extensionWorker);
+    const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    const hermes = agentLabel("hermes");
+    const id = await startConversation(panel, hermes);
+    expect(await headerValues(panel)).toEqual([hermes, ui("conversation.folder.scratch"), ui("conversation.mode.strict")]);
+    // Hermes was started with the managed layer and set to `default` after session/new.
+    const log = await fakeLog();
+    expect((log.find((line) => line.event === "start")?.launch as Record<string, string> | undefined)?.HERMES_MANAGED_DIR).toContain("managed");
+    expect(log.filter((line) => line.method === "session/set_mode").map((line) => line.params?.modeId)).toEqual(["default"]);
+
+    await sendMessage(panel, "tool:edit");
+    await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
+    expect((await permissionTitles(panel))[0]).toBe(
+      ui("conversation.permission.title").replace("{agent}", hermes).replace("{title}", "Edit src/app.ts"),
+    );
+    await answerPermission(panel, "reject");
+    await expect.poll(() => logText(panel), { timeout: 20_000 }).toMatch(/refused:call-\d+/);
+    expect(await lastPermissionAnswer()).toMatchObject({ optionId: "deny", optionKind: "reject_once" });
+    await waitComposerReady(panel);
+    // Nothing was written: the fake writes nothing, and the scratch folder holds no file of that name.
+    expect(existsSync(join(hostDataDirectory(), "scratch", id, "src", "app.ts")), "Reject wrote nothing").toBe(false);
+    // The broker marks an action the owner rejected as `refused`, not `failed` (conversation.ts tool status).
+    expect((await actionRows(panel)).map((row) => [row.title, row.status])).toEqual([["Edit src/app.ts", "refused"]]);
+  });
+
+  test("DeepSeek strict: the card shows the announced command, offers Allow once and Reject only; a second action asks again (SC-155, SC-157)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(180_000);
+    await resetHostConversationState(extensionWorker);
+    const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    const deepseek = agentLabel("deepseek");
+    await startConversation(panel, deepseek);
+    const started = (await fakeLog()).find((line) => line.event === "start");
+    expect(started?.launch).toEqual({ DSH_PERMISSION_MODE: "read-only", DSH_TELEMETRY_MODE: "DISABLED" });
+
+    await sendMessage(panel, "tool:execute");
+    await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
+    const card = await panelSectionText(panel, ".agent-conversation-permission");
+    expect(card).toContain("npm test");
+    expect(card).toContain("Run the tests to check the change");
+    expect(card).toContain(ui("conversation.permission.onceOnly"));
+    expect(await buttonLabels(panel, ".agent-conversation-permission")).toEqual([
+      ui("conversation.permission.allow-once"),
+      ui("conversation.permission.reject"),
+    ]);
+    await answerPermission(panel, "allow-once");
+    await expect.poll(async () => countMatches(await logText(panel), /done:call-\d+/g), { timeout: 20_000 }).toBe(1);
+    expect(await lastPermissionAnswer()).toMatchObject({ optionId: "allow-once", optionKind: "allow_once" });
+    await waitComposerReady(panel);
+
+    // Allowing once keeps no rule: the next action asks again.
+    await sendMessage(panel, "tool:execute");
+    await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
+    expect(await buttonLabels(panel, ".agent-conversation-permission")).toEqual([
+      ui("conversation.permission.allow-once"),
+      ui("conversation.permission.reject"),
+    ]);
+    await answerPermission(panel, "reject");
+    await expect.poll(() => logText(panel), { timeout: 20_000 }).toMatch(/refused:call-\d+/);
+    expect((await fakeLog()).filter((line) => line.event === "permission-answer")).toHaveLength(2);
+  });
+
+  test("DeepSeek asking about an action it never announced: a card that can only be rejected (SC-155)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(180_000);
+    await resetHostConversationState(extensionWorker);
+    const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    await startConversation(panel, agentLabel("deepseek"));
+
+    await sendMessage(panel, "tool:unannounced");
+    await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
+    expect(await panelSectionText(panel, ".agent-conversation-permission")).toContain(ui("conversation.permission.rejectOnly"));
+    expect(await buttonLabels(panel, ".agent-conversation-permission")).toEqual([ui("conversation.permission.reject")]);
+    await answerPermission(panel, "reject");
+    await expect.poll(() => logText(panel), { timeout: 20_000 }).toMatch(/refused:call-\d+/);
+    expect(await lastPermissionAnswer()).toMatchObject({ optionId: "reject-once", optionKind: "reject_once" });
+    await waitComposerReady(panel);
+  });
+
+  test("Cancel while starting: the start is listed with Cancel; Cancel ends it, the words return to the box, the agent process is gone within 5 s (SC-159)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(180_000);
+    await resetHostConversationState(extensionWorker);
+    const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    const deepseek = agentLabel("deepseek");
+    const cancelLabel = ui("conversation.state.cancelStartLabel").replace("{agent}", deepseek);
+    // The agent's next start never answers session/new.
+    await writeFile(HANG_FLAG!, "hang");
+    await expect.poll(() => selectedTab(panel), { timeout: 15_000 }).toBe("conversation");
+    await pickAgent(panel, deepseek);
+    await submitFirstMessage(panel);
+    await expect.poll(() => setupCard(panel), { timeout: 15_000 }).toBe("first-use");
+    await panel.clickButton(ui("conversation.firstUse.allow"));
+    await expect.poll(() => readConsentFile(), { timeout: 10_000 }).toBe(true);
+
+    const cancelButton = `(()=>{const b=[...document.querySelectorAll('.agent-conversation-starting button')].find((x)=>x.getAttribute('aria-label')===${JSON.stringify(cancelLabel)});return b?b:null})()`;
+    try {
+      await expect
+        .poll(() => panel.evaluatePanel(`${cancelButton} !== null`), { timeout: 30_000, message: "the start is listed with Cancel" })
+        .toBe(true);
+    } catch (error) {
+      throw new Error(`${(error as Error).message}\n[cancel] panel: ${await panel.panelText()}\n[cancel] fake log: ${JSON.stringify(await fakeLog())}\n[cancel] ${await hostStateForMessage(panel)}`);
+    }
+    expect(await panelSectionText(panel, ".agent-conversation-starting")).toContain(ui("conversation.state.starting").replace("{agent}", deepseek));
+    // The broker lists the start (and so shows Cancel) before it admits and spawns the agent: wait for the
+    // agent to be up and hanging at session/new before cancelling.
+    await expect
+      .poll(async () => (await fakeLog()).some((line) => line.event === "hang"), {
+        timeout: 60_000,
+        message: "the agent was started and hangs at session/new",
+      })
+      .toBe(true);
+    const pids = (await fakeLog()).filter((line) => line.event === "start").map((line) => Number(line.pid));
+    expect(pids.length, "the hanging agent was started").toBeGreaterThan(0);
+
+    expect(await panel.evaluatePanel(`(()=>{const b=${cancelButton};if(!b)return false;b.click();return true})()`, true)).toBe(true);
+    const cancelledAt = Date.now();
+    await expect
+      .poll(() => panel.evaluatePanel("document.querySelector('[data-notice-code=start-cancelled]')?.textContent ?? null"), { timeout: 15_000 })
+      .toContain(ui("conversation.error.start-cancelled"));
+    expect(await panel.evaluatePanel("document.querySelector('.agent-conversation-starting') === null")).toBe(true);
+    // The held first message is back in the box, and nothing was sent.
+    await expect
+      .poll(() => panel.evaluatePanel("document.querySelector('.agent-conversation-composer textarea')?.value ?? null"), { timeout: 10_000 })
+      .toBe(FIRST_MESSAGE);
+    expect((await fakeLog()).some((line) => line.method === "session/prompt")).toBe(false);
+    await expect.poll(() => pids.filter(alive).length, { timeout: 5_000, message: "the agent process is gone within 5 s" }).toBe(0);
+    expect(Date.now() - cancelledAt).toBeLessThan(20_000);
+  });
+
+  test("Claude Code and Codex: the existing cases stand; one strict turn each (T685, SC-162)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(180_000);
+    await resetHostConversationState(extensionWorker);
+    const { panel } = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    const claude = agentLabel("claude-code");
+    const codex = agentLabel("codex");
+
+    const first = await startConversation(panel, claude);
+    expect((await headerValues(panel))[0]).toBe(claude);
+    await sendMessage(panel, "tool:edit");
+    await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
+    expect((await permissionTitles(panel))[0]).toBe(
+      ui("conversation.permission.title").replace("{agent}", claude).replace("{title}", "Edit src/app.ts"),
+    );
+    await answerPermission(panel, "reject");
+    await expect.poll(() => logText(panel), { timeout: 20_000 }).toMatch(/refused:call-\d+/);
+    expect(await lastPermissionAnswer()).toMatchObject({ optionKind: "reject_once" });
+    await waitComposerReady(panel);
+
+    await startAnotherConversation(panel, first, codex);
+    expect((await headerValues(panel))[0]).toBe(codex);
+    await sendMessage(panel, "tool:edit");
+    await expect.poll(() => permissionTitles(panel), { timeout: 20_000 }).toHaveLength(1);
+    expect((await permissionTitles(panel))[0]).toBe(
+      ui("conversation.permission.title").replace("{agent}", codex).replace("{title}", "Edit src/app.ts"),
+    );
+    await answerPermission(panel, "allow-once");
+    await expect.poll(() => logText(panel), { timeout: 20_000 }).toMatch(/done:call-\d+/);
+    expect(await lastPermissionAnswer()).toMatchObject({ optionKind: "allow_once" });
+    await waitComposerReady(panel);
   });
 });
 
@@ -561,7 +770,11 @@ async function resetHostConversationState(worker: PackagedWorker): Promise<void>
         | undefined;
       return stored?.browserId ?? null;
     });
-  await expect.poll(ownIdentity, { timeout: 30_000, message: "this browser's identity" }).not.toBeNull();
+  try {
+    await expect.poll(ownIdentity, { timeout: 30_000, message: "this browser's identity" }).not.toBeNull();
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n${await identityDiagnostics(worker)}`);
+  }
   const current = (await ownIdentity())!;
   await expect
     .poll(async () => (await readLiveBrowserRecords()).some((record) => record.browserId === current), {
@@ -574,19 +787,58 @@ async function resetHostConversationState(worker: PackagedWorker): Promise<void>
   await writeFile(FAKE_LOG!, "");
 }
 
-/** Stops every broker a sidecar names, except `keep`'s; returns once they are gone. */
+/**
+ * Why no identity was minted, for the failure message: the identity is minted on the worker's first
+ * relay ack (018 R-279), so this says which extension targets exist, whether the worker answers a
+ * storage read, what it was greeted by, and the relay log's last lines.
+ */
+async function identityDiagnostics(worker: PackagedWorker): Promise<string> {
+  const endpoint = process.env.HALLPASS_CDP_ENDPOINT!;
+  const targets = await fetch(`${endpoint}/json/list`)
+    .then((reply) => reply.json() as Promise<Array<{ type: string; url: string; id: string }>>)
+    .then((list) => list.filter((target) => target.url.startsWith("chrome-extension://")).map((t) => `${t.type} ${t.id} ${t.url}`))
+    .catch((error: unknown) => [String(error)]);
+  const inWorker = await worker
+    .evaluate(async () => {
+      const started = Date.now();
+      const bounded = <T,>(work: Promise<T>) =>
+        Promise.race([work, new Promise<string>((resolve) => setTimeout(() => resolve("no-answer-5s"), 5_000))]);
+      const local = await bounded(chrome.storage.local.get(null).then((all) => Object.keys(all)));
+      const session = await bounded(chrome.storage.session.get(["agentBridgeGreetings", "agentBridgeDisconnects"]));
+      return JSON.stringify({ local, session, ms: Date.now() - started });
+    })
+    .catch((error: unknown) => String(error));
+  const relayLog = await readFile(join(hostDataDirectory(), "relay.log"), "utf8")
+    .then((text) => text.split(/\r?\n/u).slice(-15).join("\n"))
+    .catch((error: unknown) => String(error));
+  return `[identity] targets: ${JSON.stringify(targets)}\n[identity] worker: ${inWorker}\n[identity] relay.log tail:\n${relayLog}`;
+}
+
+/**
+ * Stops every broker a sidecar names, except `keep`'s; returns once they are gone.
+ *
+ * A sidecar outlives its broker, and Windows hands a dead broker's pid to the next process: on
+ * 2026-10-21 a sidecar left by an earlier run named the pid of the gate's own browser, and killing
+ * it closed the browser under test. So a pid is stopped only while its command line is still that
+ * broker's: `broker.js --browser-id <the sidecar's name>` (broker-launch.ts `spawnBrokerProcess`).
+ */
 async function stopBrokers(keep?: string): Promise<void> {
   const data = hostDataDirectory();
-  const pids: number[] = [];
+  const named = new Map<number, string>();
   for (const name of await readdir(join(data, "brokers")).catch(() => [] as string[])) {
     if (!name.endsWith(".json") || name === `${keep}.json`) continue;
     try {
       const pid = (JSON.parse(await readFile(join(data, "brokers", name), "utf8")) as { pid?: unknown }).pid;
-      if (typeof pid === "number" && alive(pid)) pids.push(pid);
+      if (typeof pid === "number" && alive(pid)) named.set(pid, name.slice(0, -".json".length));
     } catch {
       // gone or being rewritten
     }
   }
+  const commandLines = await commandLinesOf([...named.keys()]);
+  const pids = [...named].filter(([pid, browserId]) => {
+    const line = commandLines.get(pid) ?? "";
+    return /broker\.js/u.test(line) && line.includes(`--browser-id ${browserId}`);
+  }).map(([pid]) => pid);
   for (const pid of pids) {
     try {
       process.kill(pid);
@@ -595,6 +847,23 @@ async function stopBrokers(keep?: string): Promise<void> {
     }
   }
   await expect.poll(() => pids.filter(alive).length, { timeout: 15_000, message: "the stopped brokers exit" }).toBe(0);
+}
+
+/** The command lines of the given live pids (Windows, one CIM query); a pid that is gone is absent. */
+async function commandLinesOf(pids: number[]): Promise<Map<number, string>> {
+  const lines = new Map<number, string>();
+  if (pids.length === 0) return lines;
+  const filter = pids.map((pid) => `ProcessId=${pid}`).join(" OR ");
+  const script = `Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { [Console]::Out.WriteLine(('{0}' -f $_.ProcessId) + [char]9 + $_.CommandLine) }`;
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    windowsHide: true,
+    timeout: 30_000,
+  });
+  for (const row of stdout.split(/\r?\n/u)) {
+    const tab = row.indexOf("\t");
+    if (tab > 0) lines.set(Number(row.slice(0, tab)), row.slice(tab + 1));
+  }
+  return lines;
 }
 
 async function clearHostFiles(): Promise<void> {
@@ -779,7 +1048,7 @@ async function waitForPicker(panel: SidePanelDriver): Promise<void> {
 }
 
 /** Chooses the agent in the agent chip's menu, once the worker has reported it. */
-async function pickAgent(panel: SidePanelDriver): Promise<void> {
+async function pickAgent(panel: SidePanelDriver, name: string = AGENT_NAME): Promise<void> {
   await waitForPicker(panel);
   expect(
     await panel.evaluatePanel(
@@ -791,7 +1060,7 @@ async function pickAgent(panel: SidePanelDriver): Promise<void> {
     .poll(
       () =>
         panel.evaluatePanel(
-          `(()=>{const b=[...document.querySelectorAll('.agent-conversation-menu-item[role=menuitemradio]')].find((x)=>!x.disabled&&x.querySelector('.agent-conversation-agent-name')?.textContent===${JSON.stringify(AGENT_NAME)});if(!b)return false;b.click();return true})()`,
+          `(()=>{const b=[...document.querySelectorAll('.agent-conversation-menu-item[role=menuitemradio]')].find((x)=>!x.disabled&&x.querySelector('.agent-conversation-agent-name')?.textContent===${JSON.stringify(name)});if(!b)return false;b.click();return true})()`,
           true,
         ),
       { timeout: 30_000 },
@@ -800,7 +1069,7 @@ async function pickAgent(panel: SidePanelDriver): Promise<void> {
   await expect
     .poll(() =>
       panel.evaluatePanel(
-        `(()=>{const c=document.querySelector(${JSON.stringify(AGENT_CHIP)});return !!c&&c.getAttribute('aria-expanded')==='false'&&(c.textContent??'').trim()===${JSON.stringify(AGENT_NAME)}})()`,
+        `(()=>{const c=document.querySelector(${JSON.stringify(AGENT_CHIP)});return !!c&&c.getAttribute('aria-expanded')==='false'&&(c.textContent??'').trim()===${JSON.stringify(name)}})()`,
       ),
     )
     .toBe(true);
@@ -849,9 +1118,9 @@ async function waitForOpenConversation(panel: SidePanelDriver, not?: string): Pr
 }
 
 /** Consent given on the first-use card, then a scratch conversation with the agent, open and idle. */
-async function startConversation(panel: SidePanelDriver): Promise<string> {
+async function startConversation(panel: SidePanelDriver, name: string = AGENT_NAME): Promise<string> {
   await expect.poll(() => selectedTab(panel), { timeout: 15_000 }).toBe("conversation");
-  await pickAgent(panel);
+  await pickAgent(panel, name);
   await submitFirstMessage(panel);
   await expect.poll(() => setupCard(panel), { timeout: 15_000 }).toBe("first-use");
   await panel.clickButton(ui("conversation.firstUse.allow"));
@@ -862,9 +1131,9 @@ async function startConversation(panel: SidePanelDriver): Promise<string> {
 }
 
 /** 020 FR-315: "New conversation" over the open one, the agent picked, the first message sent. */
-async function startAnotherConversation(panel: SidePanelDriver, previous: string): Promise<string> {
+async function startAnotherConversation(panel: SidePanelDriver, previous: string, name: string = AGENT_NAME): Promise<string> {
   await panel.clickButton(ui("conversation.new"));
-  await pickAgent(panel);
+  await pickAgent(panel, name);
   await submitFirstMessage(panel);
   const id = await waitForOpenConversation(panel, previous);
   await firstTurnDone(panel);
@@ -960,12 +1229,20 @@ async function headerValues(panel: SidePanelDriver): Promise<string[]> {
 /**
  * 020 FR-318: a turn's rows are listed once it ended, folded under "N steps" (failed and refused ones
  * apart, always shown). Waits for the turn to end and unfolds every turn before reading.
+ *
+ * While a turn runs the thread shows one live line (`.agent-conversation-live`, T606 C2: drawn by the
+ * message list, so the running turn itself renders no `[data-turn=running]` group and its "N steps"
+ * button only appears once it ended) and the composer offers Stop; the turn has ended when neither is.
  */
 async function actionRows(panel: SidePanelDriver): Promise<ActionRow[]> {
   await expect
-    .poll(() => panel.evaluatePanel("document.querySelector('.agent-conversation-turn[data-turn=running]') === null"), {
-      timeout: 20_000,
-    })
+    .poll(
+      async () =>
+        (await panel.evaluatePanel(
+          "document.querySelector('.agent-conversation-live') === null && document.querySelector('.agent-conversation-turn[data-turn=running]') === null",
+        )) === true && (await composerReady(panel)),
+      { timeout: 20_000 },
+    )
     .toBe(true);
   await panel.evaluatePanel(
     "(()=>{for(const b of document.querySelectorAll('button.agent-conversation-steps[aria-expanded=false]'))b.click();return true})()",

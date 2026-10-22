@@ -1,0 +1,8 @@
+{
+  "name": "hallpass-agent-deepseek",
+  "private": true,
+  "description": "Pinned DeepSeek ACP agent, fetched by the Hallpass broker on the owner's consent (021 R-345).",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2"
+  }
+}

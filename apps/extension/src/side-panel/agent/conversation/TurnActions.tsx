@@ -1,5 +1,6 @@
 import { useId, useRef, useState, type ReactElement } from "react";
 import type { ConversationEvent } from "@hallpass/contracts";
+import { actionWords } from "./action-words.js";
 import { ActionList, inputBeside } from "./ActionList.js";
 import type { TurnActionGroup } from "./conversation-log.js";
 import { ChevronIcon, WaitIcon } from "./icons.js";
@@ -76,7 +77,7 @@ export function LiveLine(props: { live?: ToolEvent | undefined; waitingFor?: str
       <p className="agent-conversation-live" data-waiting="" aria-live="polite" aria-atomic="true">
         <WaitIcon />
         <span className="agent-conversation-action-title">
-          <InlineCode text={t("conversation.turn.waiting").replace("{title}", () => props.waitingFor ?? "")} />
+          <InlineCode text={t("conversation.turn.waiting").replace("{title}", () => actionWords(props.waitingFor, t))} />
         </span>
       </p>
     );

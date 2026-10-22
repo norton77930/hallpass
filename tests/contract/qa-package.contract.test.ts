@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -120,6 +120,9 @@ describe("QA package host bundle", () => {
         "agents/claude-code/package.json",
         "agents/codex/package-lock.json",
         "agents/codex/package.json",
+        // 021 R-345: the DeepSeek agent is fetched from its own pinned manifest and lock.
+        "agents/deepseek/package-lock.json",
+        "agents/deepseek/package.json",
         "node_modules/@koromix/koffi-win32-x64/index.js",
         "node_modules/@koromix/koffi-win32-x64/package.json",
         "node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node",
@@ -148,13 +151,11 @@ describe("QA package host bundle", () => {
 });
 
 describe("QA package zip (only when a full run has produced one)", () => {
-  const releaseDir = resolve(repoRoot, "release");
-  const zips = existsSync(releaseDir)
-    ? readdirSync(releaseDir).filter((name) => name.startsWith(`${PACKAGE_NAME}-`) && name.endsWith(".zip"))
-    : [];
+  // This build's zip, named as `npm run package` names it: `release/` may still hold older ones (T668).
+  const zipPath = resolve(repoRoot, "release", `${PACKAGE_NAME}-${AGENT_EXTENSION_VERSION}.zip`);
 
-  it.skipIf(zips.length === 0)("contains exactly the US1.1 root entries and only the host files of 019 R-327", () => {
-    const entries = listZip(resolve(releaseDir, zips[0] ?? ""));
+  it.skipIf(!existsSync(zipPath))("contains exactly the US1.1 root entries and only the host files of 019 R-327", () => {
+    const entries = listZip(zipPath);
     const roots = new Set(entries.map((entry) => (entry.includes("/") ? `${entry.split("/")[0]}/` : entry)));
     expect([...roots].sort()).toEqual([...PACKAGE_ROOT_ENTRIES].sort());
     const hostFiles = entries.filter((entry) => entry.startsWith("host/") && !entry.endsWith("/"));
@@ -171,6 +172,8 @@ describe("QA package zip (only when a full run has produced one)", () => {
       "host/agents/claude-code/package.json",
       "host/agents/codex/package-lock.json",
       "host/agents/codex/package.json",
+      "host/agents/deepseek/package-lock.json",
+      "host/agents/deepseek/package.json",
     ]);
     // node_modules is koffi and its win32-x64 prebuilt, nothing else (coverage F5).
     const modules = hostFiles.filter((entry) => entry.startsWith("host/node_modules/"));
@@ -203,7 +206,7 @@ describe("QA package 0.2.0 zip (only when a full run has produced one)", () => {
   });
 
   it.skipIf(!built)("stamps one version into the zip name, VERSION and the packed manifest", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.14.0");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.15.0");
     expect(readZipEntry(zipPath, "VERSION").trim()).toBe(AGENT_EXTENSION_VERSION);
     const manifest = JSON.parse(readZipEntry(zipPath, "extension/manifest.json")) as { version?: string };
     expect(manifest.version).toBe(AGENT_EXTENSION_VERSION);
@@ -225,6 +228,12 @@ describe("QA package PowerShell scripts (T204)", () => {
     // 019 R-327: the broker, its koffi dependency and the pinned adapter manifests are required files.
     for (const required of ["broker.js", "codex-app-server-shim.js", "node_modules", "koffi", "agents", "package-lock.json"]) {
       expect(script, `install.ps1 does not check ${required}`).toContain(required);
+    }
+    // 021 R-345: every shipped agent manifest is a required file, DeepSeek's included.
+    for (const agent of ["claude-code", "codex", "deepseek"]) {
+      for (const file of ["package.json", "package-lock.json"]) {
+        expect(script, `install.ps1 does not check agents\\${agent}\\${file}`).toContain(`agents\\${agent}\\${file}`);
+      }
     }
     expect(script).toContain("Set-Clipboard");
     expect(script).toContain("-Register");

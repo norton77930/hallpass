@@ -81,24 +81,39 @@ export async function unpairAgent(panel: PairingPanel, options: PairingOptions):
 export async function acceptPairing(panel: PairingPanel, options: PairingOptions): Promise<PairingOutcome> {
   const { locale, timeoutMs = 30_000, pollMs = 250 } = options;
   const deadline = Date.now() + timeoutMs;
-  const pairingTitle = lookup("agent.pairingTitle", locale);
+  const arrival = await awaitPairingPrompt(panel, locale, deadline, pollMs);
+  if (arrival.kind === "timeout") throw new Error(`agent-pairing-prompt-timeout:${arrival.lastText}`);
+  return arrival.kind === "already-paired" ? "already-paired" : clickAcceptAndConfirm(panel, locale, deadline, pollMs);
+}
 
-  let prompted = false;
+type PromptArrival = { kind: "prompted" } | { kind: "already-paired" } | { kind: "timeout"; lastText: string };
+
+async function awaitPairingPrompt(
+  panel: PairingPanel,
+  locale: AppLocale,
+  deadline: number,
+  pollMs: number,
+): Promise<PromptArrival> {
+  const pairingTitle = lookup("agent.pairingTitle", locale);
   let lastText = "";
   while (Date.now() < deadline) {
     // The pairing an earlier run left in extension storage is answered by the worker without ever
     // asking the owner again, so an already-paired panel is a legitimate arrival - but it is read
     // off the same discriminating signal, never assumed.
-    if (await isAgentPaired(panel, locale)) return "already-paired";
+    if (await isAgentPaired(panel, locale)) return { kind: "already-paired" };
     lastText = await panel.panelText();
-    if (lastText.includes(pairingTitle)) {
-      prompted = true;
-      break;
-    }
+    if (lastText.includes(pairingTitle)) return { kind: "prompted" };
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
-  if (!prompted) throw new Error(`agent-pairing-prompt-timeout:${lastText}`);
+  return { kind: "timeout", lastText };
+}
 
+async function clickAcceptAndConfirm(
+  panel: PairingPanel,
+  locale: AppLocale,
+  deadline: number,
+  pollMs: number,
+): Promise<PairingOutcome> {
   const clicked = await panel.clickIfPresent(lookup("agent.accept", locale));
   if (!clicked) throw new Error("agent-pairing-accept-missing");
 
@@ -135,16 +150,35 @@ export async function pairWithFirstCall(
   panel: PairingPanel,
   options: PairingOptions,
 ): Promise<PairingOutcome> {
-  const { timeoutMs = 30_000 } = options;
+  const { locale, timeoutMs = 30_000, pollMs = 250 } = options;
+  const started = Date.now();
+  const deadline = started + timeoutMs;
   // Past the SDK's 60 s default and the host's own pairing bound, so the harness is never what ends
   // the call; the card wait below is the bound this helper answers to.
-  const first = client.callTool("tabs_context", {}, { timeoutMs: timeoutMs + 60_000 });
-  // Settled either way, so a card that never came does not leave an unhandled rejection behind.
-  const answered = first.then(
-    (result) => ({ result }),
-    (error: unknown) => ({ error }),
-  );
-  const outcome = await acceptPairing(panel, options);
+  const issue = () =>
+    client.callTool("tabs_context", {}, { timeoutMs: timeoutMs + 60_000 }).then(
+      // Settled either way, so a card that never came does not leave an unhandled rejection behind.
+      (result) => ({ result }),
+      (error: unknown) => ({ error }),
+    );
+  let answered = issue();
+  // A relay that dies while carrying the first call takes the call with it and no card is ever
+  // raised (gate run 20261021-054821, attempt 2). So when no card has come by half the bound, the
+  // call is issued once more - the MCP server dials whichever relay serves the browser by then -
+  // and the second call has the rest of the same bound. The first call's late answer is ignored.
+  let arrival = await awaitPairingPrompt(panel, locale, started + Math.floor(timeoutMs / 2), pollMs);
+  if (arrival.kind === "timeout") {
+    console.log(
+      `[pairing-retry] no pairing prompt ${Date.now() - started} ms after the first tabs_context; issuing it once more (panel: ${arrival.lastText.slice(0, 160)})`,
+    );
+    answered = issue();
+    arrival = await awaitPairingPrompt(panel, locale, deadline, pollMs);
+  }
+  if (arrival.kind === "timeout") {
+    throw new Error(`agent-pairing-prompt-timeout:${arrival.lastText}\nstderr:\n${client.stderr()}`);
+  }
+  const outcome =
+    arrival.kind === "already-paired" ? "already-paired" : await clickAcceptAndConfirm(panel, locale, deadline, pollMs);
   const settled = await answered;
   if ("error" in settled) {
     throw new Error(`agent-pairing-first-call-failed:${String(settled.error)}\nstderr:\n${client.stderr()}`);

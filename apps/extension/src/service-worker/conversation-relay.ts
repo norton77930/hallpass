@@ -1,7 +1,9 @@
 import type {
   AgentLinkFrame,
   AgentPanelMessage,
+  ConversationAgent,
   ConversationEvent,
+  ConversationFolder,
   ConversationLinkCommand,
   ConversationPanelCommand,
   ConversationPanelState,
@@ -86,13 +88,22 @@ type Pending = {
   granted?: boolean;
   /**
    * T610: an open that switched the panel at once - the conversation that was open before it (none:
-   * `to` undefined), which the panel goes back to if the broker refuses the open.
+   * `to` undefined), which the panel goes back to if the broker refuses the open. T692: a start the
+   * panel switched to (`conversationId` its listed entry) goes back the same way.
    */
   back?: { to: string | undefined };
+  /**
+   * T692 (021 R-354): a start's agent and folder, and the conversations listed when it left (unknown
+   * without an overview: then it is never matched, and only its result opens the conversation).
+   */
+  start?: { agent: ConversationAgent; folder: ConversationFolder; before: ReadonlySet<string> | undefined };
 };
 
 /** T610: states with no agent running, which an open under way shows as `starting` (it resumes the agent). */
 const NOT_RUNNING = new Set<string>(["stopped", "crashed", "gone"]);
+
+const sameFolder = (a: ConversationFolder, b: ConversationFolder): boolean =>
+  a.kind === "project" ? b.kind === "project" && a.path === b.path : b.kind === a.kind;
 
 type Overview = Pick<ConversationPanelState, "conversations" | "agents" | "folders"> & {
   consent?: ConversationPanelState["consent"];
@@ -178,6 +189,41 @@ export function createConversationRelay(options: {
     }
   };
 
+  /**
+   * T692 (021 R-354, FR-354): the broker lists a new conversation as `starting` as soon as its start
+   * begins, but answers the start only once the agent is up - minutes for DeepSeek - and the panel can
+   * stop a start only from the open conversation. So an entry listed `starting` that was not listed
+   * when a start left, with that start's agent and folder, is opened at once, as an open is (T610).
+   * The overview names no command, so two starts of one agent in one folder under way together cannot
+   * be told apart: neither is matched, and each result opens its own conversation as before.
+   */
+  const claimStarts = (conversations: Overview["conversations"]): void => {
+    const taken = new Set<string>();
+    const waiting: Array<Pending & { start: NonNullable<Pending["start"]> }> = [];
+    for (const command of pending.values()) {
+      if (command.start === undefined) continue;
+      if (command.conversationId !== undefined) taken.add(command.conversationId);
+      else if (command.start.before !== undefined) waiting.push(command as Pending & { start: NonNullable<Pending["start"]> });
+    }
+    const newTo = (command: (typeof waiting)[number], entry: Overview["conversations"][number]): boolean =>
+      command.conversationId === undefined &&
+      entry.state === "starting" &&
+      !taken.has(entry.conversationId) &&
+      !command.start.before!.has(entry.conversationId) &&
+      entry.agent === command.start.agent &&
+      sameFolder(entry.folder, command.start.folder);
+    for (const command of waiting) {
+      const found = conversations.filter((entry) => newTo(command, entry));
+      if (found.length !== 1) continue;
+      const entry = found[0]!;
+      if (waiting.some((other) => other !== command && newTo(other, entry))) continue;
+      command.conversationId = entry.conversationId;
+      command.back = { to: active };
+      taken.add(entry.conversationId);
+      active = entry.conversationId;
+    }
+  };
+
   /** The commands no broker will answer now: said to the panels, so none waits in vain. */
   const failPending = (): void => {
     for (const [commandId, command] of pending) {
@@ -235,10 +281,19 @@ export function createConversationRelay(options: {
       if (!frame.ok && frame.error.code === "cannot-resume") refusedResume.add(command.conversationId!);
       else if (!frame.ok) switchBack(command);
       changed();
+    } else if (!frame.ok && command.type === "ui.conversation.start") {
+      // T692: a refused or cancelled start the panel had switched to goes back to the one before.
+      if (command.back !== undefined) {
+        switchBack(command);
+        changed();
+      }
     } else if (frame.ok) {
       let moved = true;
       if (command.type === "ui.conversation.start" && frame.value?.conversationId !== undefined) {
-        active = frame.value.conversationId;
+        const started = frame.value.conversationId;
+        // T692: already open since it was listed - unless the owner went elsewhere meanwhile.
+        if (command.conversationId === undefined || active === command.conversationId) active = started;
+        else moved = false;
       } else if (command.type === "ui.conversation.remove" && active === command.conversationId) {
         active = undefined;
       } else if (command.type === "ui.conversation.consent") {
@@ -321,6 +376,7 @@ export function createConversationRelay(options: {
             ...(consent === undefined ? {} : { consent }),
             ...(notice === undefined ? {} : { notice }),
           };
+          claimStarts(conversations);
           changed();
           break;
         }
@@ -366,7 +422,7 @@ export function createConversationRelay(options: {
         toPanels(failure(commandId, "Hallpass's helper on this computer is not connected."));
         return;
       }
-      const payload = forwarded.payload as { conversationId?: string; granted?: boolean };
+      const payload = forwarded.payload as { conversationId?: string; granted?: boolean; agent?: ConversationAgent; folder?: ConversationFolder };
       // T610: the chosen conversation is shown at once; the broker answers only once its replay ends.
       const switching = forwarded.type === "ui.conversation.open" && payload.conversationId !== active;
       pending.set(commandId, {
@@ -374,6 +430,15 @@ export function createConversationRelay(options: {
         ...(payload.conversationId === undefined ? {} : { conversationId: payload.conversationId }),
         ...(payload.granted === undefined ? {} : { granted: payload.granted }),
         ...(switching ? { back: { to: active } } : {}),
+        ...(forwarded.type === "ui.conversation.start"
+          ? {
+              start: {
+                agent: payload.agent!,
+                folder: payload.folder!,
+                before: overview === undefined ? undefined : new Set(overview.conversations.map((entry) => entry.conversationId)),
+              },
+            }
+          : {}),
       });
       options.sendFrame({ type: "conversation-command", sessionId: broker, commandId, command: forwarded });
       if (forwarded.type === "ui.conversation.open") {

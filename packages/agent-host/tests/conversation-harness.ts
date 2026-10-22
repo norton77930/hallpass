@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ConversationEventPayload } from "@hallpass/contracts";
+import type { ConversationAgent, ConversationEventPayload } from "@hallpass/contracts";
+import { launchSettings, writeLaunchFiles } from "../src/broker/agent-launch-settings.js";
 import type { AdapterLaunchSpec } from "../src/broker/agents.js";
 import { ConversationPool, type Clock, type ClockTimer, type ConversationPoolOptions } from "../src/broker/conversation.js";
 import { memoryConversationIndex, memoryFolderList, type ConversationIndex } from "../src/broker/conversation-index.js";
@@ -169,6 +170,18 @@ export type PoolHarnessOptions = {
   spawnAgent?: ConversationPoolOptions["spawnAgent"];
   /** What the broker turns into an overview (T577). */
   onChange?: () => void;
+  /** The broker's log lines (021 T660: what an error leaves in the log). */
+  log?: (code: string, detail?: string) => void;
+  /** The agent version found on the "machine" (default the tested `1.0.0`; R-358: another one is a version problem). */
+  foundVersion?: string;
+};
+
+/** 021 (T653): the fake agent's scenario for each agent - its modes, capabilities and permission shape. */
+const SCENARIO: Readonly<Record<ConversationAgent, string>> = {
+  "claude-code": "claude",
+  codex: "codex",
+  hermes: "hermes",
+  deepseek: "deepseek",
 };
 
 export async function poolHarness(options: PoolHarnessOptions = {}) {
@@ -179,8 +192,9 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
   const rec = recorder(clock);
   const index = options.index ?? memoryConversationIndex();
   const folders = memoryFolderList();
+  const dataDir = join(dir, "data");
   const pool = new ConversationPool({
-    dataDir: join(dir, "data"),
+    dataDir,
     browserRunId: options.browserRunId ?? "run-test",
     brokerPid: options.brokerPid ?? process.pid,
     index,
@@ -190,20 +204,34 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.spawnAgent === undefined ? {} : { spawnAgent: options.spawnAgent }),
     ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
+    ...(options.log === undefined ? {} : { log: options.log }),
     onEvent: rec.onEvent,
-    resolveLaunch: async (agent) => ({
-      ok: true,
-      spec: fakeAgentSpec({
-        FAKE_ACP_LOG: logPath,
-        ...(options.store === false ? {} : { FAKE_ACP_STORE: storePath }),
-        FAKE_ACP_SCENARIO: agent === "codex" ? "codex" : "claude",
-        ...options.env,
-      }),
-      versions: { agent, tested: "1.0.0", found: "1.0.0" },
-    }),
+    // 021: the mode's launch settings as a real launch applies them (Hermes' managed layer written
+    // and named, DeepSeek's environment), on top of the fake agent.
+    resolveLaunch: async (agent, mode = "strict") => {
+      const settings = launchSettings(agent, mode, dataDir);
+      await writeLaunchFiles(settings.files, {
+        readText: (path) => readFile(path, "utf8"),
+        writeText: async (path, text) => {
+          await mkdir(dirname(path), { recursive: true });
+          await writeFile(path, text, "utf8");
+        },
+      });
+      return {
+        ok: true,
+        spec: fakeAgentSpec({
+          FAKE_ACP_LOG: logPath,
+          ...(options.store === false ? {} : { FAKE_ACP_STORE: storePath }),
+          FAKE_ACP_SCENARIO: SCENARIO[agent],
+          ...settings.env,
+          ...options.env,
+        }),
+        versions: { agent, tested: "1.0.0", found: options.foundVersion ?? "1.0.0" },
+      };
+    },
   });
 
-  const start = async (agent: "claude-code" | "codex" = "claude-code"): Promise<string> => {
+  const start = async (agent: ConversationAgent = "claude-code"): Promise<string> => {
     const started = await pool.start(agent, { kind: "scratch" });
     if (!started.ok) throw new Error(`start failed: ${started.error.code} ${started.error.detail}`);
     return started.value!.conversationId!;
@@ -223,7 +251,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     if (options.dir === undefined) await removeDir(dir);
   };
 
-  return { dir, logPath, storePath, clock, rec, index, folders, pool, start, turn, cleanup, log: () => readFakeLog(logPath) };
+  return { dir, dataDir, logPath, storePath, clock, rec, index, folders, pool, start, turn, cleanup, log: () => readFakeLog(logPath) };
 }
 
 /**

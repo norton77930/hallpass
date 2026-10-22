@@ -59,9 +59,9 @@ export const KOFFI_PACKAGE_FILES = [
   "@koromix/koffi-win32-x64/win32_x64/koffi.node",
 ] as const;
 
-/** The pinned adapter manifests the broker installs from on the owner's consent (R-314). */
+/** The pinned manifests the broker installs from on the owner's consent (R-314; 021 R-345 adds DeepSeek). */
 export const AGENT_MANIFEST_FILES = ["package.json", "package-lock.json"] as const;
-const AGENT_MANIFEST_DIRECTORIES = ["claude-code", "codex"] as const;
+const AGENT_MANIFEST_DIRECTORIES = ["claude-code", "codex", "deepseek"] as const;
 
 /** What the zip's root holds, exactly (US1.1; the contract test pins it). */
 export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "README.md", "VERSION"] as const;

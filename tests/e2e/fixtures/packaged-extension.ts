@@ -403,6 +403,94 @@ async function assertAttachedEndpointReady(endpoint: string): Promise<void> {
 }
 
 /**
+ * The browser fixtures run on their own clock rather than the test's: a reset that has to wait out
+ * a slow `storage.local` (up to 150 s below, then the identity and the bridge) must not leave a test
+ * a fraction of its own timeout - in gate run 20261021-072123 a 90 s wait in setup ended the first
+ * test inside its body. Bounds the setup and the teardown, each, not the test.
+ */
+const ATTACHED_FIXTURE_TIMEOUT_MS = 240_000;
+
+/** One timed `storage.local` read in the worker: how long it took and the stored browser id, or `null` past 2 s. */
+type StorageRead = { ms: number; id: string | null } | null;
+
+const STORAGE_READ_CAP_MS = 2_000;
+
+/** Runs in the worker (as source text, so self-contained): the identity key is `agentBrowserIdentity` (018 R-279). */
+async function timedIdentityRead(capMs: number): Promise<StorageRead> {
+  const started = Date.now();
+  const answer = await Promise.race([
+    chrome.storage.local
+      .get("agentBrowserIdentity")
+      .then((stored) => ({ id: (stored.agentBrowserIdentity as { browserId?: string } | undefined)?.browserId ?? null })),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), capMs)),
+  ]);
+  return answer === null ? null : { ms: Date.now() - started, id: answer.id };
+}
+
+async function readStorageOverSocket(socketUrl: string): Promise<StorageRead> {
+  const evaluation = await evaluateOverSocket(socketUrl, `(${timedIdentityRead.toString()})(${STORAGE_READ_CAP_MS})`, {
+    awaitPromise: true,
+    timeoutMs: STORAGE_READ_CAP_MS + 3_000,
+  });
+  return (evaluation.result?.value as StorageRead | undefined) ?? null;
+}
+
+/** Until three reads in a row answered within 1 s, bounded. `tries` is each read's ms, `-` for no answer. */
+async function awaitPromptStorage(
+  read: () => Promise<StorageRead>,
+  boundMs: number,
+): Promise<{ ok: boolean; tries: string[]; id: string | null; ms: number }> {
+  const started = Date.now();
+  const tries: string[] = [];
+  let streak = 0;
+  let id: string | null = null;
+  while (Date.now() - started < boundMs) {
+    const answer = await read().catch(() => null);
+    tries.push(answer ? String(answer.ms) : "-");
+    streak = answer && answer.ms < 1_000 ? streak + 1 : 0;
+    if (answer) id = answer.id;
+    if (streak >= 3) return { ok: true, tries, id, ms: Date.now() - started };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return { ok: false, tries, id, ms: Date.now() - started };
+}
+
+/**
+ * The reset's other half, once the new worker is attached: a test starts only when the worker's
+ * `storage.local` answers promptly again and the browser identity the reset cleared has been minted
+ * again (on the first relay acknowledgement, 018 R-279). Both bounded, both failing with what was
+ * seen. A worker no relay has greeted cannot have an identity, so then the wait is reported and the
+ * test runs anyway - the same allowance `awaitStableBridge` makes for a run without a host.
+ */
+async function awaitWorkerReadyAfterReset(worker: PackagedWorker): Promise<void> {
+  const read = () => worker.evaluate(timedIdentityRead, STORAGE_READ_CAP_MS);
+  const storage = await awaitPromptStorage(read, 150_000);
+  if (!storage.ok) {
+    throw new Error(
+      `attached-worker-storage-stalled: after the reset, chrome.storage.local in the extension worker did not answer within 1 s three times in a row in ${storage.ms} ms (read ms, "-" = no answer in ${STORAGE_READ_CAP_MS} ms: ${storage.tries.slice(-40).join(" ")})`,
+    );
+  }
+  const started = Date.now();
+  let id = storage.id;
+  while (!id && Date.now() - started < 30_000) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    id = (await read().catch(() => null))?.id ?? null;
+  }
+  const note = `storage prompt after ${storage.ms} ms (${storage.tries.join(" ")})`;
+  if (id) {
+    console.log(`[reset] ${note}; identity stored after ${Date.now() - started} ms more`);
+    return;
+  }
+  const greeted = await greetedRelayPid(worker);
+  if (greeted !== undefined) {
+    throw new Error(
+      `attached-worker-identity-missing: relay ${greeted} greeted the worker but no browser identity was stored within 30 s after the reset (${note})`,
+    );
+  }
+  console.log(`[reset] ${note}; no identity: no relay greeted this worker within 30 s, running anyway`);
+}
+
+/**
  * The launched gate gives every test a fresh profile. An attached browser keeps its state, so each
  * test starts by putting it back to the launched gate's starting point: one blank tab and nothing
  * else open, the extension's stored state cleared, every extension page (the side panel included)
@@ -421,11 +509,30 @@ async function resetAttachedBrowser(context: BrowserContext, endpoint: string): 
   const prefix = `chrome-extension://${TEST_EXTENSION_ID}/`;
   const worker = findWorkerTarget(await listTargets(endpoint));
   if (worker?.webSocketDebuggerUrl) {
-    await evaluateOverSocket(
-      worker.webSocketDebuggerUrl,
+    const socketUrl = worker.webSocketDebuggerUrl;
+    const cleared = await evaluateOverSocket(
+      socketUrl,
       "Promise.all([chrome.storage.local.clear(), chrome.storage.session.clear()])",
       { awaitPromise: true, timeoutMs: 10_000 },
-    ).catch(() => undefined);
+    ).then(
+      () => "",
+      (error: unknown) => String(error),
+    );
+    if (cleared) console.log(`[reset] storage clear did not answer: ${cleared}`);
+    /**
+     * The clear is let settle before the worker is closed. Measured 2026-10-21 (branded Chrome 155,
+     * .scratch/t602 measure-reset): a close alone never slowed the worker's `storage.local`; a close
+     * straight after the clear left `storage.local.get` unanswered for 20-50 s in one try of two; a
+     * clear alone did not in two tries - but in a later gate run the first reset's reads stopped
+     * answering right after the clear, before any close, for about 90 s. So the stall follows a
+     * clear, early in a fresh profile, and is not always avoidable; it is waited out, bounded, and
+     * the worker is not closed in the middle of it when it can be helped. The wait after the new
+     * worker starts (`awaitWorkerReadyAfterReset`) is the bound a test answers to.
+     */
+    const settled = await awaitPromptStorage(() => readStorageOverSocket(socketUrl), 30_000);
+    if (!settled.ok) {
+      console.log(`[reset] storage did not settle after the clear (tries ${settled.tries.join(" ")}); closing anyway`);
+    }
   }
   for (const target of await listTargets(endpoint)) {
     if (target.url.startsWith(prefix)) {
@@ -546,7 +653,7 @@ async function withAttachedContext(endpoint: string, use: (context: BrowserConte
 }
 
 export const test = base.extend<PackagedFixtures>({
-  extensionContext: async ({}, use) => {
+  extensionContext: [async ({}, use) => {
     if (cdpEndpoint) {
       await withAttachedContext(cdpEndpoint, use);
       return;
@@ -567,10 +674,11 @@ export const test = base.extend<PackagedFixtures>({
     } finally {
       await context.close();
     }
-  },
-  extensionWorker: async ({ extensionContext }, use) => {
+  }, { timeout: ATTACHED_FIXTURE_TIMEOUT_MS }],
+  extensionWorker: [async ({ extensionContext }, use) => {
     if (cdpEndpoint) {
       const worker = await attachCdpWorker(extensionContext, cdpEndpoint);
+      await awaitWorkerReadyAfterReset(worker);
       // With two browsers the legacy `bridge.json` belongs to at most one of them, so "stable" is
       // read from the per-browser records instead (018).
       await (secondCdpEndpoint ? awaitStableBrowserRecord(worker) : awaitStableBridge(worker));
@@ -583,25 +691,26 @@ export const test = base.extend<PackagedFixtures>({
         throw new Error(channel ? `release-unpacked-load-blocked:${channel}` : "packaged-worker-missing");
       }));
     await use(worker);
-  },
+  }, { timeout: ATTACHED_FIXTURE_TIMEOUT_MS }],
   extensionId: async ({ extensionWorker }, use) => {
     const id = new URL(extensionWorker.url()).host;
     await use(id);
   },
-  extensionContext2: async ({}, use) => {
+  extensionContext2: [async ({}, use) => {
     if (!secondCdpEndpoint) {
       throw new Error(
         "second-browser-missing: set HALLPASS_CDP_ENDPOINTS=<first endpoint>,<second endpoint> (two attached browsers)",
       );
     }
     await withAttachedContext(secondCdpEndpoint, use);
-  },
-  extensionWorker2: async ({ extensionContext2 }, use) => {
+  }, { timeout: ATTACHED_FIXTURE_TIMEOUT_MS }],
+  extensionWorker2: [async ({ extensionContext2 }, use) => {
     if (!secondCdpEndpoint) throw new Error("second-browser-missing");
     const worker = await attachCdpWorker(extensionContext2, secondCdpEndpoint);
+    await awaitWorkerReadyAfterReset(worker);
     await awaitStableBrowserRecord(worker);
     await use(worker);
-  },
+  }, { timeout: ATTACHED_FIXTURE_TIMEOUT_MS }],
 });
 
 export { expect } from "@playwright/test";

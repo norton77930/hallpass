@@ -1,5 +1,5 @@
 import { useId, type ReactElement } from "react";
-import type { ConversationAgentAvailability, ConversationInstallPhase } from "@hallpass/contracts";
+import type { ConversationAgent, ConversationAgentAvailability, ConversationInstallPhase } from "@hallpass/contracts";
 import { availabilityDetail } from "./broker-words.js";
 
 /**
@@ -18,8 +18,15 @@ type T = (key: string) => string;
 
 export function FirstUseCard(props: {
   agentName: string;
+  /**
+   * 021: the agent, for the two whose words differ - DeepSeek is fetched by Hallpass itself, and
+   * Hermes and DeepSeek read their own settings (never a key from Hallpass, FR-355).
+   */
+  agent?: ConversationAgent;
   /** The `conversation.size.*` key's words; absent when there is nothing to download. */
   size?: string;
+  /** 021 FR-350: the worker's notes on the agent (`pre-release`). */
+  notes?: ConversationAgentAvailability["notes"];
   t: T;
   onAccept: () => void;
   onCancel: () => void;
@@ -27,17 +34,19 @@ export function FirstUseCard(props: {
   const { t } = props;
   const titleId = useId();
   const fill = (key: string): string => t(key).replace("{agent}", () => props.agentName);
+  const own = props.agent === "hermes" || props.agent === "deepseek" ? props.agent : undefined;
   return (
     <section aria-labelledby={titleId} className="agent-page agent-conversation-setup" data-setup="first-use">
       <h2 id={titleId}>{fill("conversation.firstUse.title")}</h2>
       {props.size === undefined ? null : (
         <>
-          <p>{fill("conversation.firstUse.what")}</p>
+          <p>{fill(own === "deepseek" ? "conversation.firstUse.what.deepseek" : "conversation.firstUse.what")}</p>
           <p>{t("conversation.firstUse.size").replace("{size}", () => props.size ?? "")}</p>
           <p>{t("conversation.firstUse.registry")}</p>
         </>
       )}
-      <p>{fill("conversation.firstUse.settings")}</p>
+      {props.notes?.includes("pre-release") === true ? <p>{t("conversation.note.pre-release")}</p> : null}
+      <p>{fill(own === undefined ? "conversation.firstUse.settings" : `conversation.firstUse.settings.${own}`)}</p>
       <p>{t("conversation.firstUse.browser")}</p>
       <div className="agent-prompt-actions">
         <button type="button" className="agent-primary" onClick={props.onAccept}>
@@ -67,7 +76,7 @@ export function AgentProblemCard(props: {
   return (
     <section aria-labelledby={titleId} className="agent-page agent-conversation-setup" data-setup={agent.availability}>
       <h2 id={titleId}>{fill(missing ? "conversation.missing.title" : "conversation.version.title")}</h2>
-      <p>{fill(missing ? "conversation.missing.body" : "conversation.version.body")}</p>
+      <p>{fill(missing ? (agent.agent === "hermes" ? "conversation.missing.body.hermes" : "conversation.missing.body") : "conversation.version.body")}</p>
       {missing ? <p>{t(`conversation.missing.${agent.agent}`)}</p> : null}
       {!missing && agent.version !== undefined ? (
         <p>{t("conversation.version.installed").replace("{version}", () => agent.version ?? "")}</p>

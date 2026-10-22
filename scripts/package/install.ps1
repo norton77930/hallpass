@@ -43,6 +43,8 @@ $requiredFiles = @(
   (Join-Path $hostDir "agents\claude-code\package-lock.json"),
   (Join-Path $hostDir "agents\codex\package.json"),
   (Join-Path $hostDir "agents\codex\package-lock.json"),
+  (Join-Path $hostDir "agents\deepseek\package.json"),
+  (Join-Path $hostDir "agents\deepseek\package-lock.json"),
   (Join-Path $extensionDir "manifest.json")
 )
 foreach ($required in $requiredFiles) {

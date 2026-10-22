@@ -64,3 +64,18 @@ export function redactedTail(text: string, maxChars: number): string {
   const clean = redact(text).trim();
   return clean.length <= maxChars ? clean : clean.slice(clean.length - maxChars);
 }
+
+/**
+ * SC-161: `text` with every value of an environment variable the agent ran with replaced by the
+ * variable's name, longest values first. Values shorter than eight characters are left: they are not
+ * keys, and replacing them would mangle ordinary words. It catches what `redact()` cannot know is a
+ * secret (a short key with no vendor prefix); callers apply `redact()` after it.
+ */
+export function withoutEnvironmentValues(text: string, env: Readonly<Record<string, string | undefined>>): string {
+  const pairs = Object.entries(env)
+    .filter((pair): pair is [string, string] => typeof pair[1] === "string" && pair[1].length >= 8)
+    .sort((a, b) => b[1].length - a[1].length);
+  let out = text;
+  for (const [name, value] of pairs) out = out.split(value).join(`%${name}%`);
+  return out;
+}

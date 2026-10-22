@@ -8,6 +8,13 @@ import {
   WAIT_CONDITIONS,
 } from "./common.js";
 import {
+  base64Schema,
+  CONVERSATION_FILE_MAX_BYTES,
+  CONVERSATION_IMAGE_MAX_CHARS,
+  CONVERSATION_IMAGE_MIME_TYPES,
+  CONVERSATION_TAB_TEXT_MAX_CHARS,
+  CONVERSATION_TAB_TITLE_MAX_CHARS,
+  CONVERSATION_TAB_URL_MAX_CHARS,
   conversationBrowserTokenFrameSchema,
   conversationCommandFrameSchema,
   conversationEventFrameSchema,
@@ -4266,6 +4273,69 @@ export const agentPanelStateSchema = z.strictObject({
 
 export type AgentPanelState = z.infer<typeof agentPanelStateSchema>;
 
+/* ------------------------------------------------------------------------------------------- */
+/* 022 R-342: the viewed tab, for an attachment (panel <-> worker only; never a link frame)       */
+/* ------------------------------------------------------------------------------------------- */
+
+/** "Screenshot of this tab" or "Attach this tab". */
+export const TAB_CAPTURE_WHATS = ["screenshot", "page"] as const;
+/** Why the worker captured nothing; the panel says it in the owner's language. */
+export const TAB_CAPTURE_REFUSALS = ["restricted", "not-active", "too-large", "failed"] as const;
+
+/**
+ * The panel asking the worker for the tab the owner is looking at. The owner's own action, so no
+ * site consent is asked (D-022-2, D-022-3); the worker still refuses restricted pages.
+ */
+export const tabCaptureCommandSchema = z.strictObject({
+  type: z.literal("ui.tab.capture"),
+  requestId: z.string().min(1).max(128),
+  payload: z.strictObject({ tabId: z.number().int().nonnegative(), what: z.enum(TAB_CAPTURE_WHATS) }),
+});
+
+/**
+ * The worker's answer, to the panel that asked (`requestId`): the visible part as a picture within
+ * the image bound, the page's address, title and visible text (cut at 50 000 characters), or a PDF
+ * tab as a file of at most 25 MB.
+ */
+const tabCaptureResultSchema = z.union([
+  z.strictObject({
+    ok: z.literal(true),
+    kind: z.literal("image"),
+    mimeType: z.enum(CONVERSATION_IMAGE_MIME_TYPES),
+    data: base64Schema(CONVERSATION_IMAGE_MAX_CHARS),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    kind: z.literal("page"),
+    url: z.string().max(CONVERSATION_TAB_URL_MAX_CHARS),
+    title: z.string().max(CONVERSATION_TAB_TITLE_MAX_CHARS),
+    text: z.string().max(CONVERSATION_TAB_TEXT_MAX_CHARS),
+    cut: z.boolean(),
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    kind: z.literal("file"),
+    name: z.string().min(1).max(255),
+    mimeType: z.literal("application/pdf"),
+    data: base64Schema(4 * Math.ceil(CONVERSATION_FILE_MAX_BYTES / 3)),
+    size: z.number().int().nonnegative().max(CONVERSATION_FILE_MAX_BYTES),
+  }),
+  z.strictObject({
+    ok: z.literal(false),
+    code: z.enum(TAB_CAPTURE_REFUSALS),
+    message: z.string().min(1).max(600),
+  }),
+]);
+export type TabCaptureResult = z.infer<typeof tabCaptureResultSchema>;
+
+export const tabCaptureResultMessageSchema = z.strictObject({
+  type: z.literal("tab-capture-result"),
+  requestId: z.string().min(1).max(128),
+  result: tabCaptureResultSchema,
+});
+
 export const agentPanelMessageSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("worker.agent.state"),
@@ -4275,6 +4345,8 @@ export const agentPanelMessageSchema = z.discriminatedUnion("type", [
   conversationPanelEventMessageSchema,
   /** 019 T547: the broker's answer to one `ui.conversation.*` command, to every panel document. */
   conversationPanelResultMessageSchema,
+  /** 022 R-342: the viewed tab, captured for the panel that asked. */
+  tabCaptureResultMessageSchema,
 ]);
 
 export type AgentPanelMessage = z.infer<typeof agentPanelMessageSchema>;
@@ -4475,6 +4547,8 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
    * `ui.conversation.resync` is the reconnecting panel naming the seq it needs next.
    */
   ...conversationPanelCommandSchema.options,
+  /** 022 R-342: the viewed tab for an attachment - a screenshot or its page. Panel and worker only. */
+  tabCaptureCommandSchema,
 ]);
 
 export type AgentPanelCommand = z.infer<typeof agentPanelCommandSchema>;

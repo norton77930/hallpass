@@ -2,6 +2,7 @@ import { DEFAULT_BOUNDS, type TargetMintPolicy, type TruncationDimension } from 
 import { classifyFormControl, discloseFormValue, type FormControlSnapshot } from "@hallpass/domain";
 import { fieldState } from "./field-state.js";
 import { INDICATOR_MARKER_ATTRIBUTE } from "./indicator-marker.js";
+import { visibleTextOf } from "./visible-text.js";
 import {
   isElementRendered,
   TargetRegistry,
@@ -277,22 +278,8 @@ function ordinaryVisibleText(body: {
   textContent?: string | null;
   cloneNode?: (deep?: boolean) => unknown;
 } | null | undefined): string {
-  if (!body) return "";
-  if (typeof body.cloneNode === "function") {
-    const clone = body.cloneNode(true) as {
-      textContent?: string | null;
-      querySelectorAll?: (selector: string) => ArrayLike<{ remove?: () => void }>;
-    };
-    const excluded = clone.querySelectorAll?.(
-      "input, textarea, select, option, script, style, template, [hidden], " +
-        `[aria-hidden="true"], [${INDICATOR_MARKER_ATTRIBUTE}]`,
-    );
-    if (excluded) {
-      for (let index = 0; index < excluded.length; index += 1) excluded[index]?.remove?.();
-    }
-    return (clone.textContent ?? "").trim();
-  }
-  return (body.innerText || body.textContent || "").trim();
+  // 022 R-342: one definition, shared with the owner's "Attach this tab".
+  return visibleTextOf(INDICATOR_MARKER_ATTRIBUTE, body ?? null);
 }
 
 export function classifyDocumentSupport(doc: {

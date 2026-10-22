@@ -34,6 +34,23 @@ const ERROR_CODES = [
   "busy",
   // T563: the folder dialog cannot open here; the panel offers a typed path instead.
   "path-entry",
+  // 022 (contracts/attachments.md): a piece or a send with attachments refused.
+  "attachment-too-large",
+  "attachment-too-many",
+  "attachment-type",
+  "attachment-order",
+  "attachment-unknown",
+  "attachment-incomplete",
+  "attachment-not-accepted",
+  "attachment-folder-gone",
+  "attachment-write-failed",
+  // 022 T618 follow-up: a readable commandId on a command that did not validate.
+  "invalid-command",
+  // 021 (contracts/agents.md): a start the owner stopped, and an agent that cannot reach its model.
+  "start-cancelled",
+  "agent-model-unreachable",
+  // 021 D-021-16: a mode change of an agent whose mode is fixed once started.
+  "mode-fixed",
 ];
 
 const VIEW = {
@@ -203,9 +220,9 @@ describe("T519 conversation link frames (R-323)", () => {
     expectRejected(f, { ...base, ok: false, error: { code: "folder-missing" } }, "an error without its detail");
   });
 
-  it("names exactly the fourteen ConversationError codes, including in-use-elsewhere, not-found, busy and path-entry", () => {
+  it("names exactly the twenty-seven ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command and 021's three", () => {
     const f = frame();
-    expect(ERROR_CODES).toHaveLength(14);
+    expect(ERROR_CODES).toHaveLength(27);
     for (const code of ERROR_CODES) {
       expectAccepted(
         f,

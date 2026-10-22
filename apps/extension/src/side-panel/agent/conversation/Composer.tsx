@@ -48,6 +48,17 @@ export function Composer(props: {
   popup?: ReactNode;
   /** What stays in view under the box (FR-293's Codex note). */
   below?: ReactNode;
+  /** 022 FR-335: the attachment chips, above the words inside the card. */
+  attachments?: ReactNode;
+  /** 022 FR-325: the "+" button and its menu, before Send. */
+  attach?: ReactNode;
+  /** 022 FR-339: the last refusal of an attachment, announced; drawn just above the card. */
+  refusal?: ReactNode;
+  /**
+   * 022 FR-326: files pasted into the box or dropped on the card. The paste itself is not taken
+   * over, so pasted words still go into the box.
+   */
+  onFiles?: (files: File[]) => void;
 }): ReactElement {
   const { t } = props;
   const box = useRef<HTMLTextAreaElement>(null);
@@ -71,10 +82,30 @@ export function Composer(props: {
   const stopName = t("conversation.stop");
   // T605: Stop takes Send's place while a turn is under way or a card waits - never both at once.
   const stoppable = (props.busy === true || waiting) && props.onStop !== undefined;
+  const onFiles = props.onFiles;
+  const takesFiles = onFiles !== undefined && props.readOnly !== true && props.disabled !== true;
+  const carriesFiles = (transfer: DataTransfer | null): boolean => transfer?.types?.includes("Files") === true;
   return (
     <div className="agent-conversation-composer-area">
       {props.above}
-      <form className="agent-conversation-composer" onSubmit={submit}>
+      {props.refusal}
+      <form
+        className="agent-conversation-composer"
+        onSubmit={submit}
+        onDragOver={(event) => {
+          // 022 FR-326: the card takes dropped files (and says so to the browser).
+          if (!takesFiles || !carriesFiles(event.dataTransfer)) return;
+          event.preventDefault();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={(event) => {
+          if (!takesFiles || !carriesFiles(event.dataTransfer)) return;
+          event.preventDefault();
+          const files = [...(event.dataTransfer?.files ?? [])];
+          if (files.length > 0) onFiles(files);
+        }}
+      >
+        {props.attachments}
         <textarea
           ref={box}
           aria-label={props.label}
@@ -88,6 +119,12 @@ export function Composer(props: {
           readOnly={props.readOnly === true}
           onChange={(event) => props.onDraft(event.target.value)}
           onKeyDown={onKey}
+          onPaste={(event) => {
+            // 022 FR-326: pasted pictures become chips; the words of the same paste still go in the box.
+            if (!takesFiles) return;
+            const files = [...(event.clipboardData?.files ?? [])];
+            if (files.length > 0) onFiles(files);
+          }}
         />
         {/* T602: one row under the box - the chips (which may wrap) and, at its end, Send and Stop. */}
         <div className="agent-conversation-composer-row">
@@ -95,6 +132,7 @@ export function Composer(props: {
             {props.chips}
           </div>
           <div className="agent-conversation-composer-actions">
+            {props.attach}
             {waiting || stoppable ? null : (
               <button
                 type="submit"
@@ -148,8 +186,14 @@ export function Chip(props: {
   warn?: boolean;
   /** While the words are held for a start, the chips stay as they were sent. */
   disabled?: boolean;
+  /**
+   * 021 D-021-16: shown but not offered (DeepSeek's mode once started) - still focusable, so the
+   * keyboard and a screen reader reach it and the reason `describedBy` names; a press opens nothing.
+   */
+  unavailable?: { describedBy: string };
   ref?: Ref<HTMLButtonElement>;
 }): ReactElement {
+  const unavailable = props.unavailable !== undefined;
   return (
     <button
       ref={props.ref}
@@ -160,11 +204,13 @@ export function Chip(props: {
       // A shortened chip still shows its whole value on hover.
       title={props.title ?? props.label}
       aria-label={props.label}
-      aria-expanded={props.expanded}
+      aria-expanded={unavailable ? false : props.expanded}
       aria-haspopup={props.popup}
-      aria-controls={props.expanded ? props.controls : undefined}
+      aria-controls={props.expanded && !unavailable ? props.controls : undefined}
+      aria-disabled={unavailable ? true : undefined}
+      aria-describedby={props.unavailable?.describedBy}
       data-warn={props.warn === true ? "" : undefined}
-      onClick={props.onToggle}
+      onClick={unavailable ? undefined : props.onToggle}
     >
       {props.short === undefined ? (
         <span className="agent-conversation-chip-text">{props.text}</span>
