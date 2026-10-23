@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { win32 } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   CONVERSATION_AGENTS,
   type ConversationAccepts,
@@ -58,6 +59,18 @@ type DescriptionCommon = {
   modeFixedOnceStarted: boolean;
   /** How a stopped conversation continues (R-352): with replay (`session/load`) or without (`session/resume`). */
   continueWith: "session/load" | "session/resume";
+  /** 023 R-365: the agent can be given MCP servers - Hallpass's browser tools among them. */
+  takesBrowserTools: boolean;
+  /**
+   * 023 R-365: the agent starts its MCP servers before it answers `session/new` / `session/load`, so
+   * a run whose `hallpass` server never greeted within 10 s of that did not take the tools (Hermes).
+   */
+  checksBrowserTools: boolean;
+  /**
+   * 023 R-369: where the name of the variable the agent reads its key from is found - Hermes: its home's
+   * `config.yaml`, `model.key_env` / `model.api_key_env` (user-environment.ts). Absent: not looked for.
+   */
+  keyNameSource?: "hermes-config";
 };
 
 export type AdapterDescription = DescriptionCommon & {
@@ -133,6 +146,8 @@ export const AGENT_DESCRIPTIONS = {
     modes: { strict: { agentMode: "default", atLaunch: false }, "agent-review": { agentMode: "auto", atLaunch: false } },
     modeFixedOnceStarted: false,
     continueWith: "session/load",
+    takesBrowserTools: true,
+    checksBrowserTools: false,
   },
   // Codex strict mode rests on this exact adapter (codex-strict.ts): a version bump means measuring
   // T573 again (does `read-only` still ask before every in-folder write through the shim?) and
@@ -149,6 +164,8 @@ export const AGENT_DESCRIPTIONS = {
     modes: { strict: { agentMode: "read-only", atLaunch: false }, "agent-review": { agentMode: "agent", atLaunch: false } },
     modeFixedOnceStarted: false,
     continueWith: "session/load",
+    takesBrowserTools: true,
+    checksBrowserTools: false,
   },
   // R-347: strict is Hermes' `default` mode under a managed layer that switches its command,
   // code-running, helper-agent and saved-login tools off; never `dont_ask`.
@@ -166,6 +183,9 @@ export const AGENT_DESCRIPTIONS = {
     modeFixedOnceStarted: false,
     continueWith: "session/load",
     expectedAccepts: { image: true, context: false },
+    takesBrowserTools: true,
+    checksBrowserTools: true,
+    keyNameSource: "hermes-config",
   },
   // R-346, R-349: 611 packages measured at 9-13 minutes, so a longer bound; its permission mode is an
   // environment variable fixed at start (no ACP modes), never `danger-full-access`.
@@ -183,6 +203,9 @@ export const AGENT_DESCRIPTIONS = {
     // ignores the launch environment, so a restart cannot change it.
     modeFixedOnceStarted: true,
     continueWith: "session/resume",
+    // 023 R-365: it takes no MCP servers, so the browser tools never reach it.
+    takesBrowserTools: false,
+    checksBrowserTools: false,
     expectedAccepts: { image: true, context: false },
     notes: ["pre-release"],
   },
@@ -302,13 +325,56 @@ export function parseInstallPointer(text: string): string | undefined {
   }
 }
 
-/** R-362: the tree the pointer names when there is one, else the 0.15.0 folder - the one place to look. */
+/** R-362 (L3): how many times a read the file system refused is tried, and how far apart. */
+export type ReadRetry = { attempts: number; delayMs: number };
+/** Under a second in all: a real-time file scanner looks at a file this small in far less. */
+export const READ_RETRY: ReadRetry = { attempts: 5, delayMs: 250 };
+
+/** R-362 (L3): a file of the install that is there but could not be read - not a missing or damaged one. */
+export class UnreadableInstallFileError extends Error {}
+
+const NOT_FOUND = new Set(["ENOENT", "ENOTDIR"]);
+
+/**
+ * R-362 (L3): a small file of the install (the pointer, the pinned package.json), or undefined when it
+ * is not there. Only not-found says "not there": any other refusal of the file system (EBUSY, EPERM,
+ * EACCES - a real-time file scanner holding it open) says nothing about the install, so the read is
+ * tried again and, if it still fails, throws `UnreadableInstallFileError` - never read as absent,
+ * which would start a download or replace a good pointer. An error with no errno code did not come
+ * from the file system and reads as not there. The message names the file, not its path.
+ */
+export async function readInstallFile(
+  readText: (path: string) => Promise<string>,
+  path: string,
+  retry: ReadRetry = READ_RETRY,
+): Promise<string | undefined> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await readText(path);
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (typeof code !== "string" || NOT_FOUND.has(code)) return undefined;
+      if (attempt >= retry.attempts) {
+        throw new UnreadableInstallFileError(`${win32.basename(path)} could not be read (${code}); another program may be holding it open`);
+      }
+      await delay(retry.delayMs);
+    }
+  }
+}
+
+/**
+ * R-362: the tree the pointer names when there is one, else the 0.15.0 folder - the one place to look.
+ * A pointer that is there but cannot be read throws (L3): it is not passed over for the 0.15.0 folder,
+ * which may hold an older install, so launch fails saying so instead of starting something else.
+ */
 export async function installedAdapterDirectory(
   dataDir: string,
   agent: ConversationAgent,
   readText: (path: string) => Promise<string>,
+  retry: ReadRetry = READ_RETRY,
 ): Promise<string> {
-  const folder = await readText(installPointerPath(dataDir, agent)).then(parseInstallPointer, () => undefined);
+  const text = await readInstallFile(readText, installPointerPath(dataDir, agent), retry);
+  const folder = text === undefined ? undefined : parseInstallPointer(text);
   return folder === undefined ? adapterDirectory(dataDir, agent) : win32.join(dataDir, "agents", agent, folder);
 }
 
@@ -394,7 +460,10 @@ export async function readCliVersion(cliPath: string, ports: AgentPorts): Promis
   }
 }
 
-/** The pinned package's package.json and the folder it was read from (the one launch then uses). */
+/**
+ * The pinned package's package.json and the folder it was read from (the one launch then uses).
+ * A pointer held open throws (R-362, L3), so launch says why instead of "not installed".
+ */
 async function readAdapterManifest(
   agent: ConversationAgent,
   ports: AgentPorts,
@@ -404,16 +473,20 @@ async function readAdapterManifest(
     const packageDir = await adapterPackageDirectory(agent, ports);
     const manifest: unknown = JSON.parse(await ports.fs.readText(win32.join(packageDir, "package.json")));
     return manifest && typeof manifest === "object" ? { packageDir, manifest: manifest as Record<string, unknown> } : undefined;
-  } catch {
+  } catch (error) {
+    if (error instanceof UnreadableInstallFileError) throw error;
     return undefined;
   }
 }
 
-/** Installed = the pinned package's own package.json is there, at the pinned version (data-model). */
+/**
+ * Installed = the pinned package's own package.json is there, at the pinned version (data-model).
+ * A pointer held open is not installed for now; the install then fails saying why and downloads nothing (R-362, L3).
+ */
 export async function isAdapterInstalled(agent: ConversationAgent, ports: AgentPorts): Promise<boolean> {
   const pin = packagePin(agent);
   if (pin === undefined) return false;
-  const read = await readAdapterManifest(agent, ports);
+  const read = await readAdapterManifest(agent, ports).catch(() => undefined);
   return read?.manifest.version === pin.version;
 }
 

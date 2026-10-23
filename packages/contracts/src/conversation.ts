@@ -222,7 +222,20 @@ export type ConversationError = z.infer<typeof conversationErrorSchema>;
  * broker's redacted detail). R-317 / SC-135: `sandbox-permissions-declined` - in strict mode the broker
  * declined Codex's request for wider sandbox permissions, which would have held for the rest of the turn.
  */
-export const CONVERSATION_NOTICES = ["sandbox-permissions-declined"] as const;
+export const CONVERSATION_NOTICES = ["sandbox-permissions-declined", "browser-tools-missing", "key-env-not-in-browser"] as const;
+
+/**
+ * 023 R-369 / FR-370: the name of an environment variable, as a notice may carry it - a name and
+ * never a value (no `=`, no space, nothing a value could hide in).
+ */
+export const conversationEnvNameSchema = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u, { message: "expected an environment variable name" });
+
+/** 023 R-367 / FR-371: what the broker keeps of an agent run's own output, and so what it can reply with. */
+export const CONVERSATION_DIAGNOSTIC_LINES_MAX = 50;
+export const CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS = 500;
+const diagnosticLinesSchema = z.array(z.string().max(CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS)).max(CONVERSATION_DIAGNOSTIC_LINES_MAX);
 
 /** The protocol's tool-call kinds (R-317). */
 export const CONVERSATION_TOOL_KINDS = [
@@ -383,11 +396,35 @@ export const conversationEventSchema = z.discriminatedUnion("type", [
     /** 021 R-354: on `stopped`, the owner stopped the conversation while it was still starting. */
     code: z.literal("start-cancelled").optional(),
   }),
+  /**
+   * 023 R-371: the agent is thinking - the fact only, never the thought. Once per turn, so a long
+   * thought is one frame; the panel takes it as the model having answered (R-370).
+   */
   z.strictObject({
-    type: z.literal("notice"),
-    code: z.string().min(1).max(64),
-    text: z.string().max(2048),
+    type: z.literal("activity"),
+    activity: z.literal("thinking"),
   }),
+  /**
+   * 023 R-368: `browser-tools-missing` names the `agent` (the panel's hint is the agent's);
+   * `key-env-not-in-browser` names the `agent` and the key `variable` by name. No other notice carries
+   * a variable.
+   */
+  z
+    .strictObject({
+      type: z.literal("notice"),
+      code: z.string().min(1).max(64),
+      text: z.string().max(2048),
+      agent: conversationAgentSchema.optional(),
+      variable: conversationEnvNameSchema.optional(),
+    })
+    .refine((event) => (event.code === "key-env-not-in-browser") === (event.variable !== undefined), {
+      message: "only key-env-not-in-browser names a variable, and it always does",
+      path: ["variable"],
+    })
+    .refine((event) => !(event.code === "browser-tools-missing" || event.code === "key-env-not-in-browser") || event.agent !== undefined, {
+      message: "this notice names its agent",
+      path: ["agent"],
+    }),
 ]);
 export type ConversationEvent = z.infer<typeof conversationEventSchema>;
 
@@ -523,6 +560,8 @@ const REMOVE_FOLDER = {
 const OPEN_FOLDER = { type: z.literal("ui.conversation.open-folder"), payload: conversationTarget };
 const INSTALL = { type: z.literal("ui.conversation.install"), payload: z.strictObject({ agent: conversationAgentSchema }) };
 const CONSENT = { type: z.literal("ui.conversation.consent"), payload: z.strictObject({ granted: z.boolean() }) };
+/** 023 R-367 / R-368: what the agent run printed about itself; answered by a `conversation-diagnostics` frame. */
+const DIAGNOSTICS = { type: z.literal("ui.conversation.diagnostics"), payload: conversationTarget };
 
 /**
  * The owner's commands as the broker receives them, inside a `conversation-command` frame: the
@@ -543,6 +582,7 @@ export const conversationCommandSchema = z.discriminatedUnion("type", [
   z.strictObject(CONSENT),
   z.strictObject(ATTACH),
   z.strictObject(ATTACH_CANCEL),
+  z.strictObject(DIAGNOSTICS),
 ]);
 export type ConversationCommand = z.infer<typeof conversationCommandSchema>;
 
@@ -579,6 +619,7 @@ export const conversationPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ ...CONSENT, ...COMMAND_ID }),
   z.strictObject({ ...ATTACH, ...COMMAND_ID }),
   z.strictObject({ ...ATTACH_CANCEL, ...COMMAND_ID }),
+  z.strictObject({ ...DIAGNOSTICS, ...COMMAND_ID }),
   z.strictObject(RESYNC),
 ]);
 export type ConversationPanelCommand = z.infer<typeof conversationPanelCommandSchema>;
@@ -714,6 +755,31 @@ export const conversationBrowserTokenFrameSchema = z
     path: ["startTabId"],
   });
 
+/**
+ * 023 R-365 / R-368: worker to broker - this conversation's `hallpass` server greeted with its panel
+ * token, so the agent run took the browser tools. Once per agent run. Like every routed frame it
+ * names the broker's session (contracts/frames.md lists only `conversationId`; `sessionId` is the
+ * routing every link frame carries, R-323).
+ */
+export const conversationBrowserAttachedFrameSchema = z.strictObject({
+  type: z.literal("conversation-browser-attached"),
+  sessionId: brokerSessionId,
+  conversationId: conversationIdSchema,
+});
+
+const diagnosticsPayloadShape = { conversationId: conversationIdSchema, lines: diagnosticLinesSchema };
+
+/**
+ * 023 R-367 / R-368: broker to worker, the reply to `ui.conversation.diagnostics` - the last lines the
+ * agent run printed about itself, oldest first, already scrubbed by the broker. An unknown or removed
+ * conversation has none.
+ */
+export const conversationDiagnosticsFrameSchema = z.strictObject({
+  type: z.literal("conversation-diagnostics"),
+  sessionId: brokerSessionId,
+  ...diagnosticsPayloadShape,
+});
+
 /* ------------------------------------------------------------------------------------------- */
 /* Panel state and message (contracts "Worker -> panel")                                         */
 /* ------------------------------------------------------------------------------------------- */
@@ -763,3 +829,10 @@ export const conversationPanelResultMessageSchema = z.strictObject({
   ]),
 });
 export type ConversationPanelResult = z.infer<typeof conversationPanelResultMessageSchema>["payload"];
+
+/** 023 R-367: the broker's `conversation-diagnostics`, passed to every panel document as it came. */
+export const conversationPanelDiagnosticsMessageSchema = z.strictObject({
+  type: z.literal("conversation-diagnostics"),
+  payload: z.strictObject(diagnosticsPayloadShape),
+});
+export type ConversationDiagnostics = z.infer<typeof conversationPanelDiagnosticsMessageSchema>["payload"];

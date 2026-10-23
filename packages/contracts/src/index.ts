@@ -352,6 +352,12 @@ export {
   conversationPanelStateSchema,
   conversationPanelEventMessageSchema,
   conversationPanelResultMessageSchema,
+  CONVERSATION_DIAGNOSTIC_LINES_MAX,
+  CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS,
+  conversationEnvNameSchema,
+  conversationBrowserAttachedFrameSchema,
+  conversationDiagnosticsFrameSchema,
+  conversationPanelDiagnosticsMessageSchema,
 } from "./conversation.js";
 export type {
   ConversationAgent,
@@ -376,4 +382,5 @@ export type {
   ConversationAccepts,
   ConversationAttachmentKind,
   ConversationAttachmentSummary,
+  ConversationDiagnostics,
 } from "./conversation.js";

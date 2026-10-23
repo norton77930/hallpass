@@ -333,6 +333,10 @@ async function main(): Promise<void> {
         log("broker.relay-gone");
         openWindow("relay-gone");
       }
+      // 023 R-365: the worker accepted a conversation's `hallpass` server greeting - that run took the tools.
+      if (!shuttingDown && frame.success && frame.data.type === "conversation-browser-attached" && frame.data.sessionId === sessionId) {
+        pool.browserAttached(frame.data.conversationId);
+      }
       // T540: the handler checks the command frame against the contract itself.
       if (
         !shuttingDown &&

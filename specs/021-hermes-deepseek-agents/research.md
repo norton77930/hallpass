@@ -210,3 +210,4 @@ local model started by the owner, Q37). Raw logs are kept outside the repository
   every takeover a race, where per-install folders have one writer each). Copying the tree into place
   (rejected: the scanner reads every copied file, slower than the rename). Excluding the folder from the
   scanner (not Hallpass's to configure).
+- **Follow-ups** (2026-10-23, review of bfa8e40): L1 - `cleanStaging` reads the pointers again after finding a tree's broker dead (an installer creates its pointer before it exits), so a tree named in between is kept; L3 - only not-found or invalid content makes the pointer or the pinned package.json missing or damaged: any other read error (a real-time file scanner holding the file) is retried briefly (5 tries, 250 ms apart), then the install fails saying so with no download and no pointer replaced, launch does not fall back to the 0.15.0 folder, and `cleanStaging` removes nothing of that agent.

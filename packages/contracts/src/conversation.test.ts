@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { agentLinkFrameSchema, agentPanelCommandSchema } from "./agent-tools.js";
+import { agentLinkFrameSchema, agentPanelCommandSchema, agentPanelMessageSchema } from "./agent-tools.js";
+import * as contracts from "./conversation.js";
 import {
   CONVERSATION_ERROR_CODES,
   conversationAgentAvailabilitySchema,
@@ -198,5 +199,79 @@ describe("022 error codes", () => {
         }).success,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * 023 T703 - the additions of contracts/frames.md (R-365, R-367, R-368, R-369): the worker's
+ * `conversation-browser-attached`, the notice codes `browser-tools-missing` / `key-env-not-in-browser`
+ * on the existing notice event (with the agent and, for the key, a variable *name*), and the panel's
+ * `ui.conversation.diagnostics` with its `conversation-diagnostics` reply on the link and to the panel.
+ */
+describe("023 conversation-browser-attached (worker to broker)", () => {
+  const attached = { type: "conversation-browser-attached", sessionId: "s-1", conversationId: CONVERSATION };
+
+  it("is a link frame naming the broker's session and the conversation, nothing else", () => {
+    expect(agentLinkFrameSchema.safeParse(attached).success).toBe(true);
+    expect(agentLinkFrameSchema.safeParse({ ...attached, token: "x".repeat(43) }).success).toBe(false);
+    expect(agentLinkFrameSchema.safeParse({ ...attached, conversationId: "../x" }).success).toBe(false);
+  });
+});
+
+describe("023 notice codes", () => {
+  it("lists browser-tools-missing and key-env-not-in-browser beside the 019 notice", () => {
+    expect(contracts.CONVERSATION_NOTICES).toEqual(["sandbox-permissions-declined", "browser-tools-missing", "key-env-not-in-browser"]);
+  });
+
+  it("browser-tools-missing names the agent", () => {
+    const notice = { type: "notice", code: "browser-tools-missing", text: "", agent: "hermes" };
+    expect(conversationEventSchema.safeParse(notice).success).toBe(true);
+    expect(conversationEventSchema.safeParse({ ...notice, agent: "other" }).success).toBe(false);
+    const { agent: _agent, ...noAgent } = notice;
+    expect(conversationEventSchema.safeParse(noAgent).success).toBe(false);
+  });
+
+  it("key-env-not-in-browser names the agent and a variable name, never a value", () => {
+    const notice = { type: "notice", code: "key-env-not-in-browser", text: "", agent: "hermes", variable: "OPENAI_API_KEY" };
+    expect(conversationEventSchema.safeParse(notice).success).toBe(true);
+    expect(conversationEventSchema.safeParse({ ...notice, variable: `_${"A".repeat(127)}` }).success).toBe(true);
+    for (const variable of ["", "1KEY", "MY-KEY", "KEY=sk-abc", "KEY VALUE", `_${"A".repeat(128)}`]) {
+      expect(conversationEventSchema.safeParse({ ...notice, variable }).success, variable.slice(0, 20)).toBe(false);
+    }
+    const { variable: _variable, ...noVariable } = notice;
+    expect(conversationEventSchema.safeParse(noVariable).success).toBe(false);
+  });
+
+  it("other notices stay as they were and carry no variable", () => {
+    expect(conversationEventSchema.safeParse({ type: "notice", code: "turn-failed", text: "words" }).success).toBe(true);
+    expect(conversationEventSchema.safeParse({ type: "notice", code: "turn-failed", text: "words", variable: "KEY" }).success).toBe(false);
+  });
+});
+
+describe("023 diagnostics", () => {
+  const request = { type: "ui.conversation.diagnostics", payload: { conversationId: CONVERSATION } };
+  const lines = (count: number, length = 10) => Array.from({ length: count }, () => "x".repeat(length));
+
+  it("the request is a command in the broker, panel and link unions", () => {
+    expect(conversationCommandSchema.safeParse(request).success).toBe(true);
+    expect(conversationPanelCommandSchema.safeParse({ ...request, commandId: "cmd-1" }).success).toBe(true);
+    expect(agentPanelCommandSchema.safeParse({ ...request, commandId: "cmd-1" }).success).toBe(true);
+    expect(
+      agentLinkFrameSchema.safeParse({ type: "conversation-command", sessionId: "s-1", commandId: "c-1", command: request }).success,
+    ).toBe(true);
+    expect(conversationCommandSchema.safeParse({ ...request, payload: { conversationId: CONVERSATION, all: true } }).success).toBe(false);
+  });
+
+  it("the reply carries at most 50 lines of at most 500 characters, on the link and to the panel", () => {
+    const frame = { type: "conversation-diagnostics", sessionId: "s-1", conversationId: CONVERSATION, lines: lines(50, 500) };
+    expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
+    expect(agentLinkFrameSchema.safeParse({ ...frame, lines: [] }).success).toBe(true);
+    expect(agentLinkFrameSchema.safeParse({ ...frame, lines: lines(51) }).success).toBe(false);
+    expect(agentLinkFrameSchema.safeParse({ ...frame, lines: lines(1, 501) }).success).toBe(false);
+    const message = { type: "conversation-diagnostics", payload: { conversationId: CONVERSATION, lines: lines(50, 500) } };
+    expect(agentPanelMessageSchema.safeParse(message).success).toBe(true);
+    expect(agentPanelMessageSchema.safeParse({ ...message, payload: { ...message.payload, lines: lines(51) } }).success).toBe(false);
+    expect((contracts as Record<string, unknown>).CONVERSATION_DIAGNOSTIC_LINES_MAX).toBe(50);
+    expect((contracts as Record<string, unknown>).CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS).toBe(500);
   });
 });

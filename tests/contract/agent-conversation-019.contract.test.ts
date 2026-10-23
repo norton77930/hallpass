@@ -239,10 +239,19 @@ describe("T519 conversation link frames (R-323)", () => {
   });
 
   it("names the notices the panel says in its own words (R-317), each carried as a notice event", () => {
-    expect(contractExport<readonly string[]>("CONVERSATION_NOTICES")).toEqual(["sandbox-permissions-declined"]);
+    // 023 R-368: the browser-tools and key-name notices name their agent, the key notice its variable name.
+    expect(contractExport<readonly string[]>("CONVERSATION_NOTICES")).toEqual([
+      "sandbox-permissions-declined",
+      "browser-tools-missing",
+      "key-env-not-in-browser",
+    ]);
+    const extra: Record<string, Record<string, string>> = {
+      "browser-tools-missing": { agent: "hermes" },
+      "key-env-not-in-browser": { agent: "hermes", variable: "MODEL_API_KEY" },
+    };
     const f = frame();
     for (const code of contractExport<readonly string[]>("CONVERSATION_NOTICES")) {
-      expectAccepted(f, { ...FRAMES["conversation-event"], event: { type: "notice", code, text: "detail" } }, `notice ${code}`);
+      expectAccepted(f, { ...FRAMES["conversation-event"], event: { type: "notice", code, text: "detail", ...extra[code] } }, `notice ${code}`);
     }
   });
 
@@ -252,6 +261,14 @@ describe("T519 conversation link frames (R-323)", () => {
       expectAccepted(f, { ...FRAMES["conversation-event"], event }, `a ${name} event`);
     }
     expectRejected(f, { ...FRAMES["conversation-event"], event: { type: "reasoning", text: "x" } }, "an unknown event kind");
+  });
+
+  it("023 R-371: says the agent is thinking, never what it thinks", () => {
+    const f = frame();
+    const at = (event: unknown) => ({ ...FRAMES["conversation-event"], event });
+    expectAccepted(f, at({ type: "activity", activity: "thinking" }), "the agent thinking");
+    expectRejected(f, at({ type: "activity", activity: "thinking", text: "the thought" }), "a thinking event with the thought");
+    expectRejected(f, at({ type: "activity", activity: "planning" }), "another activity");
   });
 
   it("keeps the event size limits of the contract", () => {

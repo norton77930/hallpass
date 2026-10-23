@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -147,6 +148,19 @@ const treeDir = (agent: ConversationAgent = AGENT, suffix = "abc123", pid = proc
 const pointerName = (agent: "claude-code" | "codex" | "deepseek" = AGENT) => `${AGENT_DESCRIPTIONS[agent].version}.installed.json`;
 const readPointer = async (agent: "claude-code" | "codex" | "deepseek" = AGENT) =>
   JSON.parse(await readFile(installPointerPath(data, agent), "utf8")) as { folder: string };
+
+/** What a real-time file scanner holding a file open makes a read fail with. */
+const busy = (path: string) => Object.assign(new Error(`EBUSY: resource busy or locked, open '${path}'`), { code: "EBUSY" });
+/** The real files, except that a read `locked` says is held fails as it would under the scanner. */
+const lockedReads =
+  (locked: (path: string) => boolean) =>
+  async (path: string): Promise<string> => {
+    if (locked(path)) throw busy(path);
+    return readFile(path, "utf8");
+  };
+/** A read retried without waiting, so these cases stay fast. */
+const FAST_RETRY = { attempts: 3, delayMs: 0 };
+const pinnedManifest = (tree: string) => join(tree, "node_modules", ...ADAPTER.package.split("/"), "package.json");
 
 describe("installAgent with an injected npm (T532, T533, R-314)", () => {
   it("runs npm ci in .install-<pid>-<random> on the shipped manifest and lock, then points the version at it", async () => {
@@ -384,6 +398,84 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
   });
 });
 
+describe("installAgent when the file system will not let a file be read (021 R-362, L3)", () => {
+  const installedTree = () => treeDir(AGENT, "old000");
+  const pointAtInstalled = async () => {
+    await writeAdapterTree(installedTree());
+    await writeFile(installPointerPath(data, AGENT), JSON.stringify({ folder: `.install-${process.pid}-old000` }));
+  };
+  const npmWrites = async (cwd: string) => {
+    await writeAdapterTree(cwd);
+    return {};
+  };
+
+  it("does not download because the pointer is held open: it fails, saying so, and leaves the install as it is", async () => {
+    await pointAtInstalled();
+    const pointer = installPointerPath(data, AGENT);
+    const { ports: p, calls } = ports(npmWrites, { readText: lockedReads((path) => path === pointer), readRetry: FAST_RETRY });
+    const result = await installAgent(AGENT, p);
+
+    expect(calls).toHaveLength(0);
+    expect(result).toMatchObject({ ok: false, error: { code: "install-failed" } });
+    expect(result.ok ? "" : result.error.detail).toContain("EBUSY");
+    expect(result.ok ? "" : result.error.detail).not.toContain(data);
+    expect(await readPointer()).toEqual({ folder: `.install-${process.pid}-old000` });
+    expect((await list(join(data, "agents", AGENT))).sort()).toEqual([`.install-${process.pid}-old000`, pointerName()].sort());
+  });
+
+  it("reads the pointer again when the hold is brief, and then needs no download", async () => {
+    await pointAtInstalled();
+    const pointer = installPointerPath(data, AGENT);
+    let held = 2;
+    const { ports: p, calls } = ports(npmWrites, {
+      readText: lockedReads((path) => path === pointer && held-- > 0),
+      readRetry: FAST_RETRY,
+    });
+    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: installedTree() });
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["the tree the pointer names", async () => (await pointAtInstalled(), installedTree())],
+    ["a 0.15.0 <version> folder", async () => (await writeAdapterTree(installedDir()), installedDir())],
+  ])("does not download because the pinned package.json in %s is held open, nor remove it", async (_, install) => {
+    const installed = await install();
+    const { ports: p, calls } = ports(npmWrites, {
+      readText: lockedReads((path) => path === pinnedManifest(installed)),
+      readRetry: FAST_RETRY,
+    });
+    const result = await installAgent(AGENT, p);
+
+    expect(calls).toHaveLength(0);
+    expect(result).toMatchObject({ ok: false, error: { code: "install-failed" } });
+    expect(await exists(pinnedManifest(installed))).toBe(true);
+  });
+
+  it("never replaces a pointer another install created because it cannot read it (the pointAt EEXIST path)", async () => {
+    const other = treeDir(AGENT, "aaa111", 4_000_201);
+    const pointer = installPointerPath(data, AGENT);
+    let npmDone = false;
+    const { ports: p, calls } = ports(
+      async (cwd) => {
+        // Another broker's install finishes and creates the pointer while this one's npm runs...
+        await writeAdapterTree(other);
+        await writeFile(pointer, JSON.stringify({ folder: ".install-4000201-aaa111" }));
+        await writeAdapterTree(cwd);
+        npmDone = true;
+        return {};
+      },
+      // ...and from then on the pointer is held open.
+      { readText: lockedReads((path) => npmDone && path === pointer), readRetry: FAST_RETRY },
+    );
+    const result = await installAgent(AGENT, p);
+
+    expect(calls).toHaveLength(1);
+    expect(result).toMatchObject({ ok: false, error: { code: "install-failed" } });
+    expect(await readPointer()).toEqual({ folder: ".install-4000201-aaa111" });
+    expect(await exists(treeDir())).toBe(false);
+  });
+});
+
 describe("installAgent per agent (021 T646, R-345, R-346)", () => {
   const DSH = AGENT_DESCRIPTIONS.deepseek;
   const writeDshTree = async (cwd: string) => {
@@ -515,6 +607,66 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: treeDir() });
     expect(calls).toHaveLength(1);
     expect((await list(join(data, "agents", AGENT))).sort()).toEqual([`.install-${process.pid}-abc123`, pointerName()].sort());
+  });
+
+  it("021 R-362 (L1): keeps a tree whose installer named it and exited between the pointer read and the pid check", async () => {
+    const installer = 4_000_501;
+    const tree = treeDir(AGENT, "race01", installer);
+    await writeAdapterTree(tree);
+
+    const removed = await cleanStaging(data, {
+      // The installer creates its pointer and exits just before its pid is looked at.
+      isAlive: (pid) => {
+        if (pid === installer) writeFileSync(installPointerPath(data, AGENT), JSON.stringify({ folder: `.install-${installer}-race01` }));
+        return false;
+      },
+      selfPid: 4_000_502,
+    });
+
+    expect(removed).toEqual([]);
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
+  });
+
+  it("021 R-362 (L3): removes nothing of an agent whose pointer it cannot read", async () => {
+    const deadBroker = 4_000_601;
+    const installed = treeDir(AGENT, "done03", deadBroker);
+    const crashed = treeDir(AGENT, "dead03", deadBroker);
+    await writeAdapterTree(installed);
+    await mkdir(crashed, { recursive: true });
+    const pointer = installPointerPath(data, AGENT);
+    await writeFile(pointer, JSON.stringify({ folder: `.install-${deadBroker}-done03` }));
+
+    const removed = await cleanStaging(data, {
+      isAlive: () => false,
+      selfPid: 4_000_602,
+      readText: lockedReads((path) => path === pointer),
+      readRetry: FAST_RETRY,
+    });
+
+    expect(removed).toEqual([]);
+    expect(await exists(installed)).toBe(true);
+    expect(await exists(crashed)).toBe(true);
+  });
+
+  it.each([
+    ["an absolute path", (tree: string) => JSON.stringify({ folder: tree })],
+    ["a separator", (tree: string) => JSON.stringify({ folder: `.\\${basename(tree)}` })],
+    ["a forward slash", (tree: string) => JSON.stringify({ folder: `./${basename(tree)}` })],
+    ["'..'", (tree: string) => JSON.stringify({ folder: `..\\${AGENT}\\${basename(tree)}` })],
+    ["junk", () => "not json {"],
+    ["null", () => "null"],
+    ["an array", (tree: string) => JSON.stringify([basename(tree)])],
+    ["a bare string", (tree: string) => JSON.stringify(basename(tree))],
+    ["a non-string folder", () => JSON.stringify({ folder: 42 })],
+  ])("021 R-362: a pointer holding %s names no tree", async (_, content) => {
+    const tree = treeDir(AGENT, "bad001", 4_000_701);
+    await writeAdapterTree(tree);
+    await writeFile(installPointerPath(data, AGENT), content(tree));
+
+    const removed = await cleanStaging(data, { isAlive: () => false, selfPid: 4_000_702 });
+
+    expect(removed).toEqual([tree]);
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(false);
   });
 
   it("is quiet when there is no agents folder yet", async () => {

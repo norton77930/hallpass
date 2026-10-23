@@ -46,7 +46,9 @@ export type TimelineItem =
   | { kind: "actions"; key: string; actions: ToolEvent[] }
   | { kind: "notice"; key: string; notice: NoticeEvent }
   /** 020 FR-319: how a card this panel showed was closed, as the broker reported it. */
-  | { kind: "answer"; key: string; title: string; answer: PermissionClosedEvent["answer"] };
+  | { kind: "answer"; key: string; title: string; answer: PermissionClosedEvent["answer"] }
+  /** 023 R-371: the agent said it was thinking (the fact only); drawn while it is the last item. */
+  | { kind: "thinking"; key: string };
 
 export type ConversationPicture = {
   timeline: TimelineItem[];
@@ -129,6 +131,9 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
         break;
       case "notice":
         timeline.push({ kind: "notice", key: `notice-${seq}`, notice: event });
+        break;
+      case "activity":
+        if (timeline[timeline.length - 1]?.kind !== "thinking") timeline.push({ kind: "thinking", key: `thinking-${seq}` });
         break;
     }
   }

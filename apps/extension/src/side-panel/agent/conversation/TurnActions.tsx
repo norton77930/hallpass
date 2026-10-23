@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactElement } from "react";
+import { useEffect, useId, useRef, useState, type ReactElement } from "react";
 import type { ConversationEvent } from "@hallpass/contracts";
 import { actionWords } from "./action-words.js";
 import { ActionList, inputBeside } from "./ActionList.js";
@@ -99,6 +99,59 @@ export function LiveLine(props: { live?: ToolEvent | undefined; waitingFor?: str
         </>
       )}
     </p>
+  );
+}
+
+/** 023 D-023-5: from this many seconds without an update the line adds the server/VPN hint. */
+const MODEL_HINT_AFTER_S = 30;
+
+/**
+ * 023 D-023-5, R-370, FR-367/368: the seconds since a wait began, counted from the moment `wait`
+ * (the key of the message being waited on) appears until it goes or changes; 0 when there is none.
+ */
+export function useModelWaitSeconds(wait: string | undefined): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    setSeconds(0);
+    if (wait === undefined) return;
+    const since = Date.now();
+    const timer = setInterval(() => setSeconds(Math.max(0, Math.floor((Date.now() - since) / 1000))), 1000);
+    return () => clearInterval(timer);
+  }, [wait]);
+  return wait === undefined ? 0 : seconds;
+}
+
+/**
+ * 023 D-023-5, R-370, FR-367/368: "Waiting for the model… N s" from the owner's message until the
+ * turn's first update, drawn as the thread's last line. Screen readers: the whole visible line (and
+ * its per-second counter) is hidden from them - `WaitingStatus` is what they hear - so the hint is
+ * not announced by the message log it sits in as well (S3a a11y).
+ */
+export function WaitingForModel(props: { t: (key: string) => string; seconds: number }): ReactElement {
+  const { t, seconds } = props;
+  const hint = seconds >= MODEL_HINT_AFTER_S ? t("conversation.turn.waitingModelHint") : "";
+  return (
+    <div className="agent-conversation-live" data-model-wait="" aria-hidden="true">
+      <p data-model-wait-text="">
+        <WaitIcon />
+        <span className="agent-conversation-action-title">{t("conversation.turn.waitingModel").replace("{seconds}", String(seconds))}</span>
+      </p>
+      {hint === "" ? null : <p className="agent-conversation-detail">{hint}</p>}
+    </div>
+  );
+}
+
+/**
+ * 023 (S3a a11y): the wait's one announcement - a polite status that stays empty until the hint
+ * appears at 30 s and then says it. The message list puts it beside the log, not inside it: the log
+ * is a live region itself, and a status nested in it was announced twice.
+ */
+export function WaitingStatus(props: { t: (key: string) => string; seconds: number }): ReactElement {
+  const hint = props.seconds >= MODEL_HINT_AFTER_S ? props.t("conversation.turn.waitingModelHint") : "";
+  return (
+    <span className="agent-sr-only" role="status" aria-live="polite" aria-atomic="true" data-model-wait-status="">
+      {hint}
+    </span>
   );
 }
 

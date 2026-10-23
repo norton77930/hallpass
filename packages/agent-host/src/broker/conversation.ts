@@ -4,6 +4,8 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
   CONVERSATION_AGENTS,
+  CONVERSATION_DIAGNOSTIC_LINES_MAX,
+  CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS,
   CONVERSATION_MAX_ATTACHMENTS,
   CONVERSATION_MODES,
   CONVERSATION_NOTICES,
@@ -39,6 +41,7 @@ import { ConversationEventLog, type ConversationPage } from "./event-log.js";
 import { ensureScratchFolder, isDirectory, scratchFolderPath } from "./folders.js";
 import { redact, withoutEnvironmentValues } from "./redact.js";
 import { killTree } from "./run-command.js";
+import { defaultUserEnvironmentPorts, keyNameOnlyInUserSettings, type UserEnvironmentPorts } from "./user-environment.js";
 
 /**
  * One conversation with the owner's own coding agent, and the broker's pool of them (019 T539;
@@ -79,6 +82,45 @@ export const TEXT_FRAME_INTERVAL_MS = 50;
 const AGENT_STOP_BOUND_MS = 3_000;
 /** T577: how often a conversation listed as in use in another browser is looked at again. */
 const LEASE_RECHECK_MS = 1_000;
+/**
+ * 023 R-367: how much of one line of the agent's error output is read before it is scrubbed and cut to
+ * 500 characters - room for a variable's value that starts just before the 500th character to be
+ * recognised whole. A value the read limit itself cuts is dropped with the cut (`withoutCutValue`).
+ */
+const OUTPUT_LINE_READ_MAX = 16 * 1024;
+/** `withoutEnvironmentValues` replaces values of at least this many characters (SC-161). */
+const SCRUBBED_VALUE_MIN = 8;
+
+/**
+ * 023 R-367: `text`, cut short at a read limit, without its longest ending that a value of `env` (one
+ * `withoutEnvironmentValues` would replace) begins with - what is left of a value the cut went through.
+ * A value the cut did not touch stays whole and is scrubbed as before.
+ */
+function withoutCutValue(text: string, env: Readonly<Record<string, string | undefined>>): string {
+  let drop = 0;
+  for (const value of Object.values(env)) {
+    if (typeof value !== "string" || value.length < SCRUBBED_VALUE_MIN) continue;
+    // Only endings shorter than the value: a whole value is found by the scrub.
+    const from = Math.max(text.length - value.length + 1, 0);
+    for (let at = text.indexOf(value[0]!, from); at >= 0 && text.length - at > drop; at = text.indexOf(value[0]!, at + 1)) {
+      if (value.startsWith(text.slice(at))) {
+        drop = text.length - at;
+        break;
+      }
+    }
+  }
+  return text.slice(0, text.length - drop);
+}
+/** 023 R-365: how long after `session/new` / `session/load` a checked agent's `hallpass` server has to greet. */
+export const BROWSER_CHECK_MS = 10_000;
+/** 023 R-365 (D-023-2): what each agent's `browser-tools-missing` says; the panel words it in its own locale. */
+const BROWSER_TOOLS_MISSING: Readonly<Record<ConversationAgent, string>> = {
+  "claude-code": "Claude Code did not take Hallpass's browser tools.",
+  codex: "Codex did not take Hallpass's browser tools.",
+  hermes:
+    "Hermes did not take Hallpass's browser tools, so it cannot use this browser. Hermes needs its optional MCP component for them: add it to your Hermes installation, then start a new conversation.",
+  deepseek: "DeepSeek cannot use Hallpass's browser tools. To show it a page, attach a screenshot or the current tab.",
+};
 const NEW_TITLE = "New conversation";
 
 export type ClockTimer = { cancel(): void };
@@ -309,7 +351,8 @@ const STOP_NOTICE_CODES: Readonly<Partial<Record<string, string>>> = {
 /**
  * 022 R-336 / FR-333: a message's prompt - its text (if any), each picture as an image, the tab as
  * one text resource (its title, a blank line, its text), and one text block naming each file with
- * its path. A message without attachments is the one text block it always was.
+ * its path. A message without attachments is the one text block it always was. 023 R-366: a tab
+ * written to a file (an agent without page context) is named in that block like a file instead.
  */
 export function promptBlocks(text: string, attachments: readonly ReadyAttachment[]): acp.ContentBlock[] {
   const blocks: acp.ContentBlock[] = [];
@@ -318,14 +361,20 @@ export function promptBlocks(text: string, attachments: readonly ReadyAttachment
     if (attachment.kind === "image") blocks.push({ type: "image", data: attachment.data, mimeType: attachment.mimeType });
   }
   for (const attachment of attachments) {
-    if (attachment.kind === "tab") {
+    if (attachment.kind === "tab" && attachment.file === undefined) {
       blocks.push({
         type: "resource",
         resource: { uri: attachment.url, mimeType: "text/plain", text: `${attachment.title}\n\n${attachment.text}` },
       });
     }
   }
-  const files = attachments.flatMap((attachment) => (attachment.kind === "file" ? [`- ${attachment.name}: ${attachment.path}`] : []));
+  const files = attachments.flatMap((attachment) =>
+    attachment.kind === "file"
+      ? [`- ${attachment.name}: ${attachment.path}`]
+      : attachment.kind === "tab" && attachment.file !== undefined
+        ? [`- ${attachment.file.name}: ${attachment.file.path}`]
+        : [],
+  );
   if (files.length > 0) blocks.push({ type: "text", text: files.join("\n") });
   return blocks;
 }
@@ -375,7 +424,7 @@ type Announced = { title?: string; kind?: ToolKind; detail?: string };
 export type AnswerResult = "answered" | "not-open" | "reject-only";
 
 /** `stopped`: the owner pressed Stop; the conversation says so when the turn ends (US1.4). */
-type Turn = { cancelled: boolean; stopped: boolean; rejected: Set<string> };
+type Turn = { cancelled: boolean; stopped: boolean; rejected: Set<string>; thinkingSaid?: true };
 
 type ToolView = {
   kind: ToolKind;
@@ -397,6 +446,8 @@ export type ConversationDeps = {
   /** S6 (T552, R-321/R-322): the browser connection handed to each agent run. None: no `mcpServers`. */
   browser?: ConversationBrowserAccess;
   log?: (code: string, detail?: string) => void;
+  /** 023 R-369: what the key-name check reads; the machine's own by default. */
+  userEnvironment?: UserEnvironmentPorts;
 };
 
 export type StartRequest = {
@@ -423,12 +474,15 @@ export type StartOutcome =
   | { ok: true; agentSessionId: string }
   | { ok: false; error: ConversationError; unknownSession?: boolean };
 
-/** The broker's own process tree: a plain child, stdio piped, stderr never read (R-326). */
+/**
+ * The broker's own process tree: a plain child, stdio piped. 023 R-367 (replaces R-326's ignored
+ * stderr): its error output is piped too and always read, into the run's scrubbed diagnostic lines.
+ */
 export function spawnAgentProcess(spec: AdapterLaunchSpec, cwd: string): ChildProcess {
   return spawn(spec.command, spec.args, {
     cwd,
     env: { ...process.env, ...spec.env },
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
     // 021: a batch-file agent (Hermes' hermes-acp.cmd) comes as one command line quoted for cmd.exe.
     ...(spec.windowsVerbatimArguments === true ? { windowsVerbatimArguments: true } : {}),
@@ -516,6 +570,21 @@ export class Conversation {
   private lastActivity: number;
   /** 022 R-336: what this run's agent said at `initialize` it takes besides text. */
   private acceptsValue: ConversationAccepts | undefined;
+  /** 023 R-365: this run's `hallpass` server greeted (the worker's `conversation-browser-attached`). */
+  private browserAttachedRun = false;
+  /** 023 R-365: the 10 s after session creation or load within which that greeting is expected. */
+  private browserCheck: ClockTimer | undefined;
+  /** 023 R-365 (data-model `browserNoticeSent`): one `browser-tools-missing` per conversation, restarts included. */
+  private browserNoticeSent = false;
+  /** 023 R-369: a turn of this run went through - a later failure is not the "first message" any more. */
+  private turnWentThrough = false;
+  /** 023 R-369: this run already looked for a key the browser cannot see. */
+  private keyNameChecked = false;
+  /**
+   * 023 R-367 (FR-371/372): the last lines the latest run printed about itself, scrubbed and cut.
+   * Memory only - never logged, never written; a new run starts a new list, removal drops it.
+   */
+  private outputLines: string[] = [];
 
   constructor(
     readonly conversationId: string,
@@ -595,6 +664,11 @@ export class Conversation {
     this.renamePending = false;
     this.muted = false;
     this.inertToken = undefined;
+    // 023 R-365: a new run, a new greeting to wait for (it may come before `session/new` answers).
+    this.browserAttachedRun = false;
+    this.cancelBrowserCheck();
+    this.turnWentThrough = false;
+    this.keyNameChecked = false;
     this.setState("starting");
     // R-322: decided once per run (the owner's Codex config may have changed since the last one),
     // read while the agent initialises.
@@ -610,6 +684,7 @@ export class Conversation {
       return { ok: false, error: classifyStartFailure("initialize", error, request.versions, this.runEnv()) };
     }
     this.child = child;
+    this.readOutput(child);
     this.exited = new Promise<never>((_resolve, reject) => {
       child.once("exit", (code) => reject(new AgentExited(code)));
       child.once("error", (error) => reject(error));
@@ -734,7 +809,16 @@ export class Conversation {
       }
       const failedAt = step === "initialize" || step === "session/set_mode" ? step : "session/new";
       const refused = startFailure(this.agent, failedAt, error, request.versions, this.runEnv());
-      if (refused.code === MODEL_UNREACHABLE_NOTICE) this.deps.log?.("conversation.model-unreachable", `${this.conversationId} ${refused.detail}`);
+      if (refused.code === MODEL_UNREACHABLE_NOTICE) {
+        this.deps.log?.("conversation.model-unreachable", `${this.conversationId} ${refused.detail}`);
+        // 023 R-369: said before the start's own failure goes back, so it is in the conversation's log first.
+        const variable = await this.sayKeyOnlyInUserSettings();
+        // 023 R-369 (FR-369): a first start's conversation is dropped with its failure, so the notice
+        // never reaches the panel; the same hint goes in the failure the panel does show. Name only.
+        if (variable !== undefined && request.resume === undefined) {
+          return { ok: false, error: startFailure(this.agent, failedAt, error, request.versions, this.runEnv(), keyEnvHint(this.agent, variable)) };
+        }
+      }
       return { ok: false, error: refused };
     }
 
@@ -748,7 +832,117 @@ export class Conversation {
     this.touch();
     this.setState("idle");
     this.armIdle();
+    this.checkBrowserTools();
     return { ok: true, agentSessionId: this.sessionId! };
+  }
+
+  /**
+   * 023 R-365 (D-023-2, FR-364): after the session was created or loaded, whether this run took the
+   * browser tools. An agent that takes no MCP servers (DeepSeek) is told at once; one that starts them
+   * before answering (Hermes) has 10 s for its server to greet; others are not checked (FR-374). Only
+   * a run that was offered the tools - a browser connection, a token not withdrawn - is checked.
+   */
+  private checkBrowserTools(): void {
+    if (this.browserNoticeSent || this.deps.browser === undefined) return;
+    const description = AGENT_ADAPTERS[this.agent];
+    if (!description.takesBrowserTools) {
+      this.sayBrowserToolsMissing();
+      return;
+    }
+    if (!description.checksBrowserTools || this.browserToken === undefined || this.browserAttachedRun) return;
+    this.browserCheck = this.deps.clock.setTimer(() => {
+      this.browserCheck = undefined;
+      if (this.live && this.browserToken !== undefined && !this.browserAttachedRun) this.sayBrowserToolsMissing();
+    }, BROWSER_CHECK_MS);
+  }
+
+  /**
+   * 023 R-369 (D-023-6, FR-369/370): after a start or first turn failed for the agent's model or key,
+   * whether the variable its settings name as its key source is in the owner's user settings but not in
+   * what this run got (nor in the agent's own `.env`) - the browser started before it was set. Once per
+   * run, only for an agent whose description says where that name is. Names only: no value is read
+   * into Hallpass, and nothing of it goes to the broker log. Gives the variable's name when it said so.
+   */
+  private async sayKeyOnlyInUserSettings(): Promise<string | undefined> {
+    if (this.keyNameChecked || (AGENT_ADAPTERS[this.agent] as AgentDescription).keyNameSource !== "hermes-config") return undefined;
+    this.keyNameChecked = true;
+    const variable = await keyNameOnlyInUserSettings(this.runEnv(), this.deps.userEnvironment ?? defaultUserEnvironmentPorts).catch(
+      () => undefined,
+    );
+    if (variable === undefined) return undefined;
+    this.enqueue({ type: "notice", code: "key-env-not-in-browser", agent: this.agent, variable, text: keyEnvHint(this.agent, variable) });
+    return variable;
+  }
+
+  private sayBrowserToolsMissing(): void {
+    if (this.browserNoticeSent) return;
+    this.browserNoticeSent = true;
+    this.enqueue({ type: "notice", code: "browser-tools-missing", agent: this.agent, text: BROWSER_TOOLS_MISSING[this.agent] });
+  }
+
+  private cancelBrowserCheck(): void {
+    this.browserCheck?.cancel();
+    this.browserCheck = undefined;
+  }
+
+  /**
+   * 023 R-367: this run's error output, always read (the agent never blocks on a full pipe), kept as
+   * its last 50 lines. Each line loses every value of the environment the run got, then key-shaped
+   * text, and only then is cut to 500 characters - so no beginning of a value is left at the cut. A
+   * line is read up to `OUTPUT_LINE_READ_MAX` characters; the rest of a longer one is dropped unread,
+   * and so is the end of what was read that a value could begin with (`withoutCutValue`) - the text
+   * before it may shrink below 500 characters once scrubbed.
+   */
+  private readOutput(child: ChildProcess): void {
+    const lines: string[] = [];
+    this.outputLines = lines;
+    const stream = child.stderr;
+    if (stream === null || stream === undefined) return;
+    const env = this.runEnv();
+    const keep = (raw: string): void => {
+      const text = raw.replace(/\r$/u, "");
+      if (text.trim().length === 0) return;
+      lines.push(redact(withoutEnvironmentValues(text, env)).slice(0, CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS));
+      if (lines.length > CONVERSATION_DIAGNOSTIC_LINES_MAX) lines.shift();
+    };
+    let partial = "";
+    // Once a line is cut, the rest of it is not read: joined to the cut, it would hide a cut value.
+    let cut = false;
+    const add = (piece: string): void => {
+      if (cut) return;
+      partial += piece;
+      if (partial.length <= OUTPUT_LINE_READ_MAX) return;
+      partial = withoutCutValue(partial.slice(0, OUTPUT_LINE_READ_MAX), env);
+      cut = true;
+    };
+    const endLine = (): void => {
+      keep(partial);
+      partial = "";
+      cut = false;
+    };
+    stream.setEncoding("utf8");
+    stream.on("data", (chunk: string) => {
+      const [first, ...rest] = chunk.split("\n");
+      add(first!);
+      for (const part of rest) {
+        endLine();
+        add(part);
+      }
+    });
+    stream.once("end", endLine);
+    stream.on("error", () => undefined);
+  }
+
+  /** 023 R-367 (FR-372): the latest run's lines, for the panel's conversation details. */
+  diagnostics(): string[] {
+    return [...this.outputLines];
+  }
+
+  /** 023 R-365: the worker accepted this conversation's `hallpass` server greeting - this run has the tools. */
+  browserAttached(): void {
+    if (!this.live) return;
+    this.browserAttachedRun = true;
+    this.cancelBrowserCheck();
   }
 
   /** SC-161: everything this run's agent was started with - the broker's environment and the launch's own. */
@@ -781,6 +975,8 @@ export class Conversation {
   revokeBrowserToken(): void {
     if (this.browserToken === undefined) return;
     this.browserToken = undefined;
+    // 023 R-365: a run without access is not asked whether it took the tools.
+    this.cancelBrowserCheck();
     this.deps.browser?.grant({ conversationId: this.conversationId, token: null });
     // A reload with no entry would let the owner's own `hallpass` load for this session (R-322).
     this.inertToken = this.deps.browser?.mint();
@@ -878,6 +1074,7 @@ export class Conversation {
       .then(
         async (response) => {
           await settle();
+          this.turnWentThrough = true;
           // R-316: the turn is over only once a drifted mode is set back.
           await this.modeReset;
           if (response.stopReason !== "end_turn" && response.stopReason !== "cancelled") {
@@ -905,6 +1102,8 @@ export class Conversation {
             // R-356 / FR-355: where the agent's own setting lives.
             this.deps.log?.("conversation.model-unreachable", `${this.conversationId} ${clip(clean, 600)}`);
             this.enqueue({ type: "notice", code: MODEL_UNREACHABLE_NOTICE, text: shown(`${modelSetupHint(this.agent)} The agent said: ${clean}`, 2048) });
+            // 023 R-369: the first message of the run - said when the check is done, the turn ends now.
+            if (!this.turnWentThrough) void this.sayKeyOnlyInUserSettings();
           } else {
             this.enqueue({ type: "notice", code: "turn-failed", text: shown(`The agent's turn failed: ${clean}`, 2048) });
           }
@@ -1189,6 +1388,14 @@ export class Conversation {
         this.showTool(update);
         return;
       }
+      case "agent_thought_chunk": {
+        // 023 R-371: that the agent thinks, once per live turn - never the thought itself.
+        const turn = this.turn;
+        if (this.replay !== "off" || this.muted || turn === undefined || turn.cancelled || turn.thinkingSaid) return;
+        turn.thinkingSaid = true;
+        this.enqueue({ type: "activity", activity: "thinking" });
+        return;
+      }
       case "current_mode_update": {
         this.reportedModeId = update.currentModeId;
         // An agent without ACP modes (R-351) has no mode of the owner's to drift from or to set back.
@@ -1388,6 +1595,7 @@ export class Conversation {
     this.connection = undefined;
     this.watchingMode = false;
     this.cancelIdle();
+    this.cancelBrowserCheck();
     this.turn = undefined;
     this.announced.clear();
     for (const card of [...this.cards.values()]) this.closeCard(card, "agent-exited", { outcome: { outcome: "cancelled" } });
@@ -1582,7 +1790,8 @@ export { withoutEnvironmentValues };
  * connection, R-358: no provider chosen yet) says where the agent's own setting lives, as a turn does;
  * any other refusal is `classifyStartFailure`'s - a version problem only when another version than the
  * tested one was found, or the modes it offers do not fit (`session/set_mode`, said as `session/new`).
- * `env` is everything the agent ran with: no value of it is said (SC-161).
+ * `env` is everything the agent ran with: no value of it is said (SC-161). 023 R-369: `keyHint`, when
+ * given, follows the setup hint - before the agent's own words, so the 600-character cut never reaches it.
  */
 function startFailure(
   agent: ConversationAgent,
@@ -1590,12 +1799,23 @@ function startFailure(
   error: unknown,
   versions: StartFailureVersions,
   env: Readonly<Record<string, string | undefined>>,
+  keyHint?: string,
 ): ConversationError {
   const shownStep = step === "initialize" ? "initialize" : "session/new";
   const classified = classifyStartFailure(shownStep, error, versions, env, step === "session/set_mode");
   const said = errorMessage(error);
   if (classified.code === "agent-missing" || !isModelUnreachable(said)) return classified;
-  return failure(MODEL_UNREACHABLE_NOTICE, `${modelSetupHint(agent)} The agent said (${shownStep}): ${withoutEnvironmentValues(said, env)}`).error;
+  const hints = keyHint === undefined ? modelSetupHint(agent) : `${modelSetupHint(agent)} ${keyHint}`;
+  return failure(MODEL_UNREACHABLE_NOTICE, `${hints} The agent said (${shownStep}): ${withoutEnvironmentValues(said, env)}`).error;
+}
+
+/**
+ * 023 R-369 (D-023-6, FR-369/370): the variable named as the agent's key source is in the owner's user
+ * settings, but this browser started before it was. `variable` is a name (`conversationEnvNameSchema`),
+ * never a value.
+ */
+function keyEnvHint(agent: ConversationAgent, variable: string): string {
+  return `${variable} is set in your Windows user settings, but this browser started before it was, so ${AGENT_ADAPTERS[agent].label} did not get it. Quit the browser completely (also when it keeps running in the background), then open it again.`;
 }
 
 /** R-319: a `session/load` refused for an unknown session marks the entry "cannot continue" (FR-304). */
@@ -1631,6 +1851,8 @@ export type ConversationPoolOptions = {
   folderExists?: (path: string) => Promise<boolean>;
   newConversationId?: () => string;
   log?: (code: string, detail?: string) => void;
+  /** 023 R-369: what the key-name check reads (Hermes' files, the user's variable names); the machine's own by default. */
+  userEnvironment?: UserEnvironmentPorts;
 };
 
 /**
@@ -1828,13 +2050,11 @@ export class ConversationPool {
       if (accepts !== undefined && !accepts.image && kinds.includes("image")) {
         return refuse(failure("attachment-not-accepted", `${AGENT_ADAPTERS[conversation.agent].label} does not take pictures.`));
       }
-      if (accepts !== undefined && !accepts.context && kinds.includes("tab")) {
-        return refuse(failure("attachment-not-accepted", `${AGENT_ADAPTERS[conversation.agent].label} does not take a page as context.`));
-      }
       const can = conversation.canSend();
       if (!can.ok) return refuse(can);
       if (store === undefined) return refuse(unknownAttachment());
-      const taken = await store.take(attachmentIds);
+      // 023 R-366 (D-023-3): an agent that takes no page context gets the tab as a text file, not a refusal.
+      const taken = await store.take(attachmentIds, { tabAsFile: accepts !== undefined && !accepts.context });
       if (!taken.ok) return taken;
       ready = taken.value;
     }
@@ -2026,6 +2246,16 @@ export class ConversationPool {
   }
 
   /** T558: consent withdrawn - every live run's token is revoked and not handed again (FR-299). */
+  /** 023 R-367 (FR-372): what the conversation's latest run printed about itself; none for one this pool does not hold. */
+  diagnostics(conversationId: string): string[] {
+    return this.conversations.get(conversationId)?.diagnostics() ?? [];
+  }
+
+  /** 023 R-365: the worker's `conversation-browser-attached` - that conversation's server greeted. */
+  browserAttached(conversationId: string): void {
+    this.conversations.get(conversationId)?.browserAttached();
+  }
+
   revokeBrowserTokens(): void {
     // T579: first, so a start whose consent check is under way hands nothing out after this.
     this.revocations += 1;
@@ -2100,6 +2330,7 @@ export class ConversationPool {
       ...(this.options.spawnAgent === undefined ? {} : { spawnAgent: this.options.spawnAgent }),
       ...(this.options.browser === undefined ? {} : { browser: this.options.browser }),
       ...(this.options.log === undefined ? {} : { log: this.options.log }),
+      ...(this.options.userEnvironment === undefined ? {} : { userEnvironment: this.options.userEnvironment }),
     });
     this.conversations.set(conversationId, conversation);
     return conversation;

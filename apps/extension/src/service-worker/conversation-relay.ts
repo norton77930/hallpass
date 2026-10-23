@@ -39,6 +39,8 @@ export const CONVERSATION_FRAME_TYPES = [
   "conversation-overview",
   "conversation-page",
   "conversation-browser-token",
+  /** 023 R-367: the reply to the panel's diagnostics request, passed to every panel document as it came. */
+  "conversation-diagnostics",
 ] as const;
 
 export type ConversationLinkFrame = Extract<AgentLinkFrame, { type: (typeof CONVERSATION_FRAME_TYPES)[number] }>;
@@ -54,6 +56,19 @@ export type ConversationCommandFrame = {
   commandId: string;
   command: ConversationLinkCommand;
 };
+
+/**
+ * 023 R-365, R-368: the worker's word that a conversation's `hallpass` server greeted with its panel
+ * token. Like every frame to the broker it names the broker's session.
+ */
+export type ConversationBrowserAttachedFrame = {
+  type: "conversation-browser-attached";
+  sessionId: string;
+  conversationId: string;
+};
+
+/** A frame the worker sends the broker. */
+export type ConversationOutFrame = ConversationCommandFrame | ConversationBrowserAttachedFrame;
 
 /**
  * T547: how long after a relay announced itself the worker waits for that relay's broker before it
@@ -75,6 +90,12 @@ export type ConversationRelay = {
   /** A conversation frame from the link; delivered only from the broker. */
   receive: (frame: ConversationLinkFrame) => boolean;
   current: () => string | undefined;
+  /**
+   * 023 T717 (R-365): a conversation's `hallpass` server greeted with this live `token`. The broker
+   * is told once per token - the broker mints one per agent run, so once per run - and only when it
+   * is attached; a redial under the same token is the same run and says nothing.
+   */
+  browserAttached: (conversationId: string, token: string) => void;
   /** T547: one `ui.conversation.*` command from a panel document, already validated at the port. */
   command: (command: ConversationPanelCommand) => void;
   /** T547: the projection's `conversation` part; `linkUp` is whether the native link is connected. */
@@ -117,6 +138,8 @@ export function createConversationRelay(options: {
   reportDiagnostic?: (code: string) => void;
   /** T547: a frame for the broker, on the native link. */
   sendFrame?: (frame: ConversationCommandFrame) => void;
+  /** 023 T717: the word that a conversation's browser server greeted, for the broker. */
+  sendAttached?: (frame: ConversationBrowserAttachedFrame) => void;
   /** T547: a message for every panel document. */
   toPanels?: (message: AgentPanelMessage) => void;
   /** T547: the projection's conversation part may have changed. */
@@ -170,6 +193,12 @@ export function createConversationRelay(options: {
   let seqsOf: string | undefined;
   /** Conversations a gap-filling page request is out for, so a burst of late events asks once. */
   const paging = new Set<string>();
+  /**
+   * 023 R-365: the token each conversation's browser server was last reported under (a marker of the
+   * run, never sent or logged). A new relay or broker forgets it: the run's server redials and the
+   * broker it then talks to has not heard.
+   */
+  const attachedUnder = new Map<string, string>();
 
   const failure = (commandId: string, detail: string): AgentPanelMessage => ({
     type: "conversation-result",
@@ -339,6 +368,7 @@ export function createConversationRelay(options: {
       broker = undefined;
       overview = undefined;
       refusedResume.clear();
+      attachedUnder.clear();
       failPending();
       changed();
       return true;
@@ -348,6 +378,7 @@ export function createConversationRelay(options: {
       overview = undefined;
       refusedResume.clear();
       greetedThisRun = false;
+      attachedUnder.clear();
       relayStartedAt = now();
       failPending();
       changed();
@@ -359,8 +390,9 @@ export function createConversationRelay(options: {
         report("agent.conversation.frame-foreign");
         return false;
       }
-      // T558: a browser token reaches `onBrowserToken` alone, never the injectable hook.
-      if (frame.type !== "conversation-browser-token") options.deliver?.(frame);
+      // T558: a browser token reaches `onBrowserToken` alone, never the injectable hook; 023 R-367: nor
+      // do the agent's own output lines, which reach the panels alone.
+      if (frame.type !== "conversation-browser-token" && frame.type !== "conversation-diagnostics") options.deliver?.(frame);
       switch (frame.type) {
         case "conversation-overview": {
           const { conversations, agents, folders, consent, notice } = frame;
@@ -386,6 +418,13 @@ export function createConversationRelay(options: {
         case "conversation-event":
           forward(frame.conversationId, frame.seq, frame.event, true);
           break;
+        case "conversation-diagnostics": {
+          // 023 R-367: the broker's reply to a diagnostics request, already scrubbed there. Passed on
+          // whole to every panel document; never logged or kept here.
+          const { type: _type, sessionId: _sessionId, ...payload } = frame;
+          toPanels({ type: "conversation-diagnostics", payload });
+          break;
+        }
         case "conversation-page":
           for (const entry of frame.events) forward(frame.conversationId, entry.seq, entry.event, false);
           if (!frame.more) paging.delete(frame.conversationId);
@@ -404,6 +443,12 @@ export function createConversationRelay(options: {
     },
     current() {
       return broker;
+    },
+    browserAttached(conversationId, token) {
+      if (broker === undefined || options.sendAttached === undefined) return;
+      if (attachedUnder.get(conversationId) === token) return;
+      attachedUnder.set(conversationId, token);
+      options.sendAttached({ type: "conversation-browser-attached", sessionId: broker, conversationId });
     },
     command(command) {
       if (command.type === "ui.conversation.resync") {

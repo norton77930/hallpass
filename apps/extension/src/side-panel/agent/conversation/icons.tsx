@@ -35,6 +35,15 @@ export function BackIcon({ size = 18 }: IconProps): ReactElement {
   );
 }
 
+/** 023 T728: a prompt and a cursor - the agent's own output. */
+export function OutputIcon({ size = 18 }: IconProps): ReactElement {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" {...line} strokeWidth={1.8}>
+      <path d="m5 8 4 4-4 4M12 17h7" />
+    </svg>
+  );
+}
+
 export function SendIcon({ size = 16 }: IconProps): ReactElement {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" focusable="false" {...line} strokeWidth={2.2}>

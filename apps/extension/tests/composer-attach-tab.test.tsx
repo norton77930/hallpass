@@ -178,7 +178,7 @@ describe("022 US2/US3 the tab entries of the + menu", () => {
     expect(refusal()).toContain(ui("conversation.attach.noImages").replace("{agent}", "Claude Code"));
   });
 
-  it("an agent that takes no page context: 'Attach this tab' is off, except on a PDF tab", async () => {
+  it("023 FR-365: an agent that takes no page context still offers 'Attach this tab' - a page goes as a tab chip, a PDF as a file", async () => {
     installActiveTab({ id: TAB_ID, url: "https://example.test/" });
     const noContext = {
       ...CONVERSATION_READY,
@@ -191,15 +191,37 @@ describe("022 US2/US3 the tab entries of the + menu", () => {
     await open(port, noContext);
     fireEvent.click(plus());
     const tab = entry("conversation.attach.tab");
-    expect(tab.getAttribute("aria-disabled")).toBe("true");
-    expect(tab.textContent).toContain(ui("conversation.attach.noContext").replace("{agent}", "Claude Code"));
+    expect(tab.getAttribute("aria-disabled")).toBeNull();
     expect(entry("conversation.attach.screenshot").getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(tab);
+    reply(port, { ok: true, kind: "page", url: "https://example.test/", title: "Page", text: "x", cut: false });
+    await settle();
+    expect(chips().map((chip) => chip.getAttribute("data-attachment-kind"))).toEqual(["tab"]);
+    expect(refusal()).toBe("");
     cleanup();
 
     installActiveTab({ id: TAB_ID, url: "https://example.test/report.pdf" });
     await open(port, noContext);
     fireEvent.click(plus());
-    expect(entry("conversation.attach.tab").getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(entry("conversation.attach.tab"));
+    reply(port, { ok: true, kind: "file", name: "report.pdf", mimeType: "application/pdf", data: btoa("%PDF-1.7"), size: 8 });
+    await settle();
+    expect(chips().map((chip) => chip.getAttribute("data-attachment-kind"))).toEqual(["file"]);
+  });
+
+  it("023: for an agent without page context a page the worker cannot read is still refused when captured", async () => {
+    installActiveTab({ id: TAB_ID, url: "chrome://extensions/" });
+    const noContext = {
+      ...CONVERSATION_READY,
+      agents: [{ agent: "claude-code" as const, availability: "ready" as const, version: "2.1.0", accepts: { image: true, context: false } }],
+    };
+    await open(port, noContext);
+    fireEvent.click(plus());
+    fireEvent.click(entry("conversation.attach.tab"));
+    reply(port, { ok: false, code: "restricted", message: "This page cannot be captured." });
+    await settle();
+    expect(chips()).toHaveLength(0);
+    expect(refusal()).toContain(ui("conversation.attach.capture.restricted"));
   });
 
   it("a second tab is refused: one tab per message", async () => {

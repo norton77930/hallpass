@@ -27,7 +27,8 @@ import type { Clock, ClockTimer } from "./conversation.js";
  * dot hides nothing on Windows, the name only says what it is), and only `take` - the send - gives
  * it its final name, by an exclusive create (a hard link, else a copy
  * that refuses an existing name), so no copy is ever visible half-written and no existing file is
- * ever replaced. This store is the authority on the limits; the panel's own checks are only early,
+ * ever replaced. 023 (R-366): for an agent that takes no page context, `take` writes the tab the same
+ * way, as `<title>.txt` holding its title, address and text. This store is the authority on the limits; the panel's own checks are only early,
  * friendly refusals.
  *
  * No name from the panel decides a path: the final name is the sanitised last segment of the name
@@ -69,11 +70,31 @@ type AttachCommand = Extract<ConversationCommand, { type: "ui.conversation.attac
 /** One `ui.conversation.attach` payload without its conversation (the pool routes by that). */
 export type AttachPiece = Omit<AttachCommand["payload"], "conversationId">;
 
-/** What a send hands the prompt and the owner's bubble, in the order the send named them. */
+/**
+ * What a send hands the prompt and the owner's bubble, in the order the send named them. A tab's
+ * `file` (023 R-366): the text file it was written to for an agent that takes no page context.
+ */
 export type ReadyAttachment =
   | { kind: "image"; id: string; name: string; size: number; mimeType: string; data: string; thumbnail?: string }
-  | { kind: "tab"; id: string; name: string; size: number; url: string; title: string; text: string; cut: boolean }
+  | {
+      kind: "tab";
+      id: string;
+      name: string;
+      size: number;
+      url: string;
+      title: string;
+      text: string;
+      cut: boolean;
+      file?: { name: string; path: string };
+    }
   | { kind: "file"; id: string; name: string; size: number; path: string };
+
+/** 023 R-366: how `take` hands the tab - in memory (page context), or written to a `.txt` file. */
+export type TakeOptions = { tabAsFile?: boolean };
+
+/** The file a ready attachment put in the folder, if any: a copied file, or a tab written as one. */
+const placedPath = (attachment: ReadyAttachment): string | undefined =>
+  attachment.kind === "file" ? attachment.path : attachment.kind === "tab" ? attachment.file?.path : undefined;
 
 export type AttachmentOutcome<T = undefined> = { ok: true; value?: T } | { ok: false; error: ConversationError };
 /** What a send gets: every named attachment ready, or why not. */
@@ -187,6 +208,21 @@ export function sanitizeAttachmentName(raw: string): string {
   return fit(stem, "", extension);
 }
 
+/**
+ * 023 R-366: the name a tab is written under - its title through the same sanitiser, with `.txt`.
+ * Slashes in a title are words, not folders, so they are replaced rather than split on; an empty
+ * title is `tab`.
+ */
+export function tabFileName(title: string): string {
+  const words = title.trim().replace(/[\\/]/gu, "_");
+  return sanitizeAttachmentName(`${words === "" ? "tab" : words}.txt`);
+}
+
+/** 023 R-366: what the tab's file holds - its title, its address, a blank line, its text. */
+export function tabFileText(tab: { title: string; url: string; text: string }): string {
+  return `${tab.title}\n${tab.url}\n\n${tab.text}`;
+}
+
 /** `data (2).csv` for `data.csv`, within the name bound. */
 function numberedName(name: string, n: number): string {
   const { stem, extension } = splitExtension(name);
@@ -271,9 +307,9 @@ export class AttachmentStore {
    * The send: every named attachment finished, the files moved to their final names. A refusal
    * drops what it named (T618: not the rest), and any file this call already placed.
    */
-  take(ids: readonly string[]): Promise<TakeOutcome> {
+  take(ids: readonly string[], options: TakeOptions = {}): Promise<TakeOutcome> {
     return this.serial(async () => {
-      const outcome = await this.claim(ids);
+      const outcome = await this.claim(ids, options);
       if (!outcome.ok) for (const id of ids) await this.drop(id);
       return outcome;
     });
@@ -290,11 +326,9 @@ export class AttachmentStore {
     });
   }
 
-  /** The files a send placed and then could not send are removed again (FR-332). */
+  /** The files a send placed (a tab's file too, 023) and then could not send are removed again (FR-332). */
   discard(placed: readonly ReadyAttachment[]): Promise<void> {
-    return this.serial(async () => {
-      for (const attachment of placed) if (attachment.kind === "file") await this.fs.unlink(attachment.path).catch(() => undefined);
-    });
+    return this.serial(() => this.removePlaced(placed));
   }
 
   /* ----------------------------------------------------------------------------------------- */
@@ -471,12 +505,19 @@ export class AttachmentStore {
     return { ok: true, value: chosen };
   }
 
-  private async claim(ids: readonly string[]): Promise<TakeOutcome> {
+  private async claim(ids: readonly string[], options: TakeOptions): Promise<TakeOutcome> {
     const found = this.find(ids);
     if (!found.ok) return found;
     const chosen = found.value;
     const ready: ReadyAttachment[] = [];
     let place: string | undefined;
+    /** The checked attachments folder, made once per take; a refusal removes what this take placed. */
+    const folder = async (): Promise<AttachmentOutcome<string>> => {
+      if (place !== undefined) return { ok: true, value: place };
+      const checked = await this.subfolder();
+      if (checked.ok) place = checked.value!;
+      return checked;
+    };
     for (const staged of chosen) {
       if (staged.kind === "image") {
         ready.push({
@@ -491,25 +532,23 @@ export class AttachmentStore {
         continue;
       }
       if (staged.kind === "tab") {
-        ready.push({
-          kind: "tab",
-          id: staged.id,
-          name: staged.name,
-          size: staged.declaredSize,
-          ...staged.tab!,
-          text: Buffer.concat(staged.chunks).toString("utf8"),
-        });
+        const text = Buffer.concat(staged.chunks).toString("utf8");
+        const tab: Extract<ReadyAttachment, { kind: "tab" }> = { kind: "tab", id: staged.id, name: staged.name, size: staged.declaredSize, ...staged.tab!, text };
+        if (options.tabAsFile === true) {
+          // 023 R-366: for an agent without page context, the tab is a text file beside the attached files.
+          const checked = await folder();
+          const written = checked.ok ? await this.placeTab(staged, checked.value!, text) : checked;
+          if (!written.ok) {
+            await this.removePlaced(ready);
+            return written;
+          }
+          tab.file = { name: basename(written.value!), path: written.value! };
+        }
+        ready.push(tab);
         continue;
       }
-      if (place === undefined) {
-        const checked = await this.subfolder();
-        if (!checked.ok) {
-          await this.removePlaced(ready);
-          return checked;
-        }
-        place = checked.value!;
-      }
-      const placed = await this.place(staged, place);
+      const checked = await folder();
+      const placed = checked.ok ? await this.place(staged, checked.value!) : checked;
       if (!placed.ok) {
         await this.removePlaced(ready);
         return placed;
@@ -523,10 +562,26 @@ export class AttachmentStore {
     return { ok: true, value: ready };
   }
 
+  /**
+   * 023 R-366: the tab's file, placed the way a file is - written whole as a part file first, then
+   * given its name exclusively (` (n)` past a taken one) - so it is never seen half-written and never
+   * replaces a file. A part left by a failure goes with the staged tab (`drop`).
+   */
+  private async placeTab(staged: Staged, folder: string, text: string): Promise<AttachmentOutcome<string>> {
+    const part = join(folder, `.${staged.id}.part`);
+    try {
+      await this.fs.writeExclusive(part, Buffer.from(tabFileText({ ...staged.tab!, text }), "utf8"));
+    } catch (error) {
+      return this.writeFailure(error);
+    }
+    staged.partPath = part;
+    return this.place(staged, folder, tabFileName(staged.tab!.title));
+  }
+
   /** The part file under its final name: exclusive, ` (n)` past a taken one, then the part removed. */
-  private async place(staged: Staged, folder: string): Promise<AttachmentOutcome<string>> {
+  private async place(staged: Staged, folder: string, name?: string): Promise<AttachmentOutcome<string>> {
     const part = staged.partPath!;
-    const base = sanitizeAttachmentName(staged.name);
+    const base = name ?? sanitizeAttachmentName(staged.name);
     let linkWorks = true;
     for (let n = 1; n <= MAX_NAME_NUMBER; n++) {
       const name = n === 1 ? base : numberedName(base, n);
@@ -579,7 +634,10 @@ export class AttachmentStore {
   }
 
   private async removePlaced(ready: readonly ReadyAttachment[]): Promise<void> {
-    for (const attachment of ready) if (attachment.kind === "file") await this.fs.unlink(attachment.path).catch(() => undefined);
+    for (const attachment of ready) {
+      const path = placedPath(attachment);
+      if (path !== undefined) await this.fs.unlink(path).catch(() => undefined);
+    }
   }
 
   /** A write that failed because the folder went away says so; anything else is a write failure. */

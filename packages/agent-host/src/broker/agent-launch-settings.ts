@@ -22,10 +22,14 @@ import { CONVERSATION_MODES, type ConversationAgent, type ConversationMode } fro
 
 export const HERMES_MANAGED_ENV = "HERMES_MANAGED_DIR";
 
-/** R-347: the Hermes toolsets the managed layer switches off, per panel mode. */
+/**
+ * R-347: the Hermes toolsets the managed layer switches off, per panel mode. R-363 / D-023-1: the
+ * saved-logins tool lives in group `browser` (Hermes has no per-tool switch and silently skips an unknown
+ * group name), so the whole group goes; the owner's browser is reached through Hallpass's own tools.
+ */
 export const HERMES_DISABLED_TOOLSETS: Readonly<Record<ConversationMode, readonly string[]>> = {
-  strict: ["terminal", "code_execution", "delegation", "browser_vault"],
-  "agent-review": ["browser_vault"],
+  strict: ["terminal", "code_execution", "delegation", "browser"],
+  "agent-review": ["browser"],
 };
 
 /** R-347: Hermes' own mode under each panel mode, set after `session/new`. */

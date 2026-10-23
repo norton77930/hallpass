@@ -171,7 +171,7 @@ describe("022 T633 the viewed tab is followed", () => {
     uninstallAgentPort();
   });
 
-  it("a navigation of the viewed tab updates its address (here: to a PDF, which turns 'Attach this tab' on)", async () => {
+  it("a navigation of the viewed tab (here: to a PDF) keeps 'Attach this tab' on for an agent without page context (023 FR-365)", async () => {
     const tab = installActiveTab({ id: TAB_ID, url: "https://example.test/" });
     const noContext: ConversationPanelState = {
       ...CONVERSATION_OPEN,
@@ -179,7 +179,7 @@ describe("022 T633 the viewed tab is followed", () => {
     };
     await open(port, noContext);
     fireEvent.click(plus());
-    expect(entry("conversation.attach.tab").getAttribute("aria-disabled")).toBe("true");
+    expect(entry("conversation.attach.tab").getAttribute("aria-disabled")).toBeNull();
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
 
     act(() => tab.navigate("https://example.test/report.pdf"));

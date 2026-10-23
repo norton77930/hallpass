@@ -889,8 +889,9 @@ describe("T680 the + menu follows what Hermes and DeepSeek say they accept (US5,
     fireEvent.click(plus());
     expect(off("conversation.attach.screenshot")).toBe(true);
     expect(entry("conversation.attach.screenshot").textContent).toContain("DeepSeek does not take images. Files still work.");
-    expect(off("conversation.attach.tab")).toBe(true);
-    expect(entry("conversation.attach.tab").textContent).toContain("DeepSeek does not take page text.");
+    // 023 FR-365: no page context no longer greys the tab - the broker hands it over as a text file.
+    expect(off("conversation.attach.tab")).toBe(false);
+    expect(entry("conversation.attach.tab").textContent).not.toContain("does not take page text");
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
 
     fireEvent.click(agentChip());

@@ -15,12 +15,15 @@ import {
   CONVERSATION_TAB_TEXT_MAX_CHARS,
   CONVERSATION_TAB_TITLE_MAX_CHARS,
   CONVERSATION_TAB_URL_MAX_CHARS,
+  conversationBrowserAttachedFrameSchema,
   conversationBrowserTokenFrameSchema,
   conversationCommandFrameSchema,
+  conversationDiagnosticsFrameSchema,
   conversationEventFrameSchema,
   conversationOverviewFrameSchema,
   conversationPageFrameSchema,
   conversationPanelCommandSchema,
+  conversationPanelDiagnosticsMessageSchema,
   conversationPanelEventMessageSchema,
   conversationPanelResultMessageSchema,
   conversationPanelStateSchema,
@@ -3673,6 +3676,13 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
   conversationOverviewFrameSchema,
   conversationPageFrameSchema,
   conversationBrowserTokenFrameSchema,
+  /**
+   * 023 (contracts/frames.md, R-368): the worker's word that a conversation's browser server greeted
+   * (R-365), and the broker's reply to the panel's diagnostics request (R-367). New frame types again,
+   * so the protocol stays 2.
+   */
+  conversationBrowserAttachedFrameSchema,
+  conversationDiagnosticsFrameSchema,
 ]);
 
 export type AgentLinkFrame = z.infer<typeof agentLinkFrameSchema>;
@@ -4347,6 +4357,8 @@ export const agentPanelMessageSchema = z.discriminatedUnion("type", [
   conversationPanelResultMessageSchema,
   /** 022 R-342: the viewed tab, captured for the panel that asked. */
   tabCaptureResultMessageSchema,
+  /** 023 R-367: what an agent run printed about itself, as the broker replied (already scrubbed). */
+  conversationPanelDiagnosticsMessageSchema,
 ]);
 
 export type AgentPanelMessage = z.infer<typeof agentPanelMessageSchema>;
