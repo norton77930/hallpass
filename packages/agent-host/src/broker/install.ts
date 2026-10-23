@@ -1,10 +1,19 @@
 import { randomBytes } from "node:crypto";
 import { statSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { copyFile, link, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { CONVERSATION_AGENTS, type ConversationAgent, type ConversationError } from "@hallpass/contracts";
 import { isProcessAlive } from "../bridge-link.js";
-import { ADAPTER_NPM_CI_ARGS, AGENT_DESCRIPTIONS, adapterDirectory, packagePin } from "./agents.js";
+import {
+  ADAPTER_NPM_CI_ARGS,
+  AGENT_DESCRIPTIONS,
+  INSTALL_TREE_PREFIX,
+  adapterDirectory,
+  installPointerPath,
+  installedAdapterDirectory,
+  packagePin,
+  parseInstallPointer,
+} from "./agents.js";
 import { redactedTail } from "./redact.js";
 import type { runCommand } from "./run-command.js";
 
@@ -20,10 +29,21 @@ import type { runCommand } from "./run-command.js";
  * bundled CLI (the owner's own CLI is used, R-315); a fetched agent keeps its optional dependencies,
  * which hold its platform native bindings (R-357). `--ignore-scripts` means no install script runs.
  *
- * The work happens in `agents\<agent>\.staging-<broker pid>-<random>` and the folder is renamed to
- * `agents\<agent>\<adapter version>` only after the pinned adapter is verified inside it, so a
- * folder with that name is always a complete install. Any failure removes the staging folder
- * (FR-300); `cleanStaging` removes what a crash of the broker itself left behind.
+ * R-362: the tree is never moved. Until 0.15.0 `npm ci` ran in a staging folder that was then
+ * renamed to `agents\<agent>\<version>`; under a real-time file scanner that one rename of DeepSeek's
+ * 611 packages took 41 minutes (the scanner walks the moved tree before the call returns). Now
+ * `npm ci` runs in `agents\<agent>\.install-<broker pid>-<random>` and the tree stays there: once the
+ * pinned package is verified inside it, the small pointer `<version>.installed.json` naming it is
+ * created whole (a hard link of a written file, which fails when the pointer exists), and only a
+ * tree a pointer names is installed (`installedAdapterDirectory`), so launch never sees a
+ * half-written one. A 0.15.0 `<version>` folder (renamed whole, so complete) still counts when
+ * there is no pointer.
+ *
+ * T572: every install writes its own folder, so two brokers (two browsers) installing at once never
+ * touch each other's tree. The first to create the pointer wins; the other finds the pointer, removes
+ * its own tree (never named, so nothing runs from it) and answers with the winner's. Any failure
+ * removes the install's own folder (FR-300); `cleanStaging` removes what a crash of a broker left
+ * behind - never a tree a pointer names, nor one whose broker is alive.
  *
  * Progress is phases only. npm prints no byte counts to a pipe, so the panel shows an indeterminate
  * bar with the expected size (R-314); `InstallProgress.bytes` is there for a runner that can tell.
@@ -111,23 +131,26 @@ export async function installAgent(
   const pin = { package: description.package, version: description.version };
   onProgress?.({ phase: "preparing" });
   const agentDir = win32.join(ports.dataDir, "agents", agent);
-  const finalDir = adapterDirectory(ports.dataDir, agent);
+  const legacyDir = adapterDirectory(ports.dataDir, agent);
   // T572: named with this broker's pid, so another browser's broker starting meanwhile leaves it alone.
   const suffix = (ports.randomSuffix ?? (() => randomBytes(6).toString("hex")))();
-  const staging = win32.join(agentDir, `${STAGING_PREFIX}${process.pid}-${suffix}`);
+  const tree = win32.join(agentDir, `${INSTALL_TREE_PREFIX}${process.pid}-${suffix}`);
+  let keepTree = false;
   try {
     await mkdir(agentDir, { recursive: true });
-    if (await pinnedAdapterPresent(agent, finalDir)) {
+    const current = await installedAdapterDirectory(ports.dataDir, agent, readText);
+    if (await pinnedAdapterPresent(agent, current)) {
       onProgress?.({ phase: "finishing" });
-      return { ok: true, directory: finalDir };
+      return { ok: true, directory: current };
     }
-    // A folder with the final name that is not a verified install is a leftover; it would block the rename.
-    await removeTree(finalDir);
+    // A 0.15.0 `<version>` folder that is not a verified install is a leftover nothing launches from.
+    // A pointer's tree that is not (damaged since) is left alone: the pointer is replaced below.
+    if (current === legacyDir) await removeTree(legacyDir);
 
-    await mkdir(staging);
+    await mkdir(tree);
     for (const name of ["package.json", "package-lock.json"]) {
       try {
-        await copyFile(win32.join(ports.manifestsDir, agent, name), win32.join(staging, name));
+        await copyFile(win32.join(ports.manifestsDir, agent, name), win32.join(tree, name));
       } catch {
         return failure(`The pinned ${name} for ${description.label} is missing from this Hallpass install.`);
       }
@@ -137,7 +160,7 @@ export async function installAgent(
     let run;
     try {
       run = await ports.run(await npmCommand(ports.nodePath), description.npmCiArgs, {
-        cwd: staging,
+        cwd: tree,
         // R-346: 10 minutes for the slim adapters (57-77 MB on a poor connection), 30 for DeepSeek's 611 packages.
         timeoutMs: description.installTimeoutMs,
       });
@@ -149,35 +172,66 @@ export async function installAgent(
       const head = `npm ci failed (exit ${run.code ?? "none"}): `;
       return failure(head + redactedTail(run.stderr || run.stdout, DETAIL_MAX - head.length));
     }
-    if (!(await pinnedAdapterPresent(agent, staging))) {
+    if (!(await pinnedAdapterPresent(agent, tree))) {
       return failure(`npm finished, but ${pin.package} ${pin.version} is not in the result.`);
     }
 
     onProgress?.({ phase: "finishing" });
+    let directory;
     try {
-      await rename(staging, finalDir);
+      directory = await pointAt(agent, ports.dataDir, tree, `${tree}.pointer`);
     } catch (error) {
-      // Another install of the same adapter won the rename: the result is the same folder.
-      if (await pinnedAdapterPresent(agent, finalDir)) return { ok: true, directory: finalDir };
       return failure(`The install could not be put in place: ${redactedTail(messageOf(error), 400)}`);
     }
-    return { ok: true, directory: finalDir };
+    keepTree = directory === tree;
+    return { ok: true, directory };
   } catch (error) {
     return failure(`The install failed: ${redactedTail(messageOf(error), 400)}`);
   } finally {
-    // After a successful rename `staging` no longer exists; after any failure this is the cleanup.
-    await removeTree(staging).catch(() => {});
+    // After any failure, or when another broker's install was in place first, this is the cleanup.
+    if (!keepTree) await removeTree(tree).catch(() => {});
   }
 }
 
-/** `.staging-<pid>-<random>`: the pid of the broker whose install it is. */
-const STAGING_OWNER = /^\.staging-(\d+)-/u;
+const readText = (path: string) => readFile(path, "utf8");
 
 /**
- * Remove the `.staging-*` folders under `agents\<agent>` - what a crash mid-install left (run at
- * broker start). T572: not one whose owning broker is alive - another browser's broker may be
- * downloading into it right now. A folder of this broker's own pid is an earlier process's (the pid
- * was reused); one with no pid in its name is from before the pid was in it.
+ * Make the pointer name `tree` (verified), and answer with the install that is in place.
+ * T572: the pointer is created by a hard link of a fully written file, which fails when it exists,
+ * so the first finished install wins whole and no reader sees half a pointer. A pointer that is
+ * there and names a verified install is kept (the caller drops its own tree); one whose tree was
+ * damaged since is replaced (a small-file rename, not of the tree).
+ */
+async function pointAt(agent: ConversationAgent, dataDir: string, tree: string, temp: string): Promise<string> {
+  const pointer = installPointerPath(dataDir, agent);
+  await writeFile(temp, `${JSON.stringify({ folder: win32.basename(tree) })}\n`, { flag: "wx" });
+  try {
+    try {
+      await link(temp, pointer);
+      return tree;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const current = await installedAdapterDirectory(dataDir, agent, readText);
+    if (await pinnedAdapterPresent(agent, current)) return current;
+    await rename(temp, pointer);
+    return tree;
+  } finally {
+    await rm(temp, { force: true }).catch(() => {});
+  }
+}
+
+/** `.staging-<pid>-<random>` (0.15.0) and `.install-<pid>-<random>[.pointer]`: the pid of the broker whose install it is. */
+const INSTALL_WORK_OWNER = /^\.(?:staging|install)-(\d+)-/u;
+const POINTER_SUFFIX = ".installed.json";
+
+/**
+ * Remove what a crash mid-install left under `agents\<agent>` (run at broker start): 0.15.0's
+ * `.staging-*` folders and `.install-*` trees and pointer files that no `<version>.installed.json`
+ * names. T572: not one whose owning broker is alive - another browser's broker may be downloading
+ * into it right now - and never a tree a pointer names (R-362: that is the install, maybe running).
+ * A folder of this broker's own pid is an earlier process's (the pid was reused); one with no pid
+ * in its name is from before the pid was in it.
  */
 export async function cleanStaging(
   dataDir: string,
@@ -194,9 +248,16 @@ export async function cleanStaging(
     } catch {
       continue;
     }
+    const named = new Set<string>();
     for (const entry of entries) {
-      if (!entry.name.startsWith(STAGING_PREFIX)) continue;
-      const owner = STAGING_OWNER.exec(entry.name);
+      if (!entry.isFile() || !entry.name.endsWith(POINTER_SUFFIX)) continue;
+      const folder = await readText(win32.join(agentDir, entry.name)).then(parseInstallPointer, () => undefined);
+      if (folder !== undefined) named.add(folder.toLowerCase());
+    }
+    for (const entry of entries) {
+      if (!entry.name.startsWith(STAGING_PREFIX) && !entry.name.startsWith(INSTALL_TREE_PREFIX)) continue;
+      if (named.has(entry.name.toLowerCase())) continue;
+      const owner = INSTALL_WORK_OWNER.exec(entry.name);
       if (owner !== null) {
         const pid = Number(owner[1]);
         if (pid !== selfPid && isAlive(pid)) continue;

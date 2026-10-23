@@ -165,7 +165,8 @@ async function main(): Promise<void> {
   }
 
   const dataDir = hostDataDirectory();
-  // S3 follow-up: what an install interrupted by a crash left in `agents\<agent>\.staging-*`.
+  // S3 follow-up: what an install interrupted by a crash left in `agents\<agent>\.install-*` (R-362;
+  // never a tree an install pointer names) and 0.15.0's `.staging-*`.
   const staged = await cleanStaging(dataDir).catch(() => []);
   if (staged.length > 0) log("broker.staging-cleaned", String(staged.length));
 

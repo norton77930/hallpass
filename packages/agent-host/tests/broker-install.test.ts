@@ -7,7 +7,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AGENT_ADAPTERS, AGENT_DESCRIPTIONS, adapterDirectory } from "../src/broker/agents.js";
+import type { ConversationAgent } from "@hallpass/contracts";
+import {
+  AGENT_ADAPTERS,
+  AGENT_DESCRIPTIONS,
+  adapterDirectory,
+  installPointerPath,
+  installedAdapterDirectory,
+  isAdapterInstalled,
+  type AgentPorts,
+} from "../src/broker/agents.js";
 import {
   NPM_CI_ARGS,
   cleanStaging,
@@ -20,7 +29,8 @@ import { runCommand, type RunResult } from "../src/broker/run-command.js";
 
 /**
  * 019/T532, T533 - the first-use install (R-314): `npm ci` against the lockfile Hallpass ships, in
- * a staging folder that becomes `agents\<agent>\<adapter version>` only when it worked.
+ * `agents\<agent>\.install-<pid>-<random>`, which stays where it is and becomes the install when the
+ * pointer `<version>.installed.json` names it, only when it worked (021 R-362: no rename of the tree).
  *
  * Most cases inject the command runner and stand in for npm by writing the tree a successful
  * `npm ci` would. Two cases run the real npm against a tarball served from the loopback interface
@@ -113,10 +123,33 @@ function ports(
   };
 }
 
+/** What launch and the availability check read the install through: the real file system under `data`. */
+const realAgentPorts = (): AgentPorts => ({
+  dataDir: data,
+  env: {},
+  nodePath: process.execPath,
+  codexShimEntry: join(root, "no-shim.js"),
+  fs: {
+    exists,
+    readText: (path) => readFile(path, "utf8"),
+    writeText: async () => {
+      throw new Error("not written in these tests");
+    },
+  },
+  exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+});
+
+/** The 0.15.0 location: `agents\<agent>\<version>`, renamed into place whole. */
 const installedDir = () => adapterDirectory(data, AGENT);
+/** Where an install of this process with the random suffix `suffix` runs `npm ci`, and stays. */
+const treeDir = (agent: ConversationAgent = AGENT, suffix = "abc123", pid = process.pid) =>
+  join(data, "agents", agent, `.install-${pid}-${suffix}`);
+const pointerName = (agent: "claude-code" | "codex" | "deepseek" = AGENT) => `${AGENT_DESCRIPTIONS[agent].version}.installed.json`;
+const readPointer = async (agent: "claude-code" | "codex" | "deepseek" = AGENT) =>
+  JSON.parse(await readFile(installPointerPath(data, agent), "utf8")) as { folder: string };
 
 describe("installAgent with an injected npm (T532, T533, R-314)", () => {
-  it("runs npm ci in .staging-<pid>-<random> on the shipped manifest and lock, then renames to the adapter version", async () => {
+  it("runs npm ci in .install-<pid>-<random> on the shipped manifest and lock, then points the version at it", async () => {
     const { ports: p, calls } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
       return {};
@@ -124,18 +157,45 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     const phases: InstallPhase[] = [];
     const result = await installAgent(AGENT, p, (progress) => phases.push(progress.phase));
 
-    expect(result).toEqual({ ok: true, directory: installedDir() });
+    expect(result).toEqual({ ok: true, directory: treeDir() });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.file).toBe("npm.cmd");
     expect(calls[0]!.args).toEqual(["ci", "--omit=optional", "--ignore-scripts", "--no-audit", "--no-fund"]);
     expect(NPM_CI_ARGS).toEqual(calls[0]!.args);
-    expect(calls[0]!.cwd).toBe(join(data, "agents", AGENT, `.staging-${process.pid}-abc123`));
+    expect(calls[0]!.cwd).toBe(treeDir());
     expect(calls[0]!.staged.sort()).toEqual(["package-lock.json", "package.json"]);
     expect(calls[0]!.lock).toBe(await readFile(join(SHIPPED, AGENT, "package-lock.json"), "utf8"));
 
-    expect(await exists(join(installedDir(), "node_modules", "@agentclientprotocol", "claude-agent-acp", "package.json"))).toBe(true);
-    expect(await list(join(data, "agents", AGENT))).toEqual([ADAPTER.version]);
+    expect(await exists(join(treeDir(), "node_modules", "@agentclientprotocol", "claude-agent-acp", "package.json"))).toBe(true);
+    expect((await list(join(data, "agents", AGENT))).sort()).toEqual([`.install-${process.pid}-abc123`, pointerName()].sort());
+    expect(await readPointer()).toEqual({ folder: `.install-${process.pid}-abc123` });
     expect(phases).toEqual(["preparing", "downloading", "finishing"]);
+  });
+
+  it("021 R-362: a tree npm is still writing is not installed for launch; it is once the pointer names it", async () => {
+    let midway: boolean | undefined;
+    const { ports: p } = ports(async (cwd) => {
+      await writeAdapterTree(cwd);
+      midway = await isAdapterInstalled(AGENT, realAgentPorts());
+      return {};
+    });
+    await installAgent(AGENT, p);
+
+    expect(midway).toBe(false);
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
+    expect(await installedAdapterDirectory(data, AGENT, (path) => readFile(path, "utf8"))).toBe(treeDir());
+  });
+
+  it("021 R-362: the folder npm ci ran in is the install - the tree is never renamed", async () => {
+    const { ports: p, calls } = ports(async (cwd) => {
+      await writeAdapterTree(cwd);
+      await writeFile(join(cwd, "written-by-npm.txt"), "x");
+      return {};
+    });
+    const result = await installAgent(AGENT, p);
+
+    expect(result).toEqual({ ok: true, directory: calls[0]!.cwd });
+    expect(await exists(join(calls[0]!.cwd!, "written-by-npm.txt"))).toBe(true);
   });
 
   it("uses the npm.cmd next to the running node when there is one", async () => {
@@ -222,21 +282,92 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
   });
 
   it("does nothing when the pinned adapter is already installed", async () => {
+    const { ports: first } = ports(async (cwd) => {
+      await writeAdapterTree(cwd);
+      return {};
+    });
+    await installAgent(AGENT, first);
+    const { ports: p, calls } = ports(() => ({}), { randomSuffix: () => "def456" });
+    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: treeDir() });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("021 R-362: keeps an install made by 0.15.0 (<version> folder, no pointer) without npm, for launch too", async () => {
     await writeAdapterTree(installedDir());
     const { ports: p, calls } = ports(() => ({}));
     expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: installedDir() });
     expect(calls).toHaveLength(0);
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
+    expect(await list(join(data, "agents", AGENT))).toEqual([ADAPTER.version]);
   });
 
-  it("replaces a half-written adapter folder that is not a valid install", async () => {
+  it("replaces a half-written 0.15.0 adapter folder that is not a valid install", async () => {
     await mkdir(join(installedDir(), "node_modules"), { recursive: true });
     await writeFile(join(installedDir(), "stale.txt"), "x");
     const { ports: p } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
       return {};
     });
-    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: installedDir() });
-    expect(await exists(join(installedDir(), "stale.txt"))).toBe(false);
+    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: treeDir() });
+    expect(await exists(installedDir())).toBe(false);
+  });
+
+  it("021 R-362: replaces a pointer whose tree was damaged since, with the new tree", async () => {
+    const damaged = treeDir(AGENT, "old000");
+    await mkdir(join(damaged, "node_modules"), { recursive: true });
+    await writeFile(installPointerPath(data, AGENT), JSON.stringify({ folder: `.install-${process.pid}-old000` }));
+    const { ports: p, calls } = ports(async (cwd) => {
+      await writeAdapterTree(cwd);
+      return {};
+    });
+    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: treeDir() });
+    expect(calls).toHaveLength(1);
+    expect(await readPointer()).toEqual({ folder: `.install-${process.pid}-abc123` });
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
+  });
+
+  it("T572: another broker's install in progress is left alone, and the first to finish is the one install", async () => {
+    // Another browser's broker is downloading into its own tree right now.
+    const other = treeDir(AGENT, "aaa111", 4_000_201);
+    await mkdir(join(other, "node_modules"), { recursive: true });
+    await writeFile(join(other, "package-lock.json"), "{}");
+
+    const { ports: p } = ports(async (cwd) => {
+      // ...and finishes while this one's npm runs: its tree is verified and the pointer names it.
+      await writeAdapterTree(other);
+      await writeFile(installPointerPath(data, AGENT), JSON.stringify({ folder: `.install-4000201-aaa111` }));
+      await writeAdapterTree(cwd);
+      return {};
+    });
+    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: other });
+
+    expect(await exists(join(other, "package-lock.json"))).toBe(true);
+    expect(await exists(treeDir())).toBe(false);
+    expect((await list(join(data, "agents", AGENT))).sort()).toEqual([".install-4000201-aaa111", pointerName()].sort());
+    expect(await readPointer()).toEqual({ folder: ".install-4000201-aaa111" });
+  });
+
+  it("T572: two installs at once each write their own tree and end with one install both answer with", async () => {
+    let release!: () => void;
+    const bothRunning = new Promise<void>((resolve) => (release = resolve));
+    let running = 0;
+    const behave = async (cwd: string) => {
+      running += 1;
+      if (running === 2) release();
+      await bothRunning;
+      await writeAdapterTree(cwd);
+      return {};
+    };
+    const a = ports(behave, { randomSuffix: () => "aaa111" });
+    const b = ports(behave, { randomSuffix: () => "bbb222" });
+    const [first, second] = await Promise.all([installAgent(AGENT, a.ports), installAgent(AGENT, b.ports)]);
+
+    expect(a.calls[0]!.cwd).not.toBe(b.calls[0]!.cwd);
+    expect(first).toEqual(second);
+    const { folder } = await readPointer();
+    expect(first).toEqual({ ok: true, directory: join(data, "agents", AGENT, folder) });
+    expect((await list(join(data, "agents", AGENT))).sort()).toEqual([folder, pointerName()].sort());
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
   });
 
   it("installs the Codex adapter the same way", async () => {
@@ -247,8 +378,9 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
       await writeFile(join(dir, "package.json"), JSON.stringify({ name: codex.package, version: codex.version }));
       return {};
     });
-    expect(await installAgent("codex", p)).toEqual({ ok: true, directory: adapterDirectory(data, "codex") });
-    expect(calls[0]!.cwd).toBe(join(data, "agents", "codex", `.staging-${process.pid}-abc123`));
+    expect(await installAgent("codex", p)).toEqual({ ok: true, directory: treeDir("codex") });
+    expect(calls[0]!.cwd).toBe(treeDir("codex"));
+    expect(await readPointer("codex")).toEqual({ folder: `.install-${process.pid}-abc123` });
   });
 });
 
@@ -274,7 +406,9 @@ describe("installAgent per agent (021 T646, R-345, R-346)", () => {
       await writeDshTree(cwd);
       return {};
     });
-    expect(await installAgent("deepseek", p)).toEqual({ ok: true, directory: join(data, "agents", "deepseek", "0.2.1-rc.2") });
+    expect(await installAgent("deepseek", p)).toEqual({ ok: true, directory: treeDir("deepseek") });
+    expect(await exists(installPointerPath(data, "deepseek"))).toBe(true);
+    expect(installPointerPath(data, "deepseek")).toBe(join(data, "agents", "deepseek", "0.2.1-rc.2.installed.json"));
     expect(calls).toHaveLength(1);
     // R-357: dsh's native bindings are optionalDependencies; `--omit=optional` left it unable to boot.
     expect(calls[0]!.args).toEqual(["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
@@ -347,6 +481,42 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect(await list(join(data, "agents", AGENT))).toEqual([`.staging-${otherBroker}-aaa`]);
   });
 
+  it("021 R-362: removes a crashed install's tree and pointer temp, never the tree a pointer names nor a live broker's", async () => {
+    const liveBroker = 4_000_301;
+    const deadBroker = 4_000_302;
+    const crashed = treeDir(AGENT, "dead01", deadBroker);
+    const installed = treeDir(AGENT, "done01", deadBroker);
+    const downloading = treeDir(AGENT, "live01", liveBroker);
+    for (const tree of [crashed, installed, downloading]) await mkdir(join(tree, "node_modules"), { recursive: true });
+    await writeAdapterTree(installed);
+    await writeFile(`${crashed}.pointer`, "{}");
+    await writeFile(installPointerPath(data, AGENT), JSON.stringify({ folder: `.install-${deadBroker}-done01` }));
+
+    const removed = await cleanStaging(data, { isAlive: (pid) => pid === liveBroker, selfPid: 4_000_303 });
+
+    expect(removed.sort()).toEqual([crashed, `${crashed}.pointer`].sort());
+    expect((await list(join(data, "agents", AGENT))).sort()).toEqual(
+      [`.install-${deadBroker}-done01`, `.install-${liveBroker}-live01`, pointerName()].sort(),
+    );
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
+  });
+
+  it("021 R-362: after a crash mid-install, the next start cleans it and the install runs again", async () => {
+    const crashed = treeDir(AGENT, "dead02", 4_000_402);
+    await mkdir(join(crashed, "node_modules", "half"), { recursive: true });
+    await writeAdapterTree(crashed); // npm had already put the pinned package.json down
+    expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(false);
+
+    await cleanStaging(data, { isAlive: () => false, selfPid: 4_000_403 });
+    const { ports: p, calls } = ports(async (cwd) => {
+      await writeAdapterTree(cwd);
+      return {};
+    });
+    expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: treeDir() });
+    expect(calls).toHaveLength(1);
+    expect((await list(join(data, "agents", AGENT))).sort()).toEqual([`.install-${process.pid}-abc123`, pointerName()].sort());
+  });
+
   it("is quiet when there is no agents folder yet", async () => {
     expect(await cleanStaging(data)).toEqual([]);
   });
@@ -414,9 +584,10 @@ describe("installAgent with the real npm against a loopback tarball (T532)", () 
   it("installs a package whose tarball matches the lockfile integrity", async () => {
     const phases: InstallPhase[] = [];
     const result = await installAgent(AGENT, real(await project(false)), (progress) => phases.push(progress.phase));
-    expect(result).toEqual({ ok: true, directory: installedDir() });
-    expect(await exists(join(installedDir(), "node_modules", "@agentclientprotocol", "claude-agent-acp", "index.js"))).toBe(true);
-    expect(await list(join(data, "agents", AGENT))).toEqual([ADAPTER.version]);
+    const directory = join(data, "agents", AGENT, (await readPointer()).folder);
+    expect(result).toEqual({ ok: true, directory });
+    expect(await exists(join(directory, "node_modules", "@agentclientprotocol", "claude-agent-acp", "index.js"))).toBe(true);
+    expect(await list(join(data, "agents", AGENT))).toHaveLength(2);
     expect(phases).toEqual(["preparing", "downloading", "finishing"]);
   }, 90_000);
 

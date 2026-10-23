@@ -9,25 +9,25 @@ Paths: `BR` = `packages/agent-host/src/broker/`, `BT` = `packages/agent-host/tes
 
 ## Phase 1: Setup
 
-- [ ] T637 Add `packages/agent-host/agents/deepseek/package.json` (exact dependency `@deepseek-ai/dsh` `0.2.1-rc.2`, private, no scripts) and generate `packages/agent-host/agents/deepseek/package-lock.json` with `npm install --package-lock-only --ignore-scripts --omit=optional` in that folder; confirm every entry has `integrity` and only registry URLs (no local paths) (R-345, FR-350)
+- [X] T637 Add `packages/agent-host/agents/deepseek/package.json` (exact dependency `@deepseek-ai/dsh` `0.2.1-rc.2`, private, no scripts) and generate `packages/agent-host/agents/deepseek/package-lock.json` with `npm install --package-lock-only --ignore-scripts --omit=optional` in that folder; confirm every entry has `integrity` and only registry URLs (no local paths) (R-345, FR-350)
 
 ## Phase 2: Foundational (S1 — blocks every story)
 
-- [ ] T638 [P] RED: contract test that `CONVERSATION_AGENTS` is `["claude-code","codex","hermes","deepseek"]`, availability accepts `notes: ["git-missing"|"pre-release"]`, a permission event accepts `rejectOnly: true`, and the error codes include `start-cancelled` and `agent-model-unreachable`, and the conversation projection accepts `replay?: "none"`, in `tests/contract/agent-conversation-021.contract.test.ts`
-- [ ] T639 Extend `packages/contracts/src/conversation.ts` per contracts/agents.md (agent ids, `notes`, `rejectOnly`, two codes, `replay?: "none"`; all `strictObject`) — T638 GREEN
-- [ ] T640 [P] RED: descriptor table tests in `BT/broker-agents.test.ts` — four descriptions with kind adapter/adapter/installed/fetched; Hermes found by `where.exe hermes` then `%USERPROFILE%\.local\bin\hermes.exe`; Hermes version `0.22.2` ready, `0.22.1` → version-problem showing both; DeepSeek needs-install until `<data>\agents\deepseek\0.2.1-rc.2\node_modules\@deepseek-ai\dsh\package.json` says `0.2.1-rc.2`; Git Bash missing → note `git-missing` on Hermes (still ready); DeepSeek note `pre-release`; Claude/Codex rows unchanged
-- [ ] T641 Rework `BR/agents.ts` into the descriptor table (data-model.md) keeping Claude/Codex behaviour byte-for-byte; Hermes discovery + version + Git Bash probe (`where.exe bash` under a Git install or `%ProgramFiles%\Git\bin\bash.exe`); DeepSeek fetched availability — T640 GREEN
-- [ ] T642 [P] RED: launch settings tests in `BT/broker-agent-launch-settings.test.ts` — Hermes strict writes `<data>\agents\hermes\managed\strict\config.yaml` with `agent.disabled_toolsets` exactly `[terminal, code_execution, delegation, browser_vault]`, agent-review exactly `[browser_vault]`, overwrites a tampered file, writes nothing else, returns env `{HERMES_MANAGED_DIR}` and agent mode `default` / `accept_edits` (never `dont_ask`); DeepSeek strict env `DSH_PERMISSION_MODE=read-only`, agent-review `workspace-write`, both `DSH_TELEMETRY_MODE=DISABLED`; no value ever equals `danger-full-access`; no key-like variable is set
-- [ ] T643 Create `BR/agent-launch-settings.ts` (pure: mode → `{env, agentMode?, files}`; writer separate) — T642 GREEN
-- [ ] T644 [P] RED: `adapterLaunchSpec` tests in `BT/broker-agents.test.ts` — Hermes `{command: <hermes.exe>, args: ["acp"]}`, DeepSeek `{command: node, args: [<dsh>\lib\bin.js, "--profile", "acp"]}`, env from T643, Claude/Codex specs unchanged; a `.cmd` Hermes shim is launched through `cmd.exe /d /s /c` like `run-command.ts`
-- [ ] T645 Extend `adapterLaunchSpec` / launcher in `BR/agents.ts` and `BR/commands.ts` (`createAgentLauncher`) with the per-mode launch settings — T644 GREEN
-- [ ] T646 [P] RED: install timeout test in `BT/broker-install.test.ts` — DeepSeek install bound 30 min, others 10 min; `NPM_CI_ARGS` unchanged
-- [ ] T647 Per-agent install timeout in `BR/install.ts` (from the descriptor) — T646 GREEN
-- [ ] T648 [P] RED: packaging tests in `tests/contract/qa-package.contract.test.ts` — the zip and `install.ps1` required files include `agents/deepseek/package.json` and `package-lock.json`
-- [ ] T649 Add `deepseek` to `AGENT_MANIFEST_DIRECTORIES` in `scripts/package.ts` and the required files in `scripts/package/install.ps1` — T648 GREEN
-- [ ] T650 Update every `Record<ConversationAgent, …>` site to compile with the two new agents without behaviour change for the panel yet (placeholder letters/strings are added in S3): `APP/agent-mark.ts`, `apps/extension/src/locales/catalog.ts`, `en-US.ts`, `zh-TW.ts` (English text for the new keys in both files is allowed only until T679 fills zh-TW) — `npm run typecheck` green
-- [ ] T651 S1 gate: `npx tsc -b`, `npm run typecheck`, `npm test`, `npm run snapshot:check` green; report counts
-- [ ] T652 Commit S1
+- [X] T638 [P] RED: contract test that `CONVERSATION_AGENTS` is `["claude-code","codex","hermes","deepseek"]`, availability accepts `notes: ["git-missing"|"pre-release"]`, a permission event accepts `rejectOnly: true`, and the error codes include `start-cancelled` and `agent-model-unreachable`, and the conversation projection accepts `replay?: "none"`, in `tests/contract/agent-conversation-021.contract.test.ts`
+- [X] T639 Extend `packages/contracts/src/conversation.ts` per contracts/agents.md (agent ids, `notes`, `rejectOnly`, two codes, `replay?: "none"`; all `strictObject`) — T638 GREEN
+- [X] T640 [P] RED: descriptor table tests in `BT/broker-agents.test.ts` — four descriptions with kind adapter/adapter/installed/fetched; Hermes found by `where.exe hermes` then `%USERPROFILE%\.local\bin\hermes.exe`; Hermes version `0.22.2` ready, `0.22.1` → version-problem showing both; DeepSeek needs-install until `<data>\agents\deepseek\0.2.1-rc.2\node_modules\@deepseek-ai\dsh\package.json` says `0.2.1-rc.2`; Git Bash missing → note `git-missing` on Hermes (still ready); DeepSeek note `pre-release`; Claude/Codex rows unchanged
+- [X] T641 Rework `BR/agents.ts` into the descriptor table (data-model.md) keeping Claude/Codex behaviour byte-for-byte; Hermes discovery + version + Git Bash probe (`where.exe bash` under a Git install or `%ProgramFiles%\Git\bin\bash.exe`); DeepSeek fetched availability — T640 GREEN
+- [X] T642 [P] RED: launch settings tests in `BT/broker-agent-launch-settings.test.ts` — Hermes strict writes `<data>\agents\hermes\managed\strict\config.yaml` with `agent.disabled_toolsets` exactly `[terminal, code_execution, delegation, browser_vault]`, agent-review exactly `[browser_vault]`, overwrites a tampered file, writes nothing else, returns env `{HERMES_MANAGED_DIR}` and agent mode `default` / `accept_edits` (never `dont_ask`); DeepSeek strict env `DSH_PERMISSION_MODE=read-only`, agent-review `workspace-write`, both `DSH_TELEMETRY_MODE=DISABLED`; no value ever equals `danger-full-access`; no key-like variable is set
+- [X] T643 Create `BR/agent-launch-settings.ts` (pure: mode → `{env, agentMode?, files}`; writer separate) — T642 GREEN
+- [X] T644 [P] RED: `adapterLaunchSpec` tests in `BT/broker-agents.test.ts` — Hermes `{command: <hermes.exe>, args: ["acp"]}`, DeepSeek `{command: node, args: [<dsh>\lib\bin.js, "--profile", "acp"]}`, env from T643, Claude/Codex specs unchanged; a `.cmd` Hermes shim is launched through `cmd.exe /d /s /c` like `run-command.ts`
+- [X] T645 Extend `adapterLaunchSpec` / launcher in `BR/agents.ts` and `BR/commands.ts` (`createAgentLauncher`) with the per-mode launch settings — T644 GREEN
+- [X] T646 [P] RED: install timeout test in `BT/broker-install.test.ts` — DeepSeek install bound 30 min, others 10 min; `NPM_CI_ARGS` unchanged
+- [X] T647 Per-agent install timeout in `BR/install.ts` (from the descriptor) — T646 GREEN
+- [X] T648 [P] RED: packaging tests in `tests/contract/qa-package.contract.test.ts` — the zip and `install.ps1` required files include `agents/deepseek/package.json` and `package-lock.json`
+- [X] T649 Add `deepseek` to `AGENT_MANIFEST_DIRECTORIES` in `scripts/package.ts` and the required files in `scripts/package/install.ps1` — T648 GREEN
+- [X] T650 Update every `Record<ConversationAgent, …>` site to compile with the two new agents without behaviour change for the panel yet (placeholder letters/strings are added in S3): `APP/agent-mark.ts`, `apps/extension/src/locales/catalog.ts`, `en-US.ts`, `zh-TW.ts` (English text for the new keys in both files is allowed only until T679 fills zh-TW) — `npm run typecheck` green
+- [X] T651 S1 gate: `npx tsc -b`, `npm run typecheck`, `npm test`, `npm run snapshot:check` green; report counts
+- [X] T652 Commit S1
 
 **Checkpoint**: contracts and descriptors settled — S2 and S3 may start in parallel.
 
@@ -36,45 +36,45 @@ Paths: `BR` = `packages/agent-host/src/broker/`, `BT` = `packages/agent-host/tes
 **Goal**: each new agent asks before every in-folder edit and command under strict (SC-155/156).
 **Independent test**: fake-agent scenarios `hermes` and `deepseek` through the broker harness.
 
-- [ ] T653 [US1] Add scenarios `hermes` and `deepseek` to `tests/harness/fake-acp-agent.ts` imitating measured messages: Hermes `loadSession: true`, image true, modes default/accept_edits/dont_ask, permission options `allow_once`/`deny` (kinds allow_once/reject_once) with title and kind; DeepSeek no modes, `sessionCapabilities {list, resume, close}`, no `loadSession`, permission request carrying only `toolCallId` after a `tool_call` with `rawInput {command, justification}`, options `allow-once`/`reject-once`; plus a keyword that requests permission for an unannounced id; record received env names (not values) for assertions; route `conversation-harness.ts` scenario by agent id
-- [ ] T654 [P] [US1] RED: `BT/broker-conversation-agents-021.test.ts` — Hermes strict starts with managed env and sets mode `default`; a permission card appears for an edit and Reject answers with the `deny` option id
-- [ ] T655 [P] [US2] RED: same file — DeepSeek strict starts with `DSH_PERMISSION_MODE=read-only` and telemetry DISABLED, never calls `session/set_mode`; its permission card detail comes from the announced `tool_call` (command + reason); Allow answers `allow-once`
-- [ ] T656 [P] [US2] RED: reject-only — a DeepSeek request whose id was never announced gives a card with `rejectOnly: true`, an "allow for this conversation" rule does not answer it, and `ui.conversation.answer` allow on it is refused `invalid-command`
-- [ ] T657 [US1] [US2] Implement in `BR/conversation.ts`: mode map from descriptors (replaces `MODE_ALLOW_LIST` literal, same values for Claude/Codex), launch-time modes (no `set_mode` for DeepSeek; Hermes agent mode after `session/new`), announced-action store per `toolCallId` (cleared at turn end), card detail fallback, `rejectOnly` — T654–T656 GREEN
-- [ ] T658 [P] [US4] RED: stop while starting — `ui.conversation.stop` during `starting` (fake agent that never answers `session/new`) kills the process tree, emits state stopped with `start-cancelled`, frees the cap slot, and the process is gone within 5 s (SC-159)
-- [ ] T659 [US4] Implement stop-while-starting in `BR/conversation.ts` (`Conversation.stop` / pool stop; kill via existing tree kill; no broker timeout added) — T658 GREEN
-- [ ] T660 [P] [US4] RED: model unreachable — an agent turn error naming connection refused / 401 / 403 or a missing key variable gives code `agent-model-unreachable` with the agent's setting location hint; the error text kept in the log never contains a value of any environment variable (only names) (SC-161)
-- [ ] T661 [US4] Implement the classification in `BR/conversation.ts` failure path — T660 GREEN
+- [X] T653 [US1] Add scenarios `hermes` and `deepseek` to `tests/harness/fake-acp-agent.ts` imitating measured messages: Hermes `loadSession: true`, image true, modes default/accept_edits/dont_ask, permission options `allow_once`/`deny` (kinds allow_once/reject_once) with title and kind; DeepSeek no modes, `sessionCapabilities {list, resume, close}`, no `loadSession`, permission request carrying only `toolCallId` after a `tool_call` with `rawInput {command, justification}`, options `allow-once`/`reject-once`; plus a keyword that requests permission for an unannounced id; record received env names (not values) for assertions; route `conversation-harness.ts` scenario by agent id
+- [X] T654 [P] [US1] RED: `BT/broker-conversation-agents-021.test.ts` — Hermes strict starts with managed env and sets mode `default`; a permission card appears for an edit and Reject answers with the `deny` option id
+- [X] T655 [P] [US2] RED: same file — DeepSeek strict starts with `DSH_PERMISSION_MODE=read-only` and telemetry DISABLED, never calls `session/set_mode`; its permission card detail comes from the announced `tool_call` (command + reason); Allow answers `allow-once`
+- [X] T656 [P] [US2] RED: reject-only — a DeepSeek request whose id was never announced gives a card with `rejectOnly: true`, an "allow for this conversation" rule does not answer it, and `ui.conversation.answer` allow on it is refused `invalid-command`
+- [X] T657 [US1] [US2] Implement in `BR/conversation.ts`: mode map from descriptors (replaces `MODE_ALLOW_LIST` literal, same values for Claude/Codex), launch-time modes (no `set_mode` for DeepSeek; Hermes agent mode after `session/new`), announced-action store per `toolCallId` (cleared at turn end), card detail fallback, `rejectOnly` — T654–T656 GREEN
+- [X] T658 [P] [US4] RED: stop while starting — `ui.conversation.stop` during `starting` (fake agent that never answers `session/new`) kills the process tree, emits state stopped with `start-cancelled`, frees the cap slot, and the process is gone within 5 s (SC-159)
+- [X] T659 [US4] Implement stop-while-starting in `BR/conversation.ts` (`Conversation.stop` / pool stop; kill via existing tree kill; no broker timeout added) — T658 GREEN
+- [X] T660 [P] [US4] RED: model unreachable — an agent turn error naming connection refused / 401 / 403 or a missing key variable gives code `agent-model-unreachable` with the agent's setting location hint; the error text kept in the log never contains a value of any environment variable (only names) (SC-161)
+- [X] T661 [US4] Implement the classification in `BR/conversation.ts` failure path — T660 GREEN
 
 ## Phase 4: User Story 3 — automatic mode per conversation (P2, S2)
 
-- [ ] T662 [P] [US3] RED: changing Hermes strict → automatic between turns closes the agent, starts it with the agent-review managed layer and `accept_edits`, and continues with `session/load`; during a turn the change is refused as today
-- [ ] T663 [P] [US3] RED: changing DeepSeek strict → automatic restarts with `workspace-write` and continues with `session/resume` (no replay)
-- [ ] T664 [US3] Implement restart-on-launch-mode-change in `BR/conversation.ts` — T662–T663 GREEN
+- [X] T662 [P] [US3] RED: changing Hermes strict → automatic between turns closes the agent, starts it with the agent-review managed layer and `accept_edits`, and continues with `session/load`; during a turn the change is refused as today
+- [X] T663 [P] [US3] RED: changing DeepSeek strict → automatic restarts with `workspace-write` and continues with `session/resume` (no replay)
+- [X] T664 [US3] Implement restart-on-launch-mode-change in `BR/conversation.ts` — T662–T663 GREEN
 
 ## Phase 5: User Story 5 — old conversations (P2, S2)
 
-- [ ] T665 [P] [US5] RED: reopening a DeepSeek conversation after its agent stopped uses `session/resume` (not `session/load`), marks the conversation `replay: none`; resume failure → `cannot-resume` as today; Hermes reopening uses `session/load` and replays
-- [ ] T666 [US5] Implement resume-without-load in `BR/conversation.ts` start path (replaces the hard `loadSession` refusal at start when the agent offers resume) and set `replay: "none"` on the projection (field from T639) — T665 GREEN
-- [ ] T667 S2 gate: `npm test`, `npm run typecheck`; Claude/Codex broker tests unchanged and green (SC-162)
-- [ ] T668 `code-reviewer` on S2 (consent path: card detail, reject-only, launch settings; lifecycle: stop while starting, restart on mode change); fix findings with a RED test each; commit S2
+- [X] T665 [P] [US5] RED: reopening a DeepSeek conversation after its agent stopped uses `session/resume` (not `session/load`), marks the conversation `replay: none`; resume failure → `cannot-resume` as today; Hermes reopening uses `session/load` and replays
+- [X] T666 [US5] Implement resume-without-load in `BR/conversation.ts` start path (replaces the hard `loadSession` refusal at start when the agent offers resume) and set `replay: "none"` on the projection (field from T639) — T665 GREEN
+- [X] T667 S2 gate: `npm test`, `npm run typecheck`; Claude/Codex broker tests unchanged and green (SC-162)
+- [X] T668 `code-reviewer` on S2 (consent path: card detail, reject-only, launch settings; lifecycle: stop while starting, restart on mode change); fix findings with a RED test each; commit S2
 
 ## Phase 6: User Story 4 + panel (P1, S3 — parallel with S2 after T652)
 
-- [ ] T669 [P] [US4] RED: `UT/agent-menu.test.tsx` — the list shows four agents in contract order with letters/marks; Hermes not installed → install hint naming the tested release and the official installer; version mismatch shows both versions and cannot be picked; `git-missing` note text; DeepSeek needs download → first-use card with size; `pre-release` note; keyboard reachable and named
-- [ ] T670 [US4] Implement in `APP/AgentMenu.tsx`, `APP/agent-mark.ts`, `APP/FirstUseCard.tsx` — T669 GREEN
-- [ ] T671 [P] [US4] RED: `UT/conversation-view.test.tsx` — a starting conversation shows "Starting <agent>…", DeepSeek adds "the first start can take a few minutes", a Cancel button sends `ui.conversation.stop`; on `start-cancelled` the held first message returns to the composer and the state is not started
-- [ ] T672 [US4] Implement in `APP/ConversationTab.tsx` — T671 GREEN
-- [ ] T673 [P] [US2] RED: `UT/permission-card.test.tsx` — `rejectOnly` card says the action is unknown and shows only Reject (no Allow / Allow for conversation), keyboard order intact
-- [ ] T674 [US2] Implement in `APP/PermissionCard.tsx` — T673 GREEN
-- [ ] T675 [P] [US4] RED: `agent-model-unreachable` shows the hint naming where the agent's own setting lives (Hermes: its settings folder; DeepSeek: its settings / environment variable), never a key field
-- [ ] T676 [US4] Implement in `APP/broker-words.ts` / conversation error view — T675 GREEN
-- [ ] T677 [P] [US5] RED: a conversation with `replay: none` shows "earlier messages cannot be shown by DeepSeek; you can continue" and the composer stays usable
-- [ ] T678 [US5] Implement in `APP/ConversationTab.tsx` — T677 GREEN
-- [ ] T679 [US3] Mode menu notes for Hermes (automatic runs commands without a folder boundary, D-021-5) and DeepSeek (switching restarts the agent) in `APP/ModeMenu.tsx`; zh-TW for every new key in `apps/extension/src/locales/zh-TW.ts` (G26), test in `UT/composer.test.tsx`
-- [ ] T680 [US5] RED→GREEN: "+" menu follows reported accepts for the two agents before and after start (descriptor expectation before start, start value wins) in `UT/composer.test.tsx`
-- [ ] T681 S3 gate: `npm test` (extension-ui), `npm run typecheck`
-- [ ] T682 Commit S3
+- [X] T669 [P] [US4] RED: `UT/agent-menu.test.tsx` — the list shows four agents in contract order with letters/marks; Hermes not installed → install hint naming the tested release and the official installer; version mismatch shows both versions and cannot be picked; `git-missing` note text; DeepSeek needs download → first-use card with size; `pre-release` note; keyboard reachable and named
+- [X] T670 [US4] Implement in `APP/AgentMenu.tsx`, `APP/agent-mark.ts`, `APP/FirstUseCard.tsx` — T669 GREEN
+- [X] T671 [P] [US4] RED: `UT/conversation-view.test.tsx` — a starting conversation shows "Starting <agent>…", DeepSeek adds "the first start can take a few minutes", a Cancel button sends `ui.conversation.stop`; on `start-cancelled` the held first message returns to the composer and the state is not started
+- [X] T672 [US4] Implement in `APP/ConversationTab.tsx` — T671 GREEN
+- [X] T673 [P] [US2] RED: `UT/permission-card.test.tsx` — `rejectOnly` card says the action is unknown and shows only Reject (no Allow / Allow for conversation), keyboard order intact
+- [X] T674 [US2] Implement in `APP/PermissionCard.tsx` — T673 GREEN
+- [X] T675 [P] [US4] RED: `agent-model-unreachable` shows the hint naming where the agent's own setting lives (Hermes: its settings folder; DeepSeek: its settings / environment variable), never a key field
+- [X] T676 [US4] Implement in `APP/broker-words.ts` / conversation error view — T675 GREEN
+- [X] T677 [P] [US5] RED: a conversation with `replay: none` shows "earlier messages cannot be shown by DeepSeek; you can continue" and the composer stays usable
+- [X] T678 [US5] Implement in `APP/ConversationTab.tsx` — T677 GREEN
+- [X] T679 [US3] Mode menu notes for Hermes (automatic runs commands without a folder boundary, D-021-5) and DeepSeek (switching restarts the agent) in `APP/ModeMenu.tsx`; zh-TW for every new key in `apps/extension/src/locales/zh-TW.ts` (G26), test in `UT/composer.test.tsx`
+- [X] T680 [US5] RED→GREEN: "+" menu follows reported accepts for the two agents before and after start (descriptor expectation before start, start value wins) in `UT/composer.test.tsx`
+- [X] T681 S3 gate: `npm test` (extension-ui), `npm run typecheck`
+- [X] T682 Commit S3
 
 ## Phase 7: Integration, User Story 6 and release conditions (S4)
 
@@ -89,7 +89,7 @@ Paths: `BR` = `packages/agent-host/src/broker/`, `BT` = `packages/agent-host/tes
 - [X] T691 Screenshots en-US / zh-TW × light / dark: agent list states, starting + Cancel, reject-only card, no-replay note (`.scratch/021/shots`) — retaken 2026-10-22 after T701 (reject-only card now shows the mode-fixed line); 1a / 1c / 1c2 kept from the earlier take (agent-list states unchanged since)
 - [X] T692 `code-reviewer` on the combined 021 diff; fix findings with a RED test each
 - [X] T693 Update spec 021 change log and coverage (FR-343..359 → tests), memory/progress
-- [ ] T694 Owner OK, then 0.15.0 (022 + 021) release per the release recipe — `human` gate
+- [X] T694 Owner OK, then 0.15.0 (022 + 021) release per the release recipe — `human` gate
 
 ## Phase 8: D-021-16 — DeepSeek's mode fixed once started; the first start takes the chosen mode (FR-360, FR-361)
 
@@ -132,17 +132,17 @@ under `packages/agent-host/tests/` (broker) or `apps/extension/tests/` (panel) u
 | FR-345 no install of Hermes or Git, install hint | `broker-agents.test.ts`; `agent-menu.test.tsx` | live step 1 |
 | FR-346 Hermes strict: tools off, edits ask | `broker-agent-launch-settings.test.ts`; `broker-conversation-agents-021.test.ts` | live step 6, `real-herm-strict` |
 | FR-347 Hermes automatic = accept edits, never dont_ask | `broker-agent-launch-settings.test.ts`; `broker-conversation-agents-021.test.ts` | live step 6b |
-| FR-348 saved-logins tool off in every mode | `broker-agent-launch-settings.test.ts` | none beyond the launch settings |
+| FR-348 saved-logins tool off in every mode | `broker-agent-launch-settings.test.ts`; `broker-conversation-agents-021.test.ts` (FR-348: every panel run - strict, automatic, restarted - has the layer with `browser_vault` off) | none beyond the launch settings |
 | FR-349 owner's Hermes settings untouched | `broker-agent-launch-settings.test.ts` (writes only the Hallpass-owned layer) | live settings hashes: config.yaml, auth.json, SOUL.md identical; only Hermes runtime state changed |
 | FR-350 DeepSeek fetched on first use, pinned | `broker-install.test.ts`; `broker-agents.test.ts`; `tests/contract/qa-package.contract.test.ts` | live steps 1 and 2 |
 | FR-351 DeepSeek read-only / workspace-write, never full access | `broker-agent-launch-settings.test.ts`; `broker-conversation-agents-021.test.ts` | live steps 3 and 5, `real-dsh-ro`, `real-dsh-ww` |
-| FR-352 DeepSeek usage reporting off | `broker-agent-launch-settings.test.ts` | none beyond the launch settings |
+| FR-352 DeepSeek usage reporting off | `broker-agent-launch-settings.test.ts`; `broker-conversation-agents-021.test.ts` (FR-352: every panel run - strict, automatic, each continued - has `DSH_TELEMETRY_MODE=DISABLED`) | none beyond the launch settings |
 | FR-353 card detail from the announced action; reject-only | `broker-conversation-agents-021.test.ts`; `permission-card.test.tsx` | gate (fake DeepSeek scenario); never arose on the real DeepSeek |
 | FR-354 starting state; Cancel leaves no process | `broker-conversation-agents-021.test.ts` (SC-159); `conversation-agents-021.test.tsx`; `conversation-relay.test.ts` | live step 2, gate |
 | FR-355 no key handled; model-unreachable hint | `broker-conversation-agents-021.test.ts` (SC-161); `conversation-agents-021.test.tsx` | live step 6b (model server error shown as such); T690 key search still open |
-| FR-356 "+" menu follows accepts | `composer.test.tsx` | none |
-| FR-357 Hermes replays, DeepSeek no-replay note | `broker-conversation-agents-021.test.ts`; `conversation-agents-021.test.tsx` | none (reopening not exercised live) |
+| FR-356 "+" menu follows accepts | `composer.test.tsx` (T680, the menu before and after the start); `broker-conversation-agents-021.test.ts` (FR-356: Hermes' and DeepSeek's `initialize` answer reaches the view and the agent entry; a page is refused `attachment-not-accepted`, a file goes). DeepSeek is image yes as measured (R-355); FR-356's text aligned 2026-10-23 | none |
+| FR-357 Hermes replays, DeepSeek no-replay note | `broker-conversation-agents-021.test.ts` (T665: DeepSeek `session/resume`, `replay: none`, continued; Hermes `session/load` replayed; an unknown session `cannot-resume`); `conversation-agents-021.test.tsx` (T677: the note in English and zh-TW, only for `replay: none`, and the owner continues) - already dedicated, no new test | none (reopening not exercised live) |
 | FR-358 English and zh-TW, keyboard and names | `agent-menu.test.tsx`; `composer.test.tsx`; `conversation-a11y.test.tsx` | T691 screenshots pending |
 | FR-359 Claude, Codex, 022 unchanged | existing broker and panel tests, unchanged | gate (Claude/Codex strict turn), live step 7 |
-| FR-360 DeepSeek mode fixed once started | `tests/contract/agent-conversation-021.contract.test.ts`; `broker-conversation-agents-021.test.ts`; `broker-commands.test.ts`; `composer.test.tsx` | live step 5 |
+| FR-360 DeepSeek mode fixed once started | `tests/contract/agent-conversation-021.contract.test.ts`; `broker-conversation-agents-021.test.ts` (incl. the conversation's own refusal and a switch during the first start, 2026-10-23); `broker-commands.test.ts`; `composer.test.tsx` | live step 5 |
 | FR-361 mode chosen before the first message; next conversation back on Ask first | `broker-conversation-agents-021.test.ts`; `broker-commands.test.ts`; `composer.test.tsx` | live steps 5, 6 and 6b (new conversation header Ask first) |

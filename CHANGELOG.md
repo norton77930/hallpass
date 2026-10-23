@@ -5,6 +5,21 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.15.1 — 2026-10-23
+
+**DeepSeek's first download is several times faster, and dependency security fixes.**
+
+- **Faster first install.** An agent Hallpass downloads (DeepSeek, and the Claude and Codex adapters) is
+  now used where it was downloaded instead of being moved into place afterwards. On a machine with a
+  real-time file scanner, that move alone took about 41 minutes for DeepSeek; the first DeepSeek
+  download now took 5.5 minutes there. Installs made by earlier versions keep working without a new
+  download.
+- **Dependency updates** for reported vulnerabilities: the MCP SDK 1.32.0 (with hono 4.13.11 and
+  ip-address 10.7.4), and the build tools vite 8.2.4 and vitest 5.0.3. DeepSeek's own pinned packages
+  are unchanged until its next release.
+- **DeepSeek's mode stays fixed** even if a mode change arrives while its first start is still running;
+  choosing the same mode during the start is now accepted.
+
 ## 0.15.0 — 2026-10-23
 
 **Attachments in the composer, and two more side-panel agents: Hermes and DeepSeek.**
