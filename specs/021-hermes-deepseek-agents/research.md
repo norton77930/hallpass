@@ -182,3 +182,31 @@ local model started by the owner, Q37). Raw logs are kept outside the repository
   (`acp_adapter/session.py`: `_restore` -> `_make_agent` -> `load_config`), so the Hallpass managed layer of the
   new mode applies: the request dump after the Agent review restart lists `terminal` and `execute_code`. Only the
   model's belief about them can lag; telling it once in the next message is enough.
+
+## R-362 — An install is never moved: a pointer names the tree `npm ci` wrote
+
+- **Decision** (owner, 2026-10-23): no rename, move or copy of an `npm ci` tree, for every fetched package
+  (the Claude Code and Codex adapters and DeepSeek). `npm ci` runs in `agents\<agent>\.install-<broker pid>-<random>`
+  and the tree stays there. Once the pinned package is verified inside it, the pointer
+  `agents\<agent>\<version>.installed.json` (`{"folder": ".install-…"}`) is created whole: a file is written
+  beside it and hard-linked to the pointer's name, which fails when the pointer exists. Launch and the
+  availability check read the install through the pointer (`installedAdapterDirectory`), and only a bare
+  `.install-*` name is followed; with no pointer, the 0.15.0 `agents\<agent>\<version>` folder (renamed whole,
+  so complete) is the install, so earlier installs need no download. Two brokers installing at once each write
+  their own tree; the first pointer wins and the other broker removes its own tree, which nothing was started
+  from, and answers with the winner's. A failure removes the install's own tree (FR-300). At broker start
+  `cleanStaging` removes `.install-*` trees and pointer temporaries whose broker is dead and that no pointer
+  names, and 0.15.0's `.staging-*` folders as before (T572). A pointer whose tree was damaged since is
+  replaced by the next install (a rename of the small pointer file only).
+- **Rationale**: measured 2026-10-22 on the owner's machine with a real-time file scanner on: DeepSeek's
+  `npm ci` (611 packages) took 8.5 min in the staging folder; the following `rename(staging, <version>)` took
+  2472.6 s (41.2 min) of a 49.7 min install. The new name was visible at once, but the call returned only after
+  the scanner had walked the moved tree; node was idle meanwhile. This was the "putting it in place" time of
+  the 2026-10-22 live verification. The rename's only job was "a folder with that name is complete"; a pointer
+  created after verification gives the same guarantee, and creating a small file costs seconds.
+- **Alternatives**: `npm ci` straight into `<version>` guarded by a lock file with the installer's pid and
+  a completion marker written last (rejected: two brokers that both find a dead installer's stale lock could
+  each clean it up, and one would delete the tree the other had just begun writing; the fixed path makes
+  every takeover a race, where per-install folders have one writer each). Copying the tree into place
+  (rejected: the scanner reads every copied file, slower than the rename). Excluding the folder from the
+  scanner (not Hallpass's to configure).

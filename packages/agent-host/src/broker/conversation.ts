@@ -116,7 +116,10 @@ export const MODE_ALLOW_LIST: Readonly<Record<ConversationAgent, Readonly<Partia
 /** The agent's own mode id behind a panel mode, if the agent has ACP modes. */
 const agentModeId = (agent: ConversationAgent, mode: ConversationMode): string | undefined => MODE_ALLOW_LIST[agent][mode];
 
-/** R-351: the agent's tools or sandbox are fixed when it starts, so this mode change restarts it. */
+/**
+ * R-351: Hermes' tools are fixed when it starts, so this mode change restarts it. A fixed-mode agent
+ * (DeepSeek, D-021-16) is refused `mode-fixed` before this is asked, and is never restarted for a mode.
+ */
 export function restartsForMode(agent: ConversationAgent, from: ConversationMode, to: ConversationMode): boolean {
   if (from === to) return false;
   const modes = AGENT_DESCRIPTIONS[agent].modes;
@@ -984,16 +987,18 @@ export class Conversation {
   }
 
   /**
-   * R-351 (T664): a mode fixed when the agent starts (Hermes' tool set, DeepSeek's sandbox) changes by
-   * closing the agent and starting it again with the new launch settings, then continuing the same
-   * session - Hermes with `session/load` (its replay is not shown again), DeepSeek with
-   * `session/resume`. The owner's "for this conversation" rules stay. A failed start leaves the
-   * conversation stopped; the next message resumes it strict (FR-289).
+   * R-351 (T664): a mode fixed when Hermes starts (its tool set) changes by closing the agent and
+   * starting it again with the new launch settings, then continuing the same session with
+   * `session/load` (its replay is not shown again). The owner's "for this conversation" rules stay.
+   * A failed start leaves the conversation stopped; the next message resumes it strict (FR-289).
+   * DeepSeek is never restarted for a mode (D-021-16, FR-360): its resumed session keeps the mode of
+   * its `session/new`, so a change is refused `mode-fixed` here as well as in the pool.
    */
   async restart(
     mode: ConversationMode,
     launch: { spec: AdapterLaunchSpec; versions: StartFailureVersions; mayHandOut?: () => boolean },
   ): Promise<CommandOutcome> {
+    if (this.modeFixedAgainst(mode)) return modeFixed(this.agent);
     const ready = this.canRestart();
     if (!ready.ok) return ready;
     const sessionId = this.sessionId!;
@@ -1014,7 +1019,16 @@ export class Conversation {
     return started.ok ? { ok: true } : { ok: false, error: started.error };
   }
 
+  /**
+   * D-021-16 (FR-360): an agent that keeps its session's first mode (DeepSeek) refuses another one
+   * once it has a session or is starting - whoever asks, not only through the pool's own check.
+   */
+  private modeFixedAgainst(mode: ConversationMode): boolean {
+    return modeFixedOnceStarted(this.agent) && mode !== this.modeValue && (this.sessionId !== undefined || this.live);
+  }
+
   async setMode(mode: ConversationMode): Promise<CommandOutcome> {
+    if (this.modeFixedAgainst(mode)) return modeFixed(this.agent);
     const connection = this.connection;
     if (this.reloading) return failure("busy", "The conversation is already switching its mode; try again in a moment.");
     if (connection === undefined || this.sessionId === undefined || !this.live || !this.watchingMode) {
@@ -1915,8 +1929,10 @@ export class ConversationPool {
     if (conversation === undefined && entry === undefined) return unknown();
     const agent = conversation?.agent ?? entry!.agent;
     if (modeFixedOnceStarted(agent)) {
-      // D-021-16: running, starting or stopped - its session has (or is getting) its mode for good.
-      return mode === (conversation?.live ? conversation.mode : entry?.mode) ? { ok: true } : modeFixed(agent);
+      // D-021-16: running, starting or stopped - its session has (or is getting) its mode for good;
+      // a first start not spawned yet has no entry, and its mode is the one it carries (FR-361).
+      const current = conversation?.live ? conversation.mode : (entry?.mode ?? this.firstStarts.get(conversationId)?.mode);
+      return mode === current ? { ok: true } : modeFixed(agent);
     }
     if (conversation === undefined || !conversation.live) {
       return failure("agent-exited", "The agent is not running; it starts in strict mode when the conversation continues.");

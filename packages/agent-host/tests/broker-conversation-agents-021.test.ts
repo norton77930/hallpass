@@ -5,8 +5,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // Every test here starts real fake-agent processes: seconds alone, far longer under the full parallel run.
 vi.setConfig({ testTimeout: 60_000 });
 import { conversationEventSchema } from "@hallpass/contracts";
-import { permissionRuleKey, spawnAgentProcess } from "../src/broker/conversation.js";
-import { isAlive, makeTempDir, poolHarness, removeDir, requests, sleep, turnEnded, waitFor, type FakeLogLine } from "./conversation-harness.js";
+import { launchSettings } from "../src/broker/agent-launch-settings.js";
+import { Conversation, permissionRuleKey, spawnAgentProcess } from "../src/broker/conversation.js";
+import {
+  fakeAgentSpec,
+  isAlive,
+  killLoggedPids,
+  makeTempDir,
+  poolHarness,
+  readFakeLog,
+  removeDir,
+  requests,
+  sleep,
+  TestClock,
+  turnEnded,
+  waitFor,
+  type FakeLogLine,
+} from "./conversation-harness.js";
 
 /**
  * 021 S2 - Hermes and DeepSeek in the broker (R-351..R-354, R-356; FR-353..FR-357). The fake agent's
@@ -289,6 +304,90 @@ describe("D-021-16 DeepSeek's mode is fixed once its conversation has started", 
     for (const entry of extra.rec.of(id)) expect(conversationEventSchema.safeParse(entry.event).success).toBe(true);
   });
 
+  it("the conversation itself refuses a change once it has a session, so a caller past the pool cannot restart DeepSeek in another mode", async () => {
+    const dir = await makeTempDir("hallpass-conv-");
+    const logPath = join(dir, "fake-acp.log");
+    const conversation = new Conversation("fixed-1", "deepseek", { clock: new TestClock(), onEvent: () => undefined });
+    const launch = (mode: "strict" | "agent-review") => ({
+      spec: fakeAgentSpec({ FAKE_ACP_LOG: logPath, FAKE_ACP_SCENARIO: "deepseek", ...launchSettings("deepseek", mode, dir).env }),
+      versions: { agent: "deepseek" as const, tested: "1.0.0", found: "1.0.0" },
+    });
+    try {
+      expect((await conversation.start({ cwd: dir, ...launch("strict") })).ok).toBe(true);
+
+      const restarted = await conversation.restart("agent-review", launch("agent-review"));
+      expect(restarted.ok).toBe(false);
+      if (!restarted.ok) expect(restarted.error.code).toBe("mode-fixed");
+      const switched = await conversation.setMode("agent-review");
+      expect(switched.ok).toBe(false);
+      if (!switched.ok) expect(switched.error.code).toBe("mode-fixed");
+
+      expect(conversation.mode).toBe("strict");
+      expect(conversation.state).toBe("idle");
+      expect(starts(await readFakeLog(logPath)).map((run) => run.launch)).toEqual([
+        { DSH_PERMISSION_MODE: "read-only", DSH_TELEMETRY_MODE: "DISABLED" },
+      ]);
+    } finally {
+      await conversation.close("gone");
+      await killLoggedPids(logPath);
+      await removeDir(dir);
+    }
+  });
+
+  it("a switch that arrives while the first start waits (before the agent is spawned) is refused; the start goes on in its chosen mode, once", async () => {
+    h = await poolHarness();
+    let consent!: () => void;
+    const consented = new Promise<void>((done) => (consent = done));
+    let outcome: Awaited<ReturnType<Harness["pool"]["start"]>> | undefined;
+    const mayStart = async () => {
+      await consented;
+      return { ok: true as const };
+    };
+    void h.pool.start("deepseek", { kind: "scratch" }, mayStart, "agent-review").then((result) => (outcome = result));
+    let id = "";
+    await waitFor(async () => {
+      id = (await h!.pool.views())[0]?.conversationId ?? "";
+      return id !== "";
+    }, "the start to be listed");
+    expect(h.pool.state(id)).not.toBe("idle");
+    expect(starts(await h.log())).toEqual([]);
+
+    const refused = await h.pool.setMode(id, "strict");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.code).toBe("mode-fixed");
+    // The mode the start carries is no change.
+    expect(await h.pool.setMode(id, "agent-review")).toEqual({ ok: true });
+
+    consent();
+    await waitFor(() => outcome !== undefined, "the start to end");
+    expect(outcome?.ok).toBe(true);
+    expect(starts(await h.log()).map((run) => run.launch)).toEqual([
+      { DSH_PERMISSION_MODE: "workspace-write", DSH_TELEMETRY_MODE: "DISABLED" },
+    ]);
+    expect(modeEvents(h, id)).toEqual([{ type: "mode", mode: "agent-review" }]);
+    expect((await h.index.get(id))?.mode).toBe("agent-review");
+  });
+
+  it("a switch that arrives while the spawned agent is still starting is refused; no second run is started", async () => {
+    h = await poolHarness({ env: { FAKE_ACP_HANG_AT: "new" } });
+    let outcome: Awaited<ReturnType<Harness["pool"]["start"]>> | undefined;
+    void h.pool.start("deepseek", { kind: "scratch" }, undefined, "agent-review").then((result) => (outcome = result));
+    await waitFor(async () => (await h!.log()).some((line) => line.event === "hang"), "the agent to hang at session/new");
+    const id = (await h.pool.views())[0]!.conversationId;
+    expect(h.pool.state(id)).toBe("starting");
+
+    const refused = await h.pool.setMode(id, "strict");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.error.code).toBe("mode-fixed");
+    expect(await h.pool.setMode(id, "agent-review")).toEqual({ ok: true });
+    expect(h.pool.state(id)).toBe("starting");
+    expect(starts(await h.log()).map((run) => run.launch)).toEqual([
+      { DSH_PERMISSION_MODE: "workspace-write", DSH_TELEMETRY_MODE: "DISABLED" },
+    ]);
+
+    expect(await h.pool.stop(id)).toEqual({ ok: true });
+    await waitFor(() => outcome !== undefined, "the start to end", 5_000);
+  });
 });
 
 /**
@@ -323,6 +422,76 @@ describe("FR-361 a new conversation starts in the mode chosen before its first m
     expect((await h.pool.views()).find((view) => view.conversationId === id)?.mode).toBe("agent-review");
     await h.turn(id, "hello");
     expect(starts(await h.log())).toHaveLength(1);
+  });
+});
+
+/**
+ * Coverage (T693 follow-up): the launch settings tests check what Hallpass would pass; these check what
+ * every run the panel starts was actually given - each mode, a restart and a continued conversation.
+ */
+describe("settings every panel run carries (FR-348, FR-352)", () => {
+  it("FR-348 every Hermes run has its saved-logins tool off: started strict, started automatic, restarted into another mode", async () => {
+    h = await poolHarness();
+    const strictId = await h.start("hermes");
+    const automatic = await h.pool.start("hermes", { kind: "scratch" }, undefined, "agent-review");
+    expect(automatic.ok).toBe(true);
+    expect(await h.pool.setMode(strictId, "agent-review")).toEqual({ ok: true });
+
+    const runs = starts(await h.log());
+    expect(runs).toHaveLength(3);
+    for (const run of runs) {
+      const managed = (run.launch as { HERMES_MANAGED_DIR?: string } | undefined)?.HERMES_MANAGED_DIR;
+      expect(managed).toBeDefined();
+      expect(await readFile(join(managed!, "config.yaml"), "utf8")).toMatch(/disabled_toolsets: \[[^\]]*\bbrowser_vault\b/u);
+    }
+  });
+
+  it("FR-352 every DeepSeek run has usage reporting off: started strict, started automatic, and each continued", async () => {
+    h = await poolHarness({ browserRunId: "run-a" });
+    const strictId = await h.start("deepseek");
+    const automatic = await h.pool.start("deepseek", { kind: "scratch" }, undefined, "agent-review");
+    if (!automatic.ok) throw new Error(`start failed: ${automatic.error.code}`);
+    await h.pool.shutdown();
+
+    extra = await poolHarness({ dir: h.dir, index: h.index, browserRunId: "run-b" });
+    expect((await extra.pool.open(strictId)).ok).toBe(true);
+    expect((await extra.pool.open(automatic.value!.conversationId)).ok).toBe(true);
+
+    const runs = starts(await extra.log());
+    expect(runs.map((run) => (run.launch as { DSH_PERMISSION_MODE?: string }).DSH_PERMISSION_MODE)).toEqual([
+      "read-only",
+      "workspace-write",
+      "read-only",
+      "workspace-write",
+    ]);
+    for (const run of runs) expect((run.launch as { DSH_TELEMETRY_MODE?: string }).DSH_TELEMETRY_MODE).toBe("DISABLED");
+  });
+});
+
+describe("FR-356 what Hermes and DeepSeek say they accept reaches the + menu, and the broker holds to it", () => {
+  const b64 = (text: string) => Buffer.from(text).toString("base64");
+
+  it.each(["hermes", "deepseek"] as const)("%s: pictures yes, the page no, as said at initialize; a page is refused, a file goes", async (agent) => {
+    h = await poolHarness();
+    const id = await h.start(agent);
+    const said = { image: true, context: false };
+    expect((await h.pool.views()).find((view) => view.conversationId === id)?.accepts).toEqual(said);
+    expect(h.pool.agentAccepts(agent)).toEqual(said);
+
+    const page = "visible words";
+    const tab = { url: "https://example.test/a", title: "A page", cut: true };
+    expect(
+      await h.pool.attach(id, { attachmentId: "t1", index: 0, final: true, kind: "tab", name: "A page", size: page.length, tab, data: b64(page) }),
+    ).toEqual({ ok: true });
+    const refused = await h.pool.send(id, "see", undefined, undefined, ["t1"]);
+    expect(refused.ok ? "ok" : refused.error.code).toBe("attachment-not-accepted");
+
+    expect(await h.pool.attach(id, { attachmentId: "f1", index: 0, final: true, kind: "file", name: "a.txt", size: 1, data: b64("x") })).toEqual({
+      ok: true,
+    });
+    const from = h.rec.events.length;
+    expect(await h.pool.send(id, "see", undefined, undefined, ["f1"])).toEqual({ ok: true });
+    await waitFor(() => turnEnded(h!.rec.events.slice(from), id), "the end of the turn");
   });
 });
 

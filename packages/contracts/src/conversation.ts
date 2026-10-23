@@ -24,8 +24,10 @@ export const conversationAgentSchema = z.enum(CONVERSATION_AGENTS);
 export type ConversationAgent = z.infer<typeof conversationAgentSchema>;
 
 /**
- * The only two modes a panel conversation can be in (FR-289, FR-292). Every resume starts `strict`
- * again; `agent-review` lets the agent's own review decide inside the allow-list.
+ * The only two modes a panel conversation can be in (FR-289, FR-292). A first start is in the mode
+ * chosen before its first message (FR-361); every resume starts `strict` again, except for an agent in
+ * `CONVERSATION_MODE_FIXED_AGENTS`, which keeps its first mode (FR-360). `agent-review` lets the
+ * agent's own review decide inside the allow-list.
  */
 export const CONVERSATION_MODES = ["strict", "agent-review"] as const;
 export const conversationModeSchema = z.enum(CONVERSATION_MODES);

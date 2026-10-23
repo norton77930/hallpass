@@ -13,6 +13,7 @@ import {
   agentAvailability,
   classifyStartFailure,
   discoverCli,
+  isAdapterInstalled,
   parseVersion,
   readCliVersion,
   type AgentPorts,
@@ -400,6 +401,41 @@ describe("adapterLaunchSpec (T531, R-315, R-322)", () => {
       win32.join(adapterDirectory(DATA, "claude-code"), "node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "index.js"),
     ]);
     expect(spec.env).toEqual({ CLAUDE_CODE_EXECUTABLE: CLAUDE_EXE });
+  });
+
+  it("021 R-362: starts from the tree the install pointer names, not from a <version> folder beside it", async () => {
+    const tree = win32.join(DATA, "agents", "claude-code", ".install-4321-abc123");
+    const pin = AGENT_DESCRIPTIONS["claude-code"];
+    const p = ports({
+      files: {
+        // A 0.15.0 folder of another version is beside it and must not be what starts.
+        ...adapterManifest("claude-code", { version: "0.0.1", bin: "dist/old.js" }),
+        [win32.join(DATA, "agents", "claude-code", `${pin.version}.installed.json`)]: JSON.stringify({ folder: ".install-4321-abc123" }),
+        [win32.join(tree, "node_modules", ...pin.package.split("/"), "package.json")]: JSON.stringify({
+          name: pin.package,
+          version: pin.version,
+          bin: { "claude-agent-acp": "dist/index.js" },
+        }),
+      },
+    });
+    expect(await isAdapterInstalled("claude-code", p)).toBe(true);
+    const spec = await adapterLaunchSpec("claude-code", CLAUDE_EXE, p);
+    expect(spec.args).toEqual([win32.join(tree, "node_modules", ...pin.package.split("/"), "dist", "index.js")]);
+  });
+
+  it("021 R-362: a pointer that names anything but an .install-* folder is not followed", async () => {
+    const pin = AGENT_DESCRIPTIONS["claude-code"];
+    const p = ports({
+      files: {
+        [win32.join(DATA, "agents", "claude-code", `${pin.version}.installed.json`)]: JSON.stringify({ folder: "..\\..\\elsewhere" }),
+        [win32.join(DATA, "elsewhere", "node_modules", ...pin.package.split("/"), "package.json")]: JSON.stringify({
+          name: pin.package,
+          version: pin.version,
+          bin: "x.js",
+        }),
+      },
+    });
+    expect(await isAdapterInstalled("claude-code", p)).toBe(false);
   });
 
   it("points CODEX_PATH at Hallpass's app-server shim and turns MCP config filtering off, with a string bin", async () => {

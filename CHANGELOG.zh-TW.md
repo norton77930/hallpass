@@ -3,6 +3,13 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.15.1 — 2026-10-23
+
+- **DeepSeek 第一次下載快很多**:Hallpass 下載的 agent(DeepSeek,以及 Claude、Codex 的配接器)現在就在下載的位置使用,不再事後搬到定位。
+  在有即時防毒掃描的電腦上,光是那次搬移 DeepSeek 就要約 41 分鐘;改版後同一台電腦第一次下載 DeepSeek 只花 5.5 分鐘。舊版裝好的不用重新下載。
+- **相依套件安全更新**:MCP SDK 1.32.0(含 hono 4.13.11、ip-address 10.7.4),建置工具 vite 8.2.4、vitest 5.0.3。DeepSeek 自己固定的套件等它下一版再一起更新。
+- **DeepSeek 的模式維持固定**:就算在第一次啟動途中收到換模式的要求也一樣;啟動途中選同一個模式現在會被接受。
+
 ## 0.15.0 — 2026-10-23
 
 - **訊息可以附東西**:輸入框的「+」可加入圖片(選取、貼上或拖放,太大會自動縮小)、其他檔案(複製進對話資料夾並告訴 agent,

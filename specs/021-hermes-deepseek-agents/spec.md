@@ -56,7 +56,8 @@ time. Hermes and DeepSeek are not tied: 0.15.0 ships whichever passes (G30).
   environment. Either may point at a local model. DeepSeek has no account login, so the DeepSeek web chat
   cannot be used. When an agent cannot reach its model or has no key, the panel says so and where to set it.
 - **D-021-13 — what each agent accepts** (D-022-6): Hermes accepts images but not page context; DeepSeek
-  accepts neither. The "+" menu follows what each agent says when it starts; files work for both.
+  accepts images but not page context with the owner's model (R-355; it depends on the configured model).
+  The "+" menu follows what each agent says when it starts; files work for both.
 - **D-021-14 — old conversations** (D-019-6): Hermes replays an old conversation; DeepSeek cannot, so
   opening an old DeepSeek conversation says the earlier messages cannot be shown and continues it.
 - **D-021-15 — scope** (G3, G26): English and zh-TW; keyboard and screen-reader access at the 006/020 bar.
@@ -234,7 +235,7 @@ Claude Code, Codex, external agents over the bridge and every 0.14.0 and 022 beh
 - **FR-355**: Hallpass MUST NOT ask for, read, show, log or store any key; when an agent reports a missing key
   or an unreachable model, the conversation MUST say so and name where the agent's own setting lives.
 - **FR-356**: The "+" menu MUST follow what each agent says it accepts (D-022-6): Hermes images and files,
-  DeepSeek files only.
+  DeepSeek images and files as measured with the owner's model (R-355); neither takes page context.
 - **FR-357**: Opening an old Hermes conversation MUST replay it; opening an old DeepSeek conversation MUST say
   the earlier messages cannot be shown and let the owner continue it.
 - **FR-358**: Every new text MUST exist in English and zh-TW; the new list entries, states, cards and buttons
@@ -309,3 +310,14 @@ lost when switching panel tabs (a separate fix).
   (T701, confirmed live). The reject-only card never arose on the real DeepSeek (every real card matched an
   announced `tool_call`); it is covered by the test-mode fake DeepSeek scenario only. See R-361 for a known
   Hermes limitation after a mode change.
+- **2026-10-23 — FR-360 follow-up** (review LOW items): the conversation itself refuses a DeepSeek mode change
+  `mode-fixed` once it has a session or is starting, not only the pool, so no caller can restart it in another
+  mode; a switch during the first start is refused and starts no second run, and a set to the mode that start
+  carries is answered ok (it was refused `mode-fixed` before the agent was spawned).
+- **2026-10-23 — FR-356 / D-021-13 text** (owner): DeepSeek accepts images, as R-355 measured and the code
+  already does; the earlier "files only" text predated that measurement. No behaviour change.
+- **2026-10-23 — install no longer renames the installed tree** (owner; R-362): the 2026-10-22 "putting it in
+  place" time was measured: under a real-time file scanner the rename of DeepSeek's `npm ci` tree into
+  `agents\<agent>\<version>` took 41.2 min of a 49.7 min install. Every fetched package (both adapters and
+  DeepSeek) now stays in the folder `npm ci` ran in, and a small pointer file names it once it is verified;
+  installs made by 0.15.0 and earlier keep working without a download.

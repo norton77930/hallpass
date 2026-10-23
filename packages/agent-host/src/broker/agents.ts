@@ -270,15 +270,54 @@ function requirePackage(agent: ConversationAgent): { package: string; version: s
 }
 
 /**
- * `<data>\agents\<agent>\<package version>` - where the pinned package's `npm ci` tree lives (an
- * adapter or a fetched agent). An installed program has none: this throws for it.
+ * `<data>\agents\<agent>\<package version>` - where 0.15.0 and earlier put the pinned package's
+ * `npm ci` tree (an adapter or a fetched agent), renamed into place whole, so complete. A newer
+ * install stays where its `npm ci` ran and `installPointerPath` names it (R-362);
+ * `installedAdapterDirectory` says which one is the install. An installed program has none: this
+ * throws for it.
  */
 export function adapterDirectory(dataDir: string, agent: ConversationAgent): string {
   return win32.join(dataDir, "agents", agent, requirePackage(agent).version);
 }
 
-const adapterPackageDirectory = (dataDir: string, agent: ConversationAgent) =>
-  win32.join(adapterDirectory(dataDir, agent), "node_modules", ...requirePackage(agent).package.split("/"));
+/** The folder an install's `npm ci` runs in, and stays in: `agents\<agent>\.install-<broker pid>-<random>`. */
+export const INSTALL_TREE_PREFIX = ".install-";
+const INSTALL_TREE_NAME = /^\.install-\d+-[0-9a-z]+$/u;
+
+/**
+ * R-362: `<data>\agents\<agent>\<package version>.installed.json` = `{"folder":".install-<pid>-<random>"}`.
+ * Created whole, and only once the tree it names was verified, so a tree it names is complete.
+ */
+export function installPointerPath(dataDir: string, agent: ConversationAgent): string {
+  return win32.join(dataDir, "agents", agent, `${requirePackage(agent).version}.installed.json`);
+}
+
+/** The tree folder a pointer names, or undefined: a bare `.install-*` name, so nothing outside the agent folder. */
+export function parseInstallPointer(text: string): string | undefined {
+  try {
+    const folder: unknown = (JSON.parse(text) as { folder?: unknown } | null)?.folder;
+    return typeof folder === "string" && INSTALL_TREE_NAME.test(folder) ? folder : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** R-362: the tree the pointer names when there is one, else the 0.15.0 folder - the one place to look. */
+export async function installedAdapterDirectory(
+  dataDir: string,
+  agent: ConversationAgent,
+  readText: (path: string) => Promise<string>,
+): Promise<string> {
+  const folder = await readText(installPointerPath(dataDir, agent)).then(parseInstallPointer, () => undefined);
+  return folder === undefined ? adapterDirectory(dataDir, agent) : win32.join(dataDir, "agents", agent, folder);
+}
+
+const adapterPackageDirectory = async (agent: ConversationAgent, ports: AgentPorts) =>
+  win32.join(
+    await installedAdapterDirectory(ports.dataDir, agent, (path) => ports.fs.readText(path)),
+    "node_modules",
+    ...requirePackage(agent).package.split("/"),
+  );
 
 /** The first semver in a CLI's `--version` output (`2.1.302 (Claude Code)`, `codex-cli 0.162.1`). */
 export function parseVersion(text: string): string | undefined {
@@ -355,16 +394,16 @@ export async function readCliVersion(cliPath: string, ports: AgentPorts): Promis
   }
 }
 
+/** The pinned package's package.json and the folder it was read from (the one launch then uses). */
 async function readAdapterManifest(
   agent: ConversationAgent,
   ports: AgentPorts,
-): Promise<{ name?: unknown; version?: unknown; bin?: unknown } | undefined> {
+): Promise<{ packageDir: string; manifest: { name?: unknown; version?: unknown; bin?: unknown } } | undefined> {
   if (packagePin(agent) === undefined) return undefined;
   try {
-    const manifest: unknown = JSON.parse(
-      await ports.fs.readText(win32.join(adapterPackageDirectory(ports.dataDir, agent), "package.json")),
-    );
-    return manifest && typeof manifest === "object" ? (manifest as Record<string, unknown>) : undefined;
+    const packageDir = await adapterPackageDirectory(agent, ports);
+    const manifest: unknown = JSON.parse(await ports.fs.readText(win32.join(packageDir, "package.json")));
+    return manifest && typeof manifest === "object" ? { packageDir, manifest: manifest as Record<string, unknown> } : undefined;
   } catch {
     return undefined;
   }
@@ -374,8 +413,8 @@ async function readAdapterManifest(
 export async function isAdapterInstalled(agent: ConversationAgent, ports: AgentPorts): Promise<boolean> {
   const pin = packagePin(agent);
   if (pin === undefined) return false;
-  const manifest = await readAdapterManifest(agent, ports);
-  return manifest?.version === pin.version;
+  const read = await readAdapterManifest(agent, ports);
+  return read?.manifest.version === pin.version;
 }
 
 export type AgentStatus = {
@@ -521,10 +560,11 @@ export async function adapterLaunchSpec(
     return programLaunch(cliPath, description.launchArgs, { ...settings.env }, ports);
   }
   if (description.kind === "adapter" && cliPath === undefined) throw new Error(`${description.label} was not found`);
-  const manifest = await readAdapterManifest(agent, ports);
-  if (!manifest) {
+  const read = await readAdapterManifest(agent, ports);
+  if (!read) {
     throw new Error(`the ${description.label} ${description.kind === "adapter" ? "adapter" : "package"} is not installed`);
   }
+  const { manifest, packageDir } = read;
   const unscoped = requirePackage(agent).package.split("/").pop();
   const entries: [string, unknown][] =
     typeof manifest.bin === "string"
@@ -536,7 +576,6 @@ export async function adapterLaunchSpec(
   const chosen = entries.find(([name]) => name === unscoped) ?? entries[0];
   const bin = typeof chosen?.[1] === "string" && chosen[1] ? chosen[1] : undefined;
   if (!bin) throw new Error("the adapter's package.json has no bin entry");
-  const packageDir = adapterPackageDirectory(ports.dataDir, agent);
   const entry = win32.resolve(packageDir, bin);
   if (!entry.toLowerCase().startsWith(`${packageDir.toLowerCase()}${win32.sep}`)) {
     throw new Error("the adapter's bin entry points outside the adapter folder");
