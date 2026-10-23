@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { link, readdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
@@ -11,12 +11,12 @@ import {
   conversationResultFrameSchema,
   type ConversationEvent,
 } from "@hallpass/contracts";
-import { ATTACHMENTS_FOLDER, type AttachPiece } from "../src/broker/attachments.js";
+import { ATTACHMENTS_FOLDER, AttachmentStore, type AttachPiece } from "../src/broker/attachments.js";
 import { createCommandHandler, type ConsentStore } from "../src/broker/commands.js";
 import { CONVERSATION_IDLE_MS } from "../src/broker/conversation.js";
 import { ConversationEventLog } from "../src/broker/event-log.js";
 import type { FolderActions } from "../src/broker/folders.js";
-import { poolHarness, sleep, turnEnded, waitFor } from "./conversation-harness.js";
+import { makeTempDir, poolHarness, removeDir, sleep, TestClock, turnEnded, waitFor } from "./conversation-harness.js";
 
 /**
  * 022 T616 - attachments through a conversation (R-336, R-343, R-344; FR-333, FR-334): what the
@@ -342,11 +342,12 @@ describe("022 T616 refusals", () => {
     expect(again.ok ? "ok" : again.error.code).toBe("attachment-unknown");
   });
 
-  it("attachment-not-accepted for the tab when the agent takes no context, before any file is placed", async () => {
-    const { h, fake, id } = await setup({ promptCapabilities: { image: true, embeddedContext: false } });
+  it("the picture refusal comes before any file is placed, a tab beside it included (023: the tab alone is no refusal)", async () => {
+    const { h, fake, id } = await setup({ promptCapabilities: { image: false, embeddedContext: false } });
     expect(await h.pool.attach(id, tab("t1"))).toEqual({ ok: true });
     expect(await h.pool.attach(id, file("f1", "a.txt", "x"))).toEqual({ ok: true });
-    const sent = await h.pool.send(id, "see", undefined, undefined, ["t1", "f1"]);
+    expect(await h.pool.attach(id, image("i1"))).toEqual({ ok: true });
+    const sent = await h.pool.send(id, "see", undefined, undefined, ["t1", "f1", "i1"]);
     expect(sent.ok ? "ok" : sent.error.code).toBe("attachment-not-accepted");
     expect(fake.prompts).toEqual([]);
     expect(await readdir(join(h.dir, "data", "scratch", id, ATTACHMENTS_FOLDER))).toEqual([]);
@@ -514,5 +515,92 @@ describe("022 T616 a replayed picture (R-343)", () => {
     expect(withImage).toMatchObject({ attachments: [{ kind: "image", name: "image" }] });
     expect(owner.map((event) => (event.type === "text" ? event.text : "")).join("")).toBe("what is this?");
     for (const event of owner) expect(conversationEventSchema.safeParse(event).success).toBe(true);
+  });
+});
+
+/**
+ * 023 T712 (R-366, D-023-3, FR-365/366): an agent that takes no page context gets the tab as a text
+ * file - title, address, a blank line, the text - in the same `hallpass-attachments` folder as files,
+ * named from the tab's title through the file-name sanitiser with `.txt`, numbered on collision, and
+ * named in the same text block as the files. An agent that takes context gets the resource as before.
+ */
+describe("023 T712 the tab as a file for an agent without page context", () => {
+  const NO_CONTEXT = { image: true, embeddedContext: false };
+  const titled = (id: string, title: string, text = "visible words"): AttachPiece => ({
+    ...tab(id, text),
+    name: title,
+    tab: { url: "https://example.test/a", title, cut: false },
+  });
+
+  it("is written as <title>.txt with title, address, blank line and text, and named like a file", async () => {
+    const { h, fake, id } = await setup({ promptCapabilities: NO_CONTEXT });
+    expect(await h.pool.attach(id, tab("t1"))).toEqual({ ok: true });
+    expect(await h.pool.attach(id, file("f1", "data.csv", "a,b"))).toEqual({ ok: true });
+    expect(await sendAndWait(h, id, "summarise", ["t1", "f1"])).toEqual({ ok: true });
+
+    const folder = await realpath(join(h.dir, "data", "scratch", id, ATTACHMENTS_FOLDER));
+    const tabPath = join(folder, "A page.txt");
+    expect(await readFile(tabPath, "utf8")).toBe("A page\nhttps://example.test/a\n\nvisible words");
+    expect(fake.prompts.at(-1)).toEqual([
+      { type: "text", text: "summarise" },
+      { type: "text", text: `- A page.txt: ${tabPath}\n- data.csv: ${join(folder, "data.csv")}` },
+    ]);
+    // The owner's bubble shows the tab as the composer did.
+    expect(ownerTexts(h, id).at(-1)?.attachments).toEqual([
+      { kind: "tab", name: "A page", cut: true },
+      { kind: "file", name: "data.csv", size: 3, path: join(folder, "data.csv") },
+    ]);
+    expect((await readdir(folder)).sort()).toEqual(["A page.txt", "data.csv"]);
+  });
+
+  it("is numbered past a name already taken, and its title goes through the sanitiser", async () => {
+    const { h, fake, id } = await setup({ promptCapabilities: NO_CONTEXT });
+    expect(await h.pool.attach(id, titled("t1", "Docs / intro: what?"))).toEqual({ ok: true });
+    expect(await sendAndWait(h, id, "", ["t1"])).toEqual({ ok: true });
+    expect(await h.pool.attach(id, titled("t2", "Docs / intro: what?", "second"))).toEqual({ ok: true });
+    expect(await sendAndWait(h, id, "", ["t2"])).toEqual({ ok: true });
+
+    const folder = await realpath(join(h.dir, "data", "scratch", id, ATTACHMENTS_FOLDER));
+    expect((await readdir(folder)).sort()).toEqual(["Docs _ intro_ what_ (2).txt", "Docs _ intro_ what_.txt"]);
+    expect(await readFile(join(folder, "Docs _ intro_ what_ (2).txt"), "utf8")).toBe("Docs / intro: what?\nhttps://example.test/a\n\nsecond");
+    expect(fake.prompts.at(-1)).toEqual([{ type: "text", text: `- Docs _ intro_ what_ (2).txt: ${join(folder, "Docs _ intro_ what_ (2).txt")}` }]);
+  });
+
+  it("an agent that takes page context still gets the tab as a resource, and no file is written", async () => {
+    const { h, fake, id } = await setup({ promptCapabilities: BOTH });
+    expect(await h.pool.attach(id, tab("t1"))).toEqual({ ok: true });
+    expect(await sendAndWait(h, id, "see", ["t1"])).toEqual({ ok: true });
+    expect(fake.prompts.at(-1)).toEqual([
+      { type: "text", text: "see" },
+      { type: "resource", resource: { uri: "https://example.test/a", mimeType: "text/plain", text: "A page\n\nvisible words" } },
+    ]);
+    expect(await readdir(join(h.dir, "data", "scratch", id, ATTACHMENTS_FOLDER)).catch(() => [])).toEqual([]);
+  });
+
+  it("a take that fails after the tab file was placed removes it again, part file included", async () => {
+    const dir = await makeTempDir("hallpass-tabfile-");
+    try {
+      // Links work for the tab's file only; the data file can neither be linked nor copied.
+      const store = new AttachmentStore({
+        folder: dir,
+        clock: new TestClock(),
+        fs: {
+          link: async (existing, target) => {
+            if (!target.endsWith(".txt")) throw Object.assign(new Error("no links"), { code: "EPERM" });
+            await link(existing, target);
+          },
+          copyExclusive: async () => {
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          },
+        },
+      });
+      expect(await store.receive(tab("t1"))).toEqual({ ok: true });
+      expect(await store.receive(file("f1", "data.csv", "a,b"))).toEqual({ ok: true });
+      const taken = await store.take(["t1", "f1"], { tabAsFile: true });
+      expect(taken.ok ? "ok" : taken.error.code).toBe("attachment-write-failed");
+      expect(await readdir(join(dir, ATTACHMENTS_FOLDER))).toEqual([]);
+    } finally {
+      await removeDir(dir);
+    }
   });
 });

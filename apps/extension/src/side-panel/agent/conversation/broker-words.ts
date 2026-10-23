@@ -169,6 +169,33 @@ export function errorDetailWords(detail: string, t: T): string | undefined {
   return said === null ? undefined : (said ?? detail);
 }
 
+/**
+ * 023 FR-373, R-369: the key hint the broker puts inside a failed first start's detail (its
+ * `keyEnvHint`), in English. Only the variable's name is taken from it.
+ */
+const KEY_ENV_HINT = new RegExp(
+  `([A-Za-z_][A-Za-z0-9_]{0,127}) is set in your Windows user settings, but this browser started before it was, so ${LABEL} did not get it\\. ` +
+    `Quit the browser completely \\(also when it keeps running in the background\\), then open it again\\.`,
+  "u",
+);
+
+/**
+ * The key hint in an `agent-model-unreachable` detail, said in the locale's words
+ * (`conversation.notice.key-env-not-in-browser`), and the detail without it; `undefined` when the
+ * detail has no such hint.
+ */
+export function keyEnvHintIn(detail: string, t: T): { words: string; rest: string } | undefined {
+  const match = KEY_ENV_HINT.exec(detail);
+  if (match === null) return undefined;
+  const variable = match[1]!;
+  const before = detail.slice(0, match.index).trimEnd();
+  const after = detail.slice(match.index + match[0].length).trimStart();
+  return {
+    words: t("conversation.notice.key-env-not-in-browser").replace("{variable}", () => variable),
+    rest: before !== "" && after !== "" ? `${before} ${after}` : before + after,
+  };
+}
+
 /** The words for a notice the broker sent with a code of its own, or its own text when it is not a known template. */
 export function noticeWords(code: string, text: string, t: T): string {
   const templates = code.startsWith("stop-") ? [TURN_ENDED] : (NOTICE_TEXTS[code] ?? []);

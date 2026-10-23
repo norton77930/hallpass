@@ -512,6 +512,8 @@ export const messages = {
   "conversation.state.starting": "Starting {agent}…",
   // 021 FR-354, R-354: a cold start can take minutes; Cancel ends it and nothing is left running.
   "conversation.state.startingSlow": "The first start can take a few minutes.",
+  // 023 D-023-5, R-370: every agent's start says how long the first one can take; DeepSeek keeps its own sentence.
+  "conversation.state.startingTimed": "Starting {agent}… (first start can take 30–60 s)",
   "conversation.state.cancelStart": "Cancel",
   "conversation.state.cancelStartLabel": "Cancel starting {agent}",
   "conversation.state.start-cancelled": "Start cancelled.",
@@ -540,6 +542,14 @@ export const messages = {
   // 019 R-317: strict mode declined Codex's request for wider sandbox permissions.
   "conversation.notice.sandbox-permissions-declined":
     "Codex asked for wider permissions for the rest of its turn. Strict mode declined, so Codex asks before each change instead.",
+  // 023 D-023-2, D-023-6, R-365, R-369 (FR-364, FR-369, FR-370): notices that carry the agent, or a variable's name.
+  "conversation.notice.browser-tools-missing": "{agent} could not take Hallpass's browser tools.",
+  "conversation.notice.browser-tools-missing.hermes":
+    "Hermes could not take Hallpass's browser tools: its optional MCP component is missing. Add it to Hermes (the `mcp` extra), then start a new conversation.",
+  "conversation.notice.browser-tools-missing.deepseek":
+    "DeepSeek cannot use the browser by itself. Attach a screenshot or the current tab instead.",
+  "conversation.notice.key-env-not-in-browser":
+    "Hermes' key variable {variable} is set in your Windows user settings, but this browser started before it was set, so Hermes cannot see it. Quit the browser completely (including any copy still running in the background) and open it again.",
   // 019 US5, US6, FR-303, FR-304, T563: the list of conversations and the folder chooser.
   "conversation.list.label": "Conversations",
   "conversation.list.cannotContinue": "Cannot continue",
@@ -605,6 +615,18 @@ export const messages = {
   "conversation.held.hint": "Sends after you agree",
   "conversation.composer.waiting": "Answer the request above…",
   "conversation.turn.waiting": "Waiting for you: {title}",
+  // 023 D-023-5, R-370: from send to the turn's first update; the hint comes at 30 s.
+  "conversation.turn.waitingModel": "Waiting for the model… {seconds} s",
+  "conversation.turn.waitingModelHint": "No reply yet. Check that the model server is reachable (network or VPN).",
+  // 023 R-371: the agent is thinking (a reasoning model before its answer).
+  "conversation.turn.thinking": "Thinking…",
+  // 023 US5, D-023-8, R-367 (FR-372): the conversation details' "Agent output", shown on request.
+  "conversation.output.button": "Agent output",
+  "conversation.output.title": "Agent output",
+  "conversation.output.note": "The last lines the agent printed about itself. Kept in memory only; check them before you share them.",
+  "conversation.output.loading": "Loading…",
+  "conversation.output.empty": "No output from the agent yet.",
+  "conversation.output.refresh": "Refresh",
   "conversation.reply.copyLabel": "Copy reply",
   "conversation.availability.readyLastUsed": "Ready · last used",
   // 021 FR-357: DeepSeek continues a conversation without replaying it.
@@ -651,7 +673,6 @@ export const messages = {
   "conversation.attach.hint": "Up to 5 images, 5 files (25 MB in all) and 1 tab per message.",
   "conversation.attach.noTab": "No tab to use in this window.",
   "conversation.attach.noImages": "{agent} does not take images. Files still work.",
-  "conversation.attach.noContext": "{agent} does not take page text. A PDF tab still works.",
   "conversation.attach.refused.tooManyImages": "At most 5 images per message. Remove one to add another.",
   "conversation.attach.refused.tooManyFiles": "At most 5 files per message. Remove one to add another.",
   "conversation.attach.refused.fileTooLarge": "{name} is larger than 25 MB, so it was not added. Attach a smaller file.",

@@ -73,6 +73,13 @@ describe("019 conversation relay (pure)", () => {
     expect(JSON.stringify(delivered)).not.toContain(token);
   });
 
+  it("023 R-367: a diagnostics frame (the agent's own output lines) never reaches the deliver hook", () => {
+    const { relay, delivered } = harness();
+    relay.announce(BROKER);
+    expect(relay.receive({ type: "conversation-diagnostics", sessionId: BROKER, conversationId: "conv-0123456789abcdef", lines: ["a"] } as never)).toBe(true);
+    expect(delivered).toEqual([]);
+  });
+
   it("drops conversation frames while no broker has greeted", () => {
     const { relay, delivered } = harness();
 
@@ -431,6 +438,19 @@ describe("T547 conversation relay: forwarding (pure)", () => {
     expect(panels).toEqual([
       { type: "conversation-result", payload: { commandId: "p-1", ok: false, error: { code: "broker-unavailable", detail: expect.any(String) } } },
     ]);
+  });
+
+  it("023 R-367: the broker's diagnostics reply goes to every panel as it came, and a stranger's is dropped", () => {
+    const { relay, panels } = harness();
+    relay.relayStarted();
+    relay.announce(BROKER);
+    const lines = ["INFO starting", "ERROR something failed"];
+    expect(relay.receive({ type: "conversation-diagnostics", sessionId: BROKER, conversationId: "conv-0123456789abcdef", lines } as never)).toBe(true);
+    expect(panels).toEqual([{ type: "conversation-diagnostics", payload: { conversationId: "conv-0123456789abcdef", lines } }]);
+
+    panels.length = 0;
+    expect(relay.receive({ type: "conversation-diagnostics", sessionId: "session-1", conversationId: "conv-0123456789abcdef", lines } as never)).toBe(false);
+    expect(panels).toEqual([]);
   });
 
   it("fans events and pages out as conversation-event messages, and asks for pages after a gap in the seqs", () => {

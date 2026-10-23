@@ -191,6 +191,7 @@ export type ConversationPoolPort = Pick<
   | "attach"
   | "cancelAttachment"
   | "agentAccepts"
+  | "diagnostics"
 >;
 
 export type CommandHandlerOptions = {
@@ -425,6 +426,12 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       }
       case "ui.conversation.remove":
         return { outcome: await pool.remove(command.payload.conversationId), after: scheduleOverview };
+      case "ui.conversation.diagnostics": {
+        // 023 R-367 (FR-372): the latest run's scrubbed lines, after the result; none for an unknown or removed one.
+        const { conversationId } = command.payload;
+        const lines = pool.diagnostics(conversationId);
+        return { outcome: { ok: true }, after: () => options.send({ type: "conversation-diagnostics", sessionId, conversationId, lines }) };
+      }
       case "ui.conversation.add-folder": {
         // T562 (R-320): the Windows folder dialog; the chosen folder reaches the panel in the overview.
         // T563: a typed path (the panel's answer to `path-entry`) is checked exactly as a chosen one.

@@ -105,6 +105,9 @@ export const WINDOW_STATE_KEYS: Record<"maximized" | "fullscreen", string> = {
  */
 export const CONVERSATION_NOTICE_KEYS: Record<(typeof CONVERSATION_NOTICES)[number], string> = {
   "sandbox-permissions-declined": "conversation.notice.sandbox-permissions-declined",
+  // 023 R-368: the two notices that carry the agent (and a variable's name); the panel words both.
+  "browser-tools-missing": "conversation.notice.browser-tools-missing",
+  "key-env-not-in-browser": "conversation.notice.key-env-not-in-browser",
 };
 
 /**
@@ -379,6 +382,20 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "conversation.firstUse.settings.deepseek",
   "conversation.state.starting",
   "conversation.state.startingSlow",
+  // 023 US2, D-023-5, R-370: the starting line with its time, and the wait for the model.
+  "conversation.state.startingTimed",
+  "conversation.turn.waitingModel",
+  "conversation.turn.waitingModelHint",
+  // 023 US3/US4: the agent's own words for the browser tools it did not take (the generic and the key one come from the notice map).
+  "conversation.notice.browser-tools-missing.hermes",
+  "conversation.notice.browser-tools-missing.deepseek",
+  // 023 US5, D-023-8: the conversation details' agent output.
+  "conversation.output.button",
+  "conversation.output.title",
+  "conversation.output.note",
+  "conversation.output.loading",
+  "conversation.output.empty",
+  "conversation.output.refresh",
   "conversation.state.cancelStart",
   "conversation.state.cancelStartLabel",
   "conversation.state.start-cancelled",

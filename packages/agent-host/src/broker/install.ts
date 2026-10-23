@@ -8,11 +8,15 @@ import {
   ADAPTER_NPM_CI_ARGS,
   AGENT_DESCRIPTIONS,
   INSTALL_TREE_PREFIX,
+  READ_RETRY,
+  UnreadableInstallFileError,
   adapterDirectory,
   installPointerPath,
   installedAdapterDirectory,
   packagePin,
   parseInstallPointer,
+  readInstallFile,
+  type ReadRetry,
 } from "./agents.js";
 import { redactedTail } from "./redact.js";
 import type { runCommand } from "./run-command.js";
@@ -44,6 +48,11 @@ import type { runCommand } from "./run-command.js";
  * its own tree (never named, so nothing runs from it) and answers with the winner's. Any failure
  * removes the install's own folder (FR-300); `cleanStaging` removes what a crash of a broker left
  * behind - never a tree a pointer names, nor one whose broker is alive.
+ *
+ * R-362 (L3): only a pointer or pinned package.json that is not there, or does not say the pinned
+ * install, is missing or damaged. One the file system will not let be read (a real-time file scanner
+ * holding it open) is read again briefly, then the install fails saying so: no download, no pointer
+ * replaced, no tree removed because of it.
  *
  * Progress is phases only. npm prints no byte counts to a pipe, so the panel shows an indeterminate
  * bar with the expected size (R-314); `InstallProgress.bytes` is there for a runner that can tell.
@@ -81,6 +90,10 @@ export type InstallPorts = {
   /** Runs a command to completion (injected in tests). */
   run: typeof runCommand;
   randomSuffix?: () => string;
+  /** Reads a small file whole: the pointer, a package.json (injected in tests). */
+  readText?: (path: string) => Promise<string>;
+  /** How a read the file system refused is tried again (R-362, L3; injected in tests). */
+  readRetry?: ReadRetry;
 };
 
 export type InstallResult = { ok: true; directory: string } | { ok: false; error: ConversationError };
@@ -98,15 +111,17 @@ const isFile = (path: string) =>
 
 const removeTree = (path: string) => rm(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 
-/** The pinned package's package.json inside an `npm ci` tree, or undefined. */
-async function pinnedAdapterPresent(agent: ConversationAgent, tree: string): Promise<boolean> {
+/**
+ * Whether the pinned package's package.json is inside an `npm ci` tree, at the pinned version.
+ * R-362 (L3): one held open throws `UnreadableInstallFileError` rather than reading as absent.
+ */
+async function pinnedAdapterPresent(agent: ConversationAgent, tree: string, read: Read, retry: ReadRetry): Promise<boolean> {
   const adapter = packagePin(agent);
   if (adapter === undefined) return false;
+  const text = await readInstallFile(read, win32.join(tree, "node_modules", ...adapter.package.split("/"), "package.json"), retry);
+  if (text === undefined) return false;
   try {
-    const manifest = JSON.parse(
-      await readFile(win32.join(tree, "node_modules", ...adapter.package.split("/"), "package.json"), "utf8"),
-    ) as { version?: unknown };
-    return manifest.version === adapter.version;
+    return (JSON.parse(text) as { version?: unknown } | null)?.version === adapter.version;
   } catch {
     return false;
   }
@@ -135,13 +150,22 @@ export async function installAgent(
   // T572: named with this broker's pid, so another browser's broker starting meanwhile leaves it alone.
   const suffix = (ports.randomSuffix ?? (() => randomBytes(6).toString("hex")))();
   const tree = win32.join(agentDir, `${INSTALL_TREE_PREFIX}${process.pid}-${suffix}`);
+  const read = ports.readText ?? readText;
+  const retry = ports.readRetry ?? READ_RETRY;
   let keepTree = false;
   try {
     await mkdir(agentDir, { recursive: true });
-    const current = await installedAdapterDirectory(ports.dataDir, agent, readText);
-    if (await pinnedAdapterPresent(agent, current)) {
-      onProgress?.({ phase: "finishing" });
-      return { ok: true, directory: current };
+    let current;
+    try {
+      current = await installedAdapterDirectory(ports.dataDir, agent, read, retry);
+      if (await pinnedAdapterPresent(agent, current, read, retry)) {
+        onProgress?.({ phase: "finishing" });
+        return { ok: true, directory: current };
+      }
+    } catch (error) {
+      if (!(error instanceof UnreadableInstallFileError)) throw error;
+      // R-362 (L3): held open is not missing - a download now could replace a good install.
+      return failure(`The ${description.label} install already here could not be checked: ${redactedTail(error.message, 400)}. Try again in a moment.`);
     }
     // A 0.15.0 `<version>` folder that is not a verified install is a leftover nothing launches from.
     // A pointer's tree that is not (damaged since) is left alone: the pointer is replaced below.
@@ -172,14 +196,14 @@ export async function installAgent(
       const head = `npm ci failed (exit ${run.code ?? "none"}): `;
       return failure(head + redactedTail(run.stderr || run.stdout, DETAIL_MAX - head.length));
     }
-    if (!(await pinnedAdapterPresent(agent, tree))) {
+    if (!(await pinnedAdapterPresent(agent, tree, read, retry))) {
       return failure(`npm finished, but ${pin.package} ${pin.version} is not in the result.`);
     }
 
     onProgress?.({ phase: "finishing" });
     let directory;
     try {
-      directory = await pointAt(agent, ports.dataDir, tree, `${tree}.pointer`);
+      directory = await pointAt(agent, ports.dataDir, tree, `${tree}.pointer`, read, retry);
     } catch (error) {
       return failure(`The install could not be put in place: ${redactedTail(messageOf(error), 400)}`);
     }
@@ -193,16 +217,25 @@ export async function installAgent(
   }
 }
 
-const readText = (path: string) => readFile(path, "utf8");
+type Read = (path: string) => Promise<string>;
+const readText: Read = (path) => readFile(path, "utf8");
 
 /**
  * Make the pointer name `tree` (verified), and answer with the install that is in place.
  * T572: the pointer is created by a hard link of a fully written file, which fails when it exists,
  * so the first finished install wins whole and no reader sees half a pointer. A pointer that is
  * there and names a verified install is kept (the caller drops its own tree); one whose tree was
- * damaged since is replaced (a small-file rename, not of the tree).
+ * damaged since is replaced (a small-file rename, not of the tree). R-362 (L3): one that cannot be
+ * read, or whose tree's package.json cannot, is never replaced - `UnreadableInstallFileError` fails the install.
  */
-async function pointAt(agent: ConversationAgent, dataDir: string, tree: string, temp: string): Promise<string> {
+async function pointAt(
+  agent: ConversationAgent,
+  dataDir: string,
+  tree: string,
+  temp: string,
+  read: Read,
+  retry: ReadRetry,
+): Promise<string> {
   const pointer = installPointerPath(dataDir, agent);
   await writeFile(temp, `${JSON.stringify({ folder: win32.basename(tree) })}\n`, { flag: "wx" });
   try {
@@ -212,8 +245,8 @@ async function pointAt(agent: ConversationAgent, dataDir: string, tree: string, 
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    const current = await installedAdapterDirectory(dataDir, agent, readText);
-    if (await pinnedAdapterPresent(agent, current)) return current;
+    const current = await installedAdapterDirectory(dataDir, agent, read, retry);
+    if (await pinnedAdapterPresent(agent, current, read, retry)) return current;
     await rename(temp, pointer);
     return tree;
   } finally {
@@ -226,19 +259,49 @@ const INSTALL_WORK_OWNER = /^\.(?:staging|install)-(\d+)-/u;
 const POINTER_SUFFIX = ".installed.json";
 
 /**
+ * The tree folders the pointers in `agentDir` name now (lower case). Undefined when the folder or a
+ * pointer cannot be read (R-362, L3): which tree is installed is then not known.
+ */
+async function namedTrees(agentDir: string, read: Read, retry: ReadRetry): Promise<Set<string> | undefined> {
+  try {
+    const named = new Set<string>();
+    for (const entry of await readdir(agentDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(POINTER_SUFFIX)) continue;
+      const text = await readInstallFile(read, win32.join(agentDir, entry.name), retry);
+      const folder = text === undefined ? undefined : parseInstallPointer(text);
+      if (folder !== undefined) named.add(folder.toLowerCase());
+    }
+    return named;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Remove what a crash mid-install left under `agents\<agent>` (run at broker start): 0.15.0's
  * `.staging-*` folders and `.install-*` trees and pointer files that no `<version>.installed.json`
  * names. T572: not one whose owning broker is alive - another browser's broker may be downloading
  * into it right now - and never a tree a pointer names (R-362: that is the install, maybe running).
  * A folder of this broker's own pid is an earlier process's (the pid was reused); one with no pid
  * in its name is from before the pid was in it.
+ *
+ * R-362 (L1): an installer creates its pointer before it exits, so the pointers are read again after
+ * a tree's broker is found dead - one that named its tree and exited between the first read and the
+ * pid check is seen then. (L3): when a pointer cannot be read, nothing of that agent is removed.
  */
 export async function cleanStaging(
   dataDir: string,
-  options: { isAlive?: (pid: number) => boolean; selfPid?: number } = {},
+  options: {
+    isAlive?: (pid: number) => boolean;
+    selfPid?: number;
+    readText?: (path: string) => Promise<string>;
+    readRetry?: ReadRetry;
+  } = {},
 ): Promise<string[]> {
   const isAlive = options.isAlive ?? isProcessAlive;
   const selfPid = options.selfPid ?? process.pid;
+  const read = options.readText ?? readText;
+  const retry = options.readRetry ?? READ_RETRY;
   const removed: string[] = [];
   for (const agent of CONVERSATION_AGENTS) {
     const agentDir = win32.join(dataDir, "agents", agent);
@@ -248,12 +311,8 @@ export async function cleanStaging(
     } catch {
       continue;
     }
-    const named = new Set<string>();
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(POINTER_SUFFIX)) continue;
-      const folder = await readText(win32.join(agentDir, entry.name)).then(parseInstallPointer, () => undefined);
-      if (folder !== undefined) named.add(folder.toLowerCase());
-    }
+    const named = await namedTrees(agentDir, read, retry);
+    if (named === undefined) continue;
     for (const entry of entries) {
       if (!entry.name.startsWith(STAGING_PREFIX) && !entry.name.startsWith(INSTALL_TREE_PREFIX)) continue;
       if (named.has(entry.name.toLowerCase())) continue;
@@ -262,6 +321,8 @@ export async function cleanStaging(
         const pid = Number(owner[1]);
         if (pid !== selfPid && isAlive(pid)) continue;
       }
+      const namedNow = await namedTrees(agentDir, read, retry);
+      if (namedNow === undefined || namedNow.has(entry.name.toLowerCase())) continue;
       const path = win32.join(agentDir, entry.name);
       try {
         await removeTree(path);

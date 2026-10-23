@@ -1154,6 +1154,42 @@
   background: var(--surface);
 }
 
+/* 023 T728 (D-023-8, FR-372): the conversation details' "Agent output", opened from the header. */
+.agent-conversation-output-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+}
+
+.agent-conversation-output-panel > * {
+  max-width: 100%;
+}
+
+/* Monospace and scrollable; a tab stop, so the keyboard can scroll it (focus ring from the shell's rule). */
+.agent-conversation-output {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 40vh;
+  margin: 0;
+  overflow: auto;
+  padding: var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: var(--fs-1);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .agent-conversation-heading {
   display: flex;
   flex: 1 1 auto;
@@ -1469,6 +1505,19 @@
 
 .agent-conversation-live:empty {
   display: none;
+}
+
+/* 023 D-023-5: "Waiting for the model… N s" and, from 30 s, the server hint under it. */
+.agent-conversation-live[data-model-wait] > [aria-hidden] {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.agent-conversation-live[data-model-wait] p {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
 }
 
 /* T605: "N steps" is one muted line with a chevron that turns when the steps are shown. */

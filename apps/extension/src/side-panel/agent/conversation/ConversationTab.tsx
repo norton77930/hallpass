@@ -28,7 +28,6 @@ import {
   type DraftStore,
 } from "./attachments/drafts.js";
 import {
-  acceptsContext,
   acceptsImages,
   draftSendable,
   readyAttachments,
@@ -42,7 +41,7 @@ import { ConversationHeader } from "./ConversationHeader.js";
 import { pictureOf, type ConversationLogs } from "./conversation-log.js";
 import { AgentProblemCard, FirstUseCard, InstallProgress } from "./FirstUseCard.js";
 import { FolderPicker } from "./FolderPicker.js";
-import { errorDetailWords, modelUnreachableHint, notAFolderPath } from "./broker-words.js";
+import { errorDetailWords, keyEnvHintIn, modelUnreachableHint, notAFolderPath } from "./broker-words.js";
 import { folderName } from "./folder-name.js";
 import { PassIcon } from "./icons.js";
 import { defaultAgent, useLastAgent } from "./last-agent.js";
@@ -105,16 +104,6 @@ const summaryOf = (attachment: DraftAttachment): ConversationAttachmentSummary =
   ...(attachment.tab?.cut === true ? { cut: true } : {}),
 });
 
-/** A tab address that names a PDF (FR-334: a PDF tab still goes as a file when page context does not). */
-const looksLikePdf = (url: string | undefined): boolean => {
-  if (url === undefined) return false;
-  try {
-    return new URL(url).pathname.toLowerCase().endsWith(".pdf");
-  } catch {
-    return false;
-  }
-};
-
 /**
  * 022 FR-325 - FR-341: the composer's attachment slots for one view - the chips, the "+" menu and
  * its entries (each disabled with its reason when it cannot be used), the refusal line, and the
@@ -148,11 +137,10 @@ function attachmentSlots(options: {
   };
   const screenshotReason =
     noTab ?? (acceptsImages(accepts) ? undefined : t("conversation.attach.noImages").replace("{agent}", () => options.agentName));
-  const tabReason =
-    noTab ??
-    (acceptsContext(accepts) || looksLikePdf(attach.activeTabUrl)
-      ? undefined
-      : t("conversation.attach.noContext").replace("{agent}", () => options.agentName));
+  // 023 D-023-3, FR-365: an agent without page context gets the tab as a text file the broker writes
+  // (R-366), so the entry is off only with no tab to use; a page the worker cannot read is refused
+  // at capture, as for every agent.
+  const tabReason = noTab;
   return {
     attachments: (
       <ComposerAttachments
@@ -217,8 +205,13 @@ export function ConversationTab(props: {
    * otherwise and the worker picks the start tab (S6).
    */
   activeTabId?: number;
-  /** 022 FR-334: the viewed tab's address, so "Attach this tab" can tell a PDF tab. */
+  /** 022 FR-334: the viewed tab's address. Since 023 (FR-365) nothing in the tab decides on it any more. */
   activeTabUrl?: string;
+  /**
+   * 023 R-367, T728: the last reply to "Agent output" per conversation (lines the agent printed
+   * about itself, scrubbed by the broker). Memory only, kept by the shell; absent until one came.
+   */
+  diagnostics?: Readonly<Record<string, readonly string[]>>;
   /** The last command's failure, when the worker reports one to the panel (T547). */
   lastError?: ConversationError;
   /** T606 (P2): shows the Connections & sites tab, where the helper's connection is checked. */
@@ -537,6 +530,7 @@ export function ConversationTab(props: {
         {...actionFor(freshError)}
         draft={drafts.get(view.conversationId)}
         onDraft={(text) => drafts.update(view.conversationId, (current) => ({ ...current, text }))}
+        {...(props.diagnostics?.[view.conversationId] === undefined ? {} : { output: props.diagnostics[view.conversationId] })}
         {...(attachSupport === undefined
           ? {}
           : { attach: { ...attachSupport, accepts: view.accepts ?? availabilityOf(view.agent)?.accepts } })}
@@ -919,7 +913,10 @@ function ErrorNotice(props: { error: ConversationError; t: T; action?: NoticeAct
   // a typed path that is no folder names that path, not the conversation's own folder.
   const typed = code === "folder-missing" ? notAFolderPath(detail) : undefined;
   // T609: every other template of the broker's is said from the locale, or left out when it only repeats the title.
-  const said = code === "path-entry" ? undefined : errorDetailWords(detail, props.t);
+  // 023 FR-373: a failed first start's key hint is said in the panel's words, apart from the rest.
+  const keyHint = code === "agent-model-unreachable" ? keyEnvHintIn(detail, props.t) : undefined;
+  const rest = keyHint?.rest ?? detail;
+  const said = code === "path-entry" || rest === "" ? undefined : errorDetailWords(rest, props.t);
   const hint = code === "agent-model-unreachable" ? modelUnreachableHint(props.agent, props.t) : undefined;
   return (
     <div className="agent-conversation-notice" role="status" data-notice-code={code}>
@@ -929,6 +926,7 @@ function ErrorNotice(props: { error: ConversationError; t: T; action?: NoticeAct
         <>
           {known ? <p>{props.t(`conversation.error.${code}`)}</p> : null}
           {said === undefined ? null : <p className="agent-conversation-detail">{said}</p>}
+          {keyHint === undefined ? null : <p className="agent-conversation-detail">{keyHint.words}</p>}
           {/* 021 FR-355: where the agent's own setting lives - never a key field. */}
           {hint === undefined ? null : <p className="agent-conversation-detail">{hint}</p>}
         </>
@@ -969,7 +967,8 @@ function StartingLine(props: { agent: ConversationAgent; agentName: string; t: T
   const fill = (key: string): string => t(key).replace("{agent}", () => props.agentName);
   return (
     <div className="agent-conversation-state agent-conversation-starting" aria-live="polite">
-      <p>{fill("conversation.state.starting")}</p>
+      {/* 023 D-023-5, R-370: DeepSeek keeps its longer sentence; every other agent says its 30-60 s in the line itself. */}
+      <p>{fill(props.agent === "deepseek" ? "conversation.state.starting" : "conversation.state.startingTimed")}</p>
       {props.agent === "deepseek" ? <p>{t("conversation.state.startingSlow")}</p> : null}
       {props.onCancel === undefined ? null : (
         <button type="button" aria-label={fill("conversation.state.cancelStartLabel")} onClick={props.onCancel}>
@@ -996,6 +995,8 @@ function OpenConversation(props: {
   /** 022 US5: this conversation's unsent words and attachments, kept by the tab per conversation. */
   draft: ComposerDraft;
   onDraft: (text: string) => void;
+  /** 023 T728: the last reply to "Agent output" for this conversation, when one came. */
+  output?: readonly string[];
   /** 022: attachments, when the shell supports them. */
   attach?: AttachProps;
 }): ReactElement {
@@ -1058,6 +1059,11 @@ function OpenConversation(props: {
     <section ref={section} className="agent-conversation" data-conversation-id={conversationId} inert={props.header.drawerOpen}>
       <ConversationHeader
         {...props.header}
+        // 023 T728 (FR-372): asked for only when the owner opens it.
+        output={{
+          lines: props.output,
+          onRequest: () => send({ type: "ui.conversation.diagnostics", payload: { conversationId } }),
+        }}
         details={{
           title,
           agentName: props.agentName,

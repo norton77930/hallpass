@@ -259,3 +259,9 @@ consent flow behave exactly as in 0.14.0.
 Audio; attachments for external (MCP) agents; dragging attachments out; editing or annotating images; text
 recognition; storing attachments anywhere but the conversation folder; folders as attachments; attachments
 from the agent to the user; a new runtime dependency.
+
+## Change log
+
+- **2026-10-24 — D-022-6 / FR-356 amended by 023** (D-023-3, FR-365): an agent that does not accept page
+  context no longer gets a greyed "Attach this tab"; the tab goes as a `.txt` file in the conversation
+  folder, named by path. Agents that accept page context are unchanged.

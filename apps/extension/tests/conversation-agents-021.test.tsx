@@ -74,11 +74,11 @@ describe("021 conversations in the panel", () => {
       expectValidCommands(port);
     });
 
-    it("says it is starting Hermes without the slow-start sentence, and Cancel still stops it", async () => {
+    it("says it is starting Hermes with the 30-60 s line (023) and not DeepSeek's slow sentence, and Cancel still stops it", async () => {
       await open(withView({ agent: "hermes", state: "starting" }));
 
-      expect(screen.getByText("Starting Hermes…")).toBeTruthy();
-      expect(screen.queryByText(/first start can take/)).toBeNull();
+      expect(screen.getByText("Starting Hermes… (first start can take 30–60 s)")).toBeTruthy();
+      expect(screen.queryByText("The first start can take a few minutes.")).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Cancel starting Hermes" }));
       expect(commandsSent(port)).toEqual([{ type: "ui.conversation.stop", payload: { conversationId: CONVERSATION_ID } }]);
     });

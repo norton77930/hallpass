@@ -264,3 +264,21 @@ describe("T537 the log and its pages", () => {
     expect(log.entries.some((entry) => entry.event.type === "permission")).toBe(false);
   });
 });
+
+describe("023 R-371 thinking", () => {
+  it("says once per turn that the agent is thinking, before its answer, without the thought", async () => {
+    h = await poolHarness();
+    const id = await h.start();
+    const from = h.rec.of(id).length;
+    await h.turn(id, "think:20 chunks:1");
+
+    const turn = h.rec.of(id).slice(from).map((entry) => entry.event);
+    const thinking = turn.filter((event) => event.type === "activity");
+    expect(thinking).toEqual([{ type: "activity", activity: "thinking" }]);
+    expect(conversationEventSchema.safeParse(thinking[0]).success).toBe(true);
+    const at = turn.indexOf(thinking[0]!);
+    expect(turn.findIndex((event) => event.type === "text" && event.role === "owner")).toBeLessThan(at);
+    expect(turn.findIndex((event) => event.type === "text" && event.role === "agent")).toBeGreaterThan(at);
+    expect(JSON.stringify(turn)).not.toContain("thought-");
+  });
+});

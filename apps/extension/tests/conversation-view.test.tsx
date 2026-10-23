@@ -274,14 +274,18 @@ describe("T545 the Conversation tab", () => {
     expect(notice?.textContent).toContain("redacted detail");
   });
 
-  it.each(CONVERSATION_NOTICES)("says the notice %s in the panel's own words, the broker's detail under it", async (code) => {
-    await open();
-    emitEvent(port, 1, { type: "notice", code, text: "what was asked" });
+  // 023 R-368: the two notices that carry an agent (and a variable) are worded, and tested, in conversation-notices-023.
+  it.each(CONVERSATION_NOTICES.filter((code) => code !== "browser-tools-missing" && code !== "key-env-not-in-browser"))(
+    "says the notice %s in the panel's own words, the broker's detail under it",
+    async (code) => {
+      await open();
+      emitEvent(port, 1, { type: "notice", code, text: "what was asked" });
 
-    const notice = log().querySelector(`[data-notice-code='${code}']`);
-    expect(notice?.textContent).toContain(ui(`conversation.notice.${code}`));
-    expect(notice?.textContent).toContain("what was asked");
-  });
+      const notice = log().querySelector(`[data-notice-code='${code}']`);
+      expect(notice?.textContent).toContain(ui(`conversation.notice.${code}`));
+      expect(notice?.textContent).toContain("what was asked");
+    },
+  );
 
   it("says a declined sandbox-permissions request in zh-TW too (R-317)", async () => {
     await open(CONVERSATION_OPEN, "zh-TW");

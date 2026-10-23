@@ -8,6 +8,8 @@ import { launchSettings, writeLaunchFiles } from "../src/broker/agent-launch-set
 import type { AdapterLaunchSpec } from "../src/broker/agents.js";
 import { ConversationPool, type Clock, type ClockTimer, type ConversationPoolOptions } from "../src/broker/conversation.js";
 import { memoryConversationIndex, memoryFolderList, type ConversationIndex } from "../src/broker/conversation-index.js";
+import type { ConversationBrowserAccess } from "../src/broker/browser-token.js";
+import type { UserEnvironmentPorts } from "../src/broker/user-environment.js";
 
 /**
  * Shared pieces of the 019/S4 conversation tests (T535-T538, T540): the fake ACP agent as a real
@@ -174,7 +176,38 @@ export type PoolHarnessOptions = {
   log?: (code: string, detail?: string) => void;
   /** The agent version found on the "machine" (default the tested `1.0.0`; R-358: another one is a version problem). */
   foundVersion?: string;
+  /** 023: the browser connection handed to each run (default none: no `mcpServers`, no browser check). */
+  browser?: ConversationPoolOptions["browser"];
+  /** 023 R-369: what the "machine" holds for the key-name check (default: nothing at all). */
+  userEnvironment?: ConversationPoolOptions["userEnvironment"];
 };
+
+/**
+ * 023 R-369: a machine with no Hermes settings and no user variables - the default, so no test reads
+ * the real owner's files or runs the real query.
+ */
+export const NO_USER_ENVIRONMENT: UserEnvironmentPorts = {
+  readText: async () => Promise.reject(Object.assign(new Error("not there"), { code: "ENOENT" })),
+  run: async () => ({ code: 0, stdout: "" }),
+};
+
+/**
+ * 023: a browser connection that only records - tokens `token-1`, `token-2`, ...; each grant as it was
+ * handed to the worker; the plain `hallpass` entry.
+ */
+export function fakeBrowserAccess() {
+  const grants: { conversationId: string; token: string | null }[] = [];
+  let minted = 0;
+  const access: ConversationBrowserAccess = {
+    mint: () => `token-${++minted}`,
+    serverName: async () => "hallpass",
+    servers: (conversationId, token) => [
+      { name: "hallpass", command: "hallpass-mcp", args: [], env: [{ name: "HALLPASS_PANEL_CONVERSATION", value: conversationId }, { name: "HALLPASS_PANEL_TOKEN", value: token }] },
+    ],
+    grant: (grant) => grants.push({ conversationId: grant.conversationId, token: grant.token }),
+  };
+  return { access, grants };
+}
 
 /** 021 (T653): the fake agent's scenario for each agent - its modes, capabilities and permission shape. */
 const SCENARIO: Readonly<Record<ConversationAgent, string>> = {
@@ -205,6 +238,8 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     ...(options.spawnAgent === undefined ? {} : { spawnAgent: options.spawnAgent }),
     ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
     ...(options.log === undefined ? {} : { log: options.log }),
+    ...(options.browser === undefined ? {} : { browser: options.browser }),
+    userEnvironment: options.userEnvironment ?? NO_USER_ENVIRONMENT,
     onEvent: rec.onEvent,
     // 021: the mode's launch settings as a real launch applies them (Hermes' managed layer written
     // and named, DeepSeek's environment), on top of the fake agent.

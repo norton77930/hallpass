@@ -40,7 +40,7 @@ describe("Hermes: the managed settings layer (R-347)", () => {
     expect(settings.env).toEqual({ HERMES_MANAGED_DIR: managed("strict") });
     expect(settings.agentMode).toBe("default");
     expect(settings.files).toEqual([
-      { path: configOf("strict"), text: "agent:\n  disabled_toolsets: [terminal, code_execution, delegation, browser_vault]\n" },
+      { path: configOf("strict"), text: "agent:\n  disabled_toolsets: [terminal, code_execution, delegation, browser]\n" },
     ]);
     expect(hermesManagedDirectory(DATA, "strict")).toBe(managed("strict"));
   });
@@ -49,14 +49,24 @@ describe("Hermes: the managed settings layer (R-347)", () => {
     const settings = launchSettings("hermes", "agent-review", DATA);
     expect(settings.env).toEqual({ HERMES_MANAGED_DIR: managed("agent-review") });
     expect(settings.agentMode).toBe("accept_edits");
-    expect(settings.files).toEqual([{ path: configOf("agent-review"), text: "agent:\n  disabled_toolsets: [browser_vault]\n" }]);
+    expect(settings.files).toEqual([{ path: configOf("agent-review"), text: "agent:\n  disabled_toolsets: [browser]\n" }]);
+  });
+
+  // R-363 / D-023-1: Hermes registers its saved-logins tool in group `browser`, and silently skips a group
+  // name it does not know — so naming the tool itself switched nothing off.
+  it("switches the saved-logins tool off through its real group in every mode", () => {
+    for (const mode of ["strict", "agent-review"] as const) {
+      const text = launchSettings("hermes", mode, DATA).files[0]!.text;
+      expect(text).toMatch(/disabled_toolsets: \[[^\]]*\bbrowser\]/u);
+      expect(text).not.toContain("browser_vault");
+    }
   });
 
   it("overwrites a tampered layer and writes nothing else", async () => {
     const machine = files({ [configOf("strict")]: "agent:\n  disabled_toolsets: []\n" });
     await writeLaunchFiles(launchSettings("hermes", "strict", DATA).files, machine.fs);
     expect(machine.writes).toEqual([configOf("strict")]);
-    expect(machine.content[configOf("strict")]).toBe("agent:\n  disabled_toolsets: [terminal, code_execution, delegation, browser_vault]\n");
+    expect(machine.content[configOf("strict")]).toBe("agent:\n  disabled_toolsets: [terminal, code_execution, delegation, browser]\n");
   });
 
   it("writes a missing layer, and leaves one with the right content alone", async () => {

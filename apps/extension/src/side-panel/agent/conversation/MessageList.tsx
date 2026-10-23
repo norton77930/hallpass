@@ -5,11 +5,11 @@ import { actionWords } from "./action-words.js";
 import { SentAttachments } from "./attachments/AttachmentChips.js";
 import { groupTurns, type TimelineItem } from "./conversation-log.js";
 import { useFollowEnd } from "./follow-end.js";
-import { errorDetailWords, modelUnreachableHint, noticeWords } from "./broker-words.js";
+import { errorDetailWords, keyEnvHintIn, modelUnreachableHint, noticeWords } from "./broker-words.js";
 import { DownIcon } from "./icons.js";
 import { InlineCode } from "./inline-code.js";
 import { Reply } from "./Reply.js";
-import { LiveLine, TurnActions } from "./TurnActions.js";
+import { LiveLine, TurnActions, useModelWaitSeconds, WaitingForModel, WaitingStatus } from "./TurnActions.js";
 
 /** The states in which the agent's turn is still under way, so its last reply may still grow. */
 const TURN_UNDER_WAY: ReadonlySet<ConversationState> = new Set<ConversationState>(["running", "waiting-for-owner"]);
@@ -65,6 +65,13 @@ export function MessageList(props: {
   const running = [...items].reverse().find((item) => item.kind === "turn-actions" && item.running);
   const live = running?.kind === "turn-actions" ? running.live : undefined;
   const showLive = running !== undefined || props.waitingFor !== undefined;
+  // 023 D-023-5, R-370: the owner's message is the thread's last item and the turn is running - the
+  // model has not answered yet. Any update (text, tool, card, notice, thinking R-371) follows it and
+  // ends the wait.
+  const lastItem = items[lastIndex];
+  const modelWait =
+    props.state === "running" && props.waitingFor === undefined && lastItem?.kind === "text" && lastItem.role === "owner" ? lastItem.key : undefined;
+  const waitedSeconds = useModelWaitSeconds(modelWait);
   return (
     // T606 (P4): the frame holds the log and, over its lower right corner, "Jump to latest" - outside
     // the log, so the log's own children stay the conversation.
@@ -98,6 +105,15 @@ export function MessageList(props: {
               </div>
             );
           }
+          if (item.kind === "thinking") {
+            // 023 R-371: one muted line while the agent's thinking is the newest thing it did; the
+            // log announces it once, as it is added.
+            return index === lastIndex && turnUnderWay ? (
+              <p key={item.key} className="agent-conversation-detail" data-thinking="">
+                {t("conversation.turn.thinking")}
+              </p>
+            ) : null;
+          }
           if (item.kind === "turn-actions") {
             return <TurnActions key={item.key} group={item} t={t} liveElsewhere />;
           }
@@ -129,6 +145,30 @@ export function MessageList(props: {
               </div>
             );
           }
+          // 023 R-368: the broker names the agent (and, for the key one, the variable); the panel says
+          // both in its own words and shows nothing else of the broker's sentence - for the key
+          // notice that is the variable's name only (FR-370).
+          if (code === "browser-tools-missing" && item.notice.agent !== undefined) {
+            const agent = item.notice.agent;
+            const specific = agent === "hermes" || agent === "deepseek" ? `conversation.notice.browser-tools-missing.${agent}` : undefined;
+            return (
+              <div key={item.key} className="agent-conversation-notice" data-notice-code={code}>
+                <p>
+                  <InlineCode
+                    text={specific !== undefined ? t(specific) : t("conversation.notice.browser-tools-missing").replace("{agent}", () => t(`conversation.agent.${agent}`))}
+                  />
+                </p>
+              </div>
+            );
+          }
+          if (code === "key-env-not-in-browser" && item.notice.variable !== undefined) {
+            const variable = item.notice.variable;
+            return (
+              <div key={item.key} className="agent-conversation-notice" data-notice-code={code}>
+                <p>{t("conversation.notice.key-env-not-in-browser").replace("{variable}", () => variable)}</p>
+              </div>
+            );
+          }
           // T607 (K1): the broker's crash notice is one title in the panel's language and, when it
           // names one, the exit code as a value - not the broker's English sentence again.
           const crash = code === "agent-exited" ? CRASH_NOTICE.exec(text) : null;
@@ -145,18 +185,25 @@ export function MessageList(props: {
           }
           // T609: the broker's templates are said from the locale (or left out when they only repeat the title).
           const hint = modelUnreachableHint(props.agent, t);
-          const words = text === "" ? undefined : isErrorCode(code) ? errorDetailWords(text, t) : noticeWords(code, text, t);
+          // 023 FR-373: a key hint inside the detail is said in the panel's words, apart from the rest.
+          const keyHint = code === "agent-model-unreachable" ? keyEnvHintIn(text, t) : undefined;
+          const rest = keyHint?.rest ?? text;
+          const words = rest === "" ? undefined : isErrorCode(code) ? errorDetailWords(rest, t) : noticeWords(code, rest, t);
           return (
             <div key={item.key} className="agent-conversation-notice" data-notice-code={code}>
               {isErrorCode(code) ?<p>{t(`conversation.error.${code}`)}</p> : null}
               {own === undefined ? null : <p>{t(own)}</p>}
               {words === undefined ? null : <p className="agent-conversation-detail">{words}</p>}
+              {keyHint === undefined ? null : <p className="agent-conversation-detail">{keyHint.words}</p>}
               {code === "agent-model-unreachable" && hint !== undefined ? <p className="agent-conversation-detail">{hint}</p> : null}
             </div>
           );
         })}
         {showLive ? <LiveLine key="live" live={live} waitingFor={props.waitingFor} t={t} /> : null}
+        {modelWait === undefined ? null : <WaitingForModel key={modelWait} t={t} seconds={waitedSeconds} />}
       </div>
+      {/* S3a a11y: beside the log, which is itself a live region - inside it the hint was announced twice. */}
+      {modelWait === undefined ? null : <WaitingStatus t={t} seconds={waitedSeconds} />}
       {away ? (
         <button type="button" className="agent-conversation-jump" onClick={jump}>
           <DownIcon />

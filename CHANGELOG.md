@@ -5,6 +5,29 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.15.2 — 2026-10-24
+
+**Fixes from the first real Hermes trial: saved logins really off, clear waiting feedback, and the tab for every agent.**
+
+- **Hermes never gets the saved-logins tool.** 0.15.0 and 0.15.1 switched it off under a name Hermes does
+  not use, so the tool was still in Hermes' look-up catalog. It is now off in both modes; Hermes' own
+  browser tools go with it (Hallpass's browser tools are the ones it uses).
+- **The panel says what it is waiting for.** While an agent starts: "Starting <agent>… (the first start can
+  take 30–60 s)". While a message waits for the model: the seconds waited, and after 30 s a hint to check
+  that the model server is reachable (network or VPN). Before, the panel could show nothing for minutes.
+- **Missing browser tools are explained.** When Hermes runs without its optional MCP component, or with
+  DeepSeek (which has no MCP support), the panel says the agent cannot use the browser and what to do:
+  install Hermes' MCP component, or attach a screenshot or the tab.
+- **"Attach this tab" works with Hermes and DeepSeek.** For an agent that does not take page context, the
+  tab's title and text are saved as a `.txt` file in the conversation folder and named by path.
+- **A key the browser cannot see is explained.** When an agent fails to start and the key variable its own
+  settings name is set for your user but missing from what Chrome passed on (Chrome was started before you
+  set it), the panel says to quit Chrome completely, including background mode, and reopen it. Hallpass
+  checks the name only, never the value.
+- **The agent's own output on request.** Conversation details can show the agent's last lines of output,
+  with environment values removed; kept in memory only and dropped with the conversation.
+- **Agent installs are sturdier**: an interrupted install by a process that has since ended is picked up
+  again, and a file held by another program is no longer taken for a damaged install.
 ## 0.15.1 — 2026-10-23
 
 **DeepSeek's first download is several times faster, and dependency security fixes.**

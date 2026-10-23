@@ -64,9 +64,17 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  * - FAKE_ACP_FAIL_MESSAGE the error text for FAKE_ACP_FAIL_AT (default `fake agent failed at <step>`).
  * - FAKE_ACP_EXIT_AT=initialize   (021 R-358) exit with code 1 on `initialize` without answering, so the
  *                         connection closes - an agent that crashes at boot (dsh without its bindings).
+ * - FAKE_ACP_NEW_DELAY_MS (023) pause before answering session/new (after logging
+ *                         `session/new-received`): a server that greets before the session exists.
+ * - FAKE_ACP_STDERR_BYTES (023) at start, write about this many bytes to stderr first, as lines of
+ *                         1000 `x` (an agent that says a lot about itself).
+ * - FAKE_ACP_STDERR_LINES (023) at start, then write this many lines to stderr, each
+ *                         FAKE_ACP_STDERR_LINE (default `stderr line {n}`) with `{n}` the line number
+ *                         and `{env:NAME}` that variable's value; then log `{ event: "stderr-written" }`.
  *
  * Prompt keywords (whitespace-separated, executed left to right; text with none is echoed)
  * - chunks:N          N `agent_message_chunk` updates, text `part-1;` ... `part-N;`.
+ * - think:N           (023) N `agent_thought_chunk` updates, text `thought-1;` ... `thought-N;`.
  * - tool:edit         tool_call (kind edit) -> session/request_permission -> tool_call_update
  *                     completed (+ chunk `done:<id>`) when allowed, or failed (+ chunk
  *                     `refused:<id>`) when the client rejected.
@@ -501,6 +509,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     for (const token of text.split(/\s+/)) {
       aborted(signal);
       const chunks = /^chunks:(\d+)$/.exec(token);
+      const think = /^think:(\d+)$/.exec(token);
       const tool = /^tool:(edit|execute|mcp)$/.exec(token);
       const drift = /^drift:(.+)$/.exec(token);
       const mcp = /^mcp:([a-z_]+)(?::(.+))?$/.exec(token);
@@ -509,6 +518,12 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
         for (let index = 1; index <= Number(chunks[1]); index++) {
           aborted(signal);
           await chunk(sessionId, `part-${index};`);
+        }
+      } else if (think) {
+        matched = true;
+        for (let index = 1; index <= Number(think[1]); index++) {
+          aborted(signal);
+          await update(sessionId, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: `thought-${index};` } });
         }
       } else if (tool) {
         matched = true;
@@ -609,6 +624,8 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     async newSession(params) {
       log({ event: "session/new-received" });
       await hangIfAsked("new");
+      const newDelay = Number(env.FAKE_ACP_NEW_DELAY_MS ?? 0);
+      if (newDelay > 0) await sleep(newDelay);
       failIfAsked("new");
       const sessionId = `fake-${scenario}-${randomBytes(6).toString("hex")}`;
       const set = MODE_SETS[scenario];
@@ -698,8 +715,24 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
   return connection.closed;
 }
 
+/** 023 (R-367): FAKE_ACP_STDERR_BYTES / FAKE_ACP_STDERR_LINES - what the agent says about itself. */
+async function writeStderr(env: Record<string, string | undefined>): Promise<void> {
+  const bytes = Number(env.FAKE_ACP_STDERR_BYTES ?? 0);
+  const lines = Number(env.FAKE_ACP_STDERR_LINES ?? 0);
+  if (bytes <= 0 && lines <= 0) return;
+  const write = (text: string) => new Promise<void>((done) => process.stderr.write(text, () => done()));
+  const filler = `${"x".repeat(1000)}\n`;
+  for (let written = 0; written < bytes; written += filler.length) await write(filler);
+  const template = env.FAKE_ACP_STDERR_LINE ?? "stderr line {n}";
+  for (let n = 1; n <= lines; n += 1) {
+    await write(`${template.replace(/\{n\}/g, String(n)).replace(/\{env:([A-Za-z0-9_]+)\}/g, (_all, name: string) => env[name] ?? "")}\n`);
+  }
+  if (env.FAKE_ACP_LOG) appendFileSync(env.FAKE_ACP_LOG, `${JSON.stringify({ event: "stderr-written" })}\n`);
+}
+
 /** The process entry: serve on stdio and leave when the client closes it. */
 export async function main(): Promise<void> {
+  await writeStderr(process.env);
   const stream = acp.ndJsonStream(
     Writable.toWeb(process.stdout) as WritableStream<Uint8Array>,
     Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>,

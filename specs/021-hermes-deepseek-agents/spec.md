@@ -321,3 +321,12 @@ lost when switching panel tabs (a separate fix).
   `agents\<agent>\<version>` took 41.2 min of a 49.7 min install. Every fetched package (both adapters and
   DeepSeek) now stays in the folder `npm ci` ran in, and a small pointer file names it once it is verified;
   installs made by 0.15.0 and earlier keep working without a download.
+- **2026-10-23 — FR-348 was not met; fixed by 023** (owner trial; R-363, D-023-1, T705–T708): the layer named
+  the tool `browser_vault`, which is not a Hermes tool group, and Hermes skips an unknown group without a
+  word, so in 0.15.0 and 0.15.1 the saved-logins tool stayed in Hermes' look-up catalog in both modes. The
+  layer now switches off the tool's real group `browser` (Hermes' own browser tools go with it); measured on
+  Hermes 0.22.2: the tool is gone from the selection and the catalog in strict and automatic.
+- **2026-10-24 — D-021-13 amended by 023** (D-023-3, FR-365; owner trial): "Attach this tab" is no longer
+  greyed for Hermes and DeepSeek, which do not accept page context; the tab's title and text are saved as a
+  `.txt` file in the conversation folder and named by path, like any file. Agents that accept page context
+  keep the page-context block. Live on 2026-10-24: the tab summary was correct in both.

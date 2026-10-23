@@ -13,8 +13,8 @@ import {
 import type { PairingAnswer } from "./pairing-controller.js";
 import {
   isConversationLinkFrame,
-  type ConversationCommandFrame,
   type ConversationLinkFrame,
+  type ConversationOutFrame,
 } from "./conversation-relay.js";
 
 /**
@@ -315,8 +315,11 @@ export type AgentBridge = {
   sendBrowserName(name: string): void;
   /** 018 FR-274: the owner's answer on the choice card, addressed to the choose link's session. */
   sendBrowserChoiceResult(sessionId: string, requestId: string, decision: "confirm" | "decline"): void;
-  /** 019 T547: a panel command (or the worker's page request) for the broker. Lost with no link. */
-  sendConversationCommand(frame: ConversationCommandFrame): void;
+  /**
+   * 019 T547: a panel command (or the worker's page request) for the broker; 023 R-365 also the word
+   * that a conversation's browser server greeted. Lost with no link.
+   */
+  sendConversationCommand(frame: ConversationOutFrame): void;
   disconnect(): void;
 };
 
@@ -655,6 +658,7 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
         case "conversation-overview":
         case "conversation-page":
         case "conversation-browser-token":
+        case "conversation-diagnostics":
           // 019 R-323: the broker's frames. The code is logged, the content never is.
           deps.reportDiagnostic?.("agent.bridge.conversation-frame");
           if (isConversationLinkFrame(link.data)) deps.onConversationFrame?.(link.data);
@@ -873,7 +877,7 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     sendBrowserChoiceResult(sessionId: string, requestId: string, decision: "confirm" | "decline"): void {
       send({ type: "browser-choice-result", sessionId, requestId, decision });
     },
-    sendConversationCommand(frame: ConversationCommandFrame): void {
+    sendConversationCommand(frame: ConversationOutFrame): void {
       send(frame);
     },
     disconnect(): void {

@@ -125,6 +125,7 @@ function resyncTarget(
 function useAgentPort(): {
   state: AgentPanelState;
   logs: ConversationLogs;
+  diagnostics: Readonly<Record<string, readonly string[]>>;
   send: SendCommand;
   request: RequestCommand;
   captureTab: CaptureTab;
@@ -136,6 +137,8 @@ function useAgentPort(): {
    * memory only. Nothing of it is written anywhere; a reopened panel is sent it again (T547).
    */
   const [logs, setLogs] = useState<ConversationLogs>({});
+  /** 023 R-367: the last "Agent output" reply per conversation - lines the broker already scrubbed; memory only, dropped with a replaced broker. */
+  const [diagnostics, setDiagnostics] = useState<Readonly<Record<string, readonly string[]>>>({});
   /**
    * 019 T547: the broker's refusal of the last command *this document* sent, cleared by its next
    * success. Results reach every document; one whose commandId this document did not mint is
@@ -207,6 +210,13 @@ function useAgentPort(): {
         setLastError(result.ok ? undefined : result.error);
         return;
       }
+      // 023 R-367, T728: what an agent run printed about itself, as the broker replied to a request
+      // from some panel document. Kept per conversation, in memory only; the newest reply wins.
+      if (parsed.data.type === "conversation-diagnostics") {
+        const { conversationId, lines } = parsed.data.payload;
+        setDiagnostics((current) => ({ ...current, [conversationId]: lines }));
+        return;
+      }
       // 022 R-342: the viewed tab's capture is answered to the composer that asked; not a projection.
       if (parsed.data.type === "tab-capture-result") {
         const waiting = captures.current.get(parsed.data.requestId);
@@ -231,6 +241,7 @@ function useAgentPort(): {
           // composer). Drop all of it and page the conversation on screen again from 0.
           lastSeqs.current.clear();
           setLogs({});
+          setDiagnostics({});
           needsResync.current = true;
         }
         epoch.current = conversation.epoch;
@@ -446,7 +457,7 @@ function useAgentPort(): {
       }
     });
 
-  return { state, logs, send, request, captureTab, lastError };
+  return { state, logs, diagnostics, send, request, captureTab, lastError };
 }
 
 /** 019 D-019-3, FR-284: the two tabs, and the key the last one is remembered under. */
@@ -573,7 +584,7 @@ function useMinuteClock(): number {
 }
 
 export function AgentShell(props: { locale: string }): ReactElement {
-  const { state, logs, send, request, captureTab, lastError } = useAgentPort();
+  const { state, logs, diagnostics, send, request, captureTab, lastError } = useAgentPort();
   /**
    * T633 (FR-335): the composer's drafts and transfers live here, above the tab switch, so showing
    * Connections & sites gives up nothing; only this document going away does (with the cancel of
@@ -788,6 +799,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
               <ConversationTab
                 conversation={state.conversation}
                 logs={logs}
+                diagnostics={diagnostics}
                 locale={props.locale}
                 send={send}
                 request={request}

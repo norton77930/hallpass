@@ -80,7 +80,7 @@ describe("T654 Hermes strict", () => {
     const log = await h.log();
     expect(starts(log)[0]?.launch).toEqual({ HERMES_MANAGED_DIR: managed });
     expect(await readFile(join(managed, "config.yaml"), "utf8")).toBe(
-      "agent:\n  disabled_toolsets: [terminal, code_execution, delegation, browser_vault]\n",
+      "agent:\n  disabled_toolsets: [terminal, code_execution, delegation, browser]\n",
     );
     expect(methods(log)).toEqual(["initialize", "session/new", "session/set_mode"]);
     expect(modeIds(log)).toEqual(["default"]);
@@ -223,7 +223,7 @@ describe("T662 / T663 a launch-time mode change restarts the agent between turns
     expect(isAlive(runs[0]!.pid as number)).toBe(false);
     const managed = join(h.dataDir, "agents", "hermes", "managed", "agent-review");
     expect(runs[1]!.launch).toEqual({ HERMES_MANAGED_DIR: managed });
-    expect(await readFile(join(managed, "config.yaml"), "utf8")).toBe("agent:\n  disabled_toolsets: [browser_vault]\n");
+    expect(await readFile(join(managed, "config.yaml"), "utf8")).toBe("agent:\n  disabled_toolsets: [browser]\n");
     const tail = methods(log).slice(methods(log).lastIndexOf("initialize"));
     expect(tail).toEqual(["initialize", "session/load", "session/set_mode"]);
     expect(modeIds(log)).toEqual(["default", "accept_edits"]);
@@ -442,7 +442,7 @@ describe("settings every panel run carries (FR-348, FR-352)", () => {
     for (const run of runs) {
       const managed = (run.launch as { HERMES_MANAGED_DIR?: string } | undefined)?.HERMES_MANAGED_DIR;
       expect(managed).toBeDefined();
-      expect(await readFile(join(managed!, "config.yaml"), "utf8")).toMatch(/disabled_toolsets: \[[^\]]*\bbrowser_vault\b/u);
+      expect(await readFile(join(managed!, "config.yaml"), "utf8")).toMatch(/disabled_toolsets: \[[^\]]*\bbrowser\b/u);
     }
   });
 
@@ -471,7 +471,8 @@ describe("settings every panel run carries (FR-348, FR-352)", () => {
 describe("FR-356 what Hermes and DeepSeek say they accept reaches the + menu, and the broker holds to it", () => {
   const b64 = (text: string) => Buffer.from(text).toString("base64");
 
-  it.each(["hermes", "deepseek"] as const)("%s: pictures yes, the page no, as said at initialize; a page is refused, a file goes", async (agent) => {
+  // 023 D-023-3 (R-366): the page is no longer refused - it goes as a text file, like the file beside it.
+  it.each(["hermes", "deepseek"] as const)("%s: pictures yes, the page no, as said at initialize; the page goes as a file, a file goes", async (agent) => {
     h = await poolHarness();
     const id = await h.start(agent);
     const said = { image: true, context: false };
@@ -483,14 +484,11 @@ describe("FR-356 what Hermes and DeepSeek say they accept reaches the + menu, an
     expect(
       await h.pool.attach(id, { attachmentId: "t1", index: 0, final: true, kind: "tab", name: "A page", size: page.length, tab, data: b64(page) }),
     ).toEqual({ ok: true });
-    const refused = await h.pool.send(id, "see", undefined, undefined, ["t1"]);
-    expect(refused.ok ? "ok" : refused.error.code).toBe("attachment-not-accepted");
-
     expect(await h.pool.attach(id, { attachmentId: "f1", index: 0, final: true, kind: "file", name: "a.txt", size: 1, data: b64("x") })).toEqual({
       ok: true,
     });
     const from = h.rec.events.length;
-    expect(await h.pool.send(id, "see", undefined, undefined, ["f1"])).toEqual({ ok: true });
+    expect(await h.pool.send(id, "see", undefined, undefined, ["t1", "f1"])).toEqual({ ok: true });
     await waitFor(() => turnEnded(h!.rec.events.slice(from), id), "the end of the turn");
   });
 });

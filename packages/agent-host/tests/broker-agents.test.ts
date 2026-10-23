@@ -438,6 +438,47 @@ describe("adapterLaunchSpec (T531, R-315, R-322)", () => {
     expect(await isAdapterInstalled("claude-code", p)).toBe(false);
   });
 
+  it.each([
+    ["an absolute path", (tree: string) => JSON.stringify({ folder: tree })],
+    ["a separator", (tree: string) => JSON.stringify({ folder: `.\\${win32.basename(tree)}` })],
+    ["a forward slash", (tree: string) => JSON.stringify({ folder: `./${win32.basename(tree)}` })],
+    ["'..'", (tree: string) => JSON.stringify({ folder: `..\\claude-code\\${win32.basename(tree)}` })],
+    ["junk", () => "not json {"],
+    ["null", () => "null"],
+    ["an array", (tree: string) => JSON.stringify([win32.basename(tree)])],
+    ["a bare string", (tree: string) => JSON.stringify(win32.basename(tree))],
+    ["a non-string folder", () => JSON.stringify({ folder: 42 })],
+  ])("021 R-362: a pointer holding %s is not followed", async (_, content) => {
+    const tree = win32.join(DATA, "agents", "claude-code", ".install-4321-abc123");
+    const pin = AGENT_DESCRIPTIONS["claude-code"];
+    const p = ports({
+      files: {
+        [win32.join(DATA, "agents", "claude-code", `${pin.version}.installed.json`)]: content(tree),
+        [win32.join(tree, "node_modules", ...pin.package.split("/"), "package.json")]: JSON.stringify({
+          name: pin.package,
+          version: pin.version,
+          bin: "dist/index.js",
+        }),
+      },
+    });
+    expect(await isAdapterInstalled("claude-code", p)).toBe(false);
+    await expect(adapterLaunchSpec("claude-code", CLAUDE_EXE, p)).rejects.toThrow(/not installed/);
+  });
+
+  it("021 R-362 (L3): a pointer the file system will not let it read is not passed over for the 0.15.0 folder beside it", async () => {
+    const pin = AGENT_DESCRIPTIONS["claude-code"];
+    const pointer = win32.join(DATA, "agents", "claude-code", `${pin.version}.installed.json`);
+    // A complete 0.15.0 install is beside the pointer, which a real-time file scanner holds open.
+    const p = ports({ files: { ...adapterManifest("claude-code", { bin: "dist/index.js" }), [pointer]: "{}" } });
+    const read = p.fs.readText;
+    p.fs.readText = async (path) => {
+      if (path === pointer) throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+      return read(path);
+    };
+    expect(await isAdapterInstalled("claude-code", p)).toBe(false);
+    await expect(adapterLaunchSpec("claude-code", CLAUDE_EXE, p)).rejects.toThrow(/EBUSY/);
+  });
+
   it("points CODEX_PATH at Hallpass's app-server shim and turns MCP config filtering off, with a string bin", async () => {
     const p = ports({ files: codexInstalled() });
     const spec = await adapterLaunchSpec("codex", CODEX_CMD, p);

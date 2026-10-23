@@ -738,6 +738,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     reportDiagnostic: reportTestDiagnostic,
     // T547: commands out on the native link, everything the broker says out to every panel.
     sendFrame: (frame) => bridge.sendConversationCommand(frame),
+    // 023 T717 (R-365): the word that a conversation's browser server greeted.
+    sendAttached: (frame) => bridge.sendConversationCommand(frame),
     toPanels: (message) => {
       for (const listener of panelMessageListeners) listener(message);
     },
@@ -2471,9 +2473,13 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       if (announcement.panelToken === undefined) panelTokenOf.delete(announcement.sessionId);
       else panelTokenOf.set(announcement.sessionId, announcement.panelToken);
       if (kind !== undefined) {
-        reportTestDiagnostic(
-          panelTokens.conversationOf(announcement.panelToken!) === undefined ? "agent.panel.token-unknown" : "agent.panel.session",
-        );
+        const conversationId = panelTokens.conversationOf(announcement.panelToken!);
+        reportTestDiagnostic(conversationId === undefined ? "agent.panel.token-unknown" : "agent.panel.session");
+        // 023 T717 (R-365, FR-364): the conversation's own `hallpass` server took the browser tools -
+        // the broker is told once per run, which is how it knows the agent did not skip them.
+        if (conversationId !== undefined && announcement.agentId === panelAgentId(conversationId)) {
+          conversations.browserAttached(conversationId, announcement.panelToken!);
+        }
       }
       if (known) {
         known.lastHelloAt = helloAt;

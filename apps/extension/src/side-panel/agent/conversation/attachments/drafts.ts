@@ -3,7 +3,6 @@ import { CONVERSATION_IMAGE_MAX_CHARS, type ConversationAccepts, type TabCapture
 import type { CaptureTab } from "../../AgentShell.js";
 import { base64ToBytes, utf8Bytes } from "./bytes.js";
 import {
-  acceptsContext,
   acceptsImages,
   admit,
   EMPTY_DRAFT,
@@ -213,10 +212,8 @@ export async function addCapture(
   // The placeholder leaves; what came back is checked against the limits as any other add.
   replace(store, key, placeholder.localId, undefined);
   if (result.kind === "page") {
-    if (!acceptsContext(context.accepts)) {
-      refuse(store, key, { key: "conversation.attach.noContext", vars: { agent: context.agentName } });
-      return;
-    }
+    // 023 D-023-3, FR-365: an agent without page context still gets the tab - the broker turns it
+    // into a text file (R-366) - so there is no refusal here for it (022 R-344 refused it).
     const bytes = utf8Bytes(result.text);
     tryAdd(store, key, {
       localId: placeholder.localId,

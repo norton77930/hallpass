@@ -475,6 +475,8 @@ export const messages: Record<MessageKey, string> = {
   "conversation.state.starting": "正在啟動 {agent}…",
   // 021 FR-354、R-354：第一次啟動可能要好幾分鐘；取消會結束啟動，不會留下任何執行中的程序。
   "conversation.state.startingSlow": "第一次啟動可能需要幾分鐘。",
+  // 023 D-023-5、R-370：每個 agent 的啟動都說第一次要多久；DeepSeek 保留自己的句子。
+  "conversation.state.startingTimed": "正在啟動 {agent}…（第一次啟動可能要 30–60 秒）",
   "conversation.state.cancelStart": "取消",
   "conversation.state.cancelStartLabel": "取消啟動 {agent}",
   "conversation.state.start-cancelled": "已取消啟動。",
@@ -503,6 +505,13 @@ export const messages: Record<MessageKey, string> = {
   // 019 R-317：嚴格模式拒絕了 Codex 放寬沙箱權限的要求。
   "conversation.notice.sandbox-permissions-declined":
     "Codex 要求在這一輪剩下的時間放寬權限。嚴格模式已拒絕，Codex 每次變更前都會先問你。",
+  // 023 D-023-2、D-023-6、R-365、R-369（FR-364、FR-369、FR-370）：帶著 agent 或變數名稱的通知。
+  "conversation.notice.browser-tools-missing": "{agent} 沒有取得 Hallpass 的瀏覽器工具。",
+  "conversation.notice.browser-tools-missing.hermes":
+    "Hermes 沒有取得 Hallpass 的瀏覽器工具：它的選用 MCP 元件尚未安裝。請把它加到 Hermes（`mcp` extra），再開始新的對話。",
+  "conversation.notice.browser-tools-missing.deepseek": "DeepSeek 無法自行使用瀏覽器。請改為附上畫面截圖或目前的分頁。",
+  "conversation.notice.key-env-not-in-browser":
+    "Hermes 的金鑰變數 {variable} 已設在你的 Windows 使用者設定中，但這個瀏覽器是在設定之前啟動的，所以 Hermes 看不到。請完全結束瀏覽器（包含仍在背景執行的視窗），再重新開啟。",
   // 019 US5、US6、FR-303、FR-304、T563：對話清單與資料夾選擇。
   "conversation.list.label": "對話清單",
   "conversation.list.cannotContinue": "這個對話已無法繼續",
@@ -566,6 +575,18 @@ export const messages: Record<MessageKey, string> = {
   "conversation.held.hint": "等你同意後送出",
   "conversation.composer.waiting": "等你回答上面的請求…",
   "conversation.turn.waiting": "等你回答：{title}",
+  // 023 D-023-5、R-370：從送出到這一輪的第一個更新；30 秒時出現提示。
+  "conversation.turn.waitingModel": "等待模型回覆… {seconds} 秒",
+  "conversation.turn.waitingModelHint": "還沒有回覆。請確認模型伺服器連得上（網路或 VPN）。",
+  // 023 R-371：agent 正在思考（推理模型回答之前）。
+  "conversation.turn.thinking": "思考中…",
+  // 023 US5、D-023-8、R-367（FR-372）：對話詳情中依要求才顯示的「Agent 輸出」。
+  "conversation.output.button": "Agent 輸出",
+  "conversation.output.title": "Agent 輸出",
+  "conversation.output.note": "agent 最近印出的幾行自身訊息。只保存在記憶體中；分享前請先檢查內容。",
+  "conversation.output.loading": "載入中…",
+  "conversation.output.empty": "agent 目前還沒有任何輸出。",
+  "conversation.output.refresh": "重新整理",
   "conversation.reply.copyLabel": "複製回覆",
   "conversation.availability.readyLastUsed": "可以使用 · 上次使用",
   // 021 FR-357：DeepSeek 接續對話時不會重播先前的內容。
@@ -612,7 +633,6 @@ export const messages: Record<MessageKey, string> = {
   "conversation.attach.hint": "每則訊息最多 5 張圖片、5 個檔案（合計 25 MB）和 1 個分頁。",
   "conversation.attach.noTab": "這個視窗沒有可用的分頁。",
   "conversation.attach.noImages": "{agent} 不接受圖片。檔案仍然可以附加。",
-  "conversation.attach.noContext": "{agent} 不接受網頁文字。PDF 分頁仍然可以附加。",
   "conversation.attach.refused.tooManyImages": "每則訊息最多 5 張圖片。先移除一張再加入。",
   "conversation.attach.refused.tooManyFiles": "每則訊息最多 5 個檔案。先移除一個再加入。",
   "conversation.attach.refused.fileTooLarge": "{name} 超過 25 MB，沒有加入。請附加較小的檔案。",
