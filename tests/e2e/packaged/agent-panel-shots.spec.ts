@@ -5,8 +5,8 @@ import type { BrowserContext } from "@playwright/test";
 import { lookup, type AppLocale } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, settingsPageDriver } from "../fixtures/settings-page-driver.js";
 import {
-  clickLabelled,
   copyFor,
   localeFromEnv,
   openSidePanel,
@@ -64,6 +64,7 @@ test.describe("agent panel screenshots", () => {
     mkdirSync(folderB);
 
     const panel = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale: LOCALES[0]! });
     let override: string | undefined = await speak(panel, LOCALES[0]!, undefined);
 
     let a: McpHarnessClient | undefined;
@@ -81,9 +82,11 @@ test.describe("agent panel screenshots", () => {
       openTabs.push(tabA);
       const tabB = ((await ok(beta, "tabs_create", { url: `${SITE_ASK}/ordinary` })) as { tabId: number }).tabId;
       openTabs.push(tabB);
-      await setSiteMode(panel, SITE, "skip-checks");
-      await setSiteMode(panel, SITE_ASK, "ask");
-      await setDiagnostics(panel, SITE_ASK, true);
+      // 024 FR-385: the modes are set on the settings page. The 016 composition also granted diagnostics
+      // on the `ask` site; since 024 no surface offers that grant (the panel's site row is gone and the
+      // settings page leaves it out), so the picture shows the site without it.
+      await settings.setSiteMode(SITE, "skip-checks");
+      await settings.setSiteMode(SITE_ASK, "ask");
       await expect
         .poll(() => panel.evaluatePanel("document.querySelectorAll('section[data-session-id]').length"), { timeout: 20_000 })
         .toBe(2);
@@ -132,25 +135,23 @@ test.describe("agent panel screenshots", () => {
         }
         await panel.sendToPanel("Emulation.setEmulatedMedia", { features: [] });
 
-        // 0.9.0 owner check: the lower half - site rows and the upload directories - scrolled into view.
-        await panel.evaluatePanel("document.querySelector('.agent-upload-roots')?.scrollIntoView({ block: 'end' }), true");
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        const lower = await panel.sendToPanel("Page.captureScreenshot", { format: "png" });
-        const lowerData = (lower.result as { data?: string } | undefined)?.data;
-        expect(lowerData, JSON.stringify(lower).slice(0, 300)).toBeTruthy();
+        // 0.9.0 owner check: the site rows and the upload directories - on the settings page since 024
+        // (FR-385), in this locale.
+        const sites = settingsPageDriver(settings.page, locale);
+        await sites.setAppearance({ language: locale, theme: "light" });
+        await sites.goto("#sites");
         const lowerName = `016-panel-${locale}-sites.png`;
         const lowerSaved = test.info().outputPath(lowerName);
-        writeFileSync(lowerSaved, Buffer.from(lowerData ?? "", "base64"));
+        await sites.screenshot(lowerSaved);
         // The last line of the upload list is the host's config path, which follows the LOCALAPPDATA the
         // *browser* was launched with. docs/media ships in the public repo and the snapshot check reads
         // text, not pixels, so a path naming the maintainer's account never reaches docs/media.
-        const listPath = await panel.evaluatePanel("document.querySelector('.agent-upload-roots-path')?.textContent ?? ''");
+        const listPath = await sites.evaluateSettings("document.querySelector('[data-section-body=sites]')?.innerText ?? ''");
         const leak = namesThisAccount(typeof listPath === "string" ? listPath : "");
         expect
           .soft(leak, `${lowerName} shows ${JSON.stringify(listPath)}; launch the browser with a neutral LOCALAPPDATA (e.g. C:\\hallpass-demo) and retake. Kept only at ${lowerSaved}`)
           .toBe(false);
         if (!leak) copyFileSync(lowerSaved, join(MEDIA, lowerName));
-        await panel.evaluatePanel("window.scrollTo(0, 0), document.scrollingElement?.scrollTo(0, 0), true");
 
         await panel.clickButton(ui("agent.refuse"));
         const refused = await pending;
@@ -160,9 +161,9 @@ test.describe("agent panel screenshots", () => {
       await ok(alpha, "tabs_close", { tabId: tabA });
       await ok(beta, "tabs_close", { tabId: tabB });
       openTabs.length = 0;
-      // The diagnostics grant and the `ask` row were this run's own; forget them for the next gate.
-      await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE_ASK)}] .agent-site-more-button')?.click(), true`, true);
-      await clickLabelled(panel, lookup("agent.siteRevoke", LOCALES[LOCALES.length - 1]!).replace("{site}", SITE_ASK));
+      // The `ask` row was this run's own; forget it for the next gate.
+      await settings.revokeSite(SITE_ASK);
+      await settings.setAppearance({ language: "system", theme: "system" });
     } finally {
       for (const tabId of openTabs) {
         await extensionWorker.evaluate((id: number) => chrome.tabs.remove(id), tabId).catch(() => undefined);
@@ -266,40 +267,4 @@ async function groupOf(
     const group = tab.groupId === undefined || tab.groupId < 0 ? undefined : await chrome.tabGroups.get(tab.groupId);
     return { groupId: tab.groupId, title: group?.title, color: group?.color };
   }, tabId);
-}
-
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
-      timeout: 15_000,
-    })
-    .toBe(mode);
-}
-
-/** Grants or revokes diagnostics for one site through the panel's own checkbox (US6, FR-049). */
-async function setDiagnostics(panel: SidePanelDriver, site: string, granted: boolean): Promise<void> {
-  await panel.waitForText(site);
-  const checked = `document.querySelector('[data-site=${JSON.stringify(site)}] input[type=checkbox]')`;
-  // T606: the diagnostics grant is behind the row's "more" button; open it when it is shut.
-  await panel.evaluatePanel(
-    `(()=>{const row=document.querySelector('[data-site=${JSON.stringify(site)}]');if(row&&!row.querySelector('.agent-site-more'))row.querySelector('.agent-site-more-button')?.click();return true})()`,
-    true,
-  );
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const box=${checked};if(!box)return false;if(box.checked===${String(granted)})return true;box.click();return true})()`,
-    true,
-  );
-  expect(clicked, `the panel offers no diagnostics control for ${site}`).toBe(true);
-  await expect.poll(() => panel.evaluatePanel(`${checked}?.checked ?? null`), { timeout: 15_000 }).toBe(granted);
 }

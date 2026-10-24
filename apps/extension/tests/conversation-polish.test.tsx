@@ -40,7 +40,7 @@ const NEEDS: ConversationPanelState = {
   ...CONVERSATION_READY,
   consent: "unknown",
   agents: [
-    { agent: "claude-code", availability: "needs-install" },
+    { agent: "claude-code", availability: "ready" },
     { agent: "codex", availability: "missing" },
   ],
 };
@@ -93,19 +93,19 @@ describe("T606 the Conversation tab", () => {
     expect(screen.getByRole("region", { name: t("conversation.welcome.title") })).toBeTruthy();
   });
 
-  it("A2: gives the held words back when the install is cancelled", async () => {
+  it("A2: gives the held words back when the consent is refused", async () => {
     await open(NEEDS);
     fireEvent.change(box(), { target: { value: "hello" } });
     fireEvent.click(document.querySelector<HTMLButtonElement>(".agent-conversation-composer button[type=submit]")!);
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.download") }));
+    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.allow") }));
     expect(document.querySelector(".agent-conversation-held")).not.toBeNull();
     expect(document.querySelector(".agent-conversation-held")?.textContent).not.toContain(ui("conversation.held.hint"));
 
     const commandId = (port.sent.at(-1) as { commandId: string }).commandId;
     act(() => {
-      port.emit({ type: "conversation-result", payload: { commandId, ok: false, error: { code: "install-failed", detail: "npm said no" } } });
+      port.emit({ type: "conversation-result", payload: { commandId, ok: false, error: { code: "broker-unavailable", detail: "The helper went away." } } });
     });
-    fireEvent.click(screen.getByRole("button", { name: ui("conversation.firstUse.cancel") }));
+    expect(document.querySelector(".agent-conversation-held")).toBeNull();
     expect(box().value).toBe("hello");
   });
 
@@ -226,15 +226,16 @@ describe("T606 the Conversation tab", () => {
     }
   });
 
-  it.each(["en-US", "zh-TW"] as const)("C8: in %s says which ready agent was used last", async (locale) => {
+  // 024 R-380: the panel no longer remembers the agent used last - the owner's default is on the settings page.
+  it.each(["en-US", "zh-TW"] as const)("C8: in %s says Ready for each ready agent and never which was used last", async (locale) => {
     installTabStorage("codex");
     await open(CONVERSATION_READY, locale);
     fireEvent.click(document.querySelector<HTMLButtonElement>("[data-chip=agent]")!);
     const items = within(screen.getByRole("menu")).getAllByRole("menuitemradio");
-    expect(items[0]?.querySelector(".agent-conversation-availability")?.textContent).toBe(lookup("conversation.availability.ready", locale));
-    expect(items[1]?.querySelector(".agent-conversation-availability")?.textContent).toBe(
-      lookup("conversation.availability.readyLastUsed", locale),
-    );
+    for (const item of items.slice(0, 2)) {
+      expect(item.querySelector(".agent-conversation-availability")?.textContent).toBe(lookup("conversation.availability.ready", locale));
+    }
+    expect(screen.getByRole("menu").textContent).not.toContain(locale === "zh-TW" ? "可以使用 · 上次使用" : "Ready · last used");
   });
 
   it("C9: marks each drawer row with its agent's badge and the open conversation as current", async () => {

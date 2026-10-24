@@ -1,0 +1,1366 @@
+/*
+ * 024 D-024-7 (layout A), R-384: the settings page, on the side panel's tokens (`side-panel/agent/
+ * tokens.css`, imported by SettingsApp) and nothing else - no literal colour, size, spacing or radius
+ * below. Every rule is scoped under `.settings-page` (the page's root is `.agent-shell.settings-page`),
+ * so nothing here can reach the side panel and the panel's own sheet cannot reach the page.
+ *
+ * tokens.css follows the browser's colour scheme only. The page also takes the owner's choice
+ * (D-024-20) as `data-theme` on the document element, so the two blocks below pin the dark and light
+ * values for it; they repeat the palette of tokens.css on purpose and must change with it.
+ */
+:root[data-theme="dark"] {
+  --bg: #15171c;
+  --surface: #1d2027;
+  --surface-2: #272b34;
+  --code: #1f232b;
+  --line: #323743;
+  --line-strong: #3a404d;
+  --text: #eceef2;
+  --text-2: #b9bfcb;
+  --text-3: #959cab;
+  --accent: #9a9df7;
+  --accent-text: #11132b;
+  --accent-soft: #272a4f;
+  --accent-line: #4a4e8f;
+  --ok: #74d18f;
+  --warn: #f2b35c;
+  --warn-soft: #3a2b14;
+  --danger: #f4938a;
+  --danger-soft: #3a1d1b;
+  --focus: #9a9df7;
+  --group-cyan: #78d9ec;
+  --group-green: #81c995;
+  --group-purple: #d7aefb;
+  --group-pink: #ff8bcb;
+  --group-orange: #fcad70;
+  --group-grey: #dadce0;
+  --group-blue: #8ab4f8;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #f6f7f9;
+  --surface-2: #eef0f3;
+  --code: #f3f4f6;
+  --line: #e1e4e9;
+  --line-strong: #d3d7de;
+  --text: #16181d;
+  --text-2: #4a505c;
+  --text-3: #646b78;
+  --accent: #4448c8;
+  --accent-text: #ffffff;
+  --accent-soft: #ecedfd;
+  --accent-line: #c5c7f4;
+  --ok: #157f3c;
+  --warn: #a54c06;
+  --warn-soft: #fff3e2;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --focus: #4448c8;
+  --group-cyan: #007b83;
+  --group-green: #188038;
+  --group-purple: #a142f4;
+  --group-pink: #d01884;
+  --group-orange: #fa903e;
+  --group-grey: #5f6368;
+  --group-blue: #1a73e8;
+  color-scheme: light;
+}
+
+body:has(.agent-shell.settings-page) {
+  margin: 0;
+  background: var(--bg);
+}
+
+.agent-shell.settings-page {
+  --fs-5: 20px;
+  --sp-5: 24px;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  color-scheme: light dark;
+  font: var(--fs-2) / 1.5 system-ui, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+:root[data-theme="dark"] .agent-shell.settings-page {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] .agent-shell.settings-page {
+  color-scheme: light;
+}
+
+.settings-page *,
+.settings-page *::before,
+.settings-page *::after {
+  box-sizing: border-box;
+}
+
+.settings-page h1,
+.settings-page h2,
+.settings-page h3,
+.settings-page h4 {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.settings-page h1 {
+  font-size: var(--fs-4);
+  font-weight: 600;
+}
+
+.settings-page h2 {
+  font-size: var(--fs-5);
+  font-weight: 600;
+}
+
+.settings-page h3 {
+  font-size: var(--fs-3);
+  font-weight: 600;
+}
+
+.settings-page p {
+  margin: 0;
+}
+
+.settings-page ul,
+.settings-page ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-page code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--fs-1);
+  background: var(--code);
+  padding: 1px var(--sp-1);
+  border-radius: var(--r-1);
+}
+
+.settings-page :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.settings-page .muted {
+  color: var(--text-2);
+}
+
+.settings-page .meta {
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+.settings-page .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------- controls ---------- */
+
+.settings-page button,
+.settings-page select,
+.settings-page input {
+  font: inherit;
+  color: inherit;
+}
+
+.settings-page button.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.settings-page button.btn:hover {
+  background: var(--surface-2);
+}
+
+.settings-page button.btn:disabled {
+  cursor: not-allowed;
+  background: var(--surface-2);
+  color: var(--text-3);
+  border-color: var(--line);
+}
+
+.settings-page button.btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.settings-page button.btn.primary:hover {
+  filter: brightness(0.94);
+}
+
+.settings-page button.btn.primary:disabled {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+  color: var(--text-3);
+  filter: none;
+}
+
+.settings-page button.btn.danger {
+  border-color: var(--danger);
+  background: var(--surface);
+  color: var(--danger);
+}
+
+.settings-page button.btn.quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+  padding: 2px var(--sp-2);
+  min-height: 28px;
+  font-size: var(--fs-1);
+}
+
+.settings-page button.btn.quiet:hover {
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+
+.settings-page select.sel,
+.settings-page input.sel {
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--surface);
+}
+
+.settings-page .switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.settings-page .switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.settings-page .switch .track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: var(--r-pill);
+  background: var(--line-strong);
+  transition: background 0.15s;
+  flex: none;
+}
+
+.settings-page .switch .track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 30%, transparent);
+  transition: transform 0.15s;
+}
+
+.settings-page .switch[aria-checked="true"] .track {
+  background: var(--accent);
+}
+
+.settings-page .switch[aria-checked="true"] .track::after {
+  transform: translateX(14px);
+}
+
+.settings-page .switch:focus-visible {
+  outline: none;
+}
+
+.settings-page .switch:focus-visible .track {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- badges, avatars ---------- */
+
+.settings-page .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+  background: var(--bg);
+  color: var(--text-2);
+}
+
+.settings-page .badge::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.settings-page .badge.ok {
+  color: var(--ok);
+}
+
+.settings-page .badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.settings-page .badge.action {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.settings-page .badge.busy {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
+.settings-page .badge.busy::before {
+  animation: settings-pulse 1.2s ease-in-out infinite;
+}
+
+.settings-page .badge.off {
+  color: var(--text-3);
+}
+
+.settings-page .badge.def {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.settings-page .badge.def::before {
+  display: none;
+}
+
+@keyframes settings-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.settings-page .avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-2);
+  font-weight: 700;
+  font-size: var(--fs-3);
+  color: var(--bg);
+  background: var(--text-3);
+}
+
+.settings-page .avatar.sm {
+  width: 24px;
+  height: 24px;
+  font-size: var(--fs-1);
+  border-radius: var(--r-1);
+}
+
+.settings-page .av-claude-code {
+  background: var(--group-orange);
+}
+
+.settings-page .av-codex {
+  background: var(--group-cyan);
+}
+
+.settings-page .av-hermes {
+  background: var(--group-purple);
+}
+
+.settings-page .av-deepseek {
+  background: var(--group-green);
+}
+
+/* ---------- progress, spinner ---------- */
+
+.settings-page .progress {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.settings-page .progress .bar {
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.settings-page .progress .fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: var(--r-pill);
+  transition: width 0.35s linear;
+}
+
+.settings-page .progress .row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.settings-page .spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-line);
+  border-top-color: var(--accent);
+  animation: settings-rot 0.8s linear infinite;
+  flex: none;
+}
+
+@keyframes settings-rot {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page .spin,
+  .settings-page .badge.busy::before {
+    animation-duration: 3s;
+  }
+
+  .settings-page .progress .fill,
+  .settings-page .acard .chev,
+  .settings-page .acard .minibar span,
+  .settings-page .switch .track,
+  .settings-page .switch .track::after {
+    transition: none;
+  }
+}
+
+/* ---------- checks, notes, guide ---------- */
+
+.settings-page .checks {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0;
+  font-size: var(--fs-1);
+}
+
+.settings-page .checks dt {
+  color: var(--text-3);
+}
+
+.settings-page .checks dd {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.settings-page .mark {
+  font-weight: 700;
+  flex: none;
+  width: 1em;
+  text-align: center;
+}
+
+.settings-page .mark.ok {
+  color: var(--ok);
+}
+
+.settings-page .mark.warn {
+  color: var(--warn);
+}
+
+.settings-page .mark.bad {
+  color: var(--danger);
+}
+
+.settings-page .mark.muted {
+  color: var(--text-3);
+}
+
+.settings-page .chip {
+  display: inline-block;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.settings-page .chip.no {
+  color: var(--text-3);
+  border-style: dashed;
+}
+
+.settings-page .chip.pend {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.settings-page .note {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  font-size: var(--fs-1);
+  line-height: 1.5;
+}
+
+.settings-page .note.warn {
+  background: var(--warn-soft);
+  color: var(--text);
+  border-left: 3px solid var(--warn);
+}
+
+.settings-page .note.warn .mark {
+  color: var(--warn);
+}
+
+.settings-page .note.info {
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+}
+
+.settings-page .note.ok {
+  background: var(--surface);
+  border-left: 3px solid var(--ok);
+}
+
+.settings-page .note.bad {
+  background: var(--danger-soft);
+  border-left: 3px solid var(--danger);
+}
+
+.settings-page .notes {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.settings-page .helper-missing .notes {
+  width: 100%;
+}
+
+.settings-page .guide {
+  display: grid;
+  gap: var(--sp-1);
+  padding-left: 1.4em;
+  list-style: decimal;
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.settings-page .guide li::marker {
+  color: var(--text-3);
+}
+
+.settings-page .guide .done {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.settings-page .guide-intro {
+  margin-bottom: var(--sp-1);
+}
+
+.settings-page .test-line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+  min-height: 20px;
+}
+
+.settings-page .test-ask {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.settings-page .consent-gate {
+  display: grid;
+  gap: var(--sp-1);
+  flex: 1 1 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+}
+
+/* ---------- sites ---------- */
+
+.settings-page .site-list {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  overflow: hidden;
+}
+
+.settings-page .site {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg);
+}
+
+.settings-page .site + .site {
+  border-top: 1px solid var(--line);
+}
+
+.settings-page .site.flash {
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.settings-page .site-host {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page .site-confirm {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  background: var(--danger-soft);
+  font-size: var(--fs-1);
+}
+
+.settings-page .site-confirm span {
+  flex: 1 1 200px;
+}
+
+.settings-page .seg {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  padding: 2px;
+  background: var(--surface);
+  gap: 2px;
+  margin: 0;
+  min-width: 0;
+}
+
+.settings-page .seg legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.settings-page .seg label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--sp-3);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-page .seg input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.settings-page .seg label:has(input:checked) {
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--line-strong);
+}
+
+.settings-page .seg label.skip-checks:has(input:checked) {
+  background: var(--warn-soft);
+  color: var(--warn);
+  box-shadow: 0 0 0 1px var(--warn);
+}
+
+.settings-page .seg label:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.settings-page .mode-help {
+  font-size: var(--fs-1);
+  color: var(--text-3);
+  grid-column: 1 / -1;
+  margin-top: calc(var(--sp-2) * -1);
+}
+
+/* 004 FR-049, 019 FR-308: the row's diagnostics grant and who changed it last, under the mode. */
+.settings-page .site-extra {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+}
+
+.settings-page .site-diagnostics {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+}
+
+.settings-page .site-diagnostics input {
+  margin: 0;
+}
+
+.settings-page .site-diagnostics input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* 014 FR-191: a long Windows path wraps rather than scrolling sideways (FR-390). */
+.settings-page .upload-list-path {
+  overflow-wrap: anywhere;
+}
+
+.settings-page .empty {
+  padding: var(--sp-5);
+  text-align: center;
+  color: var(--text-2);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-3);
+}
+
+.settings-page .row-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg);
+}
+
+.settings-page .row-item + .row-item {
+  border-top: 1px solid var(--line);
+}
+
+.settings-page .row-item .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-page .row-item.boxed {
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+}
+
+.settings-page .root-name {
+  display: block;
+  font-weight: 600;
+}
+
+/* ---------- browser tools table ---------- */
+
+.settings-page .tools {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  overflow: hidden;
+}
+
+.settings-page .tools th,
+.settings-page .tools td {
+  text-align: left;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.settings-page .tools thead th {
+  background: var(--surface);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.settings-page .tools tr:last-child td {
+  border-bottom: 0;
+}
+
+.settings-page .agent-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.settings-page .agent-cell .avatar {
+  width: 24px;
+  height: 24px;
+  font-size: var(--fs-1);
+  border-radius: var(--r-1);
+}
+
+/* ---------- diagnostics, connection ---------- */
+
+.settings-page .diag {
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--bg);
+}
+
+.settings-page .diag + .diag {
+  margin-top: var(--sp-2);
+}
+
+.settings-page .diag-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.settings-page .diag-head .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-page .diag pre {
+  margin: 0;
+  padding: var(--sp-3);
+  border-top: 1px solid var(--line);
+  background: var(--code);
+  font: var(--fs-1) / 1.6 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 0 0 var(--r-3) var(--r-3);
+}
+
+.settings-page .diag pre .red {
+  color: var(--accent);
+  font-style: italic;
+}
+
+.settings-page .rename {
+  display: grid;
+  gap: var(--sp-1);
+}
+
+.settings-page .rename-row {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.settings-page .rename-row input {
+  min-width: 0;
+  width: 220px;
+  max-width: 100%;
+}
+
+/* ---------- top bar ---------- */
+
+.settings-page .prefs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-page .prefs .sel {
+  min-height: 28px;
+  font-size: var(--fs-1);
+}
+
+.settings-page .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-page .brand-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-1);
+  background: var(--accent);
+  color: var(--accent-text);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: var(--fs-1);
+}
+
+/* ---------- notices ---------- */
+
+.settings-page .toast-region {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-5);
+  transform: translateX(-50%);
+  z-index: 50;
+  max-width: calc(100vw - 32px);
+  pointer-events: none;
+}
+
+.settings-page .toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);
+  border-radius: var(--r-2);
+  background: var(--text);
+  color: var(--bg);
+  font-size: var(--fs-2);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--text) 25%, transparent);
+}
+
+.settings-page .toast .btn {
+  background: transparent;
+  color: var(--bg);
+  border-color: color-mix(in srgb, var(--bg) 50%, transparent);
+  min-height: 26px;
+}
+
+.settings-page .toast .btn:hover {
+  background: color-mix(in srgb, var(--bg) 15%, transparent);
+}
+
+/* ---------- collapsible agent card ---------- */
+
+.settings-page .acard {
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--bg);
+}
+
+.settings-page .acard.is-default {
+  border-color: var(--accent-line);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.settings-page .acard.is-off {
+  background: var(--surface);
+}
+
+.settings-page .acard.is-off .checks,
+.settings-page .acard.is-off .notes {
+  opacity: 0.7;
+}
+
+.settings-page .acard-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-3) var(--sp-4);
+}
+
+.settings-page .acard-head .avatar {
+  width: 32px;
+  height: 32px;
+  font-size: var(--fs-2);
+}
+
+.settings-page .acard-name {
+  margin: 0;
+  min-width: 0;
+}
+
+.settings-page .acard .disc {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  padding: 0 var(--sp-2) 0 var(--sp-1);
+  margin-left: calc(var(--sp-1) * -1);
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: var(--fs-3);
+  text-align: left;
+}
+
+.settings-page .acard .disc:hover {
+  background: var(--surface-2);
+}
+
+.settings-page .acard .chev {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--text-3);
+  border-bottom: 2px solid var(--text-3);
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+  flex: none;
+  margin-right: 2px;
+}
+
+.settings-page .acard .disc[aria-expanded="true"] .chev {
+  transform: rotate(45deg) translate(-2px, -1px);
+}
+
+.settings-page .acard-grow {
+  flex: 1;
+}
+
+.settings-page .acard-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.settings-page .acard button.btn.mkdef {
+  border-color: var(--line-strong);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.settings-page .acard button.btn.mkdef:disabled {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-3);
+}
+
+.settings-page .acard-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-4);
+  padding: 0 var(--sp-4) var(--sp-3) calc(var(--sp-4) + 32px + var(--sp-3));
+  font-size: var(--fs-1);
+}
+
+.settings-page .acard-dl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-page .acard .minibar {
+  display: inline-block;
+  width: 120px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.settings-page .acard .minibar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.35s linear;
+}
+
+.settings-page .acard-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.settings-page .acard-body {
+  display: grid;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-4) var(--sp-4);
+}
+
+.settings-page .acard-body[hidden] {
+  display: none;
+}
+
+.settings-page .acard.is-open .acard-head {
+  padding-bottom: var(--sp-2);
+}
+
+.settings-page .divider {
+  height: 1px;
+  background: var(--line);
+}
+
+.settings-page .card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.settings-page .acard-out {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+/* ---------- layout A: left navigation, content right ---------- */
+
+.settings-page .top {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.settings-page .top .grow {
+  flex: 1;
+}
+
+.settings-page .shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  max-width: 1120px;
+  margin: 0 auto;
+  min-height: calc(100vh - 57px);
+}
+
+.settings-page nav.side {
+  position: sticky;
+  top: 57px;
+  align-self: start;
+  padding: var(--sp-5) var(--sp-3);
+  display: grid;
+  gap: 2px;
+}
+
+.settings-page nav.side button {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 36px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  color: var(--text-2);
+  text-align: left;
+  cursor: pointer;
+  font-size: var(--fs-3);
+}
+
+.settings-page nav.side button:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.settings-page nav.side button[aria-current="page"] {
+  background: var(--accent-soft);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.settings-page nav.side .count {
+  margin-left: auto;
+  font-size: var(--fs-1);
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.settings-page nav.side .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: none;
+}
+
+.settings-page nav.side .side-sum {
+  margin-top: var(--sp-4);
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  font-size: var(--fs-1);
+  color: var(--text-2);
+  display: grid;
+  gap: 2px;
+}
+
+.settings-page nav.side .side-sum strong {
+  color: var(--text);
+  font-size: var(--fs-2);
+}
+
+.settings-page main {
+  padding: var(--sp-5) var(--sp-5) 64px;
+  border-left: 1px solid var(--line);
+  min-width: 0;
+}
+
+.settings-page .sec-head {
+  display: grid;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-4);
+  max-width: 720px;
+}
+
+.settings-page .sec-head p {
+  color: var(--text-2);
+}
+
+.settings-page .def-hint {
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  max-width: 720px;
+  margin-top: calc(var(--sp-3) * -1);
+  margin-bottom: var(--sp-4);
+}
+
+.settings-page .cards {
+  display: grid;
+  gap: var(--sp-2);
+  max-width: 760px;
+}
+
+.settings-page .narrow {
+  max-width: 760px;
+}
+
+.settings-page .stack {
+  display: grid;
+  gap: var(--sp-5);
+}
+
+.settings-page .blk {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.settings-page .blk-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.settings-page .blk-sub {
+  display: grid;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+  justify-items: start;
+}
+
+/* 375 px (FR-390): the navigation becomes a row across the top and wraps, so nothing scrolls sideways. */
+@media (max-width: 760px) {
+  .settings-page .top {
+    padding: var(--sp-3) var(--sp-4);
+    flex-wrap: wrap;
+  }
+
+  .settings-page .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-page nav.side {
+    position: static;
+    display: flex;
+    flex-wrap: wrap;
+    padding: var(--sp-2) var(--sp-4);
+    border-bottom: 1px solid var(--line);
+    gap: var(--sp-1);
+  }
+
+  .settings-page nav.side button {
+    width: auto;
+    white-space: normal;
+    font-size: var(--fs-2);
+  }
+
+  .settings-page nav.side .side-sum {
+    display: none;
+  }
+
+  .settings-page main {
+    border-left: 0;
+    padding: var(--sp-4) var(--sp-4) 64px;
+  }
+}
+
+@media (max-width: 560px) {
+  .settings-page .acard-sub {
+    padding-left: var(--sp-4);
+  }
+
+  .settings-page .acard-grow {
+    flex-basis: 100%;
+    height: 0;
+  }
+
+  .settings-page .acard-ctl {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .settings-page .site {
+    grid-template-columns: 1fr auto;
+  }
+
+  .settings-page .site .seg {
+    grid-column: 1 / -1;
+    justify-self: start;
+    flex-wrap: wrap;
+  }
+
+  .settings-page .tools th:nth-child(3),
+  .settings-page .tools td:nth-child(3) {
+    display: none;
+  }
+}

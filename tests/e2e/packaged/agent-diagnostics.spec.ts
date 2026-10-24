@@ -1,7 +1,8 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -69,6 +70,8 @@ test.describe("agent diagnostics", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -81,7 +84,7 @@ test.describe("agent diagnostics", () => {
 
       const created = (await ok(live, "tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number };
       const tabId = created.tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       /**
        * Whether *this extension* has a debugger on the tab, asked of the browser itself.
        *
@@ -116,8 +119,8 @@ test.describe("agent diagnostics", () => {
       }
       expect(await attached(), "a refused call must not have attached a debugger").toBe(false);
 
-      // ================= the owner grants it, from the panel =================
-      await setDiagnostics(panel, SITE, true);
+      // ================= the owner grants it, on the settings page (024 FR-385) =================
+      await settings.setDiagnostics(SITE, true);
 
       const logged = await ok(live, "evaluate", {
         tabId,
@@ -200,7 +203,7 @@ test.describe("agent diagnostics", () => {
       expect(await attached()).toBe(true);
 
       // ================= the owner takes it back =================
-      await setDiagnostics(panel, SITE, false);
+      await settings.setDiagnostics(SITE, false);
       // 004/B102 (same reasoning as T156, above): this used to assert `attached()` is false, but
       // the click on the away-link earlier in this journey (`click` on `away.ref`) already
       // acquired input's own, still-valid consent for this tab, and nothing ever drops that
@@ -239,60 +242,4 @@ async function ok(
   const result = await client.callTool(tool, args);
   expect(result.isError, `${tool} failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
   return result.json;
-}
-
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(async () =>
-      panel.evaluatePanel(
-        `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-          `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-      ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
-}
-
-/**
- * Grants or revokes diagnostics for one site through the panel's own checkbox (US6, FR-049).
- *
- * Through the control the owner actually has, for the same reason the mode is: the claim is that
- * *they* can turn this on and off, and writing the store behind the panel would prove only that the
- * store works.
- */
-async function setDiagnostics(panel: SidePanelDriver, site: string, granted: boolean): Promise<void> {
-  await panel.waitForText(site);
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));` +
-      `const box=row?.querySelector('input[type=checkbox]');` +
-      `if(!box)return false;if(box.checked===${String(granted)})return true;box.click();return true})()`,
-    true,
-  );
-  expect(clicked, `the panel offers no diagnostics control for ${site}`).toBe(true);
-  await expect
-    .poll(async () =>
-      panel.evaluatePanel(
-        `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-          `const row=rows.find((r)=>r.textContent?.includes(site));` +
-          `return row?.querySelector('input[type=checkbox]')?.checked ?? null})()`,
-        true,
-      ),
-      { timeout: 15_000 },
-    )
-    .toBe(granted);
 }

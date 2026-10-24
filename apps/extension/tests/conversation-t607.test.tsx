@@ -146,7 +146,7 @@ describe("T607 the Conversation tab", () => {
       await open(CONVERSATION_READY, "zh-TW");
       fireEvent.click(chipOf("agent"));
       const states = [...document.querySelectorAll(".agent-conversation-availability")].map((node) => node.textContent);
-      expect(states).toEqual(["可以使用", "可以使用 · 上次使用"]);
+      expect(states).toEqual(["可以使用", "可以使用"]);
     });
   });
 

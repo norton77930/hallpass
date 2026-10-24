@@ -156,8 +156,6 @@ export const messages = {
   "agent.accept": "Allow pairing",
   "agent.unpair": "Unpair",
   "agent.sitesTitle": "Sites",
-  "agent.sitesNone": "No site has been decided on yet.",
-  "agent.siteModeLabel": "What the agent may do on {site}",
   "agent.modeAsk": "Ask me every time",
   "agent.modeFollowAPlan": "Follow a plan I approve",
   "agent.modeSkipChecks": "Act without asking",
@@ -221,14 +219,6 @@ export const messages = {
   "agent.status.menu": "More options",
   // 018 FR-268, FR-279: this browser's name and rename; the others are counted, never named.
   "agent.browser.this": "This browser: {name}",
-  "agent.browser.rename": "Rename",
-  "agent.browser.renameLabel": "Rename this browser",
-  "agent.browser.nameLabel": "Browser name",
-  "agent.browser.save": "Save",
-  "agent.browser.cancel": "Cancel",
-  "agent.browser.nameInvalid": "Use 1 to 40 characters.",
-  "agent.browser.others": "{n} other browsers connected",
-  "agent.browser.othersOne": "1 other browser connected",
   // 018 FR-274: an agent asking the owner to pick the browser it works in, in the browser itself.
   "agent.browserChoice.title": "Use this browser for {agent}?",
   "agent.browserChoice.body": "Several browsers are running Hallpass. Answer in the one the agent should work in.",
@@ -236,7 +226,6 @@ export const messages = {
   "agent.browserChoice.decline": "Not this one",
   // 016 FR-237: "Revoke" on screen, the site in the accessible name.
   "agent.siteRevoke": "Revoke {site}",
-  "agent.siteRevokeText": "Revoke",
   // 0.8.0 card copy the 016 card no longer shows; kept while the packaged gates still read it (T453).
   "agent.session.sites": "Working on {sites}",
   "agent.session.release": "Give my tabs back",
@@ -339,18 +328,7 @@ export const messages = {
   "agent.uploadDecline": "Refuse",
   // 014 FR-191, FR-192: the directories the host may read uploads from, listed beside the sites.
   "agent.uploadRootsTitle": "Allowed upload folders",
-  // 0.9.0 owner check: say what the list governs and that it is empty; the file path is a quiet last line.
-  "agent.uploadRootsIntro": "Files go into pages only from these folders; anywhere else asks you first.",
-  "agent.uploadRootsEmpty": "None yet. Folders you allow \"from now on\" are listed here.",
-  "agent.uploadRootsPath": "List file: {path}",
-  "agent.uploadRootsMalformed": "The host could not read that file as a list, so no directory is allowed.",
-  // S3 review F4: and what it did with the file it could not read, which is the owner's own document.
-  "agent.uploadRootsPreserved":
-    "The host could not read that file as a list, so it kept the old one as {name} and started a new one.",
-  // S3 review F2: a "from now on" the host could not write down. The agent is told in its own word.
-  "agent.uploadRootNotRecorded": "The host could not record {root}, so it is not allowed yet.",
   "agent.uploadRootRevoke": "Forget {root}",
-  "agent.uploadRootPending": "Waiting for the local host…",
   "extName.agent": "Hallpass",
   "extActionTitle.agent": "Open Hallpass",
   "extCommandDescription.agent": "Open the Hallpass side panel",
@@ -398,81 +376,36 @@ export const messages = {
   // 019 D-019-3, FR-282 - FR-284: the two tabs; questions from external agents stay above both.
   "agent.tabs.label": "Side panel sections",
   "agent.tabs.conversation": "Conversation",
-  "agent.tabs.connections": "Connections & sites",
   "agent.tabs.waiting": "{count} waiting",
-  // 019 FR-309, T555: the panel consent, where the owner can take it back.
-  "agent.panelConsent.label": "Side-panel agent may use this browser",
-  "agent.panelConsent.granted": "Follows the site rules below.",
-  "agent.panelConsent.withdrawn": "Off. The next conversation asks again.",
-  "agent.panelConsent.unknown": "Asked the first time you start a conversation.",
   // 019 FR-308, R-328, T556: who made a site's last change.
   "agent.siteChangedBy.panel-agent": "Changed by the side-panel agent",
-  "agent.siteChangedBy.external-agent": "Changed by an external agent",
-  "agent.siteChangedBy.owner": "Changed by you",
   // 019 US1, US3, FR-285 - FR-294, FR-299 - FR-301: the Conversation tab.
   "conversation.unavailable.host-outdated":
     "The Hallpass host on this computer is too old for conversations. Install the current release, then reopen the side panel.",
   "conversation.unavailable.broker-unavailable":
-    "Conversations are not available right now: Hallpass cannot reach its helper on this computer. Check the connection under Connections & sites.",
+    "Conversations are not available right now: Hallpass cannot reach its helper on this computer. Check the connection in the settings page, under Connection & diagnostics.",
   "conversation.agent.claude-code": "Claude Code",
   "conversation.agent.codex": "Codex",
   "conversation.agent.hermes": "Hermes",
   "conversation.agent.deepseek": "DeepSeek",
   "conversation.availability.ready": "Ready",
-  "conversation.availability.needs-install": "Needs a one-time download",
-  "conversation.availability.missing": "Not installed",
-  "conversation.availability.version-problem": "Version does not match",
   "conversation.back": "Back",
-  "conversation.missing.title": "{agent} is not installed on this computer",
-  "conversation.missing.body":
-    "The side panel talks to the {agent} you use in your terminal. Install it, sign in there, then pick it again. Nothing was downloaded.",
-  "conversation.missing.body.hermes":
-    "The side panel talks to the {agent} installed on this computer. Install it, set up its model in a terminal, then pick it again. Nothing was downloaded.",
-  "conversation.missing.claude-code": "Install Claude Code by following its official setup guide, then run claude once in a terminal to sign in.",
-  "conversation.missing.codex": "Install Codex by following its official setup guide, then run codex once in a terminal to sign in.",
-  "conversation.missing.hermes":
-    "Install Hermes 0.22.2 with Hermes' official Windows installer, then set up its model once in a terminal. Hallpass does not install it for you.",
-  "conversation.missing.deepseek": "DeepSeek is downloaded by Hallpass on first use.",
   // 021 FR-345, FR-350: the worker's notes beside an agent's state.
   "conversation.note.git-missing": "Git for Windows was not found. Hermes needs it to run commands in automatic mode.",
   "conversation.note.pre-release": "Pre-release version. Hallpass keeps exactly the version it tested.",
-  // 021 FR-344: the tested version beside the installed one (the broker's sentence, said in the panel's language).
-  "conversation.version.mismatch": "Hallpass works with {agent} {tested}; this computer has {agent} {version}.",
-  "conversation.version.title": "This version of {agent} does not work with the tested connector",
-  "conversation.version.installed": "Installed version: {version}",
   "conversation.version.unreadable": "{agent} was found, but it did not report a version number.",
-  "conversation.version.body":
-    "Hallpass tested its connector with a different version of {agent}. Update {agent} in your terminal, then pick it again. No conversation was started.",
   "conversation.firstUse.title": "Set up {agent} for the side panel",
-  "conversation.firstUse.what":
-    "Hallpass needs a small connector so the side panel can talk to the {agent} already installed on this computer. It is the version Hallpass tested, and it never updates itself.",
   // 021 FR-350, FR-355: DeepSeek is fetched by Hallpass itself; Hermes is the owner's own install.
-  "conversation.firstUse.what.deepseek":
-    "Hallpass downloads {agent} itself so the side panel can run it. It is the exact version Hallpass tested, with every package pinned, and it never updates itself.",
   "conversation.firstUse.settings.hermes":
     "Hermes runs with its own settings and model (its settings folder is %LOCALAPPDATA%\\hermes, or HERMES_HOME if set). Hallpass never asks for or stores a key.",
   "conversation.firstUse.settings.deepseek":
     "DeepSeek runs with its own settings and the key variable its provider names in your environment. Hallpass never asks for or stores a key.",
-  "conversation.firstUse.size": "Download size: about {size}.",
-  "conversation.firstUse.registry":
-    "Downloading it is a request to the npm registry your own npm is set up for. Hallpass adds no data of its own.",
   "conversation.firstUse.settings":
     "The agent runs with your own {agent} sign-in and settings, including your MCP servers, hooks and instruction files.",
   "conversation.firstUse.browser":
     "The side-panel agent will be able to use this browser under the same site rules as any other agent.",
-  "conversation.firstUse.download": "Download",
   "conversation.firstUse.allow": "Allow",
   "conversation.firstUse.cancel": "Cancel",
-  "conversation.size.claude-code": "60 MB",
-  "conversation.size.codex": "20 MB",
-  "conversation.size.hermes": "0 MB",
-  "conversation.size.deepseek": "700 MB",
-  "conversation.install.label": "Connector download",
-  "conversation.install.preparing": "Getting ready to download…",
-  "conversation.install.finishing": "Checking the download and putting it in place…",
-  "conversation.install.downloading": "Downloading the connector (about {size})…",
-  "conversation.install.failed": "The connector download did not finish. Nothing partial was kept.",
-  "conversation.install.retry": "Try again",
   "conversation.header.label": "Conversation details",
   "conversation.header.agent": "Agent",
   "conversation.header.folder": "Folder",
@@ -609,7 +542,7 @@ export const messages = {
   // T605: the mode chip's short visible label; its accessible name keeps the full mode name.
   "conversation.mode.short.strict": "Ask first",
   "conversation.mode.short.agent-review": "Agent review",
-  // T605: the Connections & sites tab's section heading over the session cards.
+  // T605: the section heading over the session cards on the side panel's Sessions tab.
   "agent.sessionsTitle": "Agent sessions",
   // 020 T606: the owner's review of the T605 shots.
   "conversation.held.hint": "Sends after you agree",
@@ -628,13 +561,12 @@ export const messages = {
   "conversation.output.empty": "No output from the agent yet.",
   "conversation.output.refresh": "Refresh",
   "conversation.reply.copyLabel": "Copy reply",
-  "conversation.availability.readyLastUsed": "Ready · last used",
   // 021 FR-357: DeepSeek continues a conversation without replaying it.
   "conversation.noReplay": "{agent} cannot show the earlier messages of this conversation. You can continue it.",
   "conversation.cannotResume.body": "This conversation can't continue (the agent cleared its record). Removing it from the list doesn't touch the agent's own files.",
   "conversation.cannotResume.remove": "Remove from list",
   "conversation.cannotResume.placeholder": "This conversation can't continue",
-  "conversation.error.goConnections": "Go to Connections & sites",
+  "conversation.error.goConnections": "Go to Sessions",
   "conversation.error.openList": "Open conversation list",
   "conversation.jumpLatest": "Jump to latest",
   "conversation.notice.turn-failed": "The agent's turn failed.",
@@ -661,7 +593,6 @@ export const messages = {
   "conversation.notice.mode-reload-failed": "Hallpass could not reload the conversation in the new mode ({reason}), so the agent was stopped.",
   "conversation.notice.mode-reset-failed": "Hallpass could not set the mode back ({reason}), so the agent was stopped.",
   "conversation.notice.turn-ended": "The agent ended its turn: {reason}.",
-  "agent.siteMore": "More for {site}",
   "agent.moreWaitingOne": "1 more request waiting",
   "agent.moreWaiting": "{n} more requests waiting",
   // 022 FR-325 - FR-341: attachments in the composer - the + menu, the chips, every refusal.
@@ -717,6 +648,306 @@ export const messages = {
     "Hermes reads its model settings from its own settings folder (%LOCALAPPDATA%\\hermes, or HERMES_HOME if set). Set it up in a terminal with `hermes model`; Hallpass never asks for a key.",
   "conversation.hint.agent-model-unreachable.deepseek":
     "DeepSeek reads its model settings from its own settings and from the environment variable its provider names. Set them up there; Hallpass never asks for a key.",
+  // 024 D-024-11, D-024-12, D-024-18, FR-384, FR-392 - FR-394, T752 (see agent-panel-keys.ts).
+  "agent.tabs.sessions": "Sessions",
+  "agent.sessions.empty": "No agent is acting on this browser.",
+  "agent.sessions.openSettings": "Open settings",
+  "agent.session.manageSite": "Manage this site's permissions ↗",
+  "agent.session.manageSiteLabel": "Manage permissions for {site} (opens settings)",
+  "agent.status.settings": "Settings",
+  "conversation.agentMenu.notReady": "{agent} is not ready yet.",
+  "conversation.agentMenu.notReady.download": "{agent} needs a download first.",
+  "conversation.agentMenu.notReady.downloading": "{agent} is still downloading.",
+  "conversation.agentMenu.notReady.missing": "{agent} is not installed.",
+  "conversation.agentMenu.notReady.version":
+    "This version of {agent} does not match the one Hallpass tested.",
+  "conversation.agentMenu.openSettings": "Open settings",
+  // 024 T752: the top bar, navigation and the summary (FR-376, FR-389, D-024-20).
+  "settings.title": "Hallpass settings",
+  "settings.themeLabel": "Theme",
+  "settings.theme.system": "System",
+  "settings.theme.light": "Light",
+  "settings.theme.dark": "Dark",
+  "settings.languageLabel": "Language",
+  "settings.language.system": "System",
+  "settings.language.en-US": "English",
+  "settings.language.zh-TW": "繁體中文",
+  "settings.nav.label": "Settings sections",
+  "settings.nav.agents": "Agents",
+  "settings.nav.sites": "Sites & permissions",
+  "settings.nav.tools": "Browser tools",
+  "settings.nav.connection": "Connection & diagnostics",
+  "settings.nav.warningMark": "Has warnings",
+  "settings.nav.siteCount": "{count} sites",
+  "settings.nav.siteCountOne": "{count} site",
+  "settings.summary.ready": "{ready} of {total} agents ready",
+  "settings.summary.downloading": "{count} downloading",
+  "settings.summary.attention": "{count} need attention",
+  "settings.summary.warnings": "{count} with warnings",
+  "settings.loading": "Loading…",
+  "settings.connectionLost": "This page lost its connection to Hallpass. Reload the page to try again.",
+  "settings.error.generic": "Something went wrong. Try again.",
+  "settings.toast.dismiss": "Dismiss",
+  "settings.toast.copied": "Copied to the clipboard",
+  // The helper program is missing or not reachable (edge case: the page opens and says what to do).
+  "settings.helper.missingTitle": "Hallpass cannot reach its helper on this computer",
+  "settings.helper.missingBody":
+    "Agent checks, downloads, tests and upload folders need the helper, so they cannot be shown here yet. Reopen the browser; if this stays, run the Hallpass installer again, then press Retry.",
+  "settings.helper.retry": "Retry",
+  "settings.helper.needsUpdate":
+    "The helper is older than this extension. Run the Hallpass installer again to update it.",
+  // Section introductions (D-024-2..5, D-024-17).
+  "settings.agents.desc":
+    "Choose which agents the side panel offers and which one is the default, and check that each one works. API keys stay with each agent, not here.",
+  "settings.agents.defaultHint": "Only a ready, enabled agent can be the default.",
+  "settings.sites.desc":
+    "Decide ahead who may drive this browser, on which sites, in which mode, and which folders files may be uploaded from. Consent cards still appear in the side panel.",
+  "settings.tools.desc":
+    "Which agents can use Hallpass's browser tools. Apart from the side-panel switch, this version only shows them.",
+  "settings.connection.desc":
+    "This browser's connection and versions, and the last lines each agent printed (keys, tokens and user paths removed; read only when you ask).",
+  // Agent states (D-024-14) - one of five; whether an agent is on is the Enabled switch alone.
+  "settings.state.ready": "Ready",
+  "settings.state.readyWarnings": "Ready, with warnings",
+  "settings.state.needsDownload": "Needs a download",
+  "settings.state.downloading": "Downloading",
+  "settings.state.notInstalled": "Not installed",
+  // The agent card (FR-377, FR-378, FR-382, FR-383).
+  "settings.card.details": "details",
+  "settings.card.installedByYou": "installed by you",
+  "settings.card.warnings": "{count} warnings",
+  "settings.card.warningsOne": "{count} warning",
+  "settings.card.enabled": "Enabled",
+  "settings.card.enabledLabel": "Enable {agent}",
+  "settings.card.default": "Default",
+  "settings.card.makeDefault": "Make default",
+  "settings.card.makeDefaultLabel": "Make {agent} the default",
+  "settings.card.defaultReason.notReady":
+    "This agent is not ready yet, so it cannot be the default.",
+  "settings.card.defaultReason.off": "Switch this agent on to make it the default.",
+  "settings.default.moved": "Default agent is now {agent}",
+  "settings.default.none": "No ready agent can be the default right now",
+  // The checks on an opened card (FR-378, FR-397: local checks only).
+  "settings.check.version": "Version",
+  "settings.check.prereq": "Prerequisites",
+  "settings.check.model": "Model server",
+  "settings.check.tools": "Browser tools",
+  "settings.check.attach": "Accepts",
+  "settings.check.found": "{item} found",
+  "settings.check.helperMissing": "Helper missing",
+  "settings.check.helperInstalled": "Helper installed",
+  "settings.check.afterDownload": "Checked after the download",
+  "settings.check.nothingNeeded": "Nothing else needed",
+  "settings.check.modelNotChecked": "Not checked yet; Test asks it",
+  "settings.check.modelAnswered": "Answered the last test",
+  "settings.check.modelFailed": "Did not answer the last test",
+  "settings.attach.images": "Images",
+  "settings.attach.tab": "Tab",
+  "settings.attach.files": "Files",
+  "settings.attach.accepted": "accepted",
+  "settings.attach.refused": "not accepted",
+  // Browser tools status, shared by the card and the Browser tools table (FR-386).
+  "settings.toolStatus.available": "Available",
+  "settings.toolStatus.needsComponent": "Needs its MCP component",
+  "settings.toolStatus.notSupported": "Not supported",
+  "settings.toolStatus.afterHelper": "After the helper download",
+  // Notes and warnings in the owner's words (FR-378). Key variables are named, never valued (FR-388).
+  "settings.note.helperWhy": "{agent} needs a helper of about {size} to run in the side panel.",
+  "settings.note.notInstalled":
+    "Not installed. Press Download and install; it takes about {estimate} minutes (estimate).",
+  "settings.note.gitMissing":
+    "Git for Windows was not found. Hermes needs it to run commands in automatic mode.",
+  "settings.note.preRelease": "Pre-release version. Hallpass keeps exactly the version it tested.",
+  "settings.note.versionMismatch":
+    "Hallpass works with {agent} {tested}; this computer has {agent} {version}.",
+  "settings.warning.versionUnreadable":
+    "{agent} was found, but it did not report a version number.",
+  "settings.warning.mcpMissing":
+    "Browser tools not attached: the optional MCP component is missing.",
+  "settings.warning.keyVariable":
+    "Key variable {variable} is set in Windows, but this browser started before it was set, so it cannot see it. Quit the browser completely (including any copy still running in the background) and open it again.",
+  // Actions on a card and the check again (FR-379, FR-380).
+  "settings.action.downloadHelper": "Download helper (about {size})",
+  "settings.action.downloadAgent": "Download and install",
+  "settings.action.cancel": "Cancel",
+  "settings.action.tryAgain": "Try again",
+  "settings.action.checkAgain": "Check again",
+  "settings.notice.checked": "Checked again; nothing changed.",
+  "settings.notice.checkedChanged": "Checked again; the card is updated.",
+  // Downloads (FR-379, D-024-9). Times are estimates.
+  "settings.progress.helper": "Downloading helper",
+  "settings.progress.agent": "Downloading the {agent} agent",
+  "settings.progress.preparing": "Preparing…",
+  "settings.progress.timeLeft": "About {minutes} min left (estimate)",
+  "settings.progress.timeLeftShort": "Under a minute left (estimate)",
+  "settings.progress.firstDownload":
+    "The first download takes about {estimate} minutes (estimate).",
+  "settings.progress.keepsGoing":
+    "Closing this page does not stop it; closing the browser does, and you can try again later.",
+  "settings.progress.interrupted":
+    "The last download was interrupted when the browser was closed. You can try again.",
+  "settings.progress.failed": "The download did not finish: {reason}",
+  "settings.progress.failedHint":
+    "Check your network connection and free disk space, then try again.",
+  "settings.toast.downloadDone": "{agent} is ready",
+  "settings.toast.downloadFailed": "The {agent} download failed",
+  "settings.toast.downloadCancelled": "Download cancelled",
+  // Hermes' setup steps (FR-380, D-021-3): Hallpass never installs or updates Hermes.
+  "settings.hermes.intro":
+    "You install Hermes yourself; Hallpass never downloads or updates it. Setup:",
+  "settings.hermes.git": "Install Git",
+  "settings.hermes.command":
+    "Install Hermes following its own guide, so the hermes command is on PATH",
+  "settings.hermes.mcp":
+    "Optional: install Hermes's MCP component, so it can use the browser tools",
+  "settings.hermes.keyVariable": "Set your model's key variable in Windows",
+  "settings.hermes.restart":
+    "Quit the browser completely and open it again, so it can see the variable",
+  "settings.hermes.found": "found",
+  "settings.hermes.notDone": "not done",
+  // Test (FR-381, D-024-10): one model call, said beside the button; results in the owner's words.
+  "settings.test.button": "Test",
+  "settings.test.again": "Test again",
+  "settings.test.running": "Testing…",
+  "settings.test.label": "Test {agent}",
+  "settings.test.cost": "Makes one model call",
+  "settings.test.unavailable": "Test is available once the agent is ready and enabled.",
+  "settings.test.busy": "A test of this agent is already running.",
+  "settings.test.lastTest": "Last test {time}",
+  "settings.test.passed": "Passed: the model answered in {ms} ms.",
+  "settings.test.passedTools":
+    "Passed: the model answered in {ms} ms and the browser tools are attached.",
+  "settings.test.passedNoTools":
+    "Passed: the model answered in {ms} ms. This agent does not use the browser tools.",
+  "settings.test.partial":
+    "Partly passed: the model answered in {ms} ms, but {component} could not be used.",
+  "settings.test.partialHint": "Install the missing component, then press Check again.",
+  "settings.test.component.mcp": "the optional MCP component",
+  "settings.test.component.browserTools": "the browser tools",
+  "settings.test.failed.start":
+    "Failed: the agent did not start. Check that it is still installed and runs in a terminal, then test again.",
+  "settings.test.failed.model":
+    "Failed: the model server did not answer. Check the agent's own model settings and that the server is running, then test again.",
+  "settings.test.failed.key":
+    "Failed: the key variable {variable} is set in Windows, but this browser cannot see it. Quit the browser completely, open it again, then test again.",
+  "settings.test.failed.timeout":
+    "Failed: no answer within {seconds} s. Check the model server, then test again.",
+  "settings.test.failed.other": "Failed: the test could not finish. Try again.",
+  // Sites & permissions: outside agents (FR-385, D-024-17).
+  "settings.outside.title": "Outside agents that may drive this browser",
+  "settings.outside.desc":
+    "Agents that connected from a terminal or editor and were paired. After you unpair one, it has to ask again next time.",
+  "settings.outside.none": "No outside agent is paired.",
+  "settings.outside.from.terminal": "terminal",
+  "settings.outside.from.editor": "editor",
+  "settings.outside.from.other": "another app",
+  "settings.outside.last": "{where} · last connected {time}",
+  "settings.outside.unpair": "Unpair",
+  "settings.outside.unpairLabel": "Unpair {name}",
+  "settings.outside.unpaired": "Unpaired {name}",
+  // Sites & permissions: the sites (FR-385). The mode keys are looked up by the contract's own mode value.
+  "settings.sites.title": "Sites",
+  "settings.mode.ask": "Ask",
+  "settings.mode.follow-a-plan": "Follow a plan",
+  "settings.mode.skip-checks": "Skip checks",
+  "settings.mode.ask.meaning": "Asks you in the side panel before every action.",
+  "settings.mode.follow-a-plan.meaning":
+    "Actions inside a plan you approved go ahead; anything else still asks.",
+  "settings.mode.skip-checks.meaning": "Acts without asking. Use only on sites you fully trust.",
+  "settings.sites.modeFor": "Mode for {site}",
+  "settings.sites.modeChanged": "{site} set to {mode}",
+  "settings.sites.revoke": "Revoke",
+  "settings.sites.revokeLabel": "Revoke {site}",
+  "settings.sites.revokeConfirm":
+    "Revoke {site}? Agents will have to ask again in the side panel before acting on it.",
+  "settings.sites.keep": "Keep",
+  "settings.sites.revoked": "Revoked {site}",
+  "settings.sites.undo": "Undo",
+  "settings.sites.empty":
+    "No sites. The first time an agent wants to act on a site, it asks you in the side panel.",
+  "settings.sites.gone": "{site} is no longer in the list.",
+  "settings.sites.marked":
+    "Opened from the side panel's \"Manage this site's permissions\": {site}",
+  // 004 FR-049: the diagnostics grant, its own consent; the words the panel's row used.
+  "settings.sites.diagnostics": "Allow reading console and network logs",
+  "settings.sites.diagnosticsLabel": "Allow reading console and network logs on {site}",
+  // 019 FR-308, R-328: who made the site's last change; the words the panel's row used.
+  "settings.sites.changedBy.panel-agent": "Changed by the side-panel agent",
+  "settings.sites.changedBy.external-agent": "Changed by an outside agent",
+  "settings.sites.changedBy.owner": "Changed by you",
+  // Sites & permissions: upload folders (FR-385, D-024-21: Remove only).
+  "settings.uploads.title": "Upload folders",
+  "settings.uploads.desc":
+    "Agents may upload files to web pages only from these folders; anywhere else asks you first. The list lives on this computer; changes go through the helper.",
+  "settings.uploads.addedWhenAsked":
+    "A folder is added when an agent asks to upload from it and you agree.",
+  "settings.uploads.empty": "No upload folders yet.",
+  "settings.uploads.remove": "Remove",
+  "settings.uploads.removeLabel": "Remove {folder}",
+  "settings.uploads.removed": "Removed {folder}",
+  "settings.uploads.unavailable":
+    "Upload folders are kept by the helper, so they cannot be shown until it is connected.",
+  // 014 FR-191: where the helper keeps the list, for an owner who edits it by hand.
+  "settings.uploads.listPath": "List file: {path}",
+  // Browser tools (FR-386, D-024-13): the side-panel switch, then the read-only table.
+  "settings.tools.switchTitle": "Let side-panel agents use the browser tools",
+  "settings.tools.switchDesc":
+    "When off, agents in side-panel conversations can only chat, not act on pages. Outside agents are not affected.",
+  "settings.tools.switchOn": "On. Side-panel agents follow the site rules.",
+  "settings.tools.switchOff": "Off. The next conversation asks again.",
+  "settings.tools.switchUnknown": "Asked the first time you start a conversation.",
+  "settings.tools.col.agent": "Agent",
+  "settings.tools.col.tools": "Browser tools",
+  "settings.tools.col.notes": "Notes",
+  "settings.tools.note.claude": "Attached through Hallpass's tool server.",
+  "settings.tools.note.codex": "Attached through Hallpass's tool server.",
+  "settings.tools.note.codexPending": "Can attach once the helper is downloaded.",
+  "settings.tools.note.hermes": "Hermes needs its own MCP component installed first.",
+  "settings.tools.note.deepseek": "This agent has no tool interface; chat only.",
+  "settings.tools.readOnly": "Read-only: cannot be changed here in this version.",
+  // Connection & diagnostics (FR-395, FR-387, D-024-17).
+  "settings.connection.title": "Connection",
+  "settings.connection.helper": "Helper",
+  "settings.connection.helperConnected": "Connected",
+  "settings.connection.helperNotConnected": "Not connected",
+  "settings.connection.helperNeedsUpdate": "Needs updating",
+  "settings.connection.versions": "Versions",
+  "settings.connection.versionsMatched": "extension {extension} · helper {helper} (they match)",
+  "settings.connection.versionsMismatched":
+    "extension {extension} · helper {helper} (they do not match)",
+  "settings.connection.versionsUnknown": "extension {extension} · helper version unknown",
+  "settings.connection.browsers": "Browsers on this computer",
+  "settings.connection.thisBrowser": "This browser",
+  "settings.connection.browserName": "This browser's name",
+  "settings.connection.nameHint": "Agents choosing between browsers see this name.",
+  "settings.connection.nameInvalid": "Use 1 to 40 characters.",
+  "settings.connection.rename": "Rename",
+  "settings.connection.renamed": "Renamed to {name}",
+  "settings.connection.copy": "Copy connection details",
+  "settings.diag.title": "Agents' last output",
+  "settings.diag.show": "Show last lines",
+  "settings.diag.hide": "Hide",
+  "settings.diag.copy": "Copy",
+  "settings.diag.copyLabel": "Copy {agent}'s last lines",
+  "settings.diag.readAt": "Read at {time}",
+  "settings.diag.none": "This agent has printed nothing yet.",
+  "settings.diag.reading": "Reading…",
+  // 024 S3: texts the page needs beyond T752 - kept with the card, the upload list and the toasts.
+  "settings.warning.keyVariableUnnamed":
+    "The key variable is set in Windows, but this browser started before it was set, so it cannot see it. Quit the browser completely (including any copy still running in the background) and open it again.",
+  "settings.note.programMissing":
+    "{agent} was not found on this computer. Install it yourself, then press Check again.",
+  "settings.toast.testDone": "{agent} test finished",
+  "settings.uploads.pending": "Waiting for the helper…",
+  "settings.uploads.malformed": "The helper could not read its list file, so no folder is allowed.",
+  "settings.uploads.preserved":
+    "The helper could not read its list file; the old one was kept as {name} and a new one was started.",
+  "settings.uploads.notRecorded": "The helper could not record {folder}, so it is not allowed yet.",
+  "settings.transitions.title": "Remembered decisions",
+  "settings.transitions.row": "{from} → {to}",
+  "settings.transitions.lastUsed": "Last used {time}",
+  "settings.transitions.neverUsed": "Not used since it was allowed",
+  "settings.transitions.forget": "Forget {from} → {to}",
 } as const;
 
 export type MessageKey = keyof typeof messages;

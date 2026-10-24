@@ -275,13 +275,16 @@ describe("021 conversations in the panel", () => {
   });
 
   describe("a Hermes that is not installed", () => {
-    it("asks for its model to be set up in a terminal, where Claude Code and Codex are asked to sign in", async () => {
+    // 024 D-024-3: the set-up guidance (a terminal, its model) is on Hermes's card on the settings page;
+    // in a conversation it is one reason line and the link there.
+    it("says it is not installed and links to its card on the settings page, with no set-up steps in the panel", async () => {
       await open({ ...FOUR_READY, agents: FOUR_READY.agents.map((entry) => (entry.agent === "hermes" ? { agent: "hermes" as const, availability: "missing" as const } : entry)) });
       fireEvent.click(document.querySelector("button[data-chip=agent]")!);
-      fireEvent.click(screen.getByRole("menuitemradio", { name: /^Hermes/ }));
-      const card = screen.getByRole("heading", { name: ui("conversation.missing.title").replace("{agent}", "Hermes") }).closest("section")!;
-      expect(card.textContent).toContain("set up its model in a terminal");
-      expect(card.textContent).not.toContain("sign in");
+      const row = document.querySelector<HTMLElement>("li[data-agent=hermes]")!;
+      expect(row.querySelector(".agent-conversation-reason")?.textContent).toBe(ui("conversation.agentMenu.notReady.missing").replace("{agent}", "Hermes"));
+      expect(row.textContent).not.toContain("terminal");
+      fireEvent.click(row.querySelector("[role=menuitem]")!);
+      expect(commandsSent(port)).toEqual([{ type: "ui.agent.open-settings", payload: { route: "#agents/hermes" } }]);
     });
   });
 

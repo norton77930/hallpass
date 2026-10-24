@@ -21,7 +21,9 @@ import { lookup } from "../src/locales/catalog.js";
  * consent or its connector gets the first-use card above the box, holding the message.
  */
 
+/** The key 020 remembered the last-used agent under; 024 R-380 stopped reading and writing it. */
 const LAST_AGENT_KEY = "conversationLastAgent";
+const ALL_ON = { "claude-code": true, codex: true, hermes: true, deepseek: true } as const;
 
 type FakeStorage = { items: Record<string, unknown>; writes: Record<string, unknown>[]; failGet: boolean; failSet: boolean };
 
@@ -94,9 +96,9 @@ describe("T587 the composer comes first", () => {
     await settle();
   }
 
-  it("opens with the message box focused and the agent used last on the chip (scenario 1)", async () => {
-    storage.items[LAST_AGENT_KEY] = "codex";
-    await open();
+  it("opens with the message box focused and the owner's default agent on the chip (scenario 1)", async () => {
+    // 024 R-380: the default is the owner's choice on the settings page, not the agent used last.
+    await open({ ...CONVERSATION_READY, choices: { enabled: ALL_ON, default: "codex" } });
 
     expect(document.activeElement).toBe(box());
     expect(agentChip().textContent).toContain("Codex");
@@ -119,24 +121,23 @@ describe("T587 the composer comes first", () => {
     expect(isAbove(box(), row!)).toBe(true);
   });
 
-  it("falls back to the only ready agent when none was used before (scenario 2)", async () => {
+  it("falls back to the only ready agent when the owner chose no default (scenario 2)", async () => {
     await open({ ...CONVERSATION_READY, agents: [{ agent: "claude-code", availability: "needs-install" }, { agent: "codex", availability: "ready" }] });
     expect(agentChip().textContent).toContain("Codex");
   });
 
-  it("falls back to the first supported agent when none is ready, and when storage fails", async () => {
-    storage.failGet = true;
+  it("falls back to the first supported agent when none is ready", async () => {
     await open({ ...CONVERSATION_READY, agents: [{ agent: "claude-code", availability: "needs-install" }, { agent: "codex", availability: "missing" }] });
     expect(agentChip().textContent).toContain("Claude Code");
   });
 
-  it("does not keep a last-used agent that is no longer ready", async () => {
+  it("does not remember the agent last used: a stored value changes nothing (024 R-380)", async () => {
     storage.items[LAST_AGENT_KEY] = "codex";
-    await open({ ...CONVERSATION_READY, agents: [{ agent: "claude-code", availability: "ready" }, { agent: "codex", availability: "missing" }] });
+    await open({ ...CONVERSATION_READY, agents: [{ agent: "claude-code", availability: "ready" }, { agent: "codex", availability: "ready" }] });
     expect(agentChip().textContent).toContain("Claude Code");
   });
 
-  it("starts in the scratch folder on Enter, remembers the agent, and sends the typed words once it is open", async () => {
+  it("starts in the scratch folder on Enter, and sends the typed words once it is open", async () => {
     await open();
     type("summarise this page");
     fireEvent.keyDown(box(), { key: "Enter" });
@@ -144,7 +145,7 @@ describe("T587 the composer comes first", () => {
     expect(commandsSent(port)).toEqual([
       { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } },
     ]);
-    expect(storage.writes).toContainEqual({ [LAST_AGENT_KEY]: "claude-code" });
+    expect(storage.writes.some((write) => LAST_AGENT_KEY in write)).toBe(false);
     // Held while the conversation starts: the words are still there, and not sent twice.
     expect(box().value).toBe("summarise this page");
     fireEvent.keyDown(box(), { key: "Enter" });
@@ -224,11 +225,12 @@ describe("T589 the first-use card holds the message (scenario 3, FR-314)", () =>
     uninstallAgentPort();
   });
 
+  // 024: the card is the one-time consent of an agent that is ready - no download is offered from here.
   const NEEDS: ConversationPanelState = {
     ...CONVERSATION_READY,
     consent: "unknown",
     agents: [
-      { agent: "claude-code", availability: "needs-install" },
+      { agent: "claude-code", availability: "ready" },
       { agent: "codex", availability: "missing" },
     ],
   };
@@ -264,26 +266,18 @@ describe("T589 the first-use card holds the message (scenario 3, FR-314)", () =>
     expect(commandsSent(port)).toEqual([]);
   });
 
-  it("one Download fetches the connector, starts, and sends the held message", async () => {
-    await open();
+  it("offers no card and no download for an agent that is not ready: Send stays off (024 D-024-2)", async () => {
+    await open({ ...NEEDS, agents: [{ agent: "claude-code", availability: "needs-install" }, NEEDS.agents[1]!] });
     type("what is on this page?");
-    fireEvent.click(sendButton());
-    fireEvent.click(within(firstUse()).getByRole("button", { name: ui("conversation.firstUse.download") }));
-    expect(commandsSent(port)).toEqual([
-      { type: "ui.conversation.consent", payload: { granted: true } },
-      { type: "ui.conversation.install", payload: { agent: "claude-code" } },
-    ]);
 
-    const ready: ConversationPanelState = { ...NEEDS, consent: "granted", agents: [{ agent: "claude-code", availability: "ready" }, NEEDS.agents[1]!] };
-    project(port, withConversation(ready));
-    expect(commandsSent(port).slice(2)).toEqual([
-      { type: "ui.conversation.start", payload: { agent: "claude-code", folder: { kind: "scratch" } } },
-    ]);
-    project(port, withConversation(opened(ready)));
-    expect(commandsSent(port).slice(3)).toEqual([
-      { type: "ui.conversation.send", payload: { conversationId: NEW_ID, text: "what is on this page?" } },
-    ]);
-    expectValidCommands(port);
+    expect(sendButton().disabled).toBe(true);
+    expect(document.querySelector("[data-setup=first-use]")).toBeNull();
+    // What is there instead: one line saying why, and the way to the agent's card.
+    expect(document.querySelector("[data-setup=not-ready]")?.textContent).toContain(
+      ui("conversation.agentMenu.notReady.download").replace("{agent}", "Claude Code"),
+    );
+    expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
+    expect(commandsSent(port)).toEqual([]);
   });
 
   it("one Allow gives the consent, then starts and sends once the worker reports it given", async () => {
@@ -314,7 +308,7 @@ describe("T588 the agent menu (scenario 4, FR-313)", () => {
     uninstallAgentPort();
   });
 
-  it("lists every supported agent with its state, and install guidance for one not installed", async () => {
+  it("lists every enabled agent with its state, one reason line for each that cannot start, and no install guidance", async () => {
     renderShell();
     project(
       port,
@@ -331,21 +325,19 @@ describe("T588 the agent menu (scenario 4, FR-313)", () => {
 
     const menu = screen.getByRole("menu", { name: ui("conversation.agentMenu.label") });
     const items = within(menu).getAllByRole("menuitemradio");
-    expect(items).toHaveLength(4); // 021: every contract agent is listed; S3 (T669) pins the new rows.
+    expect(items).toHaveLength(4); // 021: every contract agent is listed (no choices from the worker: all on); S3 (T669) pins the rows.
     expect(items[0]?.textContent).toContain("Claude Code");
-    expect(items[0]?.textContent).toContain(ui("conversation.availability.version-problem"));
-    expect(items[0]?.textContent).toContain(ui("conversation.version.installed").replace("{version}", "1.0.0"));
-    expect(items[0]?.textContent).toContain("needs 2.x");
-    expect(items[1]?.textContent).toContain(ui("conversation.availability.missing"));
-    expect(items[1]?.textContent).toContain(ui("conversation.missing.codex"));
+    expect(items[0]?.hasAttribute("disabled")).toBe(true);
+    const reasons = (agent: string) => document.querySelector(`li[data-agent=${agent}] .agent-conversation-reason`)?.textContent;
+    expect(reasons("claude-code")).toBe(ui("conversation.agentMenu.notReady.version").replace("{agent}", "Claude Code"));
+    expect(reasons("codex")).toBe(ui("conversation.agentMenu.notReady.missing").replace("{agent}", "Codex"));
+    expect(screen.queryByText("Install Codex by following its official setup guide, then run codex once in a terminal to sign in.")).toBeNull();
 
+    // Neither can be chosen: the chip stays where it was, and nothing can be sent.
     fireEvent.click(items[1]!);
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(agentChip().textContent).toContain("Codex");
-    // A not-installed agent cannot be sent to; its guidance stays on screen.
+    expect(agentChip().textContent).toContain("Claude Code");
     type("hello");
     expect(sendButton().disabled).toBe(true);
-    expect(screen.getByText(ui("conversation.missing.codex"))).toBeTruthy();
     expect(commandsSent(port)).toEqual([]);
   });
 
@@ -357,7 +349,10 @@ describe("T588 the agent menu (scenario 4, FR-313)", () => {
     const items = within(screen.getByRole("menu")).getAllByRole("menuitemradio");
     expect(items[0]?.textContent).toContain(ui("conversation.availability.ready"));
     expect(items[0]?.getAttribute("aria-checked")).toBe("true");
-    expect(items[1]?.textContent).toContain(ui("conversation.availability.needs-install"));
+    expect(items[1]?.hasAttribute("disabled")).toBe(true);
+    expect(document.querySelector("li[data-agent=codex] .agent-conversation-reason")?.textContent).toBe(
+      ui("conversation.agentMenu.notReady.download").replace("{agent}", "Codex"),
+    );
 
     fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
     expect(screen.queryByRole("menu")).toBeNull();
@@ -663,8 +658,6 @@ describe("T679 the mode menu for Hermes and DeepSeek (US3, D-021-5, D-021-8, FR-
       "conversation.mode.restartNote",
       "conversation.note.git-missing",
       "conversation.note.pre-release",
-      "conversation.missing.hermes",
-      "conversation.missing.deepseek",
       "conversation.state.starting",
       "conversation.state.startingSlow",
       "conversation.state.cancelStart",
@@ -672,8 +665,6 @@ describe("T679 the mode menu for Hermes and DeepSeek (US3, D-021-5, D-021-8, FR-
       "conversation.state.start-cancelled",
       "conversation.permission.rejectOnly",
       "conversation.noReplay",
-      "conversation.version.mismatch",
-      "conversation.firstUse.what.deepseek",
       "conversation.firstUse.settings.hermes",
       "conversation.firstUse.settings.deepseek",
       "conversation.error.start-cancelled",

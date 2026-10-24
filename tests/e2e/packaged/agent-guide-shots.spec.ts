@@ -4,6 +4,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -50,7 +51,7 @@ test.describe("008 guide screenshots", () => {
     leaveDialogsToTheExtension(extensionContext);
     await letTheBrowserNameTheFile(extensionContext);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let openTab: number | undefined;
 
@@ -74,7 +75,7 @@ test.describe("008 guide screenshots", () => {
       // ============= the dialog card: `ask` mode, an unchained accept =============
       const dialogTab = ((await call("tabs_create", { url: DIALOGS })) as { tabId: number }).tabId;
       openTab = dialogTab;
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       await call("read_page", { tabId: dialogTab, filter: "interactive" });
       const timerRef = await refFor(call, dialogTab, "Confirm three seconds later");
 
@@ -105,7 +106,7 @@ test.describe("008 guide screenshots", () => {
       // picture: what the page said, and which file the run was written to.
       const formTab = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
       openTab = formTab;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("read_page", { tabId: formTab, filter: "interactive" });
       await call("gif_recorder", { action: "start" });
       const safe = await refFor(call, formTab, "Safe action");
@@ -140,6 +141,7 @@ async function pairedSession(fixtures: {
   extensionWorker: PackagedWorker;
 }): Promise<{
   panel: SidePanelDriver;
+  settings: SettingsPageDriver;
   client: McpHarnessClient;
   call: (tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }> {
@@ -161,6 +163,8 @@ async function pairedSession(fixtures: {
 
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
   await speakGuideLanguage(panel);
+  // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+  const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale: GUIDE_LOCALE, route: "#sites" });
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
@@ -171,7 +175,7 @@ async function pairedSession(fixtures: {
     expect(result.isError, `${tool} failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
     return result.json;
   };
-  return { panel, client, call };
+  return { panel, settings, client, call };
 }
 
 /**
@@ -233,27 +237,4 @@ async function refFor(
   const first = found.matches[0]?.ref;
   expect(first, `find '${query}' returned no ref`).toBeTruthy();
   return first as string;
-}
-
-/** The same panel-driven site mode the sibling journeys use; never a storage write (FR-042). */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

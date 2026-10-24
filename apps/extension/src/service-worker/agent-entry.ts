@@ -1,8 +1,9 @@
-import { AGENT_PANEL_PORT_NAME } from "@hallpass/contracts";
+import { AGENT_PANEL_PORT_NAME, AGENT_SETTINGS_PORT_NAME } from "@hallpass/contracts";
 import { watchLastFocusedWindow } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
 import { createAgentPanelPort, type AgentPanelPortLike } from "./agent-panel-port.js";
 import { composeAgentRuntime } from "./agent-runtime.js";
+import { createSettingsPort } from "./settings-port.js";
 import { createTabAttach } from "./tab-attach.js";
 
 /**
@@ -22,9 +23,18 @@ export type AgentPath = {
   /** The port name the worker's `onConnect` hands over on; the panel's, never the control port's. */
   portName: string;
   accept(port: AgentPanelPortLike): void;
+  /** 024 R-373: the settings page's port name, and its own door - never the panel's. */
+  settingsPortName: string;
+  acceptSettings(port: AgentPanelPortLike): void;
 };
 
-export function startAgentPath(input: { extensionId: string; sidePanelUrl: string }): AgentPath {
+export function startAgentPath(input: {
+  extensionId: string;
+  sidePanelUrl: string;
+  /** 024: `chrome.runtime.getURL("settings.html")`. */
+  settingsUrl: string;
+  extensionVersion: string;
+}): AgentPath {
   const runtime = composeAgentRuntime();
   const panel = createAgentPanelPort({
     extensionId: input.extensionId,
@@ -44,11 +54,24 @@ export function startAgentPath(input: { extensionId: string; sidePanelUrl: strin
   // panel port is built from the runtime, and the runtime needs to know whether anybody is looking
   // (011 R-163). Before `start`, so the first derivation of the badge reads a real answer.
   runtime.bindPanelPresence(panel);
+  // 024 T747: the settings page's port. It is deliberately not bound as presence - a settings page
+  // is not a panel, so it never counts for "seen", the badge or the pairing bounds (R-373).
+  const settings = createSettingsPort({
+    extensionId: input.extensionId,
+    settingsUrl: input.settingsUrl,
+    runtime,
+    extensionVersion: input.extensionVersion,
+    reportDiagnostic: reportTestDiagnostic,
+  });
   runtime.start();
   return {
     portName: AGENT_PANEL_PORT_NAME,
     accept(port: AgentPanelPortLike): void {
       panel.accept(port);
+    },
+    settingsPortName: AGENT_SETTINGS_PORT_NAME,
+    acceptSettings(port: AgentPanelPortLike): void {
+      settings.accept(port);
     },
   };
 }

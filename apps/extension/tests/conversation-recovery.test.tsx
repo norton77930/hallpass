@@ -82,16 +82,16 @@ describe("T606 recovery in the Conversation tab", () => {
     expect(box().disabled).toBe(false);
   });
 
-  it("P2: an unreachable helper offers the way to Connections & sites", async () => {
+  it("P2: an unreachable helper offers the way to Sessions", async () => {
     await open({ ...CONVERSATION_READY, available: false, reason: "broker-unavailable" });
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.error.goConnections") }));
-    expect(tab("agent.tabs.connections").getAttribute("aria-selected")).toBe("true");
+    expect(tab("agent.tabs.sessions").getAttribute("aria-selected")).toBe("true");
   });
 
   it("P2: so does a refused command that says the helper is unreachable", async () => {
     await refuseStart("broker-unavailable");
     fireEvent.click(screen.getByRole("button", { name: ui("conversation.error.goConnections") }));
-    expect(tab("agent.tabs.connections").getAttribute("aria-selected")).toBe("true");
+    expect(tab("agent.tabs.sessions").getAttribute("aria-selected")).toBe("true");
   });
 
   it("P3: three agents already busy offers the list of conversations", async () => {

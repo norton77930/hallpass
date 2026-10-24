@@ -200,6 +200,8 @@ describe("T019 agent panel port", () => {
           conversations: [],
           agents: [],
           folders: [],
+          // 024 R-380: the owner's agent choices; before any broker, all on and no default.
+          choices: { enabled: { "claude-code": true, codex: true, hermes: true, deepseek: true }, default: null },
         },
       },
     });

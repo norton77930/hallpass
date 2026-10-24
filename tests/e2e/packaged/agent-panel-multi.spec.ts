@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -203,7 +204,9 @@ test.describe("overnight fixes of 2026-09-16, live", () => {
       expect(await extensionWorker.evaluate(async (id: number) => (await chrome.windows.get(id)).state, windowId)).toBe("normal");
 
       // ---- the phantom cursor persists between gestures and leaves with the lease (fe904ea) ----
-      await setSiteModeViaPanel(panel, SITE, "skip-checks");
+      // 024 FR-385: the site's mode is set on the settings page.
+      const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await settings.setSiteMode(SITE, "skip-checks");
       const ref = await refFor(callOn, tabA, "Safe action");
       await callOn("click", { tabId: tabA, target: { ref } });
       const cursorAfterClick = await extensionWorker.evaluate(async (id: number) => {
@@ -267,23 +270,6 @@ test.describe("overnight fixes of 2026-09-16, live", () => {
     }
   });
 });
-
-/** The panel's own mode control for one site (the helper `agent-panel-states.spec.ts` carries). */
-async function setSiteModeViaPanel(panel: { waitForText(t: string): Promise<void>; evaluatePanel(e: string, g?: boolean): Promise<unknown> }, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), { timeout: 15_000 })
-    .toBe(mode);
-}
 
 type PanelHandle = {
   evaluatePanel(expression: string, userGesture?: boolean): Promise<unknown>;

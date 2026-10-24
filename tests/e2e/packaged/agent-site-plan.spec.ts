@@ -1,8 +1,8 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import {
-  clickLabelled,
   copyFor,
   localeFromEnv,
   openSidePanel,
@@ -59,6 +59,8 @@ test.describe("agent site plan", () => {
   }) => {
     test.setTimeout(420_000);
     const panel = await ownerPanel(extensionContext, extensionId, extensionWorker);
+    // 024 FR-385: the site list (modes, diagnostics, revoke) is on the settings page.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let first: McpHarnessClient | undefined;
     let second: McpHarnessClient | undefined;
@@ -139,7 +141,7 @@ test.describe("agent site plan", () => {
       // ============ (3) SC-122: what the plan must not cover still asks ============
       // (a) page JavaScript on an approved site keeps its own consent (FR-255). `evaluate` is refused
       // before any card without the diagnostics grant, so the grant is given - mode stays `ask`.
-      await setDiagnostics(panel, A, true);
+      await settings.setDiagnostics(A, true);
       const script = live.callTool("evaluate", { tabId: tabA, expression: "document.title" });
       await refuseConsent(panel, script, live, "evaluate on an approved site");
 
@@ -164,8 +166,8 @@ test.describe("agent site plan", () => {
 
       for (const tabId of [tabA, tabB, tabC, tabOther]) await closeTab(extensionWorker, tabId);
     } finally {
-      await setDiagnostics(panel, A, false).catch(() => undefined);
-      await clearSite(panel, A);
+      await settings.setDiagnostics(A, false).catch(() => undefined);
+      if ((await settings.siteMode(A).catch(() => null)) !== null) await settings.revokeSite(A).catch(() => undefined);
       await first?.close();
       await second?.close();
     }
@@ -275,7 +277,7 @@ test.describe("agent site plan", () => {
       // The target is read before the unpair: afterwards every call of this session, reads included,
       // is refused - which is the point being checked.
       const targetBeforeUnpair = await press();
-      await unpairAgent(panel, { locale });
+      await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
       const afterUnpair = await live.callTool("click", targetBeforeUnpair);
       expect(answerOf(afterUnpair), `text: ${afterUnpair.text}\nstderr:\n${live.stderr()}`).toMatchObject({
         outcome: "denied",
@@ -636,48 +638,6 @@ async function inFlightOnCard(panel: SidePanelDriver, sessionId: string): Promis
       `return card?.querySelector('.agent-interrupt')?.getAttribute('aria-disabled') ?? null})()`,
   );
   return disabled === "false";
-}
-
-/**
- * Grants or revokes diagnostics for one site through the site list's own checkbox (004 FR-049),
- * scoped to that site's row so a plan's origin list elsewhere on the panel is never mistaken for it.
- */
-async function setDiagnostics(panel: SidePanelDriver, site: string, granted: boolean): Promise<void> {
-  const row = `.agent-sites li[data-site=${JSON.stringify(site)}]`;
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector(${JSON.stringify(row)}) !== null`), {
-      timeout: 15_000,
-      message: `the site list has no row for ${site}`,
-    })
-    .toBe(true);
-  // T606: the diagnostics grant is behind the row's "more" button; open it when it is shut.
-  await panel.evaluatePanel(
-    `(()=>{const row=document.querySelector('[data-site=${JSON.stringify(site)}]');if(row&&!row.querySelector('.agent-site-more'))row.querySelector('.agent-site-more-button')?.click();return true})()`,
-    true,
-  );
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const box=document.querySelector(${JSON.stringify(`${row} input[type=checkbox]`)});` +
-      `if(!box)return false;if(box.checked===${String(granted)})return true;box.click();return true})()`,
-    true,
-  );
-  expect(clicked, `the panel offers no diagnostics control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      () => panel.evaluatePanel(`document.querySelector(${JSON.stringify(`${row} input[type=checkbox]`)})?.checked ?? null`),
-      { timeout: 15_000 },
-    )
-    .toBe(granted);
-}
-
-/** The site list's own revoke, so the next gate starts from an undecided site. Best effort. */
-async function clearSite(panel: SidePanelDriver, site: string): Promise<void> {
-  const present = await panel
-    .evaluatePanel(`document.querySelector(${JSON.stringify(`.agent-sites li[data-site=${JSON.stringify(site)}]`)}) !== null`)
-    .catch(() => false);
-  if (present !== true) return;
-  await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] .agent-site-more-button')?.click(), true`, true);
-  await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", site)).catch(() => undefined);
 }
 
 /** Where the browser says the tab is; waited on rather than a page load event. */

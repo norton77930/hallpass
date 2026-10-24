@@ -6,7 +6,8 @@ import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -86,6 +87,8 @@ test.describe("agent file upload", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -103,7 +106,7 @@ test.describe("agent file upload", () => {
 
       const created = (await ok(live, "tabs_create", { url: `${SITE}/form` })) as { tabId: number };
       const tabId = created.tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       const form = await agentPage(extensionContext, `${SITE}/form`);
 
       const page = (await ok(live, "read_page", { tabId, filter: "all" })) as {
@@ -176,29 +179,6 @@ async function ok(client: McpHarnessClient, tool: string, args: Record<string, u
   const result = await client.callTool(tool, args);
   expect(result.isError, `${tool} failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
   return result.json;
-}
-
-
-/** Sets one site's mode through the panel's own control (FR-042), never by writing storage. */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(async () =>
-      panel.evaluatePanel(
-        `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-          `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-      ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }
 
 /** The Playwright page for a tab the *agent* opened, so the fixture can be read independently. */

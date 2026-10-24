@@ -151,6 +151,90 @@ export type ConversationInstallPhase = (typeof CONVERSATION_INSTALL_PHASES)[numb
  */
 export const CONVERSATION_AGENT_NOTES = ["git-missing", "pre-release"] as const;
 export type ConversationAgentNote = (typeof CONVERSATION_AGENT_NOTES)[number];
+
+/**
+ * 023 R-369 / FR-370: the name of an environment variable, as a notice may carry it - a name and
+ * never a value (no `=`, no space, nothing a value could hide in).
+ */
+export const conversationEnvNameSchema = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u, { message: "expected an environment variable name" });
+
+/**
+ * 024 R-374 / frames.md: Hermes' setup steps as the local check found them, in this order. Hermes only;
+ * the other agents have nothing to set up beyond their own program.
+ */
+export const CONVERSATION_SETUP_STEPS = ["git", "hermes", "mcp-component", "key-variable", "browser-restart"] as const;
+/** 024 frames.md: whether an agent's runs get the browser tools, from the local check (R-379). */
+export const CONVERSATION_BROWSER_TOOLS = ["available", "needs-helper", "missing-component", "not-supported"] as const;
+
+/**
+ * 024 R-375 / R-377 / R-378 (data-model "InstallState"): the phases of a download as the shared state
+ * file records them. `interrupted` is a running phase left behind by a broker that died.
+ */
+export const AGENT_INSTALL_STATE_PHASES = [
+  "preparing",
+  "downloading",
+  "finishing",
+  "done",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const;
+
+/**
+ * 024 R-375 (data-model "InstallState"): `install-state.json` in the agent's folder, as the host writes
+ * and reads it. `percent` is an estimate, `null` without a recorded size (R-376), and at most 99 until
+ * `done`; `pid` is the installing broker's, so another broker can tell a dead install (R-378).
+ */
+const installStateShape = {
+  phase: z.enum(AGENT_INSTALL_STATE_PHASES),
+  percent: z.number().min(0).max(100).nullable(),
+  etaSeconds: z.number().nonnegative().nullable(),
+  startedAt: isoTimeSchema,
+  endedAt: isoTimeSchema.optional(),
+  browserId: z
+    .string()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9-]+$/u, { message: "letters, digits and '-' only" }),
+  /** Owner words, already redacted (R-326); for `failed`. */
+  error: z.string().min(1).max(600).optional(),
+};
+const estimateBelowDone = (state: { phase: string; percent: number | null }): boolean =>
+  state.phase === "done" || state.percent === null || state.percent <= 99;
+const estimateBelowDoneMessage = { message: "an estimate stays at 99 until the download is done", path: ["percent"] };
+
+export const agentInstallStateFileSchema = z
+  .strictObject({ ...installStateShape, pid: z.number().int().positive() })
+  .refine(estimateBelowDone, estimateBelowDoneMessage);
+export type AgentInstallState = z.infer<typeof agentInstallStateFileSchema>;
+
+/** 024 frames.md: the install state as the overview carries it - the file's record without the pid. */
+export const conversationInstallStateSchema = z.strictObject(installStateShape).refine(estimateBelowDone, estimateBelowDoneMessage);
+export type ConversationInstallState = z.infer<typeof conversationInstallStateSchema>;
+
+/**
+ * 024 R-379 (data-model "TestResult"): `last-test.json`, and the overview's `lastTest`. How the start
+ * went, whether the model answered (and how fast, or why not, in redacted words), the browser tools,
+ * and the key variable's *name* when R-369 found it outside the browser's environment. No key value,
+ * prompt text or model answer is kept.
+ */
+export const AGENT_TEST_OUTCOMES = ["passed", "partial", "failed"] as const;
+export const AGENT_TEST_START_FAILURES = ["agent-missing", "agent-version", "agent-exited"] as const;
+export const agentTestResultSchema = z.strictObject({
+  outcome: z.enum(AGENT_TEST_OUTCOMES),
+  start: z.enum(["ok", ...AGENT_TEST_START_FAILURES]),
+  model: z.discriminatedUnion("answered", [
+    z.strictObject({ answered: z.literal(true), ms: z.number().int().nonnegative() }),
+    z.strictObject({ answered: z.literal(false), reason: z.string().min(1).max(600) }),
+  ]),
+  browserTools: z.enum(["available", "missing-component", "not-supported"]),
+  keyHint: conversationEnvNameSchema.optional(),
+  ranAt: isoTimeSchema,
+});
+export type AgentTestResult = z.infer<typeof agentTestResultSchema>;
+
 export const conversationAgentAvailabilitySchema = z.strictObject({
   agent: conversationAgentSchema,
   availability: z.enum(CONVERSATION_AVAILABILITIES),
@@ -163,6 +247,24 @@ export const conversationAgentAvailabilitySchema = z.strictObject({
   accepts: conversationAcceptsSchema.optional(),
   /** 021: notes beside the state; absent or empty when there are none. */
   notes: z.array(z.enum(CONVERSATION_AGENT_NOTES)).max(CONVERSATION_AGENT_NOTES.length).optional(),
+  /** 024 R-374: when the local check behind this entry ran. */
+  checkedAt: isoTimeSchema.optional(),
+  /** 024 frames.md: Hermes only - each setup step and whether the check found it. */
+  setupSteps: z
+    .array(z.strictObject({ step: z.enum(CONVERSATION_SETUP_STEPS), found: z.boolean() }))
+    .max(CONVERSATION_SETUP_STEPS.length)
+    .optional(),
+  /** 024 frames.md: whether this agent's runs get the browser tools. */
+  browserTools: z.enum(CONVERSATION_BROWSER_TOOLS).optional(),
+  /** 024 R-375: the shared install state, without the installing broker's pid. */
+  install: conversationInstallStateSchema.optional(),
+  /** 024 R-379: the last test's result from `last-test.json`. */
+  lastTest: agentTestResultSchema.optional(),
+  /** 024 R-379: a test of this agent is running now. */
+  testing: z.boolean().optional(),
+}).refine((entry) => entry.setupSteps === undefined || entry.agent === "hermes", {
+  message: "only Hermes has setup steps",
+  path: ["setupSteps"],
 });
 export type ConversationAgentAvailability = z.infer<typeof conversationAgentAvailabilitySchema>;
 
@@ -223,14 +325,6 @@ export type ConversationError = z.infer<typeof conversationErrorSchema>;
  * declined Codex's request for wider sandbox permissions, which would have held for the rest of the turn.
  */
 export const CONVERSATION_NOTICES = ["sandbox-permissions-declined", "browser-tools-missing", "key-env-not-in-browser"] as const;
-
-/**
- * 023 R-369 / FR-370: the name of an environment variable, as a notice may carry it - a name and
- * never a value (no `=`, no space, nothing a value could hide in).
- */
-export const conversationEnvNameSchema = z
-  .string()
-  .regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u, { message: "expected an environment variable name" });
 
 /** 023 R-367 / FR-371: what the broker keeps of an agent run's own output, and so what it can reply with. */
 export const CONVERSATION_DIAGNOSTIC_LINES_MAX = 50;
@@ -560,8 +654,34 @@ const REMOVE_FOLDER = {
 const OPEN_FOLDER = { type: z.literal("ui.conversation.open-folder"), payload: conversationTarget };
 const INSTALL = { type: z.literal("ui.conversation.install"), payload: z.strictObject({ agent: conversationAgentSchema }) };
 const CONSENT = { type: z.literal("ui.conversation.consent"), payload: z.strictObject({ granted: z.boolean() }) };
-/** 023 R-367 / R-368: what the agent run printed about itself; answered by a `conversation-diagnostics` frame. */
-const DIAGNOSTICS = { type: z.literal("ui.conversation.diagnostics"), payload: conversationTarget };
+/**
+ * 023 R-367 / R-368: what the agent run printed about itself; answered by a `conversation-diagnostics` frame.
+ * 024 R-387: or `{ agent }` - that agent's most recent run in this broker, a conversation's or a test's.
+ */
+const DIAGNOSTICS = {
+  type: z.literal("ui.conversation.diagnostics"),
+  payload: z.union([conversationTarget, z.strictObject({ agent: conversationAgentSchema })]),
+};
+
+/*
+ * 024 contracts/frames.md: the settings page's agent commands, forwarded by the worker to the broker.
+ * Not panel commands: the panel never sends them. Exported so `settings.ts` builds its union from these.
+ */
+/** R-374: re-run the local readiness check, for one agent or all of them. */
+export const conversationCheckAgentsCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.check-agents"),
+  payload: z.strictObject({ agent: conversationAgentSchema.optional() }),
+});
+/** R-377: end an agent's download in flight; the overview then shows it needs a download. */
+export const conversationInstallCancelCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.install-cancel"),
+  payload: z.strictObject({ agent: conversationAgentSchema }),
+});
+/** R-379: one test prompt outside the pool; ok at start, the result arrives in the overview. */
+export const conversationTestCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.test"),
+  payload: z.strictObject({ agent: conversationAgentSchema }),
+});
 
 /**
  * The owner's commands as the broker receives them, inside a `conversation-command` frame: the
@@ -583,6 +703,10 @@ export const conversationCommandSchema = z.discriminatedUnion("type", [
   z.strictObject(ATTACH),
   z.strictObject(ATTACH_CANCEL),
   z.strictObject(DIAGNOSTICS),
+  // 024 frames.md: from the settings page only.
+  conversationCheckAgentsCommandSchema,
+  conversationInstallCancelCommandSchema,
+  conversationTestCommandSchema,
 ]);
 export type ConversationCommand = z.infer<typeof conversationCommandSchema>;
 
@@ -768,17 +892,38 @@ export const conversationBrowserAttachedFrameSchema = z.strictObject({
 });
 
 const diagnosticsPayloadShape = { conversationId: conversationIdSchema, lines: diagnosticLinesSchema };
+/**
+ * 024 R-387: the reply to the `{ agent }` form - the agent, when the lines were read, and the run's
+ * conversation when that run was one (a test's run has none).
+ */
+const agentDiagnosticsShape = {
+  conversationId: conversationIdSchema.optional(),
+  agent: conversationAgentSchema.optional(),
+  readAt: isoTimeSchema.optional(),
+};
 
 /**
  * 023 R-367 / R-368: broker to worker, the reply to `ui.conversation.diagnostics` - the last lines the
  * agent run printed about itself, oldest first, already scrubbed by the broker. An unknown or removed
- * conversation has none.
+ * conversation has none. 024 R-387: a request by agent is answered with `agent` and `readAt` (and the
+ * run's `conversationId` when that run was a conversation); a 023 reply names only the conversation.
+ * One object with a refine rather than a union, so it stays a member of the link's discriminated union.
  */
-export const conversationDiagnosticsFrameSchema = z.strictObject({
-  type: z.literal("conversation-diagnostics"),
-  sessionId: brokerSessionId,
-  ...diagnosticsPayloadShape,
-});
+export const conversationDiagnosticsFrameSchema = z
+  .strictObject({
+    type: z.literal("conversation-diagnostics"),
+    sessionId: brokerSessionId,
+    ...agentDiagnosticsShape,
+    lines: diagnosticLinesSchema,
+  })
+  .refine((frame) => (frame.agent === undefined) === (frame.readAt === undefined), {
+    message: "a reply by agent names the agent and when it was read",
+    path: ["readAt"],
+  })
+  .refine((frame) => frame.agent !== undefined || frame.conversationId !== undefined, {
+    message: "a reply names its conversation or its agent",
+    path: ["conversationId"],
+  });
 
 /* ------------------------------------------------------------------------------------------- */
 /* Panel state and message (contracts "Worker -> panel")                                         */
@@ -786,6 +931,23 @@ export const conversationDiagnosticsFrameSchema = z.strictObject({
 
 /** Why the Conversation tab has nothing to offer: the host is too old, or its broker is not there. */
 export const CONVERSATION_UNAVAILABLE_REASONS = ["host-outdated", "broker-unavailable"] as const;
+
+/**
+ * 024 R-380 (data-model "AgentChoices"): which agents the owner switched on, and the default the
+ * picker preselects. Every agent is named; a default is an enabled agent, or `null` for none. The
+ * worker owns the record (`agentChoices` in `chrome.storage.local`); it lives here rather than in
+ * `settings.ts` so the conversation projection can carry it without an import cycle.
+ */
+export const agentChoicesSchema = z
+  .strictObject({
+    enabled: z.record(conversationAgentSchema, z.boolean()),
+    default: conversationAgentSchema.nullable(),
+  })
+  .refine((choices) => choices.default === null || choices.enabled[choices.default], {
+    message: "the default is an enabled agent",
+    path: ["default"],
+  });
+export type AgentChoices = z.infer<typeof agentChoicesSchema>;
 
 /**
  * The panel's picture of the feature: the one-time consent (FR-299), the list, the open
@@ -806,6 +968,8 @@ export const conversationPanelStateSchema = z.strictObject({
    * so a panel that sees this change drops what it holds and pages again from 0.
    */
   epoch: z.string().min(1).max(128).optional(),
+  /** 024 frames.md: the owner's enabled agents and default, for the picker (R-380). */
+  choices: agentChoicesSchema.optional(),
 });
 export type ConversationPanelState = z.infer<typeof conversationPanelStateSchema>;
 

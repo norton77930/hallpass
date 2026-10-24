@@ -128,6 +128,31 @@ describe("T011 manifest contract", () => {
     expect(extensionPageCsp()).toBe("script-src 'self'; object-src 'self'; connect-src 'self'");
   });
 
+  /**
+   * 024 T750, T751 (R-372): the settings page is the extension's options page, opened in a tab, and
+   * ships as its own document. It needs no new permission - the list above stays exactly as it is.
+   */
+  it("declares settings.html as the options page in a tab and ships it, with no new permission", () => {
+    const manifest = JSON.parse(readFileSync(agentManifestPath, "utf8")) as {
+      permissions?: string[];
+      options_ui?: unknown;
+      options_page?: unknown;
+    };
+    expect(manifest.options_ui).toEqual({ page: "settings.html", open_in_tab: true });
+    expect(manifest.options_page).toBeUndefined();
+    expect(manifest.permissions).toEqual(REQUIRED_PERMISSIONS);
+    expect(createManifest(resolveBuildConfig("agent")).options_ui).toEqual({ page: "settings.html", open_in_tab: true });
+
+    const page = resolve("apps/extension/dist/agent/settings.html");
+    expect(existsSync(page)).toBe(true);
+    expect(existsSync(resolve("apps/extension/dist/agent/settings.js"))).toBe(true);
+    const html = readFileSync(page, "utf8");
+    expect(html).toMatch(/<script[^>]+src="[./]*settings\.js"/u);
+    // Packaged code only, as for the panel: no remote script or inline script the CSP would refuse.
+    expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/u);
+    expect(html).not.toMatch(/src="https?:/u);
+  });
+
   it("builds against the pinned test Extension ID and writes the manifest from one source", () => {
     const buildConfig = readFileSync(buildConfigPath, "utf8");
     expect(buildConfig).toContain(TEST_EXTENSION_ID);

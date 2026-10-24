@@ -121,17 +121,15 @@ describe("T198 every control has a name and a place in the tab order", () => {
     expectNamedAndReachable();
   });
 
-  it("idle: status row with its menu open, and the site list", () => {
+  it("idle: status row with its menu open, and the empty-state link", () => {
     renderShell();
     project(port, { ...IDLE, sites: TWO_SITES });
+    // 024 R-381: the empty state names a place to go, as a button.
+    expect(screen.getByRole("button", { name: ui("agent.sessions.openSettings") })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
-    // 016 FR-223: each paired agent's unpair carries that agent's name.
-    expect(screen.getByRole("menuitem", { name: ui("agent.status.unpairAgent").replace("{agent}", PAIRED.displayName) })).toBeTruthy();
-    expectNamedAndReachable();
-    // The mode chip, "more" and the diagnostics grant behind it are labelled with the site they are about (T606 B1).
-    expect(screen.getByRole("button", { name: ui("agent.siteModeLabel").replace("{site}", SHOP) })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: ui("agent.siteMore").replace("{site}", LONG_SITE) }));
-    expect(screen.getByRole("checkbox", { name: ui("agent.diagnosticsLabel").replace("{site}", LONG_SITE) })).toBeTruthy();
+    // 024: the menu's one entry is Settings; the site list and the unpair rows are on the settings page.
+    expect(screen.getByRole("menuitem", { name: ui("agent.status.settings") })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: `What the agent may do on ${SHOP}` })).toBeNull();
     expectNamedAndReachable();
   });
 

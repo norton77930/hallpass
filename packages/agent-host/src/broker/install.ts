@@ -19,6 +19,7 @@ import {
   type ReadRetry,
 } from "./agents.js";
 import { redactedTail } from "./redact.js";
+import { markInterruptedInstalls } from "./shared-agent-state.js";
 import type { runCommand } from "./run-command.js";
 
 /**
@@ -54,8 +55,13 @@ import type { runCommand } from "./run-command.js";
  * holding it open) is read again briefly, then the install fails saying so: no download, no pointer
  * replaced, no tree removed because of it.
  *
- * Progress is phases only. npm prints no byte counts to a pipe, so the panel shows an indeterminate
- * bar with the expected size (R-314); `InstallProgress.bytes` is there for a runner that can tell.
+ * Progress is the phases, and - 024 R-376 addendum - an estimate: npm prints no byte counts to a
+ * pipe, and walking DeepSeek's 63 600 files takes seconds, so each second the installed package
+ * folders (a `package.json` there) are counted against what the shipped lockfile expects
+ * (`expectedPackageEntries`), and time left comes from the last 30 s (`createInstallEstimator`).
+ *
+ * 024 R-377: an install can be cancelled (`InstallControl.signal`): npm's whole process tree is ended
+ * and its folder removed as after any failure.
  */
 
 /** The adapters' `npm ci` command line (R-314); a fetched agent's is its own (R-357). */
@@ -80,6 +86,120 @@ export function shippedManifestsDirectory(
 export type InstallPhase = "preparing" | "downloading" | "finishing";
 export type InstallProgress = { phase: InstallPhase; bytes?: number };
 
+/** 024 R-376 addendum: how often the install tree's package folders are counted while npm runs. */
+export const INSTALL_ESTIMATE_INTERVAL_MS = 1_000;
+/** The estimate never says more than this until the pinned package is verified in the tree. */
+export const INSTALL_ESTIMATE_CAP = 95;
+/** Time left is said only from this percent on ... */
+const ETA_FROM_PERCENT = 10;
+/** ... and from the growth over this last stretch. */
+const ETA_WINDOW_MS = 30_000;
+
+/** One count of the tree: installed package folders of the expected ones; percent and time left as said. */
+export type InstallEstimate = { installed: number; expected: number; percent: number | null; etaSeconds: number | null };
+
+/** 024 R-376 / R-377: what the caller of `installAgent` hears and can do beyond the phases. */
+export type InstallControl = {
+  /** Aborted: npm's process tree is ended and the install fails as cancelled (R-377). */
+  signal?: AbortSignal;
+  /** Each count of the tree during `downloading` (R-376 addendum). */
+  onEstimate?: (estimate: InstallEstimate) => void;
+};
+
+/**
+ * 024 R-376 addendum: the package folders an `npm ci` of this lockfile leaves - its entries under
+ * `node_modules/` (nested ones too), less every optional one for an adapter (`--omit=optional`), and
+ * for a fetched agent less the optional ones whose `os` / `cpu` leave this platform out. Measured:
+ * Codex 18 expected = 18 installed, DeepSeek 613 expected for 611 installed.
+ */
+export function expectedPackageEntries(
+  lockText: string,
+  kind: "adapter" | "fetched",
+  platform: { os: string; cpu: string } = { os: process.platform, cpu: process.arch },
+): string[] {
+  const packages = (JSON.parse(lockText) as { packages?: Record<string, { optional?: unknown; os?: unknown; cpu?: unknown }> }).packages ?? {};
+  const allows = (list: unknown, value: string): boolean => {
+    if (!Array.isArray(list) || list.length === 0) return true;
+    const entries = list.filter((item): item is string => typeof item === "string");
+    if (entries.includes(`!${value}`)) return false;
+    const positive = entries.filter((item) => !item.startsWith("!"));
+    return positive.length === 0 || positive.includes(value);
+  };
+  return Object.entries(packages)
+    .filter(([key, entry]) => {
+      if (!key.startsWith("node_modules/")) return false;
+      if (entry.optional !== true) return true;
+      return kind === "fetched" && allows(entry.os, platform.os) && allows(entry.cpu, platform.cpu);
+    })
+    .map(([key]) => key);
+}
+
+/**
+ * 024 R-376 addendum: percent = installed / expected, none before the first folder (Preparing), at
+ * most 95 until verified; time left only from 10 % on, from the growth since the oldest count of the
+ * last 30 s, and none while nothing grew in that stretch.
+ */
+export function createInstallEstimator(expected: number): { sample(installed: number, at: number): InstallEstimate } {
+  const counts: { installed: number; at: number }[] = [];
+  return {
+    sample(installed, at) {
+      const base = counts.find((count) => count.at >= at - ETA_WINDOW_MS);
+      counts.push({ installed, at });
+      while (counts.length > 0 && counts[0]!.at < at - ETA_WINDOW_MS) counts.shift();
+      if (installed <= 0 || expected <= 0) return { installed, expected, percent: null, etaSeconds: null };
+      const share = Math.min(installed / expected, 1);
+      const percent = Math.min(INSTALL_ESTIMATE_CAP, Math.floor(share * 100));
+      let etaSeconds: number | null = null;
+      if (share * 100 >= ETA_FROM_PERCENT && base !== undefined && at > base.at && installed > base.installed) {
+        const perMs = (installed - base.installed) / (at - base.at);
+        etaSeconds = Math.round(Math.max(expected - installed, 0) / perMs / 1000);
+      }
+      return { installed, expected, percent, etaSeconds };
+    },
+  };
+}
+
+/** How many of the expected package folders hold their `package.json` now. */
+async function countInstalled(tree: string, entries: readonly string[]): Promise<number> {
+  const present = await Promise.all(entries.map((key) => isFile(win32.join(tree, ...key.split("/"), "package.json"))));
+  return present.filter(Boolean).length;
+}
+
+/** Counts the tree each `intervalMs` while npm runs, one count at a time; `stop` ends it. */
+function estimateWhileRunning(
+  tree: string,
+  kind: "adapter" | "fetched",
+  intervalMs: number,
+  onEstimate: (estimate: InstallEstimate) => void,
+): { stop(): void } {
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let estimator: ReturnType<typeof createInstallEstimator> | undefined;
+  let entries: string[] | undefined;
+  const tick = async (): Promise<void> => {
+    try {
+      entries ??= expectedPackageEntries(await readFile(win32.join(tree, "package-lock.json"), "utf8"), kind);
+      estimator ??= createInstallEstimator(entries.length);
+      const installed = await countInstalled(tree, entries);
+      if (!stopped) onEstimate(estimator.sample(installed, Date.now()));
+    } catch {
+      // A lockfile that cannot be read leaves the estimate out; the phases still go on.
+    }
+    if (!stopped) {
+      timer = setTimeout(() => void tick(), intervalMs);
+      timer.unref?.();
+    }
+  };
+  timer = setTimeout(() => void tick(), 0);
+  timer.unref?.();
+  return {
+    stop() {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+    },
+  };
+}
+
 export type InstallPorts = {
   /** `%LOCALAPPDATA%\hallpass`. */
   dataDir: string;
@@ -94,6 +214,8 @@ export type InstallPorts = {
   readText?: (path: string) => Promise<string>;
   /** How a read the file system refused is tried again (R-362, L3; injected in tests). */
   readRetry?: ReadRetry;
+  /** 024 R-376 addendum: how often the tree is counted (default `INSTALL_ESTIMATE_INTERVAL_MS`; injected in tests). */
+  estimateIntervalMs?: number;
 };
 
 export type InstallResult = { ok: true; directory: string } | { ok: false; error: ConversationError };
@@ -102,6 +224,9 @@ const failure = (detail: string): InstallResult => ({
   ok: false,
   error: { code: "install-failed", detail: detail.slice(0, DETAIL_MAX) },
 });
+
+/** 024 R-377: what a cancelled install answers; the contract has no code of its own for it. */
+export const INSTALL_CANCELLED_DETAIL = "You cancelled the download.";
 
 const isFile = (path: string) =>
   stat(path).then(
@@ -139,8 +264,11 @@ export async function installAgent(
   agent: ConversationAgent,
   ports: InstallPorts,
   onProgress?: (progress: InstallProgress) => void,
+  control: InstallControl = {},
 ): Promise<InstallResult> {
   const description = AGENT_DESCRIPTIONS[agent];
+  const { signal } = control;
+  const cancelled = (): boolean => signal?.aborted === true;
   // 021 R-345: an installed program (Hermes) comes from its own installer; Hallpass downloads nothing for it.
   if (description.kind === "installed") return failure(`${description.label} is installed with its own installer; Hallpass downloads nothing for it.`);
   const pin = { package: description.package, version: description.version };
@@ -180,17 +308,27 @@ export async function installAgent(
       }
     }
 
+    if (cancelled()) return failure(INSTALL_CANCELLED_DETAIL);
     onProgress?.({ phase: "downloading" });
+    const estimating =
+      control.onEstimate === undefined
+        ? undefined
+        : estimateWhileRunning(tree, description.kind, ports.estimateIntervalMs ?? INSTALL_ESTIMATE_INTERVAL_MS, control.onEstimate);
     let run;
     try {
       run = await ports.run(await npmCommand(ports.nodePath), description.npmCiArgs, {
         cwd: tree,
         // R-346: 10 minutes for the slim adapters (57-77 MB on a poor connection), 30 for DeepSeek's 611 packages.
         timeoutMs: description.installTimeoutMs,
+        // 024 R-377: cancel ends npm's whole tree.
+        ...(signal === undefined ? {} : { signal }),
       });
     } catch (error) {
       return failure(`npm could not be started: ${redactedTail(messageOf(error), 400)}`);
+    } finally {
+      estimating?.stop();
     }
+    if (run.aborted === true || cancelled()) return failure(INSTALL_CANCELLED_DETAIL);
     if (run.timedOut) return failure("npm ci did not finish in time and was stopped.");
     if (run.code !== 0) {
       const head = `npm ci failed (exit ${run.code ?? "none"}): `;
@@ -252,6 +390,23 @@ async function pointAt(
   } finally {
     await rm(temp, { force: true }).catch(() => {});
   }
+}
+
+/**
+ * 024 R-378: what a broker does with the agent folders when it starts - a download left running by a
+ * broker that is gone is marked `interrupted` (shown until the next attempt), then `cleanStaging`
+ * removes what it left behind, as before.
+ */
+export async function prepareAgentsAtStart(
+  dataDir: string,
+  options: Parameters<typeof cleanStaging>[1] = {},
+): Promise<{ interrupted: ConversationAgent[]; staged: string[] }> {
+  const interrupted = await markInterruptedInstalls(dataDir, {
+    ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
+    ...(options.selfPid === undefined ? {} : { selfPid: options.selfPid }),
+  }).catch((): ConversationAgent[] => []);
+  const staged = await cleanStaging(dataDir, options).catch((): string[] => []);
+  return { interrupted, staged };
 }
 
 /** `.staging-<pid>-<random>` (0.15.0) and `.install-<pid>-<random>[.pointer]`: the pid of the broker whose install it is. */

@@ -3,6 +3,7 @@ import { groupTitle, isAgentGroupTitle } from "../fixtures/agent-group.js";
 import { INDICATOR_MARKER_ATTRIBUTE } from "../../../apps/extension/src/content-runtime/indicator-marker.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -224,7 +225,7 @@ test.describe("agent claim", () => {
       client = undefined;
 
       // ============ 7. FR-059: an accept twenty seconds late still answers the call ============
-      await unpairAgent(panel, { locale });
+      await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
 
       slow = await startMcpClient({ clientName: "Claude Code" });
       const waiting = slow;

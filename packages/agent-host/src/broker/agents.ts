@@ -16,6 +16,7 @@ import { HERMES_AGENT_MODES, launchSettings, writeLaunchFiles } from "./agent-la
 import { CODEX_SHIM_COMMAND, CODEX_SHIM_ENV, codexAdapterModesAsMeasured } from "./codex-strict.js";
 import { redact, withoutEnvironmentValues } from "./redact.js";
 import { runCommand } from "./run-command.js";
+import { dotEnvNames, hermesHome, hermesKeyEnvName, userEnvironmentNames, type UserEnvironmentPorts } from "./user-environment.js";
 
 /**
  * Finding the owner's coding agent and what speaks ACP to it (019/T530, T531, T534; R-314, R-315,
@@ -227,7 +228,19 @@ export function packagePin(agent: ConversationAgent): { package: string; version
   return description.kind === "installed" ? undefined : { package: description.package, version: description.version };
 }
 
-export type ExecResult = { code: number | null; stdout: string; stderr: string };
+export type ExecResult = {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** 024 R-374: the command was ended at its bound before it finished. */
+  timedOut?: boolean;
+};
+
+/**
+ * 024 R-374: how long one external command may take; absent, the 15 s bound of a real launch.
+ * `signal` aborted ends the command's tree (the readiness check's background retry, when it is superseded).
+ */
+export type ExecOptions = { timeoutMs?: number; signal?: AbortSignal };
 
 export type AgentPorts = {
   /** `%LOCALAPPDATA%\hallpass`. */
@@ -251,8 +264,11 @@ export type AgentPorts = {
     writeText(path: string, text: string): Promise<void>;
   };
   /** Run `file args` to the end. May reject when the file cannot be started. */
-  exec(file: string, args: string[]): Promise<ExecResult>;
+  exec(file: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 };
+
+/** The bound of an external command a launch runs (`where.exe`, `--version` before a start). */
+export const LAUNCH_EXEC_BOUND_MS = 15_000;
 
 /** The real machine. `codexShimEntry` is resolved by the broker's entry, beside itself in both layouts. */
 export function defaultAgentPorts(codexShimEntry: string, env: NodeJS.ProcessEnv = process.env): AgentPorts {
@@ -279,9 +295,12 @@ export function defaultAgentPorts(codexShimEntry: string, env: NodeJS.ProcessEnv
         }
       },
     },
-    exec: async (file, args) => {
-      const { code, stdout, stderr } = await runCommand(file, args, { timeoutMs: 15_000 });
-      return { code, stdout, stderr };
+    exec: async (file, args, options) => {
+      const { code, stdout, stderr, timedOut } = await runCommand(file, args, {
+        timeoutMs: options?.timeoutMs ?? LAUNCH_EXEC_BOUND_MS,
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      });
+      return { code, stdout, stderr, timedOut };
     },
   };
 }
@@ -549,6 +568,171 @@ export async function agentAvailability(agent: ConversationAgent, ports: AgentPo
   }
   const installed = await isAdapterInstalled(agent, ports);
   return { availability: { agent, availability: installed ? "ready" : "needs-install", version }, cliPath };
+}
+
+/** 024 R-374: how long one external command of the settings page's readiness check may take. */
+export const READINESS_EXEC_BOUND_MS = 5_000;
+/** A command that ignores its bound (its kill did not end it) still costs no more than this. */
+const READINESS_GUARD_MS = 500;
+
+export type ReadinessOptions = {
+  /** The environment this broker was started with: where Hermes' home is, whether the browser has its key variable. */
+  env?: Readonly<Record<string, string | undefined>>;
+  /** Hermes' settings and the user's environment names (023 R-369); default: the real ones, bounded at 5 s. */
+  userEnvironment?: UserEnvironmentPorts;
+  /** The bound of each external command (default `READINESS_EXEC_BOUND_MS`); the background retry's is the launch's. */
+  boundMs?: number;
+  /** Aborted, the check's commands end: a retry that a newer check superseded, or the broker's shutdown. */
+  signal?: AbortSignal;
+};
+
+/** 024 R-374: one check run in the background after the first, and what it is bounded and stopped by. */
+export type ReadinessAttempt = { boundMs: number; signal: AbortSignal };
+
+export type ReadinessStatus = AgentStatus & {
+  /**
+   * 024 R-374: the program was found, but its `--version` did not answer within the bound - worth
+   * one retry at the launch bound in the background (a slow `hermes --version` takes 6-11 s, T794).
+   */
+  versionTimedOut?: true;
+};
+
+const boundedUserEnvironment: UserEnvironmentPorts = {
+  readText: (path) => readFile(path, "utf8"),
+  run: async (file, args) => {
+    const { code, stdout } = await runCommand(file, args, { timeoutMs: READINESS_EXEC_BOUND_MS });
+    return { code, stdout };
+  },
+};
+
+/** At most `bound` plus the guard, then `fallback`: a program that outlives its kill does not hold the check. */
+function withinBound<T>(work: Promise<T>, fallback: T, bound = READINESS_EXEC_BOUND_MS): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const guard = new Promise<T>((done) => {
+    timer = setTimeout(() => done(fallback), bound + READINESS_GUARD_MS);
+    timer.unref?.();
+  });
+  return Promise.race([work, guard]).finally(() => clearTimeout(timer));
+}
+
+/** A program `where.exe` or a known location names, that is there, but whose path cmd.exe would misread. */
+async function refusedCli(agent: ConversationAgent, ports: AgentPorts): Promise<boolean> {
+  const description = describeAgent(agent);
+  if (description.kind === "fetched") return false;
+  for (const candidate of [...(await whereAll(description.cliFile, ports)), ...knownLocations(agent, ports.env)]) {
+    if (!shellSafe(candidate) && (await ports.fs.exists(candidate))) return true;
+  }
+  return false;
+}
+
+/** Hermes' optional MCP component (`mcp`, its browser tools' client): in the program's own environment. */
+function mcpComponentLocations(cliPath: string, env: AgentPorts["env"]): string[] {
+  const inEnvironment = win32.join(win32.dirname(cliPath), "..", "Lib", "site-packages", "mcp", "__init__.py");
+  const uvTool = env.APPDATA ? [win32.join(env.APPDATA, "uv", "tools", "hermes-agent", "Lib", "site-packages", "mcp", "__init__.py")] : [];
+  return [win32.resolve(inEnvironment), ...uvTool];
+}
+
+async function anyExists(paths: readonly string[], ports: AgentPorts): Promise<boolean> {
+  const found = await Promise.all(paths.map((path) => ports.fs.exists(path)));
+  return found.includes(true);
+}
+
+/**
+ * Hermes' setup steps (frames.md, in `CONVERSATION_SETUP_STEPS` order): Git Bash, Hermes itself, its MCP
+ * component, the key variable it names, and whether the browser was started after that variable was set.
+ * The key steps are names only (user-environment.ts): with no variable named there is nothing to set up.
+ */
+async function hermesSetupSteps(
+  status: AgentStatus,
+  ports: AgentPorts,
+  options: ReadinessOptions,
+): Promise<{ steps: NonNullable<ConversationAgentAvailability["setupSteps"]>; mcp: boolean }> {
+  const env = options.env ?? {};
+  const userEnvironment = options.userEnvironment ?? boundedUserEnvironment;
+  const home = hermesHome(env);
+  const keyName = async (): Promise<{ inBrowser: boolean; set: boolean }> => {
+    if (home === undefined) return { inBrowser: true, set: true };
+    const config = await withinBound(userEnvironment.readText(win32.join(home, "config.yaml")).catch(() => undefined), undefined);
+    const name = config === undefined ? undefined : hermesKeyEnvName(config);
+    if (name === undefined) return { inBrowser: true, set: true };
+    const same = (other: string) => other.toUpperCase() === name.toUpperCase();
+    const dotEnv = await withinBound(userEnvironment.readText(win32.join(home, ".env")).catch(() => ""), "");
+    const inBrowser = Object.keys(env).some((key) => same(key) && env[key] !== undefined) || dotEnvNames(dotEnv).some(same);
+    if (inBrowser) return { inBrowser, set: true };
+    const userNames = await withinBound(userEnvironmentNames(userEnvironment), []);
+    return { inBrowser, set: userNames.some(same) };
+  };
+  const [git, mcp, key] = await Promise.all([
+    findGitBash(ports),
+    status.cliPath === undefined ? Promise.resolve(false) : anyExists(mcpComponentLocations(status.cliPath, ports.env), ports),
+    keyName(),
+  ]);
+  return {
+    mcp,
+    steps: [
+      { step: "git", found: git !== undefined },
+      { step: "hermes", found: status.availability.availability === "ready" },
+      { step: "mcp-component", found: mcp },
+      { step: "key-variable", found: key.set },
+      { step: "browser-restart", found: key.inBrowser },
+    ],
+  };
+}
+
+/**
+ * 024 R-374 (D-024-19, FR-397): the settings page's readiness check - `agentAvailability`, with every
+ * external command bounded at 5 s instead of a launch's 15 s, plus what the page shows beside it: when
+ * it ran, Hermes' setup steps, and whether the agent's runs get the browser tools. Local facts only: a
+ * program is asked `--version` and nothing else, so no model is called. A program that does not answer
+ * in time is Not installed ("did not answer"); a program at a path Hallpass will not hand to cmd.exe is
+ * Not installed with that reason, never with the path. Run per agent in parallel by the caller, so one
+ * hung program costs only its own row. A found program whose `--version` timed out says so
+ * (`versionTimedOut`): the caller retries it once at the launch bound, in the background (`boundMs`).
+ */
+export async function checkAgentReadiness(agent: ConversationAgent, ports: AgentPorts, options: ReadinessOptions = {}): Promise<ReadinessStatus> {
+  const description = describeAgent(agent);
+  const bound = options.boundMs ?? READINESS_EXEC_BOUND_MS;
+  const timedOut = new Set<string>();
+  const bounded: AgentPorts = {
+    ...ports,
+    exec: async (file, args) => {
+      const missed: ExecResult = { code: null, stdout: "", stderr: "", timedOut: true };
+      const execOptions: ExecOptions = { timeoutMs: bound, ...(options.signal === undefined ? {} : { signal: options.signal }) };
+      const result = await withinBound(ports.exec(file, args, execOptions), missed, bound);
+      if (result.timedOut === true) timedOut.add(file);
+      return result;
+    },
+  };
+  const checkedAt = new Date().toISOString();
+  const status = await agentAvailability(agent, bounded);
+  let availability: ConversationAgentAvailability = { ...status.availability };
+  if (availability.availability === "missing" && (await refusedCli(agent, bounded))) {
+    availability.detail = `${description.label} was found in a folder whose name has a quote, a percent sign or a line break; Hallpass will not run it from there.`;
+  }
+  const versionTimedOut = availability.availability === "version-problem" && status.cliPath !== undefined && timedOut.has(status.cliPath);
+  if (versionTimedOut) {
+    availability = {
+      agent,
+      availability: "version-problem",
+      detail: `${description.label} was found, but did not answer \`--version\` within ${bound / 1000} s.`,
+    };
+  }
+  availability.checkedAt = checkedAt;
+  if (description.kind === "fetched") {
+    availability.browserTools = "not-supported";
+  } else if (description.kind === "adapter") {
+    if (availability.availability === "needs-install") availability.browserTools = "needs-helper";
+    if (availability.availability === "ready") availability.browserTools = "available";
+  } else {
+    const { steps, mcp } = await hermesSetupSteps(status, bounded, options);
+    availability.setupSteps = steps;
+    if (status.cliPath !== undefined) availability.browserTools = mcp ? "available" : "missing-component";
+  }
+  return {
+    availability,
+    ...(status.cliPath === undefined ? {} : { cliPath: status.cliPath }),
+    ...(versionTimedOut ? { versionTimedOut: true as const } : {}),
+  };
 }
 
 /** `<data>\agents\codex\app-server-shim.cmd` - what `CODEX_PATH` names (codex-strict.ts). */

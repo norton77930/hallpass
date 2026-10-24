@@ -2,7 +2,8 @@ import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -69,6 +70,8 @@ test.describe("agent batch and wait", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -82,7 +85,7 @@ test.describe("agent batch and wait", () => {
 
       const created = (await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number };
       const tabId = created.tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       const form = await agentPage(extensionContext, `${SITE}/form`);
 
       // ================= SC-021: the five-step form fill, as one call =================
@@ -181,7 +184,7 @@ test.describe("agent batch and wait", () => {
       // ================= follow-a-plan: one question for the whole batch =================
       await call("navigate", { tabId, url: `${SITE}/form` });
       const formAgain = await agentPage(extensionContext, `${SITE}/form`);
-      await setSiteMode(panel, SITE, "follow-a-plan");
+      await settings.setSiteMode(SITE, "follow-a-plan");
       refs = await interactiveRefs(call, tabId);
 
       const approvedBatch = live.callTool("browser_batch", {
@@ -227,7 +230,7 @@ test.describe("agent batch and wait", () => {
       // The page is exactly as the approved batch left it: a refused plan runs no step of itself.
       await expect(formAgain.locator('input[name="nickname"]')).toHaveValue("approved-by-owner");
 
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       await call("tabs_close", { tabId });
     } finally {
       await client?.close();
@@ -281,32 +284,4 @@ async function agentPage(context: { pages: () => Page[] }, url: string, timeoutM
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`agent-tab-not-found:${url}`);
-}
-
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown, and poking the store behind the
- * panel would prove only that the store works.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

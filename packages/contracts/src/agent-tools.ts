@@ -15,6 +15,7 @@ import {
   CONVERSATION_TAB_TEXT_MAX_CHARS,
   CONVERSATION_TAB_TITLE_MAX_CHARS,
   CONVERSATION_TAB_URL_MAX_CHARS,
+  CONVERSATION_AGENTS,
   conversationBrowserAttachedFrameSchema,
   conversationBrowserTokenFrameSchema,
   conversationCommandFrameSchema,
@@ -3989,6 +3990,11 @@ const agentSessionViewSchema = z.strictObject({
   sitePlan: z
     .strictObject({ origins: z.array(sitePlanOriginSchema).min(1).max(AGENT_SITE_PLAN_MAX_ORIGINS) })
     .optional(),
+  /**
+   * 024 frames.md: the canonical origin the session acts on, when it acts on one, for the card's
+   * link to that site's permissions on the settings page. Absent from a 0.15 projection.
+   */
+  site: siteOriginSchema.optional(),
 });
 
 /**
@@ -4363,11 +4369,44 @@ export const agentPanelMessageSchema = z.discriminatedUnion("type", [
 
 export type AgentPanelMessage = z.infer<typeof agentPanelMessageSchema>;
 
+/** 024 R-372: the longest settings route the panel may name (a section and one canonical origin). */
+export const SETTINGS_ROUTE_MAX_CHARS = 512;
+
+/**
+ * 024 R-372: whether `route` is one of the settings page's routes - `#agents`, `#agents/<agent>`,
+ * `#sites`, `#sites?site=<canonical origin>` (the origin raw or URI-encoded), `#tools`,
+ * `#connection` - and nothing else: no other page, section, agent or query field.
+ */
+function isSettingsRoute(route: string): boolean {
+  if (route.length > SETTINGS_ROUTE_MAX_CHARS) return false;
+  if (route === "#agents" || route === "#sites" || route === "#tools" || route === "#connection") return true;
+  if (route.startsWith("#agents/")) {
+    return (CONVERSATION_AGENTS as readonly string[]).includes(route.slice("#agents/".length));
+  }
+  if (!route.startsWith("#sites?")) return false;
+  const query = new URLSearchParams(route.slice("#sites?".length));
+  const keys = [...query.keys()];
+  if (keys.length !== 1 || keys[0] !== "site") return false;
+  const site = query.get("site") ?? "";
+  return isSiteOrigin(site);
+}
+
+export const settingsRouteSchema = z.string().refine(isSettingsRoute, { message: "expected a settings route (R-372)" });
+
 /**
  * The three things the owner can do about an agent. Nothing here can grant a capability, set a
  * site mode, or start a tool: the panel decides who may connect, and never what they may do.
  */
 export const agentPanelCommandSchema = z.discriminatedUnion("type", [
+  /**
+   * 024 T753 (R-372): open the settings page at a route - the panel's menu, the picker's reason line
+   * and a session card's permissions link. It opens or focuses the extension's own page and nothing
+   * else; the route is one of the closed set above.
+   */
+  z.strictObject({
+    type: z.literal("ui.agent.open-settings"),
+    payload: z.strictObject({ route: settingsRouteSchema }),
+  }),
   z.strictObject({
     type: z.literal("ui.agent.pair-decide"),
     payload: z.strictObject({

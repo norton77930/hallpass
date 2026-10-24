@@ -80,7 +80,11 @@ describe("T545 the Conversation tab", () => {
     const claude = within(agents).getByRole("menuitemradio", { name: /^Claude Code/ });
     const codex = within(agents).getByRole("menuitemradio", { name: /^Codex/ });
     expect(claude.textContent).toContain(ui("conversation.availability.ready"));
-    expect(codex.textContent).toContain(ui("conversation.availability.missing"));
+    // 024 D-024-3: an agent that cannot start says why on a line of its own, and cannot be chosen.
+    expect(codex.hasAttribute("disabled")).toBe(true);
+    expect(codex.closest("li")?.querySelector(".agent-conversation-reason")?.textContent).toBe(
+      ui("conversation.agentMenu.notReady.missing").replace("{agent}", "Codex"),
+    );
 
     fireEvent.click(claude);
     composeAndSend();

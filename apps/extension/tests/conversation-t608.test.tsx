@@ -65,25 +65,17 @@ describe("T608 the Conversation tab", () => {
   }
 
   describe("M1 an agent whose version cannot be read", () => {
-    it.each(["en-US", "zh-TW"] as const)("in %s says so in the panel's words, on the card and in the menu row", async (locale) => {
+    // 024 D-024-3: the panel says only that the version does not fit and links to the agent's card; the
+    // worker's own sentence (and the unreadable-version words) are on the settings page now.
+    it.each(["en-US", "zh-TW"] as const)("in %s says so in the panel's words in the menu row, without the broker's English", async (locale) => {
       await open(UNREADABLE, locale);
-      const said = lookup("conversation.version.unreadable", locale).replace("{agent}", lookup("conversation.agent.claude-code", locale));
+      const said = lookup("conversation.agentMenu.notReady.version", locale).replace("{agent}", lookup("conversation.agent.claude-code", locale));
 
       fireEvent.click(chipOf("agent"));
-      const row = document.querySelector<HTMLElement>("[role=menuitemradio][data-availability=version-problem]")!;
-      expect(row.querySelector(".agent-conversation-menu-note")?.textContent).toBe(said);
+      const row = document.querySelector<HTMLElement>("li[data-agent=claude-code]")!;
+      expect(row.querySelector(".agent-conversation-reason")?.textContent).toBe(said);
       expect(row.textContent).not.toContain("--version");
-
-      // Choosing it puts its problem card above the message box.
-      fireEvent.click(row);
-      const card = document.querySelector<HTMLElement>("[data-setup=version-problem]")!;
-      expect(card.querySelector(".agent-conversation-detail")?.textContent).toBe(said);
-      expect(card.textContent).not.toContain("--version");
-    });
-
-    it("keeps a detail it has no words for", async () => {
-      await open({ ...UNREADABLE, agents: [{ agent: "claude-code", availability: "version-problem", version: "1.0.0", detail: "needs 2.x" }] });
-      expect(document.querySelector("[data-setup=version-problem] .agent-conversation-detail")?.textContent).toBe("needs 2.x");
+      expect(row.querySelector("[role=menuitemradio]")?.hasAttribute("disabled")).toBe(true);
     });
   });
 
@@ -124,37 +116,6 @@ describe("T608 the Conversation tab", () => {
       fireEvent.click(screen.getByRole("button", { name: lookup("conversation.folders.addTyped", "en-US") }));
       result(port, { commandId: lastCommandId(port), ok: false, error: { code: "folder-missing", detail: "The folder D:\\work does not exist any more." } });
       expect(notice().querySelector("p")?.textContent).toBe(lookup("conversation.error.folder-missing", "en-US"));
-    });
-  });
-
-  describe("L3 a download that failed", () => {
-    const NPM_LOG = "npm ci failed (exit 1): errno: -4048, npm warn cleanup code: 'EPERM'";
-    const NEEDS: ConversationPanelState = {
-      ...CONVERSATION_READY,
-      consent: "unknown",
-      agents: [
-        { agent: "claude-code", availability: "needs-install" },
-        { agent: "codex", availability: "missing" },
-      ],
-    };
-
-    it.each(["en-US", "zh-TW"] as const)("in %s says one line and keeps the raw log behind Technical details", async (locale) => {
-      await open(NEEDS, locale);
-      fireEvent.change(document.querySelector(".agent-conversation-composer textarea")!, { target: { value: "hello" } });
-      fireEvent.click(document.querySelector<HTMLButtonElement>(".agent-conversation-composer button[type=submit]")!);
-      fireEvent.click(screen.getByRole("button", { name: lookup("conversation.firstUse.download", locale) }));
-      result(port, { commandId: lastCommandId(port), ok: false, error: { code: "install-failed", detail: NPM_LOG } });
-
-      const card = document.querySelector<HTMLElement>("[data-setup=install-failed]")!;
-      const visible = card.cloneNode(true) as HTMLElement;
-      visible.querySelector("details")?.remove();
-      expect(visible.querySelector("p")?.textContent).toBe(lookup("conversation.install.failed", locale));
-      expect(visible.textContent).not.toContain("npm ci failed");
-
-      const details = card.querySelector("details")!;
-      expect(details.open).toBe(false);
-      expect(details.querySelector("summary")?.textContent).toBe(lookup("agent.details.title", locale));
-      expect(details.textContent).toContain(NPM_LOG);
     });
   });
 

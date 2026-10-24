@@ -12,5 +12,7 @@ bindServiceWorker(
   startAgentPath({
     extensionId: chrome.runtime.id ?? "",
     sidePanelUrl: chrome.runtime.getURL("side-panel.html"),
+    settingsUrl: chrome.runtime.getURL("settings.html"),
+    extensionVersion: chrome.runtime.getManifest().version,
   }),
 );

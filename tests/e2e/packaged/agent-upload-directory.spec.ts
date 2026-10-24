@@ -7,6 +7,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { UPLOAD_CONFIG_TEMPLATE } from "../../../packages/agent-host/src/upload-policy.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -127,7 +128,9 @@ test.describe("agent upload directory", () => {
       await pairWithFirstCall(live, panel, { locale, timeoutMs: 45_000 });
 
       const tabId = ((await ok(live, "tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      // 024 FR-385: site modes and upload folders are on the settings page.
+      const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await settings.setSiteMode(SITE, "skip-checks");
       const form = await agentPage(extensionContext, `${SITE}/form`);
       const ref = await fileInputRef(live, tabId);
 
@@ -228,10 +231,10 @@ test.describe("agent upload directory", () => {
       expect(rememberedAnswer.isError, `text: ${rememberedAnswer.text}\nstderr:\n${live.stderr()}`).toBe(false);
       await expect(form.locator("#uploaded")).toHaveText("receipt.txt:9");
       await expect.poll(() => rootsInFile(configPath), { timeout: 15_000 }).toContain(docsDir);
-      // FR-191: the owner can see what they allowed, in the panel's own list, without a reload.
-      await waitForRootsSection(panel);
+      // FR-191: the owner can see what they allowed, on the settings page, without a reload.
+      await waitForRootsSection(settings);
       await expect
-        .poll(() => rootsOnPanel(panel), { timeout: 20_000 })
+        .poll(() => settings.uploadRoots(), { timeout: 20_000 })
         .toEqual(expect.arrayContaining([docsDir, photosDir, notesDir]));
       // And a sibling in that directory now crosses without a question.
       const sibling = await ok(live, "file_upload", { tabId, ref, paths: [docsSibling] });
@@ -239,17 +242,17 @@ test.describe("agent upload directory", () => {
       expect(await directoryCardUp(panel), "an allowed directory raised a card again").toBe(false);
 
       // ============ (6) revoking the row makes the next file ask again ============
-      await panel.clickButton(ui("agent.uploadRootRevoke").replace("{root}", docsDir));
+      await settings.removeUploadRoot(docsDir);
       // The host is what removes it, so the file on disk is the evidence (FR-192).
       await expect.poll(() => rootsInFile(configPath), { timeout: 20_000 }).not.toContain(docsDir);
-      await expect.poll(() => rootsOnPanel(panel), { timeout: 20_000 }).not.toContain(docsDir);
+      await expect.poll(() => settings.uploadRoots(), { timeout: 20_000 }).not.toContain(docsDir);
       const asksAgain = live.callTool("file_upload", { tabId, ref, paths: [docsFile] });
       await waitForDirectoryCard(panel, docsFile);
       await panel.clickButton(ui("agent.uploadDecline"));
       expect((await asksAgain).isError).toBe(true);
 
       // ============ (7) the directory question comes first, and never replaces the site's ======
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const chained = live.callTool("file_upload", { tabId, ref, paths: [privateFile] });
       // The disk first: the call has not crossed the link yet, so the site cannot have been asked.
       await waitForDirectoryCard(panel, privateFile);
@@ -329,54 +332,28 @@ async function waitForDirectoryCard(panel: SidePanelDriver, path: string): Promi
 }
 
 /**
- * The section itself, with the one diagnosis that is not a product failure.
+ * The settings page's upload folders (024 FR-385), with the one diagnosis that is not a product
+ * failure.
  *
  * The rows come from the *relay* - the native host Chrome spawned - answering `upload-roots-list`,
  * and that process is whichever build the machine's registration points at. A registration from
  * another checkout drops the request as an unknown frame (`relay.mux.dropped unaddressed
- * type=upload-roots-list` in `relay.log`), and the panel then correctly shows no section at all.
- * Saying so here turns a bare text timeout into the one line that names what to do about it.
+ * type=upload-roots-list` in `relay.log`), and the page then says the list is unavailable. Saying so
+ * here turns a bare timeout into the one line that names what to do about it.
  */
-async function waitForRootsSection(panel: SidePanelDriver): Promise<void> {
+async function waitForRootsSection(settings: SettingsPageDriver): Promise<void> {
   try {
-    await panel.waitForText(ui("agent.uploadRootsTitle"), 20_000);
+    await settings.goto("#sites");
+    await expect
+      .poll(() => settings.evaluateSettings("document.querySelector('li[data-upload-root]') !== null"), { timeout: 20_000 })
+      .toBe(true);
   } catch (error) {
     throw new Error(
-      "no upload-directory rows on the panel: the relay this browser spawned never answered " +
+      "no upload-directory rows on the settings page: the relay this browser spawned never answered " +
         "`upload-roots-list`. Re-install the host from this checkout (npm run agent-host:install) " +
         `so the registration points at its build. (${error instanceof Error ? error.message : String(error)})`,
     );
   }
-}
-
-/** The allowed directories the panel is showing, by the row key the site list gives them. */
-async function rootsOnPanel(panel: SidePanelDriver): Promise<string[]> {
-  return (await panel.evaluatePanel(
-    "[...document.querySelectorAll('[data-upload-root]')].map((row)=>row.getAttribute('data-upload-root'))",
-  )) as string[];
-}
-
-/** Sets one site's mode through the panel's own control (FR-042), never by writing storage. */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site)&&r.querySelector('select'));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site)&&r.querySelector('select'));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }
 
 /** Tidying up through the browser, as the owner closing their own tab would. */

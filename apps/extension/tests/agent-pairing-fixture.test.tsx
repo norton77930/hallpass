@@ -1,18 +1,22 @@
 import { act, cleanup, fireEvent } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SettingsResult } from "@hallpass/contracts";
 import {
   acceptPairing,
   isAgentPaired,
   unpairAgent,
   type PairingPanel,
+  type PairingSettings,
 } from "../../../tests/e2e/fixtures/agent-pairing.js";
+import type { SettingsCommandInput } from "../src/settings/context.js";
+import { NOW, renderSettings } from "./fixtures/settings-harness.js";
+import { prototypeAState } from "./fixtures/settings-prototype-a.js";
 import {
   IDLE,
   NOT_PAIRED,
   installAgentPort,
   project,
   renderShell,
-  ui,
   uninstallAgentPort,
   type FakeAgentPort,
 } from "./helpers/agent-shell-harness.js";
@@ -113,16 +117,58 @@ describe("T098a pairing is observable in the packaged journeys (006 shell)", () 
     ).rejects.toThrow(/agent-pairing-not-confirmed/);
   });
 
-  it("unpairs through the overflow menu and waits for the not-connected page", async () => {
+  it("unpairs on the settings page and waits for the panel's not-connected page (024 R-385)", async () => {
     renderShell();
     project(port, IDLE);
-    const panel = panelAdapter((label) => {
-      if (label === ui("agent.unpair")) project(port, NOT_PAIRED);
+    // 024 FR-385: the paired agent and its Unpair are on the settings page; the worker answers the
+    // command and the panel follows with a fresh projection.
+    const send = vi.fn(async (command: SettingsCommandInput): Promise<SettingsResult> => {
+      if (command.type === "ui.agent.unpair") project(port, NOT_PAIRED);
+      return { commandId: "t", ok: true };
     });
+    const harness = renderSettings({
+      route: "sites",
+      send,
+      state: {
+        ...prototypeAState(NOW),
+        paired: [{ agentId: "agent-1", displayName: "Claude Code", origin: "stdio:terminal", acceptedAt: NOW.toISOString() }],
+      },
+    });
+    const routes: string[] = [];
+    const settings: PairingSettings = {
+      async goto(route: string): Promise<void> {
+        routes.push(route);
+      },
+      async evaluateSettings(expression: string): Promise<unknown> {
+        let value: unknown;
+        await act(async () => {
+          value = (0, eval)(expression) as unknown;
+        });
+        return value;
+      },
+    };
+    const panel = panelAdapter();
 
-    await unpairAgent(panel, { locale: "en-US", timeoutMs: 2_000, pollMs: 10 });
+    await unpairAgent(panel, settings, { locale: "en-US", timeoutMs: 2_000, pollMs: 10 });
 
-    expect(port.sent).toEqual([{ type: "ui.agent.unpair", payload: { agentId: "agent-1" } }]);
+    expect(routes).toEqual(["#sites"]);
+    expect(harness.commands()).toMatchObject([{ type: "ui.agent.unpair", payload: { agentId: "agent-1" } }]);
+    // The panel sends nothing: its menu holds only "Settings" (FR-392).
+    expect(port.sent).toEqual([]);
     expect(await isAgentPaired(panel, "en-US")).toBe(false);
+  });
+
+  it("refuses when the settings page lists no agent of that name", async () => {
+    renderShell();
+    project(port, IDLE);
+    renderSettings({ route: "sites" });
+    const settings: PairingSettings = {
+      goto: async () => undefined,
+      evaluateSettings: async (expression: string) => (0, eval)(expression) as unknown,
+    };
+
+    await expect(
+      unpairAgent(panelAdapter(), settings, { locale: "en-US", agentName: "Nobody", timeoutMs: 300, pollMs: 10 }),
+    ).rejects.toThrow(/agent-unpair-missing:Nobody/);
   });
 });

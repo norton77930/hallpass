@@ -34,4 +34,6 @@
 - Decisions D-024-1..8 come from the owner's answers to Q7–Q12 (2026-10-23) and the prototype pick.
 - "Local helper program" is named only as the existing part that downloads and runs agents; how the page
   talks to it is left to the plan.
-- Test costs one short model call per press (Assumptions); the owner may want to confirm this in the plan.
+- Test costs one short model call per press; confirmed by the owner 2026-10-24 (D-024-10).
+- D-024-9..18 come from the second grilling round of 2026-10-24 (owner "全部照建議"); the side panel's
+  Connections & sites tab becomes Sessions (FR-392), superseding the second sentence of 019 FR-282.

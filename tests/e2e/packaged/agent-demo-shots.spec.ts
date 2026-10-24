@@ -6,8 +6,8 @@ import type { BrowserContext } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient, type ToolCallResult } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import {
-  clickLabelled,
   copyFor,
   localeFromEnv,
   openSidePanel,
@@ -115,7 +115,10 @@ test.describe("README demo GIF", () => {
       const created = await answerCards(panel, client.callTool("tabs_create", { url: START }));
       expect(created.isError, `tabs_create failed: ${created.text}\nstderr:\n${client.stderr()}`).toBe(false);
       tabId = (created.json as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "ask");
+      // 024 FR-385: the mode is set on the settings page, closed again so it is in no picture.
+      const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await settings.setSiteMode(SITE, "ask");
+      await settings.close();
       await showAndSettle(extensionWorker, tabId);
       // The product's recorder draws the watermark, the step counter and the action labels.
       await call("gif_recorder", { action: "start" });
@@ -173,8 +176,8 @@ test.describe("README demo GIF", () => {
       tabId = undefined;
       // The explicit `ask` row was this run's own; forget it so the owner's site list is as it was.
       // Tidying only: the browser is a private one, so a label that moved must not cost the picture.
-      await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE)}] .agent-site-more-button')?.click(), true`, true);
-      await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", SITE)).catch((error: unknown) => {
+      const tidy = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await tidy.revokeSite(SITE).catch((error: unknown) => {
         // eslint-disable-next-line no-console -- the row stays; say so.
         console.log(`[demo] site row left in place: ${String(error)}`);
       });
@@ -311,24 +314,6 @@ async function searchBoxRef(
   const field = fields.at(-1);
   expect(field?.ref, "the start page offered no search field").toBeTruthy();
   return field!.ref;
-}
-
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
-      timeout: 15_000,
-    })
-    .toBe(mode);
 }
 
 /** The text of every text node with a box inside the panel's viewport: what the picture can show. */

@@ -275,3 +275,126 @@ describe("023 diagnostics", () => {
     expect((contracts as Record<string, unknown>).CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS).toBe(500);
   });
 });
+
+/**
+ * 024 T739 - the host additions of contracts/frames.md (R-374, R-375, R-377, R-379, R-387): the broker
+ * commands `check-agents`, `install-cancel`, `test`, the `{ agent }` form of `diagnostics` with its
+ * reply naming `agent` and `readAt`, and the optional overview fields on an agent's availability.
+ */
+describe("024 broker commands", () => {
+  const link = (command: Record<string, unknown>) =>
+    agentLinkFrameSchema.safeParse({ type: "conversation-command", sessionId: "s-1", commandId: "c-1", command }).success;
+
+  it("check-agents names one agent or none", () => {
+    for (const payload of [{}, { agent: "hermes" }]) {
+      const command = { type: "ui.conversation.check-agents", payload };
+      expect(conversationCommandSchema.safeParse(command).success).toBe(true);
+      expect(link(command)).toBe(true);
+    }
+    expect(conversationCommandSchema.safeParse({ type: "ui.conversation.check-agents", payload: { agent: "other" } }).success).toBe(false);
+    expect(conversationCommandSchema.safeParse({ type: "ui.conversation.check-agents", payload: { all: true } }).success).toBe(false);
+  });
+
+  it("install-cancel and test name exactly one agent", () => {
+    for (const type of ["ui.conversation.install-cancel", "ui.conversation.test"]) {
+      expect(conversationCommandSchema.safeParse({ type, payload: { agent: "codex" } }).success, type).toBe(true);
+      expect(link({ type, payload: { agent: "codex" } }), type).toBe(true);
+      expect(conversationCommandSchema.safeParse({ type, payload: {} }).success, type).toBe(false);
+      expect(conversationCommandSchema.safeParse({ type, payload: { agent: "codex", extra: 1 } }).success, type).toBe(false);
+    }
+  });
+
+  it("diagnostics takes { agent } as the alternative to { conversationId }, never both", () => {
+    const diagnostics = (payload: Record<string, unknown>) => ({ type: "ui.conversation.diagnostics", payload });
+    expect(conversationCommandSchema.safeParse(diagnostics({ agent: "deepseek" })).success).toBe(true);
+    expect(link(diagnostics({ agent: "deepseek" }))).toBe(true);
+    expect(conversationCommandSchema.safeParse(diagnostics({ conversationId: CONVERSATION })).success).toBe(true);
+    expect(conversationCommandSchema.safeParse(diagnostics({ agent: "deepseek", conversationId: CONVERSATION })).success).toBe(false);
+    expect(conversationCommandSchema.safeParse(diagnostics({})).success).toBe(false);
+  });
+
+  it("the new commands are not panel commands", () => {
+    for (const type of ["ui.conversation.check-agents", "ui.conversation.install-cancel", "ui.conversation.test"]) {
+      expect(agentPanelCommandSchema.safeParse({ type, payload: { agent: "codex" }, commandId: "c" }).success, type).toBe(false);
+    }
+  });
+});
+
+describe("024 diagnostics reply by agent", () => {
+  const frame = { type: "conversation-diagnostics", sessionId: "s-1", agent: "hermes", readAt: "2026-10-24T00:00:00.000Z", lines: ["x"] };
+
+  it("names the agent and when it was read, with or without the run's conversation", () => {
+    expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
+    expect(agentLinkFrameSchema.safeParse({ ...frame, conversationId: CONVERSATION }).success).toBe(true);
+    expect(contracts.conversationDiagnosticsFrameSchema.safeParse(frame).success).toBe(true);
+  });
+
+  it("an agent reply always carries readAt, and the 023 form still parses", () => {
+    const { readAt: _readAt, ...noReadAt } = frame;
+    expect(agentLinkFrameSchema.safeParse(noReadAt).success).toBe(false);
+    expect(agentLinkFrameSchema.safeParse({ type: "conversation-diagnostics", sessionId: "s-1", conversationId: CONVERSATION, lines: [] }).success).toBe(
+      true,
+    );
+    expect(agentLinkFrameSchema.safeParse({ type: "conversation-diagnostics", sessionId: "s-1", lines: [] }).success).toBe(false);
+  });
+});
+
+describe("024 overview fields on an agent's availability", () => {
+  const base = { agent: "hermes", availability: "ready" };
+  const parse = (extra: Record<string, unknown>) => conversationAgentAvailabilitySchema.safeParse({ ...base, ...extra }).success;
+  const install = { phase: "downloading", percent: 40, etaSeconds: 12, startedAt: "2026-10-24T00:00:00.000Z", browserId: "b-12345678" };
+  const lastTest = {
+    outcome: "partial",
+    start: "ok",
+    model: { answered: true, ms: 1200 },
+    browserTools: "missing-component",
+    keyHint: "OPENAI_API_KEY",
+    ranAt: "2026-10-24T00:00:00.000Z",
+  };
+
+  it("still parses an entry without any of them", () => {
+    expect(parse({})).toBe(true);
+  });
+
+  it("takes checkedAt, a version of at most 64 characters, browserTools and testing", () => {
+    expect(parse({ checkedAt: "2026-10-24T00:00:00.000Z", version: "v".repeat(64), browserTools: "needs-helper", testing: true })).toBe(true);
+    expect(parse({ version: "v".repeat(65) })).toBe(false);
+    for (const browserTools of ["available", "needs-helper", "missing-component", "not-supported"]) expect(parse({ browserTools })).toBe(true);
+    expect(parse({ browserTools: "maybe" })).toBe(false);
+  });
+
+  it("takes Hermes' setup steps, and only Hermes'", () => {
+    const setupSteps = ["git", "hermes", "mcp-component", "key-variable", "browser-restart"].map((step) => ({ step, found: step !== "git" }));
+    expect(parse({ setupSteps })).toBe(true);
+    expect(parse({ setupSteps: [{ step: "python", found: true }] })).toBe(false);
+    expect(conversationAgentAvailabilitySchema.safeParse({ agent: "codex", availability: "ready", setupSteps }).success).toBe(false);
+  });
+
+  it("takes an install state without its pid, every phase including interrupted, null percent and time left", () => {
+    expect(parse({ install })).toBe(true);
+    for (const phase of ["preparing", "downloading", "finishing", "done", "failed", "cancelled", "interrupted"]) {
+      expect(parse({ install: { ...install, phase, percent: null, etaSeconds: null } }), phase).toBe(true);
+    }
+    expect(parse({ install: { ...install, pid: 4242 } })).toBe(false);
+    expect(parse({ install: { ...install, phase: "paused" } })).toBe(false);
+    expect(parse({ install: { ...install, percent: 100 } })).toBe(false);
+    expect(parse({ install: { ...install, phase: "done", percent: 100, endedAt: "2026-10-24T00:01:00.000Z" } })).toBe(true);
+    expect(parse({ install: { ...install, phase: "failed", error: "The download stopped." } })).toBe(true);
+  });
+
+  it("the host's file form of an install state carries the pid", () => {
+    expect(contracts.agentInstallStateFileSchema.safeParse({ ...install, pid: 4242 }).success).toBe(true);
+    expect(contracts.agentInstallStateFileSchema.safeParse(install).success).toBe(false);
+  });
+
+  it("takes the last test, and refuses one that keeps more than the data model names", () => {
+    expect(parse({ lastTest })).toBe(true);
+    expect(parse({ lastTest: { ...lastTest, outcome: "failed", start: "agent-missing", model: { answered: false, reason: "not started" } } })).toBe(
+      true,
+    );
+    expect(parse({ lastTest: { ...lastTest, answer: "OK" } })).toBe(false);
+    expect(parse({ lastTest: { ...lastTest, keyHint: "KEY=sk-abc" } })).toBe(false);
+    expect(parse({ lastTest: { ...lastTest, start: "crashed" } })).toBe(false);
+    expect(contracts.agentTestResultSchema.safeParse(lastTest).success).toBe(true);
+  });
+});

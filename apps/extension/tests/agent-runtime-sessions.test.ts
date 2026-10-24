@@ -839,6 +839,27 @@ describe("T189 owner controls from the panel and the projection they read", () =
     await expect(asked).resolves.toMatchObject({ decision: "timed-out" });
   });
 
+  it("024 FR-393: names the site each session acts on - its main tab's canonical origin - for the permissions link", async () => {
+    const port = fakePort();
+    const runtime = await twoSessions(port);
+    const siteOf = async (sessionId: string): Promise<string | undefined> =>
+      (await runtime.projection()).sessions.find((session) => session.sessionId === sessionId)?.site;
+
+    expect(await siteOf("session-a")).toBe("https://agent.test");
+    // The tab it opened last is the one it is working on now...
+    fake.tabs.push({ id: 10, url: "https://shop.test/cart", title: "Cart", groupId: -1, active: false, windowId: 900 });
+    await runtime.tabs.adopt("session-a", 10);
+    expect(await siteOf("session-a")).toBe("https://shop.test");
+    // ...and an action on another of its tabs moves it there.
+    await runtime.tabs.touch("session-a", 7);
+    expect(await siteOf("session-a")).toBe("https://agent.test");
+    // A tab that is not a web page names no site, so the card offers no link.
+    fake.tabs.push({ id: 11, url: "chrome://extensions", title: "Extensions", groupId: -1, active: false, windowId: 900 });
+    await runtime.tabs.adopt("session-a", 11);
+    expect(await siteOf("session-a")).toBeUndefined();
+    expect(await siteOf("session-b")).toBe("https://agent.test");
+  });
+
   it("projects each session under the name its own greeting carried, not the paired record's (FR-087 follow-up)", async () => {
     // One agent id serves every MCP client on the machine, so the pairing record's name is the
     // first client's. The greeting is where a session says who it is; the card must read that.

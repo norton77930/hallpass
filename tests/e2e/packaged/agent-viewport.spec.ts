@@ -3,6 +3,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -84,7 +85,7 @@ test.describe("agent viewport", () => {
   }) => {
     test.setTimeout(300_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
@@ -129,7 +130,9 @@ test.describe("agent viewport", () => {
       // ============= a point read off that picture lands where the picture shows it (R-280) =============
       // Measured by the harness in the page's own pixels and turned into the picture's, the way an
       // agent reading the image would aim; the click is then delivered at the picture's point.
-      await setSiteModeViaPanel(panel, SITE, "skip-checks");
+      // 024 FR-385: the site's mode is set on the settings page.
+      const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await settings.setSiteMode(SITE, "skip-checks");
       const box = await page.evaluate(() => {
         const r = document.getElementById("wide-only")!.getBoundingClientRect();
         return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
@@ -150,7 +153,7 @@ test.describe("agent viewport", () => {
       });
 
       // ============= an element that exists only at this width can be clicked (SC-088) =============
-      // The site's mode was set through the panel's own control above: the claim here is about the
+      // The site's mode was set through the settings page's own control above (024 FR-385): the claim here is about the
       // coordinate frame a click is delivered in, not about consent.
       const found = (await call("find", { tabId, query: "Wide only" })) as {
         outcome: string;
@@ -470,25 +473,6 @@ async function releaseTabsViaPanel(panel: SidePanelDriver): Promise<void> {
       true,
     );
   await expect.poll(press, { timeout: 15_000, message: "no take-back control on the session card" }).toBe(true);
-}
-
-/** One site's mode through the panel's own control (the helper the sibling journeys carry). */
-async function setSiteModeViaPanel(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
-      timeout: 15_000,
-    })
-    .toBe(mode);
 }
 
 /** One paired MCP session with the panel open, exactly as the sibling journeys start. */

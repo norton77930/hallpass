@@ -209,6 +209,78 @@ describe("T013 locales contract", () => {
     }
   });
 
+  /**
+   * 024/T752 — every sentence the settings page can show, in both locales.
+   *
+   * The page's keys are one exported list (`settings/settings-keys.ts`), checked three ways: each
+   * entry resolves in both locales (a missing zh-TW string is the failure an owner would meet), each
+   * `settings.*` key the catalogues carry is in the list (so the list cannot lag behind the copy),
+   * and each key the page's source looks up literally is in the list (so the copy cannot lag behind
+   * the page). Dynamic lookups (`settings.state.${x}`) are not seen by the scan; the list names them.
+   */
+  it("024 gives every settings page key reviewed copy in both locales", async () => {
+    const catalog = await import("../../apps/extension/src/locales/catalog.js");
+    const keys = await import("../../apps/extension/src/settings/settings-keys.js");
+    const en = await import("../../apps/extension/src/locales/en-US.js");
+    const zh = await import("../../apps/extension/src/locales/zh-TW.js");
+
+    expect(keys.SETTINGS_KEYS.length).toBeGreaterThan(0);
+    expect(new Set(keys.SETTINGS_KEYS).size, "the list names a key twice").toBe(keys.SETTINGS_KEYS.length);
+    for (const key of keys.SETTINGS_KEYS) {
+      expect(key.startsWith("settings."), key).toBe(true);
+      for (const [locale, messages] of [
+        ["en-US", en.messages],
+        ["zh-TW", zh.messages],
+      ] as const) {
+        const text = (messages as Record<string, string>)[key];
+        expect(text, `${key} ${locale}`).toBeTruthy();
+        expect(catalog.lookup(key, locale), `${key} ${locale}`).toBe(text);
+      }
+    }
+    for (const key of Object.keys(en.messages).filter((name) => name.startsWith("settings."))) {
+      expect(keys.SETTINGS_KEYS, `${key} is in the catalogue but not listed`).toContain(key);
+    }
+
+    const { readdir, readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const folder = fileURLToPath(new URL("../../apps/extension/src/settings/", import.meta.url));
+    const names = (await readdir(folder, { recursive: true })).filter((name) => name.endsWith(".tsx"));
+    const source = (await Promise.all(names.map((name) => readFile(`${folder}${name}`, "utf8")))).join("\n");
+    const looked = [...source.matchAll(/\b(?:lookup|t)\("(settings\.[a-zA-Z0-9._]+)"/gu)].map((match) => match[1] ?? "");
+    for (const key of looked) {
+      expect(keys.SETTINGS_KEYS, `${key} is looked up by the settings page but not listed`).toContain(key);
+    }
+  });
+
+  /**
+   * 024/T752 (S4) — the side panel's wording for the settings page: the second tab named Sessions,
+   * its empty line, the links to the page and the picker's reason line.
+   */
+  it("024 gives the side panel's settings-page keys copy in both locales", async () => {
+    const keys = await import("../../apps/extension/src/side-panel/agent-panel-keys.js");
+    const en = await import("../../apps/extension/src/locales/en-US.js");
+    const zh = await import("../../apps/extension/src/locales/zh-TW.js");
+    const wanted = [
+      "agent.tabs.sessions",
+      "agent.sessions.empty",
+      "agent.sessions.openSettings",
+      "agent.session.manageSite",
+      "agent.session.manageSiteLabel",
+      "agent.status.settings",
+      "conversation.agentMenu.notReady",
+      "conversation.agentMenu.notReady.download",
+      "conversation.agentMenu.notReady.downloading",
+      "conversation.agentMenu.notReady.missing",
+      "conversation.agentMenu.notReady.version",
+      "conversation.agentMenu.openSettings",
+    ];
+    for (const key of wanted) {
+      expect(keys.AGENT_PANEL_KEYS, key).toContain(key);
+      expect((en.messages as Record<string, string>)[key], `${key} en-US`).toBeTruthy();
+      expect((zh.messages as Record<string, string>)[key], `${key} zh-TW`).toBeTruthy();
+    }
+  });
+
   it("fails closed when safety or consent copy cannot be resolved", async () => {
     const catalog = await import("../../apps/extension/src/locales/catalog.js");
     const result = catalog.lookupSafety("missing.safety.key", "zh-TW");

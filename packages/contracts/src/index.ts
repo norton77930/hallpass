@@ -358,6 +358,18 @@ export {
   conversationBrowserAttachedFrameSchema,
   conversationDiagnosticsFrameSchema,
   conversationPanelDiagnosticsMessageSchema,
+  // 024: readiness, install state, test result and the settings page's agent commands.
+  CONVERSATION_SETUP_STEPS,
+  CONVERSATION_BROWSER_TOOLS,
+  AGENT_INSTALL_STATE_PHASES,
+  AGENT_TEST_OUTCOMES,
+  AGENT_TEST_START_FAILURES,
+  agentInstallStateFileSchema,
+  conversationInstallStateSchema,
+  agentTestResultSchema,
+  conversationCheckAgentsCommandSchema,
+  conversationInstallCancelCommandSchema,
+  conversationTestCommandSchema,
 } from "./conversation.js";
 export type {
   ConversationAgent,
@@ -383,4 +395,29 @@ export type {
   ConversationAttachmentKind,
   ConversationAttachmentSummary,
   ConversationDiagnostics,
+  AgentInstallState,
+  ConversationInstallState,
+  AgentTestResult,
 } from "./conversation.js";
+
+// 024: the settings page's port, commands, messages and the two per-browser records.
+export {
+  AGENT_SETTINGS_PORT_NAME,
+  AGENT_APPEARANCE_THEMES,
+  AGENT_APPEARANCE_LANGUAGES,
+  SETTINGS_TOAST_KINDS,
+  agentChoicesSchema,
+  agentAppearanceSchema,
+  settingsCommandSchema,
+  settingsStateSchema,
+  settingsMessageSchema,
+} from "./settings.js";
+export type {
+  AgentChoices,
+  AgentAppearance,
+  SettingsCommand,
+  SettingsState,
+  SettingsResult,
+  SettingsToast,
+  SettingsMessage,
+} from "./settings.js";

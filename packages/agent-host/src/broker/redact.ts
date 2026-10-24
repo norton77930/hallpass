@@ -79,3 +79,18 @@ export function withoutEnvironmentValues(text: string, env: Readonly<Record<stri
   for (const [name, value] of pairs) out = out.split(value).join(`%${name}%`);
   return out;
 }
+
+/**
+ * 024 R-387 (SC-174): a line with the user's profile folder said as `%USERPROFILE%` - either slash,
+ * any case - so a copied diagnostic does not carry the account name. Applied where a run's lines are
+ * kept (023 R-367), so every reply that hands them out says the same.
+ */
+export function withoutUserProfile(line: string, profile: string | undefined): string {
+  const trimmed = profile?.replace(/[\\/]+$/u, "");
+  if (trimmed === undefined || trimmed.length < 3) return line;
+  const pattern = trimmed
+    .split(/[\\/]+/u)
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"))
+    .join("[\\\\/]+");
+  return line.replace(new RegExp(pattern, "giu"), "%USERPROFILE%");
+}

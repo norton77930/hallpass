@@ -2,6 +2,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { TEST_EXTENSION_ID } from "../../../packages/test-kit/src/build-config.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { unpairAgent } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
@@ -126,7 +127,7 @@ test.describe("agent pairing", () => {
       expect(await panelText()).not.toContain(ui("agent.pairingTitle"));
 
       // --- SC-026: the owner unpairs, and the open session's next call is refused by name. ---
-      await unpairAgent(panel, { locale });
+      await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
 
       const refused = await second.callTool("tabs_context");
       expect(refused.isError).toBe(true);

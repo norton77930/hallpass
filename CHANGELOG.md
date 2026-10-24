@@ -5,6 +5,30 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.16.0 — 2026-10-25
+
+**A settings page for agents, sites and the connection; the side panel keeps to what is happening now.**
+
+- **Settings page.** A full tab (side panel menu, or the extension's Options) with four sections: Agents,
+  Sites & permissions, Browser tools, and Connection & diagnostics. It works without network, in English
+  and zh-TW, light or dark, and down to a 375 px wide window.
+- **Agents at a glance.** Each agent is a card with one of five states (ready, ready with warnings, needs a
+  download, downloading, not installed), its version, prerequisites, model server and browser tools, all
+  from local checks. The navigation says how many are ready.
+- **Prepare an agent from its card.** Hallpass's helper downloads run there with progress and Cancel, and
+  keep going when the page is closed; Hermes shows its setup steps and Check again.
+- **Test an agent.** One short model call that says whether the agent starts, answers and gets the browser
+  tools, in the owner's words, with the last result kept.
+- **Choose the panel's agents.** An Enabled switch per agent and Make default decide what the side panel's
+  picker offers, per browser.
+- **Sites & permissions moved here.** Paired outside agents, each site's mode, the diagnostics grant, who
+  made the last change, Revoke with Undo, and the upload folders. A session card links straight to its site.
+- **Connection & diagnostics.** Whether the helper is connected, the versions, this browser's name with
+  Rename, and each agent's last lines of output on request, with secrets removed.
+- **The side panel has two tabs, Conversation and Sessions.** Sessions shows the connection and the live
+  sessions; standing permissions are managed on the settings page.
+- No API key is asked for, shown or stored; key variables are named only.
+
 ## 0.15.2 — 2026-10-24
 
 **Fixes from the first real Hermes trial: saved logins really off, clear waiting feedback, and the tab for every agent.**

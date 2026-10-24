@@ -2,6 +2,7 @@ import type { BrowserContext } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient, type ToolCallResult } from "../../harness/mcp-client.js";
 import { isAgentPaired, unpairAgent } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -218,7 +219,7 @@ async function unpairedPanel(
   });
   await waitForAgentPanel(panel);
   await panel.clickIfPresent(ui("agent.retry"));
-  if (await isAgentPaired(panel, locale)) await unpairAgent(panel, { locale });
+  if (await isAgentPaired(panel, locale)) await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
   expect(await pairingCardUp(panel), "a pairing card was already up before the journey began").toBe(false);
   return panel;
 }

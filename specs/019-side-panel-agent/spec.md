@@ -510,3 +510,10 @@ panel; with the Conversation tab active, an external consent request shows its c
    fourth stops the one idle longest, which resumes on its next message), or no limit?
 4. **Where the one-time consent is withdrawn**: a switch "Side-panel agent may use this browser" in
    Connections & sites (proposed, FR-309).
+
+## Change log
+
+- **2026-10-24 — FR-282 (second sentence) and FR-309's placement superseded by 024** (D-024-11, D-024-13,
+  FR-392): the Connections & sites tab becomes "Sessions" and keeps only the connection state and the
+  session cards; the site list, upload folders, paired agents, browser name and the side-panel-agent switch
+  move to the settings page. FR-283 and FR-284 are unchanged.

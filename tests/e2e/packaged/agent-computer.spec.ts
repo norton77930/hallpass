@@ -2,7 +2,8 @@ import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -73,6 +74,8 @@ test.describe("agent computer", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -85,7 +88,7 @@ test.describe("agent computer", () => {
       const created = (await call("tabs_create", { url: `${SITE}/canvas` })) as { tabId: number };
       const tabId = created.tabId;
       const canvasPage = await agentPage(extensionContext, `${SITE}/canvas`);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // ================= 1. a position click changes the fixture's own state =================
       const before = await canvasPage.locator("body").getAttribute("data-active-tool");
@@ -122,7 +125,7 @@ test.describe("agent computer", () => {
       await expect(canvasPage.locator("body")).toHaveAttribute("data-active-tool", "draw");
 
       // ================= 3. under ask, the prompt shows the crop of where it would land =================
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const erasePoint = await centreOf(canvasPage, "#tool-erase");
       const asked = client.callTool("computer", { tabId, action: "left_click", x: erasePoint.x, y: erasePoint.y });
 
@@ -183,32 +186,4 @@ async function agentPage(
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`agent-tab-not-found:${url}`);
-}
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown, and poking the store behind the
- * panel would prove only that the store works.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  // The worker answers with a fresh projection; waiting for it is what makes the next call's mode
-  // the one just chosen rather than a race with it.
-  await expect
-    .poll(
-      async () => panel.evaluatePanel(
-        `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-          `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-      ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

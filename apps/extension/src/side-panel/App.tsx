@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type ReactElement } from "react";
 import { selectLocale, type AppLocale } from "../locales/catalog.js";
+import { appearanceLocale, applyTheme, useAppearance } from "./appearance.js";
 
 /**
  * The panel's shell, loaded lazily (003 M2 review A7, 006 S1).
@@ -21,12 +22,18 @@ function selectUiLocale(): AppLocale {
  * nothing of the archived remote path - no service status, no sign-in, no task workspace.
  */
 export function App(): ReactElement {
-  const [locale] = useState(selectUiLocale);
+  const [systemLocale] = useState(selectUiLocale);
+  // 024 D-024-20: the owner's theme and language choice, followed at once; System is today's behaviour.
+  const appearance = useAppearance();
+  const locale = appearanceLocale(appearance, systemLocale);
   // The document declares the language it is rendered in, or a screen reader reads reviewed zh-TW
   // copy with an en-US voice (review M16).
   useEffect(() => {
     document.documentElement.lang = locale;
   }, [locale]);
+  useEffect(() => {
+    applyTheme(appearance.theme);
+  }, [appearance.theme]);
   return (
     <main className="app-shell">
       <Suspense fallback={null}>

@@ -1,30 +1,33 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactElement } from "react";
-import { CONVERSATION_AGENTS, type ConversationAgent, type ConversationAgentAvailability } from "@hallpass/contracts";
+import type { ConversationAgent, ConversationAgentAvailability } from "@hallpass/contracts";
 import { AGENT_MARK } from "./agent-mark.js";
-import { availabilityDetail } from "./broker-words.js";
+import { notReadyReason } from "./not-ready.js";
 import { useOutsidePress } from "./outside-press.js";
 
 /**
- * 020 D-020-8, FR-313, T588: the agent chip's menu - every supported agent with its state.
+ * 020 D-020-8, FR-313, T588: the agent chip's menu - the agents the owner switched on, each with its state.
  *
- * The states are the worker's availability (019 FR-299 - FR-301), in the same words the 019 picker
- * used: ready, needs a one-time download, not installed (with the install guidance), version not
- * supported (with the installed version and the broker's redacted detail). Choosing an agent only
- * moves the chip; nothing leaves the panel until the owner sends. An agent the worker has not
- * reported yet is listed but cannot be chosen.
+ * 024 FR-384, D-024-2, D-024-3: which agents are listed is the owner's choice on the settings page, so
+ * an agent they switched off is not here. A ready agent can be chosen. One that is enabled but cannot
+ * start is listed greyed with one line saying why and a link that opens the settings page at its card;
+ * nothing is downloaded or installed from here. Choosing an agent only moves the chip; nothing leaves
+ * the panel until the owner sends. An agent the worker has not reported yet is listed but cannot be
+ * chosen.
  */
 
 type T = (key: string) => string;
 
 export function AgentMenu(props: {
   agents: readonly ConversationAgentAvailability[];
+  /** 024: the enabled agents, in the contract's order; no other agent is listed. */
+  enabled: readonly ConversationAgent[];
   selected: ConversationAgent;
-  /** T606 (C8): the agent the panel remembers using last, when it remembers one (R-335). */
-  lastUsed?: ConversationAgent | undefined;
   agentName: (agent: ConversationAgent) => string;
   t: T;
   id: string;
   onChoose: (agent: ConversationAgent) => void;
+  /** 024 FR-384: the link of an agent that cannot start - the settings page at that agent's card. */
+  onOpenSettings: (agent: ConversationAgent) => void;
   /** Escape or Tab: the menu closes and focus goes back to the chip. */
   onClose: () => void;
   /** T600: a press outside the menu closes it and leaves the focus where the press put it. */
@@ -33,7 +36,10 @@ export function AgentMenu(props: {
   const { t } = props;
   const menu = useRef<HTMLUListElement>(null);
   useOutsidePress(menu, props.id, props.onDismiss);
-  const items = (): HTMLButtonElement[] => [...(menu.current?.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]:not(:disabled)") ?? [])];
+  // The rows that can be chosen and the links of the ones that cannot, in the order they are drawn.
+  const items = (): HTMLButtonElement[] => [
+    ...(menu.current?.querySelectorAll<HTMLButtonElement>("[role=menuitemradio]:not(:disabled), [role=menuitem]") ?? []),
+  ];
 
   useEffect(() => {
     // The chosen agent has focus when the menu opens, as a menu button's menu does.
@@ -62,16 +68,20 @@ export function AgentMenu(props: {
 
   return (
     <ul ref={menu} id={props.id} role="menu" aria-label={t("conversation.agentMenu.label")} className="agent-conversation-menu" onKeyDown={onKey}>
-      {CONVERSATION_AGENTS.map((agent) => {
+      {props.enabled.map((agent) => {
         const entry = props.agents.find((candidate) => candidate.agent === agent);
         const availability = entry?.availability;
+        const name = props.agentName(agent);
+        // FR-384: one line saying why this agent cannot start, when it cannot (D-024-3).
+        const reason = notReadyReason(entry, name, t);
+        const reasonId = `${props.id}-${agent}-reason`;
         return (
-          <li key={agent} role="none">
+          <li key={agent} role="none" data-agent={agent}>
             <button
               type="button"
               role="menuitemradio"
               aria-checked={props.selected === agent}
-              disabled={entry === undefined}
+              disabled={reason !== undefined}
               data-availability={availability}
               className="agent-conversation-menu-item"
               onClick={() => props.onChoose(agent)}
@@ -81,27 +91,12 @@ export function AgentMenu(props: {
                 {AGENT_MARK[agent]}
               </span>
               <span className="agent-conversation-menu-text">
-                <span className="agent-conversation-agent-name">{props.agentName(agent)}</span>
-                {availability === undefined ? null : (
-                  <span className="agent-conversation-availability">
-                    {availability === "ready" && agent === props.lastUsed
-                      ? t("conversation.availability.readyLastUsed")
-                      : t(`conversation.availability.${availability}`)}
-                  </span>
-                )}
-                {availability === "missing" ? (
-                  <span className="agent-conversation-menu-note">{t(`conversation.missing.${agent}`)}</span>
+                <span className="agent-conversation-agent-name">{name}</span>
+                {/* A ready agent says so; one that cannot start says why on the line below instead. */}
+                {availability === "ready" ? (
+                  <span className="agent-conversation-availability">{t("conversation.availability.ready")}</span>
                 ) : null}
-                {availability === "version-problem" && entry?.version !== undefined ? (
-                  <span className="agent-conversation-menu-note">
-                    {t("conversation.version.installed").replace("{version}", () => entry.version ?? "")}
-                  </span>
-                ) : null}
-                {/* Already redacted by the broker (R-326); T608: its known sentence is said in the panel's language. */}
-                {availability === "version-problem" && entry?.detail !== undefined ? (
-                  <span className="agent-conversation-menu-note">{availabilityDetail(entry.detail, props.agentName(agent), t)}</span>
-                ) : null}
-                {/* 021 FR-345, FR-350: the worker's notes (Git for Windows missing, a pre-release) in words. */}
+                {/* 021 FR-345, FR-350: the worker's notes (the Windows Git tools missing, a pre-release) in words. */}
                 {(entry?.notes ?? []).map((note) => (
                   <span key={note} className="agent-conversation-menu-note" data-note={note}>
                     {t(`conversation.note.${note}`)}
@@ -109,6 +104,23 @@ export function AgentMenu(props: {
                 ))}
               </span>
             </button>
+            {reason === undefined ? null : (
+              <div className="agent-conversation-reason-row">
+                <span id={reasonId} className="agent-conversation-reason">
+                  {reason}
+                </span>
+                {/* The link says where it goes; the line above it says for which agent. */}
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="agent-conversation-menu-link"
+                  aria-describedby={reasonId}
+                  onClick={() => props.onOpenSettings(agent)}
+                >
+                  {t("conversation.agentMenu.openSettings")}
+                </button>
+              </div>
+            )}
           </li>
         );
       })}

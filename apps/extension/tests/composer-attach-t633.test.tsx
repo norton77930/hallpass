@@ -23,8 +23,8 @@ const refusal = () => document.querySelector("[data-attach-refusal]")?.textConte
 const plus = () => screen.getByRole("button", { name: ui("conversation.attach.button") });
 const entry = (key: string) => screen.getByRole("menuitem", { name: new RegExp(ui(key)) });
 const sendButton = () => screen.getByRole("button", { name: ui("conversation.composer.send") });
-const panelTab = (name: "conversation" | "connections") =>
-  screen.getByRole("tab", { name: new RegExp(ui(name === "conversation" ? "agent.tabs.conversation" : "agent.tabs.connections")) });
+const panelTab = (name: "conversation" | "sessions") =>
+  screen.getByRole("tab", { name: new RegExp(ui(name === "conversation" ? "agent.tabs.conversation" : "agent.tabs.sessions")) });
 
 type Sent = { type: string; requestId?: string; commandId?: string; payload: Record<string, unknown> };
 const sentOf = (port: FakeAgentPort, type: string): Sent[] => (port.sent as Sent[]).filter((message) => message.type === type);
@@ -85,7 +85,7 @@ async function open(port: FakeAgentPort, conversation: ConversationPanelState = 
   await settle();
 }
 
-describe("022 T633 the composer outlives a switch to Connections & sites", () => {
+describe("022 T633 the composer outlives a switch to Sessions", () => {
   let port: FakeAgentPort;
 
   beforeEach(() => {
@@ -109,7 +109,7 @@ describe("022 T633 the composer outlives a switch to Connections & sites", () =>
     await settle();
     const piece = sentOf(port, "ui.conversation.attach")[0]!;
 
-    fireEvent.click(panelTab("connections"));
+    fireEvent.click(panelTab("sessions"));
     await settle();
     act(() => port.emit({ type: "conversation-result", payload: { commandId: piece.commandId, ok: true } }));
     await settle();
@@ -137,7 +137,7 @@ describe("022 T633 the composer outlives a switch to Connections & sites", () =>
     fireEvent.click(entry("conversation.attach.tab"));
     const asked = sentOf(port, "ui.tab.capture").at(-1)!;
 
-    fireEvent.click(panelTab("connections"));
+    fireEvent.click(panelTab("sessions"));
     await settle();
     reply(port, { ok: true, kind: "page", url: "https://example.test/", title: "Page", text: "x", cut: false }, asked);
     await settle();
@@ -151,7 +151,7 @@ describe("022 T633 the composer outlives a switch to Connections & sites", () =>
     fireEvent.click(entry("conversation.attach.tab"));
     reply(port, { ok: true, kind: "page", url: "https://example.test/", title: "Page", text: "x", cut: false });
     await settle();
-    fireEvent.click(panelTab("connections"));
+    fireEvent.click(panelTab("sessions"));
     fireEvent.click(panelTab("conversation"));
     await settle();
     expect(refusal()).toContain(ui("conversation.attach.refused.oneTab"));

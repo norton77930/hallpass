@@ -4,6 +4,7 @@ import { decodeGif, nonBackgroundPixelsIn, sampleColorAt, type DecodedGif } from
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -73,10 +74,10 @@ test.describe("agent recording", () => {
     extensionWorker,
   }) => {
     test.setTimeout(300_000);
-    const { client, call, panel } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { client, call, settings } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("read_page", { tabId, filter: "interactive" });
 
       await call("gif_recorder", { action: "start" });
@@ -115,10 +116,10 @@ test.describe("agent recording", () => {
     extensionWorker,
   }) => {
     test.setTimeout(300_000);
-    const { client, call, panel } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { client, call, settings } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       const started = (await call("gif_recorder", { action: "start" })) as RecordingAnswer;
       expect(started).toMatchObject({ state: "recording", frames: 1 });
@@ -151,11 +152,11 @@ test.describe("agent recording", () => {
   }) => {
     test.setTimeout(600_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // ============= 0. start: the page as it was, before anything happened =============
       const started = (await call("gif_recorder", { action: "start" })) as RecordingAnswer;
@@ -297,11 +298,11 @@ test.describe("agent recording", () => {
   }) => {
     test.setTimeout(600_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("gif_recorder", { action: "start" });
 
       // Six frames in (the initial one plus five actions), then the worker goes.
@@ -352,11 +353,11 @@ test.describe("agent recording", () => {
   }) => {
     test.setTimeout(900_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("gif_recorder", { action: "start" });
 
       // 205 actions over the initial frame: the first 199 fill the recording, and the rest are
@@ -402,13 +403,13 @@ test.describe("agent recording", () => {
   }) => {
     test.setTimeout(600_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
     const cdp = await extensionContext.newCDPSession(ownerPage);
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("gif_recorder", { action: "start" });
       for (let action = 0; action < 3; action += 1) {
         await call("key", { tabId, key: "Tab" });
@@ -443,6 +444,7 @@ async function pairedSession(fixtures: {
   extensionWorker: PackagedWorker;
 }): Promise<{
   panel: SidePanelDriver;
+  settings: SettingsPageDriver;
   client: McpHarnessClient;
   call: (tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }> {
@@ -465,6 +467,8 @@ async function pairedSession(fixtures: {
 
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
   await waitForAgentPanel(panel);
+  // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+  const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
@@ -475,7 +479,7 @@ async function pairedSession(fixtures: {
     expect(result.isError, `${tool} failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
     return result.json;
   };
-  return { panel, client, call };
+  return { panel, settings, client, call };
 }
 
 /**
@@ -567,27 +571,4 @@ async function refFor(
   const first = found.matches[0]?.ref;
   expect(first, `find '${query}' returned no ref`).toBeTruthy();
   return first as string;
-}
-
-/** The same panel-driven site mode the sibling journeys use; never a storage write (FR-042). */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

@@ -1,0 +1,81 @@
+/*
+ * 024 D-024-20, R-382, T787: the owner's theme choice for the side panel. `tokens.css` follows the
+ * browser's colour scheme only; the settings page's top bar can also pin Light or Dark, and the panel
+ * puts that on the document element as `data-theme` (`side-panel/appearance.ts`). System takes the
+ * attribute off, so nothing here applies and tokens.css decides, as it always did.
+ *
+ * The two blocks repeat the palettes of tokens.css on purpose - a pinned theme must not depend on the
+ * browser's scheme - and a test (`tests/appearance-panel-024.test.tsx`) fails when they drift. They live
+ * apart from tokens.css because `tests/panel-a11y.test.tsx` reads that file as "light, then the dark
+ * overrides" and checks its contrast. Every colour stays a 6-digit hex, one per line.
+ */
+:root[data-theme="dark"] {
+  --bg: #15171c;
+  --surface: #1d2027;
+  --surface-2: #272b34;
+  --code: #1f232b;
+  --line: #323743;
+  --line-strong: #3a404d;
+  --text: #eceef2;
+  --text-2: #b9bfcb;
+  --text-3: #959cab;
+  --accent: #9a9df7;
+  --accent-text: #11132b;
+  --accent-soft: #272a4f;
+  --accent-line: #4a4e8f;
+  --ok: #74d18f;
+  --warn: #f2b35c;
+  --warn-soft: #3a2b14;
+  --danger: #f4938a;
+  --danger-soft: #3a1d1b;
+  --focus: #9a9df7;
+
+  --group-cyan: #78d9ec;
+  --group-green: #81c995;
+  --group-purple: #d7aefb;
+  --group-pink: #ff8bcb;
+  --group-orange: #fcad70;
+  --group-grey: #dadce0;
+  --group-blue: #8ab4f8;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #f6f7f9;
+  --surface-2: #eef0f3;
+  --code: #f3f4f6;
+  --line: #e1e4e9;
+  --line-strong: #d3d7de;
+  --text: #16181d;
+  --text-2: #4a505c;
+  --text-3: #646b78;
+  --accent: #4448c8;
+  --accent-text: #ffffff;
+  --accent-soft: #ecedfd;
+  --accent-line: #c5c7f4;
+  --ok: #157f3c;
+  --warn: #a54c06;
+  --warn-soft: #fff3e2;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --focus: #4448c8;
+
+  --group-cyan: #007b83;
+  --group-green: #188038;
+  --group-purple: #a142f4;
+  --group-pink: #d01884;
+  --group-orange: #fa903e;
+  --group-grey: #5f6368;
+  --group-blue: #1a73e8;
+  color-scheme: light;
+}
+
+/* The shell sets `color-scheme: light dark` for its form controls; a pinned theme narrows it. */
+:root[data-theme="dark"] .agent-shell {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] .agent-shell {
+  color-scheme: light;
+}

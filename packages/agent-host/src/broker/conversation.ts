@@ -39,7 +39,7 @@ import { PANEL_SERVER_NAME, type ConversationBrowserAccess, type PanelServerName
 import type { ConversationIndex, FolderList } from "./conversation-index.js";
 import { ConversationEventLog, type ConversationPage } from "./event-log.js";
 import { ensureScratchFolder, isDirectory, scratchFolderPath } from "./folders.js";
-import { redact, withoutEnvironmentValues } from "./redact.js";
+import { redact, withoutEnvironmentValues, withoutUserProfile } from "./redact.js";
 import { killTree } from "./run-command.js";
 import { defaultUserEnvironmentPorts, keyNameOnlyInUserSettings, type UserEnvironmentPorts } from "./user-environment.js";
 
@@ -489,6 +489,10 @@ export function spawnAgentProcess(spec: AdapterLaunchSpec, cwd: string): ChildPr
   });
 }
 
+/** 024 R-387: agent runs of this broker in the order they started - a conversation's or a test's. */
+let runSerials = 0;
+export const nextRunSerial = (): number => ++runSerials;
+
 /** Lets SDK notification handlers that were dispatched before a response settle (they run on microtasks). */
 const settle = () => new Promise<void>((done) => setImmediate(done));
 
@@ -580,11 +584,15 @@ export class Conversation {
   private turnWentThrough = false;
   /** 023 R-369: this run already looked for a key the browser cannot see. */
   private keyNameChecked = false;
+  /** 024 R-379: that look, once begun: resolves with the variable it named, if any. */
+  private keyNameCheck: Promise<string | undefined> | undefined;
   /**
    * 023 R-367 (FR-371/372): the last lines the latest run printed about itself, scrubbed and cut.
    * Memory only - never logged, never written; a new run starts a new list, removal drops it.
    */
   private outputLines: string[] = [];
+  /** 024 R-387: when this conversation's latest run started, among every run of this broker; 0 before one. */
+  private runSerialValue = 0;
 
   constructor(
     readonly conversationId: string,
@@ -669,6 +677,7 @@ export class Conversation {
     this.cancelBrowserCheck();
     this.turnWentThrough = false;
     this.keyNameChecked = false;
+    this.keyNameCheck = undefined;
     this.setState("starting");
     // R-322: decided once per run (the owner's Codex config may have changed since the last one),
     // read while the agent initialises.
@@ -863,15 +872,26 @@ export class Conversation {
    * run, only for an agent whose description says where that name is. Names only: no value is read
    * into Hallpass, and nothing of it goes to the broker log. Gives the variable's name when it said so.
    */
-  private async sayKeyOnlyInUserSettings(): Promise<string | undefined> {
-    if (this.keyNameChecked || (AGENT_ADAPTERS[this.agent] as AgentDescription).keyNameSource !== "hermes-config") return undefined;
+  private sayKeyOnlyInUserSettings(): Promise<string | undefined> {
+    if (this.keyNameChecked || (AGENT_ADAPTERS[this.agent] as AgentDescription).keyNameSource !== "hermes-config") return Promise.resolve(undefined);
     this.keyNameChecked = true;
-    const variable = await keyNameOnlyInUserSettings(this.runEnv(), this.deps.userEnvironment ?? defaultUserEnvironmentPorts).catch(
-      () => undefined,
-    );
-    if (variable === undefined) return undefined;
-    this.enqueue({ type: "notice", code: "key-env-not-in-browser", agent: this.agent, variable, text: keyEnvHint(this.agent, variable) });
-    return variable;
+    this.keyNameCheck = (async () => {
+      const variable = await keyNameOnlyInUserSettings(this.runEnv(), this.deps.userEnvironment ?? defaultUserEnvironmentPorts).catch(
+        () => undefined,
+      );
+      if (variable === undefined) return undefined;
+      this.enqueue({ type: "notice", code: "key-env-not-in-browser", agent: this.agent, variable, text: keyEnvHint(this.agent, variable) });
+      return variable;
+    })();
+    return this.keyNameCheck;
+  }
+
+  /**
+   * 024 R-379: this run's key-name check (023 R-369) once a failure began it - its notice said when it
+   * resolves, with the variable's name if it found one; none when no check began.
+   */
+  get keyNameCheckDone(): Promise<string | undefined> | undefined {
+    return this.keyNameCheck;
   }
 
   private sayBrowserToolsMissing(): void {
@@ -887,8 +907,8 @@ export class Conversation {
 
   /**
    * 023 R-367: this run's error output, always read (the agent never blocks on a full pipe), kept as
-   * its last 50 lines. Each line loses every value of the environment the run got, then key-shaped
-   * text, and only then is cut to 500 characters - so no beginning of a value is left at the cut. A
+   * its last 50 lines. Each line loses every value of the environment the run got, then the user's
+   * profile folder (024 R-387), then key-shaped text, and only then is cut to 500 characters - so no beginning of a value is left at the cut. A
    * line is read up to `OUTPUT_LINE_READ_MAX` characters; the rest of a longer one is dropped unread,
    * and so is the end of what was read that a value could begin with (`withoutCutValue`) - the text
    * before it may shrink below 500 characters once scrubbed.
@@ -896,13 +916,17 @@ export class Conversation {
   private readOutput(child: ChildProcess): void {
     const lines: string[] = [];
     this.outputLines = lines;
+    this.runSerialValue = nextRunSerial();
     const stream = child.stderr;
     if (stream === null || stream === undefined) return;
     const env = this.runEnv();
     const keep = (raw: string): void => {
       const text = raw.replace(/\r$/u, "");
       if (text.trim().length === 0) return;
-      lines.push(redact(withoutEnvironmentValues(text, env)).slice(0, CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS));
+      // 024 R-387: the profile folder in any case or slash, here where the line is kept, so a reply
+      // by conversation and one by agent hand out the same line.
+      const scrubbed = withoutUserProfile(withoutEnvironmentValues(text, env), env.USERPROFILE);
+      lines.push(redact(scrubbed).slice(0, CONVERSATION_DIAGNOSTIC_LINE_MAX_CHARS));
       if (lines.length > CONVERSATION_DIAGNOSTIC_LINES_MAX) lines.shift();
     };
     let partial = "";
@@ -936,6 +960,11 @@ export class Conversation {
   /** 023 R-367 (FR-372): the latest run's lines, for the panel's conversation details. */
   diagnostics(): string[] {
     return [...this.outputLines];
+  }
+
+  /** 024 R-387: the order of this conversation's latest run among the broker's runs (`nextRunSerial`); 0 before one. */
+  get runSerial(): number {
+    return this.runSerialValue;
   }
 
   /** 023 R-365: the worker accepted this conversation's `hallpass` server greeting - this run has the tools. */
@@ -2247,6 +2276,19 @@ export class ConversationPool {
 
   /** T558: consent withdrawn - every live run's token is revoked and not handed again (FR-299). */
   /** 023 R-367 (FR-372): what the conversation's latest run printed about itself; none for one this pool does not hold. */
+  /**
+   * 024 R-387: the agent's conversation whose run started last in this broker, with that run's lines;
+   * none when no conversation of it has run here (a removed one is gone with its lines).
+   */
+  latestRun(agent: ConversationAgent): { conversationId: string; serial: number; lines: string[] } | undefined {
+    let latest: Conversation | undefined;
+    for (const conversation of this.conversations.values()) {
+      if (conversation.agent !== agent || conversation.runSerial === 0) continue;
+      if (latest === undefined || conversation.runSerial > latest.runSerial) latest = conversation;
+    }
+    return latest === undefined ? undefined : { conversationId: latest.conversationId, serial: latest.runSerial, lines: latest.diagnostics() };
+  }
+
   diagnostics(conversationId: string): string[] {
     return this.conversations.get(conversationId)?.diagnostics() ?? [];
   }

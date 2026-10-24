@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentPanelCommandSchema } from "@hallpass/contracts";
+import { lookup } from "../src/locales/catalog.js";
 import {
   IDLE,
   NOT_PAIRED,
@@ -14,6 +15,9 @@ import {
   type FakeAgentPort,
 } from "./helpers/agent-shell-harness.js";
 import { CONVERSATION_READY, withConversation } from "./helpers/conversation-fixtures.js";
+
+/** The line the panel's removed site list showed when it was empty (024 R-381: it is on the settings page now). */
+const SITES_NONE_WORDS = "No site has been decided on yet.";
 
 /**
  * 006/T191 — the four compositions, derived from the projection alone (FR-081, R-125).
@@ -45,7 +49,7 @@ describe("T191 the shell derives its composition from the projection", () => {
     expect(screen.getByText(ui("agent.notPaired.body"))).toBeTruthy();
     // No site list, no session section, no status row, no tab list.
     expect(screen.queryByText(ui("agent.sitesTitle"))).toBeNull();
-    expect(screen.queryByText(ui("agent.sitesNone"))).toBeNull();
+    expect(screen.queryByText(SITES_NONE_WORDS)).toBeNull();
     expect(screen.queryByText(ui("agent.status.connected"))).toBeNull();
     expect(screen.queryByText(ui("agent.tab.title"))).toBeNull();
     expect(screen.queryByRole("button", { name: ui("agent.session.stop") })).toBeNull();
@@ -96,32 +100,21 @@ describe("T191 the shell derives its composition from the projection", () => {
     expect(screen.getByText(ui("agent.details.none"))).toBeTruthy();
   });
 
-  it("shows the status row and the site list, and no session section, while paired and idle", () => {
+  it("shows the status row and the empty-state line, and no session section, while paired and idle", () => {
     renderShell();
     project(port, IDLE);
 
     expect(shellState()).toBe("idle");
     const row = screen.getByText(ui("agent.status.connected")).closest("[data-status-row]");
     expect(row).toBeTruthy();
-    expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
+    expect(screen.getByText(ui("agent.sessions.empty"))).toBeTruthy();
+    expect(screen.queryByText(SITES_NONE_WORDS)).toBeNull();
     expect(screen.queryByText(ui("agent.notPaired.title"))).toBeNull();
     expect(screen.queryByRole("button", { name: ui("agent.session.stop") })).toBeNull();
     expect(screen.queryByText(ui("agent.session.none"))).toBeNull();
   });
 
-  it("keeps unpair behind the overflow menu and sends it for the paired agent", () => {
-    renderShell();
-    project(port, IDLE);
-
-    const unpair = ui("agent.status.unpairAgent").replace("{agent}", PAIRED.displayName);
-    expect(screen.queryByRole("menuitem", { name: unpair })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
-    fireEvent.click(screen.getByRole("menuitem", { name: unpair }));
-
-    expect(port.sent).toEqual([{ type: "ui.agent.unpair", payload: { agentId: PAIRED.agentId } }]);
-  });
-
-  it("shows one card per live session above the site list, newest activity first", () => {
+  it("shows one card per live session, newest activity first", () => {
     renderShell();
     project(port, {
       ...IDLE,
@@ -134,10 +127,10 @@ describe("T191 the shell derives its composition from the projection", () => {
     expect(shellState()).toBe("sessions");
     const cards = [...document.querySelectorAll("[data-session-id]")].map((card) => card.getAttribute("data-session-id"));
     expect(cards).toEqual(["session-new", "session-old"]);
-    // The status row stays, and so does the site list: a session is live the moment its server
-    // greets the relay, and the owner switches a site's mode while one is (SC-045).
+    // The status row stays. The site list does not: it is on the settings page now (024 R-381).
     expect(screen.getByText(ui("agent.status.connected"))).toBeTruthy();
-    expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
+    expect(screen.queryByText(SITES_NONE_WORDS)).toBeNull();
+    expect(document.querySelector(".agent-sites")).toBeNull();
   });
 
   /**
@@ -181,31 +174,27 @@ describe("T191 the shell derives its composition from the projection", () => {
     expect(row).not.toContain("Cursor");
   });
 
-  it("lists every paired agent in the menu, each with its own unpair that sends one command", () => {
-    const second = { agentId: "agent-2", displayName: "Second Agent", origin: "stdio:local", acceptedAt: "2026-09-13T00:00:00.000Z" };
+  it("holds one entry in the menu, Settings, which opens the settings page at the agents (024 R-381)", () => {
     renderShell();
-    project(port, { ...IDLE, paired: [PAIRED, second] });
+    project(port, { ...IDLE, paired: [PAIRED] });
 
     fireEvent.click(screen.getByRole("button", { name: ui("agent.status.menu") }));
     const items = screen.getAllByRole("menuitem");
-    expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["Unpair Claude Code", "Unpair Second Agent"]);
-    expect(screen.getByRole("menu").textContent).toContain("Claude Code");
-    expect(screen.getByRole("menu").textContent).toContain("Second Agent");
-    expect(items.map((item) => item.textContent)).toEqual(["Unpair", "Unpair"]);
+    // Unpair moved to the settings page: the menu names no agent any more.
+    expect(items.map((item) => item.textContent)).toEqual([ui("agent.status.settings")]);
+    expect(screen.getByRole("menu").textContent).not.toContain("Claude Code");
 
-    fireEvent.click(screen.getByRole("menuitem", { name: "Unpair Second Agent" }));
-
-    expect(port.sent).toEqual([{ type: "ui.agent.unpair", payload: { agentId: "agent-2" } }]);
+    fireEvent.click(items[0]!);
+    expect(port.sent).toEqual([{ type: "ui.agent.open-settings", payload: { route: "#agents" } }]);
     expect(agentPanelCommandSchema.safeParse(port.sent[0]).success).toBe(true);
   });
 
-  it("names the menu's unpair in zh-TW", () => {
+  it("names the menu's entry in zh-TW", () => {
     renderShell("zh-TW");
     project(port, IDLE);
 
     fireEvent.click(screen.getByRole("button", { name: "更多選項" }));
-    const item = screen.getByRole("menuitem", { name: "解除與 Claude Code 的配對" });
-    expect(item.textContent).toBe("解除配對");
+    expect(screen.getByRole("menuitem").textContent).toBe(lookup("agent.status.settings", "zh-TW"));
   });
 
   it("keeps the last projection it could trust when one does not parse", () => {
@@ -230,27 +219,27 @@ describe("T191 the shell derives its composition from the projection", () => {
       sites: [],
       state: "working" as const,
     };
-    const connections = () => fireEvent.click(screen.getByRole("tab", { name: ui("agent.tabs.connections") }));
+    const connections = () => fireEvent.click(screen.getByRole("tab", { name: ui("agent.tabs.sessions") }));
 
-    it("is connected once the panel consent is granted, with the site list and no session yet", () => {
+    it("is connected once the panel consent is granted, with no session yet", () => {
       renderShell();
       project(port, withConversation(CONVERSATION_READY, NOT_PAIRED));
       connections();
 
       expect(shellState()).toBe("idle");
       expect(screen.getByText(ui("agent.status.connected"))).toBeTruthy();
-      expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
+      expect(screen.getByText(ui("agent.sessions.empty"))).toBeTruthy();
       expect(screen.queryByRole("heading", { name: ui("agent.notPaired.title") })).toBeNull();
     });
 
-    it("shows a panel session's card and the site list", () => {
+    it("shows a panel session's card", () => {
       renderShell();
       project(port, withConversation(CONVERSATION_READY, { ...NOT_PAIRED, sessions: [panelSession] }));
       connections();
 
       expect(shellState()).toBe("sessions");
       expect(document.querySelector("[data-session-id='session-panel']")).toBeTruthy();
-      expect(screen.getByText(ui("agent.sitesNone"))).toBeTruthy();
+      expect(screen.queryByText(ui("agent.sessions.empty"))).toBeNull();
     });
 
     it("counts a panel session as connected even when the consent shown is not yet granted", () => {
@@ -270,7 +259,7 @@ describe("T191 the shell derives its composition from the projection", () => {
 
       expect(shellState()).toBe("not-connected");
       expect(screen.getByRole("heading", { name: ui("agent.notPaired.title") })).toBeTruthy();
-      expect(screen.queryByText(ui("agent.sitesNone"))).toBeNull();
+      expect(screen.queryByText(ui("agent.sessions.empty"))).toBeNull();
     });
 
     it("is not connected while the bridge is down, whatever the consent", () => {

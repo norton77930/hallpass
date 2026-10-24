@@ -3,24 +3,32 @@ import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { AGENT_LINK_PROTOCOL, agentBrowserIdSchema, agentLinkFrameSchema } from "@hallpass/contracts";
+import {
+  AGENT_LINK_PROTOCOL,
+  agentBrowserIdSchema,
+  agentLinkFrameSchema,
+  type AgentTestResult,
+  type ConversationAgent,
+} from "@hallpass/contracts";
 import { dialRelay, isProcessAlive, type BridgeRecord, type RelayDial } from "./bridge-link.js";
 import { browserRecordPath, inspectBrowserRecord } from "./browser-record.js";
 import { removeOwnBrokerSidecar, removeOwnBrokerSidecarSync } from "./broker-launch.js";
-import { defaultAgentPorts } from "./broker/agents.js";
+import { createAgentTestRunner } from "./broker/agent-test.js";
+import { checkAgentReadiness, defaultAgentPorts, type ReadinessAttempt } from "./broker/agents.js";
 import { watchBrowserProcess } from "./broker/browser-process.js";
 import { createBrowserAccess } from "./broker/browser-token.js";
 import { codexConfigPath } from "./broker/codex-config.js";
-import { createAgentLauncher, createCommandHandler, fileConsentStore, type CommandHandler } from "./broker/commands.js";
+import { createAgentLauncher, createCommandHandler, fileConsentStore, type CommandHandler, type ReadinessResult } from "./broker/commands.js";
 import { createFolderActions, fileFolderList, folderListPath } from "./broker/folders.js";
 import { conversationIndexPath, fileConversationIndex } from "./broker/index-store.js";
 import { ConversationPool, spawnAgentProcess } from "./broker/conversation.js";
-import { cleanStaging, installAgent, shippedManifestsDirectory } from "./broker/install.js";
+import { installAgent, prepareAgentsAtStart, shippedManifestsDirectory } from "./broker/install.js";
 import { createKillOnCloseJob } from "./broker/job.js";
 import { createBrokerLifetime } from "./broker/lifetime.js";
 import { redact } from "./broker/redact.js";
 import { runCommand } from "./broker/run-command.js";
-import { readBrokerTestOverrides } from "./broker/test-mode.js";
+import { readTestMachine, testMachinePorts, testMachineReadinessEnv } from "./broker/test-machine.js";
+import { readBrokerTestOverrides, testInstallRun } from "./broker/test-mode.js";
 import { hostDataDirectory, isWindowsDeviceName } from "./host-paths.js";
 
 /**
@@ -48,7 +56,9 @@ import { hostDataDirectory, isWindowsDeviceName } from "./host-paths.js";
  * the installed adapter found by discovery (R-315), except under `HALLPASS_TEST_MODE=1`, where
  * `HALLPASS_BROKER_TEST_AGENT` (a JSON argv) replaces every adapter launch - so the relay-process
  * tests can put a real tree under the job without an installed agent - and
- * `HALLPASS_BROKER_TEST_IDLE_MS` shortens the idle limit for the packaged gate (`broker/test-mode.ts`).
+ * `HALLPASS_BROKER_TEST_IDLE_MS` shortens the idle limit for the packaged gate (`broker/test-mode.ts`);
+ * for the settings page's gate (024), `HALLPASS_BROKER_TEST_MACHINE` makes up the machine the readiness
+ * check looks at and `HALLPASS_BROKER_TEST_INSTALL` runs in place of `npm ci`.
  */
 
 const logPath = join(hostDataDirectory(), "broker.log");
@@ -165,10 +175,12 @@ async function main(): Promise<void> {
   }
 
   const dataDir = hostDataDirectory();
-  // S3 follow-up: what an install interrupted by a crash left in `agents\<agent>\.install-*` (R-362;
-  // never a tree an install pointer names) and 0.15.0's `.staging-*`.
-  const staged = await cleanStaging(dataDir).catch(() => []);
-  if (staged.length > 0) log("broker.staging-cleaned", String(staged.length));
+  // 024 R-377 (T763): an install state left running by a process that is gone says `interrupted`
+  // first; then, as before (S3 follow-up, R-362), what that install left in `agents\<agent>\.install-*`
+  // (never a tree an install pointer names) and 0.15.0's `.staging-*` is removed.
+  const prepared = await prepareAgentsAtStart(dataDir).catch(() => ({ interrupted: [], staged: [] }));
+  if (prepared.interrupted.length > 0) log("broker.install-interrupted", prepared.interrupted.join(","));
+  if (prepared.staged.length > 0) log("broker.staging-cleaned", String(prepared.staged.length));
 
   let dial: RelayDial | undefined;
   const sessionId = `broker-${randomBytes(12).toString("hex")}`;
@@ -188,7 +200,28 @@ async function main(): Promise<void> {
   const testMode = readBrokerTestOverrides(process.env);
   for (const code of testMode.codes) log(code);
   const testAgent = testMode.agent;
+  const testInstall = testMode.install === undefined ? runCommand : testInstallRun(testMode.install);
   const launcher = createAgentLauncher({ ports, ...(testAgent === undefined ? {} : { testAgent }) });
+  /**
+   * 024 R-374 (T755): the settings page's check - bounded at 5 s per command, with version, time,
+   * browser tools and Hermes' setup steps. Under the test agent every agent is the test agent - ready,
+   * unless `HALLPASS_BROKER_TEST_MACHINE` names a machine file: then the same check runs on the
+   * machine it describes (`broker/test-machine.ts`), read again for every check. `attempt` is the
+   * background retry of a `--version` that timed out (the launch bound, and its stop).
+   */
+  const checkAgent = async (agent: ConversationAgent, attempt?: ReadinessAttempt): Promise<ReadinessResult> => {
+    const retry = attempt === undefined ? {} : { boundMs: attempt.boundMs, signal: attempt.signal };
+    if (testAgent === undefined) return checkAgentReadiness(agent, ports, { env: process.env, ...retry });
+    const machine = testMode.machineFile === undefined ? undefined : await readTestMachine(testMode.machineFile);
+    if (machine === undefined) return { availability: { ...(await launcher.availability(agent)), checkedAt: new Date().toISOString(), browserTools: "available" } };
+    return checkAgentReadiness(agent, testMachinePorts(ports, machine), { env: testMachineReadinessEnv(process.env, dataDir), ...retry });
+  };
+  /** 024 R-379 (T767): a Test's view of the browser tools, from the same local check. */
+  const testBrowserTools = async (agent: ConversationAgent): Promise<AgentTestResult["browserTools"]> => {
+    const tools = (await checkAgent(agent)).availability.browserTools;
+    if (tools === "available" || tools === "not-supported") return tools;
+    return "missing-component";
+  };
   let handler: CommandHandler | undefined;
   const ownerCodexConfig = codexConfigPath(process.env);
   const pool = new ConversationPool({
@@ -220,6 +253,18 @@ async function main(): Promise<void> {
     log,
     ...(testMode.idleMs === undefined ? {} : { idleMs: testMode.idleMs }),
   });
+  // 024 R-379 (T767): Tests run beside the pool, never in it - no cap, no index entry, no browser token.
+  const tests = createAgentTestRunner({
+    dataDir,
+    resolveLaunch: (agent, mode) => launcher.resolveLaunch(agent, mode),
+    browserTools: testBrowserTools,
+    spawnAgent: (spec, cwd) => {
+      const child = spawnAgentProcess(spec, cwd);
+      log("broker.agent-test-started", `broker=${process.pid} pid=${child.pid ?? "none"}`);
+      return child;
+    },
+    log,
+  });
   handler = createCommandHandler({
     sessionId,
     send,
@@ -229,7 +274,11 @@ async function main(): Promise<void> {
     consent: fileConsentStore(dataDir, browserId),
     folderActions,
     availability: launcher.availability,
-    install: (agent, onProgress) =>
+    checkAgent,
+    // 024 R-375 / R-377: install state, last test and the install lock, shared with other browsers' brokers.
+    shared: { dataDir, browserId, pid: process.pid },
+    tests,
+    install: (agent, onProgress, control) =>
       installAgent(
         agent,
         {
@@ -238,10 +287,13 @@ async function main(): Promise<void> {
           // `host/`, beside its folder in the dev `dist/` (S9 packaging, coverage F5).
           manifestsDir: shippedManifestsDirectory(fileURLToPath(new URL(".", import.meta.url))),
           nodePath: process.execPath,
-          run: runCommand,
+          // Under HALLPASS_TEST_MODE=1, HALLPASS_BROKER_TEST_INSTALL runs in place of npm ci (`broker/test-mode.ts`).
+          run: testInstall,
         },
         // T547 (G2): each phase reaches the panel as an overview.
         onProgress,
+        // 024 R-376 / R-377: the estimates written each second, and the cancel signal.
+        control,
       ),
     listNotice: index.notice,
     log,
@@ -260,8 +312,11 @@ async function main(): Promise<void> {
     await dial?.stop().catch(() => undefined);
     // The agents end with their input (R-313's first layer), within the bound; the job is the rest.
     let bound: ReturnType<typeof setTimeout> | undefined;
+    handler?.stopWatching();
+    // 024 R-374: a background `--version` retry ends with its tree, not left behind the exit.
+    handler?.stopChecks();
     await Promise.race([
-      pool.shutdown().catch(() => undefined),
+      Promise.all([pool.shutdown().catch(() => undefined), tests.shutdown().catch(() => undefined)]),
       new Promise<void>((done) => (bound = setTimeout(done, SHUTDOWN_BOUND_MS + 500))),
     ]);
     if (bound !== undefined) clearTimeout(bound);
@@ -325,6 +380,8 @@ async function main(): Promise<void> {
     },
     onDetached() {
       attachedRelayPid = undefined;
+      // 024 R-375: no settings page can be listening without the link; the next check-agents watches again.
+      handler?.stopWatching();
       openWindow("link-closed");
     },
     onFrame(value) {

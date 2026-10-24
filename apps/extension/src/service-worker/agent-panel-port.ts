@@ -9,6 +9,8 @@ import {
 import { isPanelWindowType, parsePanelWindowMessage } from "../panel-window.js";
 import { isTrustedControlSender } from "./shared-port.js";
 import type { AgentRuntime } from "./agent-runtime.js";
+import { openSettings, type SettingsRoute } from "./open-settings.js";
+import { isOwnerCommand, runOwnerCommand } from "./owner-commands.js";
 
 /**
  * The side panel's link to the agent path (003/T019).
@@ -61,6 +63,8 @@ export type AgentPanelPortInput = {
    * owner's own action - no consent card, no site mode. Absent, the panel is told `failed`.
    */
   tabCapture?: (request: { tabId: number; what: "screenshot" | "page" }) => Promise<TabCaptureResult>;
+  /** 024 T753: opens the settings page at a route; absent, the real one (`open-settings.ts`). */
+  openSettings?: (route: SettingsRoute) => Promise<void>;
 };
 
 export type AgentPanelPort = {
@@ -287,7 +291,20 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
           input.runtime.conversation.command(command);
           return;
         }
+        if (isOwnerCommand(command)) {
+          // 024 T749 (R-373): site modes, the diagnostics grant, revoke, unpair, upload folders and
+          // the browser's name go through the one handler the settings page's port uses too. Nothing
+          // is answered back - the panel re-reads the picture, as before.
+          void runOwnerCommand(input.runtime, command).catch(() => input.reportDiagnostic?.("agent.panel.owner-command-failed"));
+          return;
+        }
         switch (command.type) {
+          case "ui.agent.open-settings":
+            // 024 T753 (R-372): the extension's own settings page, at a route of the closed set.
+            void (input.openSettings ?? openSettings)(command.payload.route).catch(() =>
+              input.reportDiagnostic?.("agent.panel.open-settings-failed"),
+            );
+            return;
           case "ui.agent.pair-decide":
             void input.runtime.pairing.decide(command.payload.agentId, command.payload.accepted);
             return;
@@ -295,9 +312,6 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
             // A decline of this request only (006 FR-084 as amended 2026-09-24, 003 FR-032a): the
             // agent is answered at once and its next call raises a fresh card.
             void input.runtime.pairing.ignore(command.payload.agentId);
-            return;
-          case "ui.agent.unpair":
-            void input.runtime.unpair(command.payload.agentId);
             return;
           case "ui.agent.connect":
             input.runtime.connect();
@@ -345,26 +359,25 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
             // 017 FR-259, R-252: the session goes on; only its plan ends, at once.
             void input.runtime.sitePlans.withdraw(command.payload.sessionId);
             return;
-          case "ui.agent.site-mode":
-            void input.runtime.setSiteMode(command.payload.site, command.payload.mode);
-            return;
-          case "ui.agent.set-diagnostics":
-            // A consent of its own (US6, FR-049). Revoking is not just a stored `false`: the
-            // runtime detaches the debugger, so the browser's own warning about it goes away too.
-            void input.runtime.setDiagnostics(command.payload.site, command.payload.granted);
-            return;
           // 006/R-126: the rebuilt panel's four owner controls, each one runtime operation.
           case "ui.agent.retry-bridge":
             input.runtime.connect();
-            return;
-          case "ui.agent.site-clear":
-            void input.runtime.clearSiteMode(command.payload.site);
             return;
           case "ui.agent.session-stop":
             void input.runtime.stopSessionFromOwner(command.payload.sessionId);
             return;
           case "ui.agent.session-release":
             void input.runtime.releaseSessionTabs(command.payload.sessionId);
+            return;
+          case "ui.agent.browser-choice-decide":
+            // 018 FR-274: an answer to a card that was withdrawn, expired or never raised sends
+            // nothing to the host; said here as the site plan's refusal is.
+            if (!input.runtime.decideBrowserChoice(command.payload.requestId, command.payload.confirm)) {
+              input.reportDiagnostic?.("agent.panel.browser-choice-refused");
+            }
+            return;
+          case "ui.tab.capture":
+            void answerTabCapture(port, command.requestId, command.payload);
             return;
           /**
            * 014 FR-178: end the calls, keep the session.
@@ -374,35 +387,6 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
            * picture as it does after every other command. A press that found nothing running is
            * not an error the worker reports; the card says so in the moment.
            */
-          /**
-           * 014 FR-192: forget one remembered move; the next such move asks again.
-           *
-           * The row goes as soon as the store says so, because the store is the whole of it - no
-           * host, no file, nothing that can be out of reach (which is what makes this different
-           * from the upload directories the same list will show).
-           */
-          case "ui.agent.transition-clear":
-            void input.runtime.clearTransition(command.payload.from, command.payload.to);
-            return;
-          case "ui.agent.browser-rename":
-            // 018 FR-268: validated again in the worker, which strips and trims before storing.
-            void input.runtime.renameBrowser(command.payload.name);
-            return;
-          case "ui.agent.browser-choice-decide":
-            // 018 FR-274: an answer to a card that was withdrawn, expired or never raised sends
-            // nothing to the host; said here as the site plan's refusal is.
-            if (!input.runtime.decideBrowserChoice(command.payload.requestId, command.payload.confirm)) {
-              input.reportDiagnostic?.("agent.panel.browser-choice-refused");
-            }
-            return;
-          case "ui.agent.upload-root-clear":
-            // The press goes to the host; the row goes when the host answers (014 FR-192). Nothing
-            // is awaited here - the panel is told by the next projection, as it is for everything.
-            void input.runtime.clearUploadRoot(command.payload.root);
-            return;
-          case "ui.tab.capture":
-            void answerTabCapture(port, command.requestId, command.payload);
-            return;
           case "ui.agent.session-interrupt": {
             const ended = input.runtime.interruptSession(command.payload.sessionId);
             // What the press found, where a gate and a puzzled owner's log can read it: "nothing

@@ -8,6 +8,7 @@ import { hostDataDirectory } from "@hallpass/agent-host";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, readLiveBrowserRecords, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -122,7 +123,7 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
       await hostStateForMessage(panel),
     ).toBe(0);
     await hideList(panel);
-    expect(await consentSwitchState(panel)).not.toBe("granted");
+    expect(await consentSwitchState({ extensionContext, extensionId, extensionWorker })).not.toBe("granted");
 
     // Asked again on the next send (the agent stays unavailable until the owner says yes).
     await pickAgent(panel);
@@ -262,8 +263,8 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
     let external: McpHarnessClient | undefined;
     let tabId: number | undefined;
     try {
-      // Pairing is read off the Connections tab's status row.
-      await chooseTab(panel, "connections");
+      // Pairing is read off the Sessions tab's status row.
+      await chooseTab(panel, "sessions");
       external = await startMcpClient({ clientName: "Claude Code" });
       await panel.clickIfPresent(ui("agent.retry"));
       await pairWithFirstCall(external, panel, { locale });
@@ -279,13 +280,13 @@ test.describe("019 side-panel conversation - part 1 (T549)", () => {
       });
       expect(await selectedTab(panel)).toBe("conversation");
       // US7.2: the other tab counts what waits there.
-      expect(await connectionsCount(panel)).toBe("1");
+      expect(await sessionsCount(panel)).toBe("1");
       await panel.clickButton(ui("agent.refuse"));
       const refused = await asked;
       expect(refused.isError).toBe(true);
       expect(refused.json).toMatchObject({ outcome: "denied", reason: "owner-denied" });
       await expect.poll(() => pinnedPrompt(panel), { timeout: 15_000 }).toBeNull();
-      expect(await connectionsCount(panel)).toBeNull();
+      expect(await sessionsCount(panel)).toBeNull();
     } finally {
       if (tabId !== undefined) await extensionWorker.evaluate((id: number) => chrome.tabs.remove(id), tabId).catch(() => undefined);
       await external?.close().catch(() => undefined);
@@ -346,20 +347,23 @@ test.describe("019 side-panel conversation - part 2 (T557)", () => {
     expect((calls[4]!.args as { tabId?: number }).tabId).toBe(ownerTabId);
     expect(await groupIdOf(extensionWorker, ownerTabId)).toBeGreaterThan(-1);
 
-    // FR-308: the site row says who changed it last.
-    await chooseTab(panel, "connections");
+    // FR-308: the site row says who changed it last. The decision is recorded with its author...
+    await expect.poll(() => storedAuthorOf(extensionWorker, SITE), { timeout: 15_000 }).toBe("panel-agent");
+    // ...and since 024 (FR-385) the site row is the settings page's. It must say the same thing the
+    // panel's row did (FR-385: a moved control behaves as its side-panel counterpart did).
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+    await expect(settings.page.locator(`li.site[data-site=${JSON.stringify(SITE)}]`)).toBeVisible({ timeout: 15_000 });
     await expect
-      .poll(() => panel.evaluatePanel(`(()=>{const row=document.querySelector('[data-site=${JSON.stringify(SITE)}]');if(row&&!row.querySelector('.agent-site-more'))row.querySelector('.agent-site-more-button')?.click();return null})() ?? document.querySelector('[data-site=${JSON.stringify(SITE)}] .agent-site-author')?.textContent ?? null`), {
+      .poll(() => settings.evaluateSettings(`document.querySelector('li.site[data-site=${JSON.stringify(SITE)}]')?.textContent ?? ''`), {
         timeout: 15_000,
+        message: "019 FR-308: the settings page's site row does not say the side-panel agent changed it",
       })
-      .toBe(ui("agent.siteChangedBy.panel-agent"));
+      .toContain(ui("agent.siteChangedBy.panel-agent"));
 
-    // FR-309: withdrawal - the next browser call of the running agent is refused.
-    expect(await consentSwitchState(panel)).toBe("granted");
-    expect(
-      await panel.evaluatePanel("(()=>{const s=document.querySelector('.agent-panel-consent input[role=switch]');if(!s)return false;s.click();return true})()", true),
-    ).toBe(true);
-    await expect.poll(() => consentSwitchState(panel), { timeout: 15_000 }).toBe("withdrawn");
+    // FR-309: withdrawal - the next browser call of the running agent is refused. The switch is the
+    // settings page's Browser tools (024 FR-386).
+    expect(await settings.consent()).toBe("granted");
+    await settings.setBrowserTools(false);
     await expect.poll(() => readConsentFile(), { timeout: 10_000 }).toBe(false);
     await chooseTab(panel, "conversation");
     await waitComposerReady(panel);
@@ -990,15 +994,15 @@ async function selectedTab(panel: SidePanelDriver): Promise<string | null> {
   )) as string | null;
 }
 
-async function chooseTab(panel: SidePanelDriver, name: "conversation" | "connections"): Promise<void> {
+async function chooseTab(panel: SidePanelDriver, name: "conversation" | "sessions"): Promise<void> {
   expect(await panel.evaluatePanel(`(()=>{const b=document.getElementById('agent-tab-${name}');if(!b)return false;b.click();return true})()`, true)).toBe(
     true,
   );
   await expect.poll(() => selectedTab(panel), { timeout: 10_000 }).toBe(name);
 }
 
-async function connectionsCount(panel: SidePanelDriver): Promise<string | null> {
-  return (await panel.evaluatePanel("document.querySelector('#agent-tab-connections [data-tab-count]')?.textContent ?? null")) as
+async function sessionsCount(panel: SidePanelDriver): Promise<string | null> {
+  return (await panel.evaluatePanel("document.querySelector('#agent-tab-sessions [data-tab-count]')?.textContent ?? null")) as
     | string
     | null;
 }
@@ -1026,10 +1030,27 @@ async function buttonLabels(panel: SidePanelDriver, selector: string): Promise<s
   )) as string[];
 }
 
-async function consentSwitchState(panel: SidePanelDriver): Promise<string | null> {
-  return (await panel.evaluatePanel("document.querySelector('.agent-panel-consent')?.getAttribute('data-consent') ?? null")) as
-    | string
-    | null;
+/** 024 FR-386: the side-panel-agent consent, as the settings page's Browser tools shows it. */
+async function consentSwitchState(fixtures: { extensionContext: BrowserContext; extensionId: string; extensionWorker: PackagedWorker }): Promise<string | null> {
+  const settings = await openSettingsPage({
+    context: fixtures.extensionContext,
+    worker: fixtures.extensionWorker,
+    extensionId: fixtures.extensionId,
+    locale,
+    route: "#tools",
+  });
+  const state = await settings.consent();
+  await settings.close();
+  return state;
+}
+
+/** Who the worker recorded as the last to change a site's mode (019 FR-308). */
+async function storedAuthorOf(worker: PackagedWorker, site: string): Promise<unknown> {
+  return worker.evaluate(async (origin: string) => {
+    const raw = await chrome.storage.local.get(["agentSiteModes"]);
+    const records = (raw.agentSiteModes ?? {}) as Record<string, { changedBy?: string }>;
+    return records[origin]?.changedBy;
+  }, site);
 }
 
 /** 020 FR-313: the agent is chosen on the agent chip under the message box (a menu button). */
