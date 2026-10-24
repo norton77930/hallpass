@@ -4,6 +4,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { SCREENSHOT_UPLOAD_SENTENCES } from "../../../packages/agent-host/src/screenshot-cache.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -65,12 +66,12 @@ test.describe("agent upload image", () => {
   }) => {
     test.setTimeout(300_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
       const page = await fixturePage(extensionContext);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // ============= the answer an agent reads: a picture, an id, and what to do with it =============
       const shot = await client.callTool("screenshot", { tabId });
@@ -140,12 +141,12 @@ test.describe("agent upload image", () => {
   }) => {
     test.setTimeout(300_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
       const page = await fixturePage(extensionContext);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       const shot = await client.callTool("screenshot", { tabId });
       expect(shot.isError, shot.text).toBe(false);
@@ -206,7 +207,7 @@ test.describe("agent upload image", () => {
 
     // ---------- session 1: an id nobody issued, and an id this session let go of ----------
     {
-      const { panel, client, call } = await pairedSession(
+      const { settings, client, call } = await pairedSession(
         { extensionContext, extensionId, extensionWorker },
         { HALLPASS_SCREENSHOT_RETENTION_MS: String(retentionMs) },
       );
@@ -214,7 +215,7 @@ test.describe("agent upload image", () => {
       try {
         const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
         const page = await fixturePage(extensionContext);
-        await setSiteMode(panel, SITE, "skip-checks");
+        await settings.setSiteMode(SITE, "skip-checks");
         await reset(page);
         const visible = nodeFor(await readNodes(call, tabId), "Visible attachment");
 
@@ -259,7 +260,7 @@ test.describe("agent upload image", () => {
       // gives up the oldest to make room (oldest-first, stop when it fits).
       const budgetChars = Math.ceil(sizeChars * 1.5);
       expect(sizeChars, "no screenshot was measured in the first session").toBeGreaterThan(0);
-      const { panel, client, call } = await pairedSession(
+      const { settings, client, call } = await pairedSession(
         { extensionContext, extensionId, extensionWorker },
         { HALLPASS_SCREENSHOT_BUDGET_CHARS: String(budgetChars) },
       );
@@ -267,7 +268,7 @@ test.describe("agent upload image", () => {
       try {
         const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
         const page = await fixturePage(extensionContext);
-        await setSiteMode(panel, SITE, "skip-checks");
+        await settings.setSiteMode(SITE, "skip-checks");
         await reset(page);
         const visible = nodeFor(await readNodes(call, tabId), "Visible attachment");
 
@@ -313,14 +314,14 @@ test.describe("agent upload image", () => {
   }) => {
     test.setTimeout(300_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     try {
       const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
       const page = await fixturePage(extensionContext);
       // The read has to happen before the site is put in `ask`: a read is not an effect either way,
       // and this keeps the one card of this journey the upload's own.
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       const visible = nodeFor(await readNodes(call, tabId), "Visible attachment");
       await reset(page);
       const shot = await client.callTool("screenshot", { tabId });
@@ -328,7 +329,7 @@ test.describe("agent upload image", () => {
       const imageId = (shot.json as { imageId: string }).imageId;
       const size = Buffer.from(shot.images[0]!.data, "base64").length;
 
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
 
       // ============= refused: the page is untouched and the agent is told who said no =============
       const refusedCall = client.callTool("upload_image", { tabId, imageId, ref: visible.ref });
@@ -377,7 +378,7 @@ test.describe("agent upload image", () => {
       // The refused upload left no line: the list is what a session *did*, not what it asked.
       expect(panelText).not.toContain(ui("agent.activity.uploadDrop").replace("{site}", SITE));
 
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("tabs_close", { tabId });
     } finally {
       await live?.close();
@@ -395,13 +396,13 @@ test.describe("agent upload image", () => {
   test("keeps a picture across a worker restart", async ({ extensionContext, extensionId, extensionWorker }) => {
     test.setTimeout(600_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let tabId = 0;
     try {
       tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
       const page = await fixturePage(extensionContext);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await reset(page);
 
       const shot = await client.callTool("screenshot", { tabId });
@@ -450,13 +451,13 @@ test.describe("agent upload image", () => {
   test("forgets a picture when the session ends", async ({ extensionContext, extensionId, extensionWorker }) => {
     test.setTimeout(600_000);
 
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let tabId = 0;
     try {
       tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
       const page = await fixturePage(extensionContext);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await reset(page);
 
       const shot = await client.callTool("screenshot", { tabId });
@@ -531,32 +532,6 @@ function nodeFor(nodes: ReadNode[], name: string): ReadNode & { ref: string } {
 }
 
 /**
- * One site's mode through the panel's own control (FR-042), never by writing storage.
- *
- * Addressed by `data-site` rather than by finding the list row whose text contains the site (which
- * is what the older sibling journeys do): once this journey has an *activity* line on the card, that
- * line is an `li` naming the same site and has no mode control in it.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      () => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
-}
-
-/**
  * One paired MCP session with the panel open, exactly as the sibling journeys start.
  *
  * `env` reaches the session's own `mcp-server` process and nothing else, which is how journey 3
@@ -571,6 +546,8 @@ async function pairedSession(
   env: Record<string, string> = {},
 ): Promise<{
   panel: SidePanelDriver;
+  /** 024 FR-385: site modes are set on the settings page, open beside the panel. */
+  settings: SettingsPageDriver;
   client: McpHarnessClient;
   call: (tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }> {
@@ -602,5 +579,6 @@ async function pairedSession(
     expect(result.isError, `${tool} failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
     return result.json;
   };
-  return { panel, client, call };
+  const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+  return { panel, settings, client, call };
 }

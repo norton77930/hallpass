@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AGENT_PANEL_PORT_NAME } from "@hallpass/contracts";
+import { AGENT_PANEL_PORT_NAME, AGENT_SETTINGS_PORT_NAME } from "@hallpass/contracts";
 import { bindServiceWorker } from "../src/service-worker/bootstrap.js";
 import type { AgentPath } from "../src/service-worker/agent-entry.js";
 
@@ -83,13 +83,19 @@ function fakeChrome(options: { sidePanel?: boolean } = {}) {
   return { chromeStub, connectListeners, tabUpdateListeners, behaviors };
 }
 
-function fakeAgentPath(): AgentPath & { accepted: string[] } {
+function fakeAgentPath(): AgentPath & { accepted: string[]; settingsAccepted: string[] } {
   const accepted: string[] = [];
+  const settingsAccepted: string[] = [];
   return {
     accepted,
+    settingsAccepted,
     portName: AGENT_PANEL_PORT_NAME,
     accept(port) {
       accepted.push(port.name);
+    },
+    settingsPortName: AGENT_SETTINGS_PORT_NAME,
+    acceptSettings(port) {
+      settingsAccepted.push(port.name);
     },
   };
 }
@@ -115,6 +121,22 @@ describe("bindServiceWorker", () => {
     expect(agentPath.accepted).toEqual([AGENT_PANEL_PORT_NAME]);
     expect(strangerPort.posted).toEqual([]);
     expect(strangerPort.listeners).toBe(0);
+  });
+
+  // 024 T747 (R-373): the settings page's port goes to its own door, which proves who is calling;
+  // it never reaches the panel's.
+  it("hands the settings page's port to the settings door, and never to the panel's", () => {
+    const { chromeStub, connectListeners } = fakeChrome();
+    vi.stubGlobal("chrome", chromeStub);
+    const agentPath = fakeAgentPath();
+    bindServiceWorker(agentPath);
+
+    const settingsPort = fakePort(AGENT_SETTINGS_PORT_NAME);
+    connectListeners[0]?.(settingsPort);
+
+    expect(agentPath.settingsAccepted).toEqual([AGENT_SETTINGS_PORT_NAME]);
+    expect(agentPath.accepted).toEqual([]);
+    expect(settingsPort.disconnected).toBe(0);
   });
 
   /**

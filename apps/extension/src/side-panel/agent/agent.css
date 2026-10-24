@@ -247,135 +247,6 @@
   text-align: left;
 }
 
-/* 016 FR-223: one row per paired agent - its name, then its own unpair. */
-.agent-menu-row {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding-left: var(--sp-2);
-}
-
-.agent-menu-name {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.agent-menu-row button {
-  width: auto;
-}
-
-/* ---------- this browser (018 FR-268, FR-279) ---------- */
-
-.agent-browser {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-
-.agent-browser-line,
-.agent-browser-form {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.agent-browser-line {
-  min-height: 32px;
-}
-
-/* T605: "This browser: …" is a quiet line; Rename beside it reads as a link. */
-.agent-browser-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  color: var(--text-2);
-}
-
-/* ---------- the side-panel agent's permission (019 FR-309), T605: a switch row ---------- */
-
-.agent-panel-consent {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 0;
-}
-
-.agent-shell .agent-panel-consent-switch {
-  min-height: 32px;
-  color: var(--text);
-}
-
-.agent-shell .agent-panel-consent-switch input[role="switch"] {
-  position: relative;
-  flex: none;
-  width: 30px;
-  height: 18px;
-  margin: 0;
-  border-radius: var(--r-pill);
-  background: var(--line-strong);
-  appearance: none;
-  cursor: pointer;
-}
-
-.agent-shell .agent-panel-consent-switch input[role="switch"]::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--bg);
-  transition: left 0.15s ease;
-}
-
-.agent-shell .agent-panel-consent-switch input[role="switch"]:checked {
-  background: var(--accent);
-}
-
-.agent-shell .agent-panel-consent-switch input[role="switch"]:checked::after {
-  left: 14px;
-  background: var(--accent-text);
-}
-
-.agent-shell .agent-panel-consent-note {
-  margin: 0;
-  padding-left: calc(30px + var(--sp-2));
-  color: var(--text-3);
-  font-size: var(--fs-1);
-}
-
-.agent-browser-input {
-  flex: 1 1 12em;
-  min-width: 0;
-  font: inherit;
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-1);
-  padding: var(--sp-1) var(--sp-2);
-}
-
-.agent-browser-input[aria-invalid="true"] {
-  border-color: var(--danger);
-}
-
-.agent-browser-error {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: var(--fs-1);
-  color: var(--danger);
-}
-
-.agent-browser-others {
-  margin: 0;
-  font-size: var(--fs-1);
-  color: var(--text-3);
-}
-
 /* ---------- prompt card ---------- */
 
 .agent-prompt {
@@ -658,102 +529,6 @@
   color: var(--text-3);
 }
 
-/* T606 (B2): what the upload list is for, in one short secondary line. */
-.agent-upload-roots-intro,
-.agent-upload-roots-empty {
-  color: var(--text-3);
-  font-size: var(--fs-1);
-}
-
-.agent-upload-roots-path {
-  font-size: var(--fs-1);
-  line-height: 1.35;
-  color: var(--text-3);
-  overflow-wrap: anywhere;
-}
-
-
-/* T605: one row per allowed directory - its path on a nested surface, its revoke at the end. */
-.agent-upload-roots ul,
-.agent-transitions ul {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  margin-bottom: var(--sp-2);
-}
-
-.agent-upload-root,
-.agent-transition {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--sp-1) var(--sp-2);
-  padding: var(--sp-1) var(--sp-1) var(--sp-1) 10px;
-  border-radius: var(--r-2);
-  background: var(--surface);
-}
-
-.agent-upload-root-path,
-.agent-transition-pair {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.agent-upload-root-path {
-  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
-  font-size: var(--fs-1);
-}
-
-/*
- * T606 (B4): the folder takes what the x leaves, however long its path is (basis 0, so the x never
- * wraps to a line of its own); a "waiting for the host" note goes on the line below. T607 (S3): the
- * folder's name on one line and its path under it on one line that ends in an ellipsis (the title
- * has the whole path).
- */
-.agent-upload-root > .agent-upload-root-text {
-  display: flex;
-  flex: 1 1 0;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.agent-upload-root-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-upload-root-text > .agent-upload-root-path {
-  flex: none;
-  overflow: hidden;
-  color: var(--text-3);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-upload-root > .agent-icon-button {
-  flex: none;
-}
-
-.agent-upload-root > .agent-upload-root-pending {
-  flex: 0 0 100%;
-}
-
-.agent-upload-root-pending,
-.agent-transition-used {
-  color: var(--text-3);
-  font-size: var(--fs-1);
-}
-
-.agent-upload-roots-warning {
-  padding: var(--sp-1) var(--sp-2);
-  border-radius: var(--r-1);
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: var(--fs-2);
-}
-
 .agent-session-state {
   color: var(--text-2);
 }
@@ -812,166 +587,6 @@
   padding-left: var(--sp-2);
   border-left: 2px solid var(--line);
   color: var(--text-2);
-}
-
-/* ---------- site list ---------- */
-
-/*
- * T605: no box around the list - a small heading with a hairline above it (see "shared small
- * controls"), then one row per site with its mode on the right.
- */
-.agent-sites {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.agent-shell .agent-sites h2,
-.agent-shell .agent-sites h3 {
-  margin-bottom: 0;
-}
-
-.agent-sites > p {
-  color: var(--text-2);
-}
-
-.agent-site {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  padding: var(--sp-2) 0;
-}
-
-.agent-site + .agent-site {
-  border-top: 1px solid var(--line);
-}
-
-.agent-site-name {
-  min-width: 0;
-  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
-  font-size: var(--fs-2);
-}
-
-.agent-site-author {
-  color: var(--text-3);
-  font-size: var(--fs-1);
-}
-
-
-
-/*
- * T606 (B1): one line per site - its name, then its mode as a chip and a "more" button. What the
- * chip or "more" opens is drawn under the line, over what follows, and leaves on Escape or a press
- * elsewhere.
- */
-.agent-site {
-  position: relative;
-  flex-direction: row;
-  flex-wrap: nowrap;
-  align-items: center;
-  column-gap: var(--sp-2);
-}
-
-/* The host stays on the one line (the full name is its title); the chip and "more" never wrap away. */
-.agent-site-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-site-controls {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-  white-space: nowrap;
-}
-
-.agent-shell button.agent-site-mode-chip {
-  flex: none;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  min-height: 26px;
-  padding: 2px var(--sp-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-pill);
-  background: var(--bg);
-  color: var(--text-2);
-  font-size: var(--fs-1);
-}
-
-/* 016 FR-235: acting without asking is marked on its own chip, in the warning colour. */
-.agent-shell button[data-site-mode][data-permissive="true"] {
-  border-color: var(--warn);
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.agent-shell button.agent-site-more-button {
-  width: 28px;
-  height: 28px;
-  min-height: 28px;
-}
-
-.agent-site-popup {
-  position: absolute;
-  top: calc(100% - var(--sp-1));
-  right: 0;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  min-width: 180px;
-  max-width: 100%;
-  margin: 0;
-  padding: var(--sp-1);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  background: var(--bg);
-  box-shadow: 0 8px 28px color-mix(in srgb, var(--text) 18%, transparent);
-  list-style: none;
-}
-
-.agent-site-more {
-  padding: var(--sp-2);
-  color: var(--text-2);
-  font-size: var(--fs-1);
-}
-
-.agent-shell .agent-site-mode-menu button {
-  width: 100%;
-  border-color: transparent;
-  background: transparent;
-  text-align: left;
-}
-
-.agent-shell .agent-site-mode-menu button:hover,
-.agent-shell .agent-site-mode-menu button:focus-visible {
-  background: var(--surface-2);
-}
-
-.agent-shell .agent-site-mode-menu button[aria-checked="true"] {
-  font-weight: 600;
-}
-
-.agent-shell .agent-site-mode-menu button[data-mode="skip-checks"] {
-  color: var(--warn);
-}
-
-.agent-site-diagnostics {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-.agent-site-more .agent-site-revoke {
-  align-self: flex-start;
 }
 
 /* A control that must be there but should not compete: text-sized, no fill until hovered. */
@@ -1062,19 +677,6 @@
 .agent-shell button.agent-icon-button:hover {
   background: var(--surface-2);
   color: var(--text);
-}
-
-/* A text button that reads as a link (Rename). */
-.agent-shell button.agent-link {
-  min-height: 28px;
-  padding: var(--sp-1);
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-}
-
-.agent-shell button.agent-link:hover {
-  background: var(--accent-soft);
 }
 
 /* A section's small muted heading with a hairline above it, instead of a box around it. */
@@ -2028,6 +1630,43 @@
   font-size: var(--fs-1);
 }
 
+/*
+ * 024 FR-384: an enabled agent that cannot start is listed greyed, with one line saying why and a link
+ * to its card on the settings page. The line starts under the agent's name (badge, gap, row padding).
+ */
+.agent-shell .agent-conversation-menu-item:disabled {
+  cursor: default;
+}
+
+.agent-shell .agent-conversation-menu-item:disabled:hover {
+  background: transparent;
+}
+
+.agent-conversation-reason-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  padding: 0 var(--sp-2) var(--sp-2) calc(26px + 10px + var(--sp-2));
+}
+
+.agent-conversation-reason {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-shell button.agent-conversation-menu-link {
+  flex: none;
+  padding: 2px var(--sp-2);
+  border-color: transparent;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-1);
+  text-decoration: underline;
+}
+
 /* 019 T563: the folder chooser (in the popup). */
 .agent-conversation-folders {
   display: flex;
@@ -2107,31 +1746,6 @@
   background: var(--bg);
   color: var(--text);
   font: inherit;
-}
-
-/* Indeterminate: npm's byte count is not sent, so the bar says "under way", not how far (R-314). */
-.agent-conversation-progress {
-  height: var(--sp-1);
-  border-radius: var(--r-1);
-  background: linear-gradient(90deg, var(--surface-2) 0%, var(--accent) 50%, var(--surface-2) 100%);
-  background-size: 200% 100%;
-  animation: agent-conversation-progress 1.5s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-conversation-progress {
-    animation: none;
-    background: var(--accent);
-  }
-}
-
-@keyframes agent-conversation-progress {
-  from {
-    background-position: 100% 0;
-  }
-  to {
-    background-position: -100% 0;
-  }
 }
 
 /* ---------- 020 FR-321 (T598): the drawer of conversations, from the left over a scrim ---------- */

@@ -4,6 +4,7 @@ import { ATTENTION_BADGE_TEXT } from "../../../apps/extension/src/chrome-adapter
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { acceptPairing, pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SiteMode } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -148,7 +149,7 @@ test.describe("agent first run: the panel nobody opened", () => {
       // --- SC-080, second transition: answered, so the icon is plain again. ---
       await expect.poll(() => badgeText(extensionWorker), { timeout: 15_000 }).toBe("");
 
-      await unpairAgent(panel, { locale });
+      await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
     } finally {
       await client?.close();
     }
@@ -187,7 +188,7 @@ test.describe("agent first run: the panel nobody opened", () => {
 
       heldTab = ((await call("tabs_create", { url: ORDINARY })) as { tabId: number }).tabId;
       const held = heldTab;
-      await setSiteMode(panel, SITE, "ask");
+      await setSiteMode({ context: extensionContext, worker: extensionWorker, extensionId }, SITE, "ask");
       // A read is not an effect, so it asks nothing - and it gives the ref the click needs.
       await call("read_page", { tabId: held, filter: "interactive" });
 
@@ -246,7 +247,7 @@ test.describe("agent first run: the panel nobody opened", () => {
 
       await call("tabs_close", { tabId: held });
       heldTab = undefined;
-      await unpairAgent(panel, { locale });
+      await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
     } finally {
       if (client && heldTab !== undefined) {
         await client.callTool("tabs_close", { tabId: heldTab, force: true }).catch(() => undefined);
@@ -365,7 +366,7 @@ test.describe("agent first run: the panel nobody opened", () => {
       heldTab = ((await call("tabs_create", { url: GESTURES })) as { tabId: number }).tabId;
       const held = heldTab;
       // The pointer is the subject here, so no card stands between the calls and the page.
-      await setSiteMode(panel, SITE, "skip-checks");
+      await setSiteMode({ context: extensionContext, worker: extensionWorker, extensionId }, SITE, "skip-checks");
       await call("read_page", { tabId: held, filter: "interactive" });
 
       const page = await pageAt(extensionContext, GESTURES);
@@ -458,7 +459,7 @@ test.describe("agent first run: the panel nobody opened", () => {
 
       await call("tabs_close", { tabId: held });
       heldTab = undefined;
-      await unpairAgent(panel, { locale });
+      await unpairAgent(panel, await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale }), { locale });
     } finally {
       if (client && heldTab !== undefined) {
         await client.callTool("tabs_close", { tabId: heldTab, force: true }).catch(() => undefined);
@@ -550,23 +551,19 @@ async function refFor(
   return first as string;
 }
 
-/** The same panel-driven site mode the sibling journeys use; never a storage write (FR-042). */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
-      timeout: 15_000,
-    })
-    .toBe(mode);
+/**
+ * A site's mode, set on the settings page (024 FR-385) as the sibling journeys do; never a storage
+ * write (FR-042). The page is closed again, so what this journey counts - panel documents, the badge -
+ * is what it was before the settings page existed.
+ */
+async function setSiteMode(
+  fixtures: { context: BrowserContext; worker: PackagedWorker; extensionId: string },
+  site: string,
+  mode: SiteMode,
+): Promise<void> {
+  const settings = await openSettingsPage({ ...fixtures, locale, route: "#sites" });
+  await settings.setSiteMode(site, mode);
+  await settings.close();
 }
 
 /** The owner's own page for a url a tool opened, so the page's DOM can be read directly. */

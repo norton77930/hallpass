@@ -39,12 +39,12 @@ import { Chip, Composer, FixedChip } from "./Composer.js";
 import { ConversationDrawer, ConversationListNotice } from "./ConversationDrawer.js";
 import { ConversationHeader } from "./ConversationHeader.js";
 import { pictureOf, type ConversationLogs } from "./conversation-log.js";
-import { AgentProblemCard, FirstUseCard, InstallProgress } from "./FirstUseCard.js";
+import { FirstUseCard, NotReadyCard } from "./FirstUseCard.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { errorDetailWords, keyEnvHintIn, modelUnreachableHint, notAFolderPath } from "./broker-words.js";
 import { folderName } from "./folder-name.js";
 import { PassIcon } from "./icons.js";
-import { defaultAgent, useLastAgent } from "./last-agent.js";
+import { enabledAgents, startingAgent } from "./agent-choice.js";
 import { MessageList } from "./MessageList.js";
 import { ModeMenu } from "./ModeMenu.js";
 import { PermissionCard } from "./PermissionCard.js";
@@ -235,10 +235,11 @@ export function ConversationTab(props: {
   const drafts = memory.drafts;
   /** 022: transfers under way, by conversation - given up when the owner leaves it or the panel closes. */
   const transfers = memory.transfers;
-  const [lastAgent, rememberAgent] = useLastAgent();
-  /** The agent the owner put on the chip; until then the FR-313 default. */
+  /**
+   * The agent the owner put on the chip for the conversation they are writing; until then, and again
+   * after it started, the owner's default (024 FR-384, R-380).
+   */
   const [ownerAgent, setOwnerAgent] = useState<ConversationAgent | undefined>(undefined);
-  const [installing, setInstalling] = useState<ConversationAgent | undefined>(undefined);
   /** An error the owner already acted on (Download, Retry, Send), so an older failure does not reappear. */
   const [handledError, setHandledError] = useState<ConversationError | undefined>(undefined);
   /** 020 FR-321 (T598): the drawer of conversations, over whatever is shown (which stays behind it). */
@@ -273,19 +274,12 @@ export function ConversationTab(props: {
 
   const start = (agent: ConversationAgent, folder: ConversationFolder, mode: ConversationMode): void => {
     setHandledError(props.lastError);
-    rememberAgent(agent);
     const known = new Set(conversation.conversations.map((entry) => entry.conversationId));
     setHeld((message) => (message === undefined ? undefined : { ...message, known }));
     // 021 FR-361: the chip's mode goes with the start, for every agent - a switch sent beside the first
     // message raced it (Hermes' restart refused `busy`, Claude's reload refusing the message).
     send({ type: "ui.conversation.start", payload: { agent, folder, ...(mode === "strict" ? {} : { mode }) } });
   };
-
-  const installingReady = installing !== undefined && availabilityOf(installing)?.availability === "ready";
-  useEffect(() => {
-    // The connector arrived: the install is over and the agent is offered as ready.
-    if (installingReady) setInstalling(undefined);
-  }, [installingReady]);
 
   const startable = pendingStart !== undefined && availabilityOf(pendingStart.agent)?.availability === "ready" && consented;
   useEffect(() => {
@@ -320,6 +314,8 @@ export function ConversationTab(props: {
     // FR-361: the mode went with the start; nothing is switched beside the first message.
     // T701: the choice was that conversation's - the next new one starts strict (D-019 default).
     setNewMode("strict");
+    // 024: likewise the agent - the next new conversation starts on the owner's default again.
+    setOwnerAgent(undefined);
     if (held.attachments !== undefined && held.attachments.length > 0 && attachSupport !== undefined) {
       // 022 FR-337, R-338: the attachments leave now that the conversation exists, then the words.
       drafts.update(NEW_DRAFT_KEY, (current) => ({ ...current, attachments: [] }));
@@ -337,12 +333,11 @@ export function ConversationTab(props: {
   }, [held, opened, openedListed, openedState, openedCancelled]);
 
   useEffect(() => {
-    // A refused start or consent gives the words back; an install's refusal is the install view's,
-    // and while the first-use card is up nothing has left yet.
-    if (freshError === undefined || installing !== undefined || asking || held === undefined) return;
+    // A refused start or consent gives the words back; while the first-use card is up nothing has left yet.
+    if (freshError === undefined || asking || held === undefined) return;
     giveBack();
     setPendingStart(undefined);
-  }, [freshError, installing, asking, held]);
+  }, [freshError, asking, held]);
 
   /** The held words were not sent: they go back into the box (T606 A2) and the hold ends. */
   function giveBack(): void {
@@ -545,16 +540,14 @@ export function ConversationTab(props: {
     pickedFolder.kind === "project" && !conversation.folders.some((entry) => entry.path === pickedFolder.path)
       ? SCRATCH
       : pickedFolder;
-  const agent = ownerAgent ?? defaultAgent(lastAgent, conversation.agents);
-
-  const install = (target: ConversationAgent, startIn: ConversationFolder): void => {
-    // FR-299: the consent goes first, and only on the owner's press; the install follows it.
-    setPendingStart({ agent: target, folder: startIn });
-    setHandledError(props.lastError);
-    setInstalling(target);
-    if (!consented) send({ type: "ui.conversation.consent", payload: { granted: true } });
-    send({ type: "ui.conversation.install", payload: { agent: target } });
-  };
+  // 024 FR-384, R-380: the agents the owner switched on, and the default a new conversation starts on.
+  // What the owner put on the chip holds only while that agent stays enabled; the settings page
+  // changing the choices arrives in the projection and is followed at once.
+  const enabled = enabledAgents(conversation.choices);
+  const agent = ownerAgent !== undefined && enabled.includes(ownerAgent) ? ownerAgent : startingAgent(conversation.choices, conversation.agents);
+  /** FR-384: the settings page at one agent's card - the picker's reason link and the note above the box. */
+  const openSettings = (target: ConversationAgent | undefined): void =>
+    send({ type: "ui.agent.open-settings", payload: { route: target === undefined ? "#agents" : `#agents/${target}` } });
 
   // T606 (A1): the new-conversation button is always there; here it only puts the focus in the box.
   const focusBox = (): void => frame.current?.querySelector<HTMLTextAreaElement>(".agent-conversation-composer textarea")?.focus();
@@ -566,22 +559,21 @@ export function ConversationTab(props: {
       agent={agent}
       agentName={agentName}
       agents={conversation.agents}
+      enabled={enabled}
       folder={folder}
       folders={conversation.folders}
       mode={newMode}
-      lastUsed={lastAgent}
       draft={draft}
       composerDraft={newDraft}
       {...(attachSupport === undefined ? {} : { attach: { ...attachSupport, accepts: availabilityOf(agent)?.accepts } })}
       held={held !== undefined}
       {...(held?.bubble === true ? { heldWords: held.text, heldAttachments: held.attachments ?? [] } : {})}
       asking={asking}
-      installing={installing}
-      {...(installing === undefined ? {} : { installPhase: availabilityOf(installing)?.installing ?? "preparing" })}
       {...(freshError === undefined ? {} : { error: freshError })}
       {...actionFor(freshError)}
       send={send}
       onAgent={setOwnerAgent}
+      onOpenSettings={openSettings}
       onFolder={setPickedFolder}
       onMode={setNewMode}
       onDraft={setDraft}
@@ -605,24 +597,14 @@ export function ConversationTab(props: {
         }
       }}
       onAccept={() => {
+        // FR-299: the one-time consent, on the owner's press; the start waits for the worker to report it.
         setAsking(false);
-        if (availabilityOf(agent)?.availability === "needs-install") {
-          install(agent, folder);
-        } else {
-          setHandledError(props.lastError);
-          setPendingStart({ agent, folder });
-          send({ type: "ui.conversation.consent", payload: { granted: true } });
-        }
+        setHandledError(props.lastError);
+        setPendingStart({ agent, folder });
+        send({ type: "ui.conversation.consent", payload: { granted: true } });
       }}
       onCancel={() => {
         setAsking(false);
-        giveBack();
-      }}
-      onRetry={() => installing !== undefined && install(installing, pendingStart?.folder ?? folder)}
-      onCancelInstall={() => {
-        setPendingStart(undefined);
-        setHandledError(props.lastError);
-        setInstalling(undefined);
         giveBack();
       }}
     />,
@@ -647,11 +629,11 @@ function NewConversation(props: {
   agent: ConversationAgent;
   agentName: (agent: ConversationAgent) => string;
   agents: ConversationPanelState["agents"];
+  /** 024 R-380: the agents the owner switched on - the picker lists these. */
+  enabled: readonly ConversationAgent[];
   folder: ConversationFolder;
   folders: ConversationPanelState["folders"];
   mode: ConversationMode;
-  /** T606 (C8): the agent the panel remembers using last. */
-  lastUsed?: ConversationAgent | undefined;
   draft: string;
   /** 022: the empty conversation's whole draft - the words and the attachments. */
   composerDraft: ComposerDraft;
@@ -664,20 +646,18 @@ function NewConversation(props: {
   /** 022 FR-337: the attachments held with them. */
   heldAttachments?: readonly DraftAttachment[];
   asking: boolean;
-  installing: ConversationAgent | undefined;
-  installPhase?: NonNullable<ConversationPanelState["agents"][number]["installing"]>;
   error?: ConversationError;
   errorAction?: NoticeAction;
   send: SendCommand;
-  onAgent:(agent: ConversationAgent) => void;
+  onAgent: (agent: ConversationAgent) => void;
+  /** 024 FR-384: the settings page at an agent's card (`undefined`: at the agents section). */
+  onOpenSettings: (agent: ConversationAgent | undefined) => void;
   onFolder: (folder: ConversationFolder) => void;
   onMode: (mode: ConversationMode) => void;
   onDraft: (text: string) => void;
   onSend: () => void;
   onAccept: () => void;
   onCancel: () => void;
-  onRetry: () => void;
-  onCancelInstall: () => void;
 }): ReactElement {
   const { t, agent } = props;
   const [opened, setOpened] = useState<"agent" | "folder" | "mode" | undefined>(undefined);
@@ -687,10 +667,10 @@ function NewConversation(props: {
   const ids = { agent: useId(), folder: useId(), mode: useId() };
   const name = props.agentName(agent);
   const entry = props.agents.find((candidate) => candidate.agent === agent);
-  const availability = entry?.availability;
-  // A not-installed agent, or one whose version does not fit, cannot be sent to (FR-301, FR-313).
-  const reachable = availability === "ready" || availability === "needs-install";
-  const holding = props.held || props.asking || props.installing !== undefined;
+  // 024 FR-384: an agent that is not ready - not installed, still to be downloaded, a version that does
+  // not fit, not reported yet - or that the owner switched off cannot be sent to (FR-301, FR-313).
+  const reachable = entry?.availability === "ready" && props.enabled.includes(agent);
+  const holding = props.held || props.asking;
   // 022 FR-336: words or a ready attachment, and nothing still being prepared.
   const sendable = draftSendable(props.composerDraft) && reachable;
   const toggle = (which: "agent" | "folder" | "mode") => setOpened((current) => (current === which ? undefined : which));
@@ -703,35 +683,27 @@ function NewConversation(props: {
   const folderPath = props.folder.kind === "project" ? props.folder.path : undefined;
 
   let above: ReactElement | null = null;
-  if (props.installing !== undefined) {
-    // Any refusal of the install ends the wait (not only `install-failed`): consent-needed,
-    // broker-unavailable after a relay restart, agent-missing... The broker's redacted detail says why.
-    const failure = props.error?.detail;
-    above = (
-      <InstallProgress
-        // T547 (G2): the phase the broker names; "preparing" until it has named one.
-        phase={props.installPhase ?? "preparing"}
-        size={t(`conversation.size.${props.installing}`)}
-        t={t}
-        {...(failure === undefined ? {} : { failure })}
-        onRetry={props.onRetry}
-        onCancel={props.onCancelInstall}
-      />
-    );
-  } else if (props.asking) {
+  if (props.asking) {
     above = (
       <FirstUseCard
         agentName={name}
         agent={agent}
-        {...(availability === "needs-install" ? { size: t(`conversation.size.${agent}`) } : {})}
         {...(entry?.notes === undefined ? {} : { notes: entry.notes })}
         t={t}
         onAccept={props.onAccept}
         onCancel={props.onCancel}
       />
     );
-  } else if (entry !== undefined && !reachable) {
-    above = <AgentProblemCard agent={entry} agentName={name} t={t} />;
+  } else if (!reachable) {
+    // 024 FR-384: one line saying why, and the way to the agent's card; nothing is downloaded from here.
+    above = (
+      <NotReadyCard
+        entry={entry}
+        agentName={name}
+        t={t}
+        onOpenSettings={() => props.onOpenSettings(props.enabled.includes(agent) ? agent : undefined)}
+      />
+    );
   } else if (props.held) {
     // 021 FR-354: which agent is starting, and for DeepSeek that the first start is slow. Cancel comes
     // with the open conversation once the broker lists it (it does from the start); Stop names a conversation.
@@ -751,7 +723,7 @@ function NewConversation(props: {
         details={{ title: t("conversation.new"), agentName: name, folder: folderText, ...(folderPath === undefined ? {} : { folderPath }) }}
       />
       {props.notice}
-      {props.error === undefined || props.installing !== undefined ? null : (
+      {props.error === undefined ? null : (
         <ErrorNotice error={props.error} t={t} agent={agent} {...(props.errorAction === undefined ? {} : { action: props.errorAction })} />
       )}
       {props.heldWords === undefined ? (
@@ -830,12 +802,16 @@ function NewConversation(props: {
             <AgentMenu
               id={ids.agent}
               agents={props.agents}
+              enabled={props.enabled}
               selected={agent}
-              lastUsed={props.lastUsed}
               agentName={props.agentName}
               t={t}
               onChoose={(next) => {
                 props.onAgent(next);
+                closeAgentMenu();
+              }}
+              onOpenSettings={(target) => {
+                props.onOpenSettings(target);
                 closeAgentMenu();
               }}
               onClose={closeAgentMenu}

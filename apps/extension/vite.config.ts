@@ -41,6 +41,11 @@ export default defineConfig(({ mode: target }) => {
            * up to `offscreen.html`, where `chrome.offscreen.createDocument` names it.
            */
           offscreen: resolve(rootDir, "src/offscreen/index.html"),
+          /**
+           * 024 T750 (R-372): the settings page, keyed `settings` so the script lands at
+           * `settings.js`; the writer moves the document up to `settings.html`, the options page.
+           */
+          settings: resolve(rootDir, "src/settings/index.html"),
         },
         output: {
           entryFileNames: "[name].js",

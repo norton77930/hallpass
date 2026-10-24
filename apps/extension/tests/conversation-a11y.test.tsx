@@ -12,7 +12,7 @@ import { CONVERSATION_OPEN, CONVERSATION_READY, emitEvent, installTabStorage, wi
  */
 
 const CONTROL_SELECTOR = "button, input, textarea, select, a[href]";
-const CONTROL_ROLES = ["button", "menuitemradio", "radio", "textbox", "searchbox", "checkbox", "link"];
+const CONTROL_ROLES = ["button", "menuitem", "menuitemradio", "radio", "textbox", "searchbox", "checkbox", "link"];
 
 const settle = async () => {
   await act(async () => {

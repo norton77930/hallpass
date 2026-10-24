@@ -1,11 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { FAKE_INSTALL_DONE_MARKER, fakeLockfileInstall, fakeSlowInstall, lockfileSeconds } from "./fake-acp-agent-install.js";
 
 /**
  * The fake ACP agent (019/T521, R-329) driven the way the broker will drive a real adapter: a
@@ -14,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
  */
 
 const AGENT = resolve(dirname(fileURLToPath(import.meta.url)), "fake-acp-agent.ts");
+const INSTALL = resolve(dirname(fileURLToPath(import.meta.url)), "fake-acp-agent-install.ts");
 
 type Answer = (request: acp.RequestPermissionRequest) => acp.RequestPermissionResponse;
 
@@ -308,5 +310,126 @@ describe("fake ACP agent (T521)", () => {
       ["session/load", null],
       ["session/load", meta],
     ]);
+  });
+});
+
+describe("fake ACP agent knobs (024 T741)", () => {
+  const runVersion = (env: Record<string, string>) =>
+    spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", AGENT, "--version"], {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+
+  it("answers --version with one line and exits 0", async () => {
+    const child = runVersion({ FAKE_ACP_VERSION: "1.2.3 (fake)" });
+    let out = "";
+    child.stdout!.on("data", (data: Buffer) => (out += data.toString()));
+    const code = await new Promise<number | null>((done) => child.once("exit", done));
+    expect(code).toBe(0);
+    expect(out.trim()).toBe("1.2.3 (fake)");
+  });
+
+  it("FAKE_ACP_VERSION_HANG keeps --version alive and silent until it is killed", async () => {
+    const child = runVersion({ FAKE_ACP_VERSION_HANG: "1" });
+    extraPids.push(child.pid!);
+    let out = "";
+    child.stdout!.on("data", (data: Buffer) => (out += data.toString()));
+    let exited = false;
+    child.once("exit", () => (exited = true));
+    await new Promise((done) => setTimeout(done, 1500));
+    expect(exited).toBe(false);
+    expect(out).toBe("");
+  });
+
+  it("FAKE_ACP_COUNT_PROMPTS gets one line per session/prompt", async () => {
+    const counter = join(dir, "prompts.txt");
+    const agent = start({ FAKE_ACP_COUNT_PROMPTS: counter });
+    await init(agent);
+    const session = await newSession(agent);
+    await say(agent, session.sessionId, "one");
+    await say(agent, session.sessionId, "two");
+    expect(readFileSync(counter, "utf8").split("\n").filter(Boolean)).toEqual([session.sessionId, session.sessionId]);
+  });
+});
+
+describe("fake slow install (024 T741)", () => {
+  it("writes its files into the target over the given time, then a done marker", async () => {
+    const target = join(dir, "tree");
+    const started = Date.now();
+    await fakeSlowInstall({ target, files: 4, seconds: 0.8, bytesPerFile: 1024 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(600);
+    expect(readdirSync(target).sort()).toEqual([FAKE_INSTALL_DONE_MARKER, "file-1.bin", "file-2.bin", "file-3.bin", "file-4.bin"].sort());
+    expect(statSync(join(target, "file-1.bin")).size).toBe(1024);
+  });
+
+  it("stops between files when aborted, with no done marker", async () => {
+    const target = join(dir, "tree");
+    const abort = new AbortController();
+    setTimeout(() => abort.abort(), 300);
+    await expect(fakeSlowInstall({ target, files: 10, seconds: 2, signal: abort.signal })).rejects.toThrow();
+    const written = readdirSync(target);
+    expect(written).not.toContain(FAKE_INSTALL_DONE_MARKER);
+    expect(written.length).toBeLessThan(10);
+  });
+
+  it("runs as a process that grows the tree and can be killed part way", async () => {
+    const target = join(dir, "tree");
+    const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", INSTALL, target, "3", "6"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    extraPids.push(child.pid!);
+    await new Promise((done) => setTimeout(done, 1500));
+    const partway = existsSync(target) ? readdirSync(target) : [];
+    killTree(child.pid);
+    await new Promise((done) => setTimeout(done, 300));
+    expect(partway.length).toBeGreaterThan(0);
+    expect(partway).not.toContain(FAKE_INSTALL_DONE_MARKER);
+    expect(readdirSync(target)).not.toContain(FAKE_INSTALL_DONE_MARKER);
+  });
+});
+
+describe("fake lockfile install (024 T791, HALLPASS_BROKER_TEST_INSTALL)", () => {
+  const LOCK = {
+    lockfileVersion: 3,
+    packages: {
+      "": { name: "root" },
+      "node_modules/@scope/pinned": { version: "1.13.1" },
+      "node_modules/dep": { version: "2.0.0" },
+      "node_modules/dep/node_modules/nested": { version: "0.1.0" },
+    },
+  };
+
+  it("writes each lockfile entry's package.json at its locked version, then the done marker", async () => {
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify(LOCK));
+    expect(await fakeLockfileInstall({ dir, seconds: 0.3 })).toBe(3);
+    expect(JSON.parse(readFileSync(join(dir, "node_modules", "@scope", "pinned", "package.json"), "utf8"))).toEqual({
+      name: "@scope/pinned",
+      version: "1.13.1",
+    });
+    expect(JSON.parse(readFileSync(join(dir, "node_modules", "dep", "node_modules", "nested", "package.json"), "utf8")).name).toBe("nested");
+    expect(existsSync(join(dir, FAKE_INSTALL_DONE_MARKER))).toBe(true);
+  });
+
+  it("takes its seconds from the switch file over the environment", () => {
+    const switchFile = join(dir, "switch.json");
+    expect(lockfileSeconds({ FAKE_INSTALL_SECONDS: "7" })).toBe(7);
+    writeFileSync(switchFile, JSON.stringify({ FAKE_INSTALL_SECONDS: "45" }));
+    expect(lockfileSeconds({ FAKE_INSTALL_SECONDS: "7", FAKE_ACP_SWITCH_FILE: switchFile })).toBe(45);
+    expect(lockfileSeconds({ FAKE_ACP_SWITCH_FILE: join(dir, "missing.json") })).toBeUndefined();
+  });
+
+  it("runs as a process in the tree it is started in", async () => {
+    writeFileSync(join(dir, "package-lock.json"), JSON.stringify(LOCK));
+    const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", INSTALL, "--lockfile", "0.3"], {
+      cwd: dir,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    extraPids.push(child.pid!);
+    expect(await new Promise((done) => child.once("exit", done))).toBe(0);
+    expect(existsSync(join(dir, "node_modules", "dep", "package.json"))).toBe(true);
+    expect(existsSync(join(dir, FAKE_INSTALL_DONE_MARKER))).toBe(true);
   });
 });

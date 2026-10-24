@@ -87,8 +87,8 @@ export async function openSidePanel(input: {
   fixturePage: Page;
   tabId: number;
   copy: PanelCopy;
-  /** Which 019 panel tab to land on: Connections & sites (default) or whatever the panel remembers. */
-  tab?: "connections" | "as-remembered";
+  /** Which panel tab to land on: Sessions (default, 024 FR-392) or whatever the panel remembers. */
+  tab?: "sessions" | "as-remembered";
 }): Promise<SidePanelDriver> {
   const { context, extensionId, fixturePage, tabId, copy } = input;
   const launcher = await context.newPage();
@@ -210,14 +210,15 @@ export async function openSidePanel(input: {
   await fixturePage.bringToFront();
 
   // 019 D-019-3: the panel opens on the Conversation tab (or the one it remembers), and everything a
-  // pre-019 journey reads - the status row, session cards, the site list - lives on Connections &
-  // sites. Journeys land there unless they ask for the remembered tab; a panel without tabs (no
-  // conversation part yet) is left as it is.
-  if ((input.tab ?? "connections") === "connections") {
+  // pre-019 journey reads - the status row and the session cards - lives on Sessions (024 FR-392: the
+  // site list, upload folders, Unpair and the consent switch moved to the settings page, which
+  // `settings-page-driver.ts` drives). Journeys land on Sessions unless they ask for the remembered
+  // tab; a panel without tabs (no conversation part yet) is left as it is.
+  if ((input.tab ?? "sessions") === "sessions") {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
       const selected = await evaluatePanel(
-        `(()=>{const b=document.getElementById('agent-tab-connections');if(!b)return null;if(b.getAttribute('aria-selected')!=='true')b.click();return b.getAttribute('aria-selected')==='true'})()`,
+        `(()=>{const b=document.getElementById('agent-tab-sessions');if(!b)return null;if(b.getAttribute('aria-selected')!=='true')b.click();return b.getAttribute('aria-selected')==='true'})()`,
         true,
       );
       if (selected === true) break;

@@ -14,30 +14,8 @@ import type { ConversationAgent } from "@hallpass/contracts";
 
 type T = (key: string) => string;
 
-/** `<agent> was found, but \`--version\` did not print a version number.` (agentAvailability). */
-const VERSION_UNREADABLE = /^.{1,80} was found, but `--version` did not print a version number\.$/u;
-
 /** `<path> is not an existing folder.` (addExisting: a chosen or typed path that is no folder). */
 const NOT_A_FOLDER = /^([\s\S]{1,1024}) is not an existing folder\.$/u;
-
-/**
- * 021 FR-344: `Hallpass works with <agent> <tested>; this computer has <agent> <version>.` - an installed
- * agent (Hermes) of another version than the tested one. Both versions stay as values.
- */
-const VERSION_MISMATCH = /^Hallpass works with .{1,80} (\S{1,40}); this computer has .{1,80} (\S{1,40})\.$/u;
-
-/** The words for an agent's availability detail: the locale's, or the broker's own when it is not a known template. */
-export function availabilityDetail(detail: string, agentName: string, t: T): string {
-  if (VERSION_UNREADABLE.test(detail)) return t("conversation.version.unreadable").replace("{agent}", () => agentName);
-  const mismatch = VERSION_MISMATCH.exec(detail);
-  const tested = mismatch?.[1];
-  const installed = mismatch?.[2];
-  if (tested === undefined || installed === undefined) return detail;
-  return t("conversation.version.mismatch")
-    .replace(/\{agent\}/g, () => agentName)
-    .replace("{tested}", () => tested)
-    .replace("{version}", () => installed);
-}
 
 /**
  * 021 FR-355: where an agent's own model setting lives, for the two agents Hallpass has words for.

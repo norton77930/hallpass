@@ -142,16 +142,8 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.status.unpairAgent",
   "agent.status.menu",
   "agent.unpair",
-  // 018 FR-268, FR-279: this browser's name, its inline rename, and how many others are connected.
+  // 018 FR-268, FR-279: this browser's name.
   "agent.browser.this",
-  "agent.browser.rename",
-  "agent.browser.renameLabel",
-  "agent.browser.nameLabel",
-  "agent.browser.save",
-  "agent.browser.cancel",
-  "agent.browser.nameInvalid",
-  "agent.browser.others",
-  "agent.browser.othersOne",
   // 018 FR-274: the in-browser choice card ("Use this browser for <agent>?").
   "agent.browserChoice.title",
   "agent.browserChoice.body",
@@ -159,14 +151,11 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.browserChoice.decline",
   // The site list (FR-086).
   "agent.sitesTitle",
-  "agent.sitesNone",
   // T605: the heading over the session cards.
   "agent.sessionsTitle",
-  "agent.siteModeLabel",
   "agent.siteRevoke",
   // 016 FR-235 – FR-237: no permissive badge and no "granted" line; the visible texts of the
   // checkbox and the revoke, whose accessible names carry the site.
-  "agent.siteRevokeText",
   "agent.diagnosticsLabel",
   "agent.diagnosticsText",
   // The moves the owner remembered, listed in the same place and revoked the same way (014 FR-191).
@@ -177,14 +166,7 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.transitionRevoke",
   // The directories the local host may read uploads from, and their revoke (014 FR-191, FR-192).
   "agent.uploadRootsTitle",
-  "agent.uploadRootsIntro",
-  "agent.uploadRootsEmpty",
-  "agent.uploadRootsPath",
-  "agent.uploadRootsMalformed",
-  "agent.uploadRootsPreserved",
-  "agent.uploadRootNotRecorded",
   "agent.uploadRootRevoke",
-  "agent.uploadRootPending",
   // The session cards (FR-087).
   // 016 FR-228 – FR-234: title, subtitle, the three states, the last action, the id under technical
   // details, and the controls that are shown only when they would do something.
@@ -283,17 +265,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // 019/T544: the tab bar above the conversation and today's view.
   "agent.tabs.label",
   "agent.tabs.conversation",
-  "agent.tabs.connections",
   "agent.tabs.waiting",
-  // 019 FR-309, T555: the panel consent switch in Connections & sites.
-  "agent.panelConsent.label",
-  "agent.panelConsent.granted",
-  "agent.panelConsent.withdrawn",
-  "agent.panelConsent.unknown",
   // 019 FR-308, R-328, T556: who made a site's last change.
   "agent.siteChangedBy.panel-agent",
-  "agent.siteChangedBy.external-agent",
-  "agent.siteChangedBy.owner",
   // 019 US5, US6, FR-303, FR-304, T563: the list of conversations and the folder chooser.
   "conversation.error.path-entry",
   "conversation.list.label",
@@ -361,7 +335,6 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "conversation.composer.waiting",
   "conversation.turn.waiting",
   "conversation.reply.copyLabel",
-  "conversation.availability.readyLastUsed",
   "conversation.cannotResume.body",
   "conversation.cannotResume.remove",
   "conversation.cannotResume.placeholder",
@@ -373,11 +346,8 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // 021 US1 - US5, FR-343 - FR-358: Hermes and DeepSeek - notes, first use, starting and Cancel,
   // a card with nothing to allow, the mode notes, a conversation that cannot be replayed, and where
   // the agents' own model settings live.
-  "conversation.missing.body.hermes",
   "conversation.note.git-missing",
   "conversation.note.pre-release",
-  "conversation.version.mismatch",
-  "conversation.firstUse.what.deepseek",
   "conversation.firstUse.settings.hermes",
   "conversation.firstUse.settings.deepseek",
   "conversation.state.starting",
@@ -434,7 +404,23 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "conversation.notice.mode-reload-failed",
   "conversation.notice.mode-reset-failed",
   "conversation.notice.turn-ended",
-  "agent.siteMore",
+  // 024 D-024-11, D-024-12, D-024-18, FR-384, FR-392 - FR-394, T752: the second tab is Sessions; the
+  // site rules, upload folders, paired-agent list, browser name and panel switch live on the settings
+  // page, which the panel links to. The old `agent.tabs.connections` and the keys of the removed rows
+  // stay in the catalogue until S4 deletes their UI.
+  "agent.tabs.sessions",
+  "agent.sessions.empty",
+  "agent.sessions.openSettings",
+  "agent.session.manageSite",
+  "agent.session.manageSiteLabel",
+  "agent.status.settings",
+  // The agent picker's reason line for an enabled agent that is not ready, and its settings link.
+  "conversation.agentMenu.notReady",
+  "conversation.agentMenu.notReady.download",
+  "conversation.agentMenu.notReady.downloading",
+  "conversation.agentMenu.notReady.missing",
+  "conversation.agentMenu.notReady.version",
+  "conversation.agentMenu.openSettings",
   "agent.moreWaitingOne",
   "agent.moreWaiting",
   ...Object.values(MODE_KEYS),

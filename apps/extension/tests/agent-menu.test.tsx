@@ -1,16 +1,20 @@
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CONVERSATION_AGENTS, agentPanelCommandSchema, type ConversationAgentAvailability, type ConversationPanelState } from "@hallpass/contracts";
+import { CONVERSATION_AGENTS, type ConversationAgentAvailability, type ConversationPanelState } from "@hallpass/contracts";
+import { lookup } from "../src/locales/catalog.js";
 import { installAgentPort, project, renderShell, ui, uninstallAgentPort, type FakeAgentPort } from "./helpers/agent-shell-harness.js";
 import { CONVERSATION_READY, commandsSent, installTabStorage, withConversation } from "./helpers/conversation-fixtures.js";
 
 /**
- * 021/T669 - Hermes and DeepSeek in the agent menu (US4, FR-343 - FR-345, FR-350, FR-358).
+ * 021/T669 - Hermes and DeepSeek in the agent menu (US4, FR-343 - FR-345, FR-350, FR-358), as 024
+ * leaves it (FR-384, D-024-3).
  *
- * The menu lists the contract's four agents in the contract's order with their state; what is not
- * installed says how to install it (Hallpass installs neither Hermes nor Git), a Hermes of another
- * version shows both versions and cannot be sent to, the worker's notes (`git-missing`,
- * `pre-release`) are said in words, and DeepSeek's first use goes through the first-use card.
+ * The menu lists the contract's four agents in the contract's order with their state (a worker that
+ * sends no choices is read as "all enabled"; the choices themselves are covered in
+ * conversation-agents-024.test.tsx). An agent that cannot start says why in one line and links to its
+ * card on the settings page - install and version guidance live there now. The worker's notes
+ * (`git-missing`, `pre-release`) are said in words, and a ready agent's first use goes through the
+ * first-use card.
  */
 
 const settle = async () => {
@@ -56,6 +60,7 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
   const choose = (name: RegExp) => {
     fireEvent.click(screen.getByRole("menuitemradio", { name }));
   };
+  const rowOf = (agent: string) => document.querySelector<HTMLElement>(`li[data-agent=${agent}]`)!;
 
   it("lists the four agents in the contract's order, each with its mark and its state", async () => {
     await open(FOUR());
@@ -66,27 +71,27 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
     expect(rows.map((row) => row.querySelector(".agent-conversation-agent-name")?.textContent)).toEqual(["Claude Code", "Codex", "Hermes", "DeepSeek"]);
     expect(rows.map((row) => row.querySelector(".agent-conversation-agent-badge")?.textContent)).toEqual(["C", "X", "H", "D"]);
     expect(rows[2]?.textContent).toContain(ui("conversation.availability.ready"));
-    expect(rows[3]?.textContent).toContain(ui("conversation.availability.needs-install"));
+    // DeepSeek still needs its one-time download: it says so as a reason and cannot be chosen from here.
+    expect(rows[3]?.hasAttribute("disabled")).toBe(true);
+    expect(rowOf("deepseek").querySelector(".agent-conversation-reason")?.textContent).toBe(
+      ui("conversation.agentMenu.notReady.download").replace("{agent}", "DeepSeek"),
+    );
   });
 
-  it("says how to install a Hermes that is not installed, naming the tested release, and sends nothing", async () => {
+  it("says a Hermes that is not installed is not installed, links to its card, and cannot be sent to", async () => {
     await open(FOUR({ hermes: { agent: "hermes", availability: "missing" } }));
 
-    const row = items()[2]!;
-    expect(row.textContent).toContain(ui("conversation.availability.missing"));
-    // FR-345: the tested release, its official installer, and that Hallpass does not install it.
-    expect(row.textContent).toContain("Hermes 0.22.2");
-    expect(row.textContent).toContain("official Windows installer");
-    expect(row.textContent).toContain("Hallpass does not install it");
-
-    fireEvent.click(row);
-    expect(screen.getByRole("heading", { name: ui("conversation.missing.title").replace("{agent}", "Hermes") })).toBeTruthy();
-    fireEvent.change(box(), { target: { value: "hello" } });
-    expect(sendButton().disabled).toBe(true);
-    expect(commandsSent(port)).toEqual([]);
+    const row = rowOf("hermes");
+    expect(row.querySelector(".agent-conversation-reason")?.textContent).toBe(ui("conversation.agentMenu.notReady.missing").replace("{agent}", "Hermes"));
+    // 024 D-024-3: no install steps in a conversation - the card on the settings page has them.
+    expect(row.textContent).not.toContain("official Windows installer");
+    expect(items()[2]?.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(within(row).getByRole("menuitem", { name: ui("conversation.agentMenu.openSettings") }));
+    expect(commandsSent(port)).toEqual([{ type: "ui.agent.open-settings", payload: { route: "#agents/hermes" } }]);
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("shows both versions of a Hermes that is not the tested one, and cannot be sent to (FR-344)", async () => {
+  it("says a Hermes of another version does not fit, and cannot be sent to (FR-344)", async () => {
     const mismatch: ConversationAgentAvailability = {
       agent: "hermes",
       availability: "version-problem",
@@ -95,21 +100,12 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
     };
     await open(FOUR({ hermes: mismatch }));
 
-    const row = items()[2]!;
-    expect(row.textContent).toContain(ui("conversation.availability.version-problem"));
-    expect(row.textContent).toContain("0.21.0");
-    expect(row.textContent).toContain("0.22.2");
-
-    fireEvent.click(row);
-    const card = screen.getByRole("region", { name: ui("conversation.version.title").replace("{agent}", "Hermes") });
-    expect(card.textContent).toContain("0.21.0");
-    expect(card.textContent).toContain("0.22.2");
-    fireEvent.change(box(), { target: { value: "hello" } });
-    expect(sendButton().disabled).toBe(true);
+    expect(rowOf("hermes").querySelector(".agent-conversation-reason")?.textContent).toBe(ui("conversation.agentMenu.notReady.version").replace("{agent}", "Hermes"));
+    expect(items()[2]?.hasAttribute("disabled")).toBe(true);
     expect(commandsSent(port)).toEqual([]);
   });
 
-  it("says the broker's version sentence in zh-TW, keeping both version numbers", async () => {
+  it("says the version problem in zh-TW", async () => {
     await open(
       FOUR({
         hermes: {
@@ -122,10 +118,9 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
       "zh-TW",
     );
 
-    const text = items()[2]?.textContent ?? "";
+    const text = rowOf("hermes").textContent ?? "";
     expect(text).not.toContain("Hallpass works with");
-    expect(text).toContain("0.22.2");
-    expect(text).toContain("0.21.0");
+    expect(text).toContain(lookup("conversation.agentMenu.notReady.version", "zh-TW").replace("{agent}", "Hermes"));
   });
 
   it("says that Git for Windows is needed when the worker reports git-missing", async () => {
@@ -139,11 +134,10 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
     expect(items()[0]?.textContent).not.toContain("Git for Windows");
   });
 
-  it("marks the DeepSeek pre-release and puts the first use on the first-use card, with its size", async () => {
-    await open(FOUR());
+  it("marks a ready DeepSeek pre-release and puts its first use on the first-use card, with no download", async () => {
+    await open(FOUR({ deepseek: { agent: "deepseek", availability: "ready", notes: ["pre-release"] } }));
 
     const row = items()[3]!;
-    expect(row.textContent).toContain(ui("conversation.availability.needs-install"));
     expect(row.textContent).toContain(ui("conversation.note.pre-release"));
     expect(row.textContent).toContain("Pre-release");
 
@@ -153,21 +147,16 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
 
     const card = screen.getByRole("region", { name: "Set up DeepSeek for the side panel" });
     const text = card.textContent ?? "";
-    // It is fetched by Hallpass, not found on the computer; the size, the pre-release, the owner's own settings.
-    expect(text).not.toContain("already installed on this computer");
-    expect(text).toContain("Download size: about 700 MB.");
+    expect(text).not.toContain("Download size");
     expect(text).toContain(ui("conversation.note.pre-release"));
     expect(text).toContain("key");
     expect(within(card).queryByRole("textbox")).toBeNull();
     expect(screen.getAllByRole("textbox")).toHaveLength(1); // the message box alone: no key field anywhere
+    expect(within(card).queryByRole("button", { name: "Download" })).toBeNull();
     expect(commandsSent(port)).toEqual([]);
 
-    fireEvent.click(within(card).getByRole("button", { name: ui("conversation.firstUse.download") }));
-    expect(commandsSent(port)).toEqual([
-      { type: "ui.conversation.consent", payload: { granted: true } },
-      { type: "ui.conversation.install", payload: { agent: "deepseek" } },
-    ]);
-    for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
+    fireEvent.click(within(card).getByRole("button", { name: ui("conversation.firstUse.allow") }));
+    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.consent", payload: { granted: true } }]);
   });
 
   it("asks only for the consent on a Hermes that is ready, and says where its settings live", async () => {
@@ -178,14 +167,14 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
 
     const card = screen.getByRole("region", { name: "Set up Hermes for the side panel" });
     expect(card.textContent).toContain("%LOCALAPPDATA%\\hermes");
-    expect(card.textContent).not.toContain(ui("conversation.firstUse.registry"));
-    expect(within(card).queryByRole("button", { name: ui("conversation.firstUse.download") })).toBeNull();
+    expect(card.textContent).not.toContain("npm registry your own npm is set up for");
+    expect(within(card).queryByRole("button", { name: "Download" })).toBeNull();
     fireEvent.click(within(card).getByRole("button", { name: ui("conversation.firstUse.allow") }));
     expect(commandsSent(port)).toEqual([{ type: "ui.conversation.consent", payload: { granted: true } }]);
   });
 
-  it("is reachable by keyboard: arrows walk the four rows, each named, and Escape gives the chip its focus back", async () => {
-    await open(FOUR());
+  it("is reachable by keyboard: arrows walk the rows that can be chosen, each named, and Escape gives the chip its focus back", async () => {
+    await open(FOUR({ deepseek: { agent: "deepseek", availability: "ready", notes: ["pre-release"] } }));
 
     const rows = items();
     expect(document.activeElement).toBe(rows[0]);
@@ -213,9 +202,11 @@ describe("T669 Hermes and DeepSeek in the agent menu", () => {
       "zh-TW",
     );
 
-    const text = items().map((row) => row.textContent).join(" ");
+    const text = items().map((row) => row.closest("li")?.textContent ?? "").join(" ");
     expect(text).not.toContain("official");
     expect(text).not.toContain("downloaded by Hallpass");
-    expect(text).toContain("0.22.2");
+    expect(text).not.toContain("{agent}");
+    expect(text).toContain(lookup("conversation.agentMenu.notReady.missing", "zh-TW").replace("{agent}", "Hermes"));
+    expect(text).toContain(lookup("conversation.agentMenu.openSettings", "zh-TW"));
   });
 });

@@ -11,6 +11,7 @@ import {
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver, type SiteMode } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -74,6 +75,7 @@ test.describe("016 readable panel", () => {
     mkdirSync(folderB);
 
     const panel = await ownerPanel({ extensionContext, extensionId, extensionWorker });
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale });
     let alpha: McpHarnessClient | undefined;
     let beta: McpHarnessClient | undefined;
     const openTabs: number[] = [];
@@ -90,7 +92,7 @@ test.describe("016 readable panel", () => {
       openTabs.push(tabA);
       const tabB = ((await ok(b, "tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
       openTabs.push(tabB);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await setSiteMode(settings, SITE, "skip-checks");
 
       // Which session is which, as the sessions themselves are told (each names the other's holder).
       const sessionB = holderOf((await ok(a, "tabs_context")) as ListedTab[], tabB);
@@ -158,7 +160,7 @@ test.describe("016 readable panel", () => {
       expect(idleA.buttons).toEqual([ui("agent.session.stop"), ui("agent.session.takeBack").replace("{n}", "1")]);
 
       // ================= US2 + US4: waiting on the owner =================
-      await setSiteMode(panel, SITE, "ask");
+      await setSiteMode(settings, SITE, "ask");
       const askRef = await refFor(b, tabB, "Safe action");
       const asked = b.callTool("click", { tabId: tabB, target: { ref: askRef } });
       await panel.waitForText(ui("agent.promptTitle"), 20_000);
@@ -172,21 +174,24 @@ test.describe("016 readable panel", () => {
       expect(refused.isError).toBe(true);
       expect(refused.json).toMatchObject({ outcome: "denied", reason: "owner-denied" });
       await expect.poll(async () => (await groupOf(extensionWorker, tabB)).title, { timeout: 10_000, intervals: [250] }).toBe(AGENT_GROUP_TITLE);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await setSiteMode(settings, SITE, "skip-checks");
 
-      // ================= US1: the menu names the paired agent =================
+      // ================= US1: the menu leads to Settings, which names the paired agent =================
+      // 024 FR-392: the status row's menu holds only "Settings"; the paired agent and its Unpair are
+      // on the settings page's Sites & permissions (FR-385).
       expect(await panel.clickIfPresent(ui("agent.status.menu"))).toBe(true);
       const menu = (await panel.evaluatePanel(
-        "[...document.querySelectorAll('[data-status-row] .agent-menu .agent-menu-name')].map((n)=>n.textContent ?? '')",
+        "[...document.querySelectorAll('[data-status-row] .agent-menu [role=menuitem]')].map((n)=>n.textContent?.trim() ?? '')",
       )) as string[];
-      expect(menu).toContain(AGENT);
+      expect(menu).toEqual([ui("agent.status.settings")]);
+      // Closed again without opening anything.
+      expect(await panel.clickIfPresent(ui("agent.status.menu"))).toBe(true);
+      expect((await settings.pairedAgents()).map((paired) => paired.name)).toContain(AGENT);
       expect(
-        await panel.evaluatePanel(
-          `[...document.querySelectorAll('[data-status-row] .agent-menu button')].some((b)=>b.getAttribute('aria-label')===${JSON.stringify(ui("agent.status.unpairAgent").replace("{agent}", AGENT))})`,
+        await settings.evaluateSettings(
+          `[...document.querySelectorAll('[data-paired] button')].some((b)=>b.getAttribute('aria-label')===${JSON.stringify(settings.t("settings.outside.unpairLabel", { name: AGENT }))})`,
         ),
       ).toBe(true);
-      // Closed again without unpairing anything.
-      expect(await panel.clickIfPresent(ui("agent.status.menu"))).toBe(true);
 
       // ================= US5 scenario 1: a keydown alert answers with the dialog =================
       const KEYDOWN = `${SITE}/keydown-alert`;
@@ -319,20 +324,7 @@ function pageAt(context: BrowserContext, url: string): Page {
   return page;
 }
 
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(() => panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`), {
-      timeout: 15_000,
-    })
-    .toBe(mode);
+/** 024 FR-385: a site's mode is changed on the settings page's Sites & permissions. */
+async function setSiteMode(settings: SettingsPageDriver, site: string, mode: SiteMode): Promise<void> {
+  await settings.setSiteMode(site, mode);
 }

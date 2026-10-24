@@ -2,7 +2,8 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { transitionNoticeText } from "@hallpass/contracts";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { acceptPairing, pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, clickLabelled, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, setTransitionTestSwitch, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -86,7 +87,9 @@ test.describe("agent transitions", () => {
 
       // ============ (5.1) the switch unset: a loopback destination asks nothing ============
       const loopbackTab = ((await call("tabs_create", { url: `${A}/transition-a` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, A, "skip-checks");
+      // 024 FR-385: site modes and remembered moves are on the settings page.
+      const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await settings.setSiteMode(A, "skip-checks");
       await call("navigate", { tabId: loopbackTab, url: `${A}/go-b` });
       await expect.poll(() => urlOf(extensionWorker, loopbackTab), { timeout: 20_000 }).toContain(":19445/");
       const loopbackRead = await first.callTool("get_page_text", { tabId: loopbackTab });
@@ -152,12 +155,12 @@ test.describe("agent transitions", () => {
       expect((await collapsed).isError).toBe(true);
 
       // ============ (5.2) a destination the owner has a mode for asks nothing ============
-      await setSiteMode(panel, C, "follow-a-plan");
+      await settings.setSiteMode(C, "follow-a-plan");
       const tabMode = ((await call("tabs_create", { url: `${A}/transition-batch` })) as { tabId: number }).tabId;
       await call("click", { tabId: tabMode, target: { ref: await refFor(call, tabMode, "Leave for C") } });
       await expect.poll(() => urlOf(extensionWorker, tabMode), { timeout: 30_000 }).toContain(":19444/");
       expect(await pendingOn(extensionWorker, tabMode), "a decided site was treated as undecided").toBeUndefined();
-      await clearSiteMode(panel, C);
+      await settings.revokeSite(C);
       await closeTab(extensionWorker, tabMode);
       await closeTab(extensionWorker, tab3);
 
@@ -241,8 +244,7 @@ test.describe("agent transitions", () => {
       await panel.clickButton(ui("agent.transitionAlways"));
       expect((await remembering).isError, `stderr:\n${secondSession.stderr()}`).toBe(false);
       // FR-191: the owner can see what they allowed, and FR-190: only the origins are stored.
-      await panel.waitForText(ui("agent.transitionsTitle"));
-      expect(await rowsOnPanel(panel)).toContain(`${A}→${B}`);
+      await expect.poll(() => settings.transitions(), { timeout: 15_000 }).toContain(`${A}→${B}`);
       expect(await storedAllowances(extensionWorker)).toMatchObject([
         { from: A, to: B, allowedAt: expect.any(String) },
       ]);
@@ -267,8 +269,9 @@ test.describe("agent transitions", () => {
       expect(await cardUp(panel), "a remembered move asked again").toBe(false);
 
       // ============ (8) revoking the row makes the next such move ask again ============
-      await panel.waitForText(ui("agent.transitionsTitle"));
-      await panel.clickButton(ui("agent.transitionRevoke").replace("{from}", A).replace("{to}", B));
+      // The settings page was open across the worker restart; it reconnects and still lists the row.
+      await expect.poll(() => settings.transitions(), { timeout: 30_000 }).toContain(`${A}→${B}`);
+      await settings.forgetTransition(A, B);
       await expect.poll(() => storedAllowances(extensionWorker), { timeout: 15_000 }).toEqual([]);
       const tabAgain = ((await callGamma("tabs_create", { url: `${A}/transition-a` })) as { tabId: number }).tabId;
       await callGamma("navigate", { tabId: tabAgain, url: `${A}/go-b` });
@@ -382,45 +385,6 @@ async function cardUp(panel: SidePanelDriver): Promise<boolean> {
 /** The card, with the two origins the owner is being asked about. */
 async function waitForCard(panel: SidePanelDriver, from: string, to: string): Promise<void> {
   await panel.waitForText(ui("agent.prompt.transition").replace("{from}", from).replace("{to}", to));
-}
-
-/** The remembered pairs the panel is showing, by the row key the site list gives them. */
-async function rowsOnPanel(panel: SidePanelDriver): Promise<string[]> {
-  return (await panel.evaluatePanel(
-    "[...document.querySelectorAll('[data-transition]')].map((row)=>row.getAttribute('data-transition'))",
-  )) as string[];
-}
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
-}
-
-/** The site list's own revoke, so the next run of this gate starts from an undecided site. */
-async function clearSiteMode(panel: SidePanelDriver, site: string): Promise<void> {
-  await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(site)}] .agent-site-more-button')?.click(), true`, true);
-  await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", site));
 }
 
 /**

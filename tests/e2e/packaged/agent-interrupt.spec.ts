@@ -4,6 +4,7 @@ import { INTERRUPT_HINTS } from "@hallpass/contracts";
 import { isAgentGroupTitle } from "../fixtures/agent-group.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -89,6 +90,8 @@ test.describe("agent interrupt", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -102,7 +105,7 @@ test.describe("agent interrupt", () => {
       const tabId = created.tabId;
       await expect.poll(() => sessionIdOnPanel(panel), { timeout: 15_000 }).toEqual(expect.any(String));
       const sessionId = (await sessionIdOnPanel(panel)) as string;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // The two things the browser must still be doing afterwards, started before the interrupt.
       const groupedBefore = await groupOf(extensionWorker, tabId);
@@ -152,7 +155,7 @@ test.describe("agent interrupt", () => {
       expect(framesAfter?.frames).toBe(framesBefore + 1);
 
       // ================= (2) a batch, interrupted at the step it was on =====================
-      await setSiteMode(panel, SITE, "follow-a-plan");
+      await settings.setSiteMode(SITE, "follow-a-plan");
       const refs = await refFor(call, tabId, "Safe action");
       const batch = live.callTool("browser_batch", {
         tabId,
@@ -194,7 +197,7 @@ test.describe("agent interrupt", () => {
       expect((await afterBatch).isError, `stderr:\n${live.stderr()}`).toBe(false);
 
       // ================= (3) a call waiting on a consent card =============================
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const asking = live.callTool("click", { tabId, target: { ref: await refFor(call, tabId, "Safe action") } });
       await panel.waitForText(ui("agent.promptTitle"));
       /**
@@ -224,7 +227,7 @@ test.describe("agent interrupt", () => {
       expect(await storedModeOf(extensionWorker, SITE)).toBeUndefined();
 
       // ================= (4) an effect whose input had already been delivered ==============
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("navigate", { tabId, url: `${SITE}/slow-input` });
       const slowRef = await refFor(call, tabId, "Slow field");
       const typing = live.callTool("type", { tabId, target: { ref: slowRef }, text: "hello", mode: "insert" });
@@ -385,30 +388,4 @@ async function storedModeOf(worker: PackagedWorker, site: string): Promise<unkno
     const records = (raw.agentSiteModes ?? {}) as Record<string, { mode?: string }>;
     return records[origin]?.mode;
   }, site);
-}
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

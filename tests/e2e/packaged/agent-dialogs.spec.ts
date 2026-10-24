@@ -2,6 +2,7 @@ import type { BrowserContext, Dialog as PlaywrightDialog, Page } from "@playwrig
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -50,13 +51,13 @@ test.describe("agent dialogs", () => {
   }) => {
     test.setTimeout(600_000);
     leaveDialogsToTheExtension(extensionContext);
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let openTab: number | undefined;
     try {
       const tabId = ((await call("tabs_create", { url: DIALOGS })) as { tabId: number }).tabId;
       openTab = tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("read_page", { tabId, filter: "interactive" });
 
       // ============= 1. an alert: the answer carries it, and the tab is blocked =============
@@ -134,13 +135,13 @@ test.describe("agent dialogs", () => {
   }) => {
     test.setTimeout(600_000);
     leaveDialogsToTheExtension(extensionContext);
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let openTab: number | undefined;
     try {
       const tabId = ((await call("tabs_create", { url: DIALOGS })) as { tabId: number }).tabId;
       openTab = tabId;
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       // The read is not an effect, so it does not ask - and it gives the refs the clicks below need.
       await call("read_page", { tabId, filter: "interactive" });
       const chainedRef = await refFor(call, tabId, "Confirm shortly after the click");
@@ -240,13 +241,13 @@ test.describe("agent dialogs", () => {
   }) => {
     test.setTimeout(600_000);
     leaveDialogsToTheExtension(extensionContext);
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let openTab: number | undefined;
     try {
       const tabId = ((await call("tabs_create", { url: DIALOGS })) as { tabId: number }).tabId;
       openTab = tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("read_page", { tabId, filter: "interactive" });
       const notes = await refFor(call, tabId, "Notes");
       // Typed, not scripted: a browser raises "leave site?" only for a page somebody interacted with.
@@ -272,13 +273,13 @@ test.describe("agent dialogs", () => {
       await call("read_page", { tabId, filter: "interactive" });
       const notesAgain = await refFor(call, tabId, "Notes");
       await call("type", { tabId, target: { ref: notesAgain }, text: "more unsaved work" });
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const asked = client.callTool("navigate", { tabId, url: `${SITE}/ordinary`, force: true });
       await panel.waitForText(ui("agent.prompt.beforeunloadForce").replace("{site}", SITE));
       await panel.clickButton(ui("agent.allowOnce"));
       expect((await asked).isError).toBe(false);
 
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("tabs_close", { tabId });
     } finally {
       // A dialog left open wedges the whole browser for the next connection, so the journey never
@@ -307,7 +308,7 @@ test.describe("agent dialogs", () => {
   }) => {
     test.setTimeout(600_000);
     leaveDialogsToTheExtension(extensionContext);
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     let live: McpHarnessClient | undefined = client;
     let openTab: number | undefined;
     const raised: PlaywrightDialog[] = [];
@@ -315,7 +316,7 @@ test.describe("agent dialogs", () => {
     try {
       const tabId = ((await call("tabs_create", { url: DIALOGS })) as { tabId: number }).tabId;
       openTab = tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       await call("read_page", { tabId, filter: "interactive" });
       // Typed by the agent, so the page has been interacted with and its `beforeunload` is armed -
       // exactly the state the journey above leaves it in before *its* navigation.
@@ -400,6 +401,7 @@ async function pairedSession(fixtures: {
   extensionWorker: PackagedWorker;
 }): Promise<{
   panel: SidePanelDriver;
+  settings: SettingsPageDriver;
   client: McpHarnessClient;
   call: (tool: string, args?: Record<string, unknown>) => Promise<unknown>;
 }> {
@@ -421,6 +423,8 @@ async function pairedSession(fixtures: {
 
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
   await waitForAgentPanel(panel);
+  // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+  const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
@@ -431,7 +435,7 @@ async function pairedSession(fixtures: {
     expect(result.isError, `${tool} failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
     return result.json;
   };
-  return { panel, client, call };
+  return { panel, settings, client, call };
 }
 
 async function refFor(
@@ -444,27 +448,4 @@ async function refFor(
   const first = found.matches[0]?.ref;
   expect(first, `find '${query}' returned no ref`).toBeTruthy();
   return first as string;
-}
-
-/** The same panel-driven site mode the sibling journeys use; never a storage write (FR-042). */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () =>
-        panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

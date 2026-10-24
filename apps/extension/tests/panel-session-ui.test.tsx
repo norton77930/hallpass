@@ -1,10 +1,7 @@
 import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { agentPanelCommandSchema } from "@hallpass/contracts";
-import { lookup } from "../src/locales/catalog.js";
 import {
   installAgentPort,
-  NOT_PAIRED,
   project,
   renderShell,
   ui,
@@ -23,9 +20,11 @@ import {
 /**
  * 019/T554, T555 - the panel's half of a panel session (FR-306, FR-309, D-019-11).
  *
- * The consent "Side-panel agent may use this browser" is given once, on the first-use card, and
- * lives on as a switch in Connections & sites, where the owner can take it back; a message names the
- * tab the owner was viewing when they sent it, so the agent starts there.
+ * The consent "Side-panel agent may use this browser" is given once, on the first-use card; a message
+ * names the tab the owner was viewing when they sent it, so the agent starts there.
+ *
+ * 024 R-381: the switch that took the consent back moved to the settings page (Connection), so the
+ * Sessions tab no longer carries it.
  */
 
 const settle = async () => {
@@ -33,12 +32,8 @@ const settle = async () => {
     await Promise.resolve();
   });
 };
-const toConnections = () => {
-  fireEvent.click(screen.getByRole("tab", { name: ui("agent.tabs.connections") }));
-};
-const consentSwitch = () => screen.getByRole("switch", { name: ui("agent.panelConsent.label") }) as HTMLInputElement;
 
-describe("T555 the panel consent switch in Connections & sites", () => {
+describe("T555 the panel consent switch is no longer in the panel", () => {
   let port: FakeAgentPort;
 
   beforeEach(() => {
@@ -51,47 +46,15 @@ describe("T555 the panel consent switch in Connections & sites", () => {
     uninstallAgentPort();
   });
 
-  it("shows the consent as given and withdraws it with the closed command", async () => {
+  it.each(["granted", "withdrawn"] as const)("shows no consent switch on the Sessions tab with the consent %s", async (consent) => {
     renderShell();
-    project(port, withConversation(CONVERSATION_READY));
+    project(port, withConversation({ ...CONVERSATION_READY, consent }));
     await settle();
-    toConnections();
+    fireEvent.click(screen.getByRole("tab", { name: ui("agent.tabs.sessions") }));
 
-    expect(consentSwitch().checked).toBe(true);
-    fireEvent.click(consentSwitch());
-
-    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.consent", payload: { granted: false } }]);
-    for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
-  });
-
-  it("gives it back from the switch, and says what withdrawing does", async () => {
-    renderShell();
-    project(port, withConversation({ ...CONVERSATION_READY, consent: "withdrawn" }));
-    await settle();
-    toConnections();
-
-    expect(consentSwitch().checked).toBe(false);
-    expect(screen.getByText(ui("agent.panelConsent.withdrawn"))).toBeTruthy();
-    fireEvent.click(consentSwitch());
-
-    expect(commandsSent(port)).toEqual([{ type: "ui.conversation.consent", payload: { granted: true } }]);
-  });
-
-  it("is there before any external agent has paired, and reads in zh-TW", async () => {
-    renderShell("zh-TW");
-    project(port, withConversation(CONVERSATION_READY, NOT_PAIRED));
-    await settle();
-    fireEvent.click(screen.getByRole("tab", { name: lookup("agent.tabs.connections", "zh-TW") }));
-
-    expect(screen.getByRole("switch", { name: lookup("agent.panelConsent.label", "zh-TW") })).toBeTruthy();
-  });
-
-  it("is absent for a worker without conversations", async () => {
-    renderShell();
-    project(port, { ...NOT_PAIRED });
-    await settle();
-
-    expect(screen.queryByRole("switch", { name: ui("agent.panelConsent.label") })).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByText("Off. The next conversation asks again.")).toBeNull();
+    expect(commandsSent(port)).toEqual([]);
   });
 });
 

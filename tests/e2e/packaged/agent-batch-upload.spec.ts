@@ -7,6 +7,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -64,10 +65,10 @@ test.describe("015 uploads inside a batch", () => {
       await writeFile(allowedFile, "allowed-by-the-owner", "utf8");
       await writeFile(configPath, JSON.stringify({ uploadRoots: [allowedRoot] }, null, 2), "utf8");
 
-      const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+      const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
       try {
         const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
-        await setSiteMode(panel, SITE, "skip-checks");
+        await settings.setSiteMode(SITE, "skip-checks");
         const page = await agentPage(extensionContext, FIXTURE);
 
         // The picture is taken *before* the batch, which is the only way an agent can hold its id.
@@ -117,10 +118,10 @@ test.describe("015 uploads inside a batch", () => {
       await writeFile(privateFile, "not for the agent", "utf8");
       await writeFile(configPath, JSON.stringify({ uploadRoots: [allowedRoot] }, null, 2), "utf8");
 
-      const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+      const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
       try {
         const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
-        await setSiteMode(panel, SITE, "skip-checks");
+        await settings.setSiteMode(SITE, "skip-checks");
         const batchOf = (refs: (name: string) => string, text: string): Record<string, unknown> => ({
           tabId,
           steps: [
@@ -178,10 +179,10 @@ test.describe("015 uploads inside a batch", () => {
     extensionWorker,
   }) => {
     test.setTimeout(300_000);
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     try {
       const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
       const page = await agentPage(extensionContext, FIXTURE);
       const refs = await refsByName(call, tabId);
 
@@ -242,7 +243,7 @@ async function pairedSession(fixtures: {
   extensionContext: BrowserContext;
   extensionId: string;
   extensionWorker: PackagedWorker;
-}): Promise<{ panel: SidePanelDriver; client: McpHarnessClient; call: (tool: string, args?: Record<string, unknown>) => Promise<unknown> }> {
+}): Promise<{ panel: SidePanelDriver; settings: SettingsPageDriver; client: McpHarnessClient; call: (tool: string, args?: Record<string, unknown>) => Promise<unknown> }> {
   const { extensionContext, extensionId, extensionWorker } = fixtures;
   const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
   await ownerPage.goto(`${SITE}/waiting`);
@@ -254,6 +255,8 @@ async function pairedSession(fixtures: {
   });
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
   await waitForAgentPanel(panel);
+  // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+  const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
   await pairWithFirstCall(client, panel, { locale, timeoutMs: 45_000 });
@@ -262,7 +265,7 @@ async function pairedSession(fixtures: {
     expect(result.isError, `${tool} failed: ${result.text}\nstderr:\n${client.stderr()}`).toBe(false);
     return result.json;
   };
-  return { panel, client, call };
+  return { panel, settings, client, call };
 }
 
 /**
@@ -307,18 +310,6 @@ async function directoryCardUp(panel: SidePanelDriver): Promise<boolean> {
 async function waitForDirectoryCard(panel: SidePanelDriver, path: string): Promise<void> {
   await panel.waitForText(ui("agent.prompt.uploadDirectory").replace("{agent}", "Claude Code"));
   await panel.waitForText(path);
-}
-
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site)&&r.querySelector('select'));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
 }
 
 async function closeTab(worker: PackagedWorker, tabId: number): Promise<void> {

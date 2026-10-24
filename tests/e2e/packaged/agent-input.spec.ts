@@ -2,7 +2,8 @@ import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -81,6 +82,8 @@ test.describe("agent input", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -94,9 +97,9 @@ test.describe("agent input", () => {
       const hoverCreated = (await call("tabs_create", { url: `${SITE}/hover-menu` })) as { tabId: number };
       const tabId = hoverCreated.tabId;
       const hoverPage = await agentPage(extensionContext, `${SITE}/hover-menu`);
-      // The site appears in the panel's own list only once a tab has visited it - so the mode is
+      // The site appears in the settings page's list only once a tab has visited it - so the mode is
       // set from here, the same order every other agent journey uses.
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       const beforeHover = (await call("read_page", { tabId, filter: "interactive" })) as {
         nodes: Array<{ name?: string }>;
@@ -216,7 +219,7 @@ test.describe("agent input", () => {
       await call("tabs_close", { tabId: heldTabId });
 
       // ================= 5. ask mode still prompts the owner once per effect =================
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const askCreated = (await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number };
       const askTabId = askCreated.tabId;
       const askPage = await agentPage(extensionContext, `${SITE}/ordinary`);
@@ -286,6 +289,8 @@ test.describe("agent input", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -297,7 +302,7 @@ test.describe("agent input", () => {
       const created = (await call("tabs_create", { url: `${SITE}/frames-oopif` })) as { tabId: number };
       const tabId = created.tabId;
       const oopifPage = await agentPage(extensionContext, `${SITE}/frames-oopif`);
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // ============ the fixture's own proof: Chrome really did put the child out of process ============
       // An ordinary (same-process) iframe - same-origin or cross-origin-same-site, as `frames.html`'s
@@ -413,35 +418,4 @@ async function agentPage(
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`agent-tab-not-found:${url}`);
-}
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown, and poking the store behind the
- * panel would prove only that the store works.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () => {
-        const value = await panel.evaluatePanel(
-          `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-            `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? "forgotten"})()`,
-        );
-        // Back at the default with no grant, the site is forgotten and leaves the list once no
-        // session tab is on it (site-mode-store, 2026-09-16); a vanished row is that answer.
-        return value === "forgotten" && mode === "ask" ? "ask" : value;
-      },
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

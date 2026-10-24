@@ -2,11 +2,14 @@ import type {
   AgentLinkFrame,
   AgentPanelMessage,
   ConversationAgent,
+  ConversationError,
   ConversationEvent,
   ConversationFolder,
   ConversationLinkCommand,
   ConversationPanelCommand,
   ConversationPanelState,
+  SettingsCommand,
+  SettingsMessage,
 } from "@hallpass/contracts";
 
 /**
@@ -71,6 +74,35 @@ export type ConversationBrowserAttachedFrame = {
 export type ConversationOutFrame = ConversationCommandFrame | ConversationBrowserAttachedFrame;
 
 /**
+ * 024 contracts/frames.md: the settings page's commands the broker answers (check-agents, install,
+ * install-cancel, test, diagnostics by agent, and the side-panel-agent consent). Validated at the
+ * settings port against the page's closed union; each carries the page's commandId.
+ */
+export type SettingsBrokerCommand = Extract<SettingsCommand, { type: `ui.conversation.${string}` }>;
+
+/**
+ * 024 R-373, R-387: where a settings page's forwarded command is answered - that page, and never the
+ * panels. `result` is the broker's answer to the command (or the worker's own refusal when no broker
+ * can answer); `diagnostics` the broker's reply to the page's `ui.conversation.diagnostics { agent }`.
+ */
+export type SettingsReplyTarget = {
+  result: (
+    payload: { commandId: string; ok: true } | { commandId: string; ok: false; error: { code: ConversationError["code"]; detail?: string } },
+  ) => void;
+  diagnostics: (payload: Extract<SettingsMessage, { type: "worker.settings.diagnostics" }>["payload"]) => void;
+  /** Whether the page is still connected; a page that went no longer waits for a diagnostics reply. */
+  isOpen?: () => boolean;
+};
+
+/**
+ * 024 R-387: how long a page's `ui.conversation.diagnostics { agent }` waits for the broker's reply.
+ * The reply names the agent and no command, so a wait whose reply never came would otherwise sit at
+ * the head of that agent's queue and take the next asker's reply. The broker reads the lines from
+ * its own ring and answers at once; 10 s is far past that, and a page that asks again is waiting anew.
+ */
+export const DIAGNOSTICS_REPLY_WINDOW_MS = 10_000;
+
+/**
  * T547: how long after a relay announced itself the worker waits for that relay's broker before it
  * says the host is too old to have one. A 0.12 relay never starts a broker (R-323), and the broker a
  * current relay spawns greets within a second or two; 15 s is the broker's own redial window
@@ -96,8 +128,11 @@ export type ConversationRelay = {
    * is attached; a redial under the same token is the same run and says nothing.
    */
   browserAttached: (conversationId: string, token: string) => void;
-  /** T547: one `ui.conversation.*` command from a panel document, already validated at the port. */
-  command: (command: ConversationPanelCommand) => void;
+  /**
+   * T547: one `ui.conversation.*` command from a panel document, already validated at the port.
+   * 024 R-373: or from a settings page (`page` given), whose answers go to that page alone.
+   */
+  command: (command: ConversationPanelCommand | SettingsBrokerCommand, page?: SettingsReplyTarget) => void;
   /** T547: the projection's `conversation` part; `linkUp` is whether the native link is connected. */
   panelState: (linkUp: boolean) => ConversationPanelState;
 };
@@ -118,6 +153,8 @@ type Pending = {
    * without an overview: then it is never matched, and only its result opens the conversation).
    */
   start?: { agent: ConversationAgent; folder: ConversationFolder; before: ReadonlySet<string> | undefined };
+  /** 024 R-373: the settings page that sent it, which alone hears its result. */
+  page?: SettingsReplyTarget;
 };
 
 /** T610: states with no agent running, which an open under way shows as `starting` (it resumes the agent). */
@@ -200,10 +237,48 @@ export function createConversationRelay(options: {
    */
   const attachedUnder = new Map<string, string>();
 
+  /**
+   * 024 R-387: the settings pages waiting for a diagnostics reply by agent, in the order they asked.
+   * The broker's reply names the agent and no command, so the first page waiting on that agent takes
+   * it; a refused request leaves the list, and a reply nobody waits for goes nowhere. A wait also
+   * leaves when its page went, and when no reply came within `DIAGNOSTICS_REPLY_WINDOW_MS`.
+   */
+  type DiagnosticsWait = { commandId: string; agent: ConversationAgent; page: SettingsReplyTarget };
+  const diagnosticsWaiting: DiagnosticsWait[] = [];
+  const stopWaiting = (commandId: string): void => {
+    const at = diagnosticsWaiting.findIndex((entry) => entry.commandId === commandId);
+    if (at !== -1) diagnosticsWaiting.splice(at, 1);
+  };
+  const waitForDiagnostics = (wait: DiagnosticsWait): void => {
+    diagnosticsWaiting.push(wait);
+    schedule(() => {
+      const at = diagnosticsWaiting.indexOf(wait);
+      if (at === -1) return;
+      diagnosticsWaiting.splice(at, 1);
+      report("agent.conversation.diagnostics-expired");
+    }, DIAGNOSTICS_REPLY_WINDOW_MS);
+  };
+  /** Drops the waits whose page is no longer connected. */
+  const pruneClosedWaits = (): void => {
+    for (let at = diagnosticsWaiting.length - 1; at >= 0; at -= 1) {
+      if (diagnosticsWaiting[at]!.page.isOpen?.() === false) diagnosticsWaiting.splice(at, 1);
+    }
+  };
+
   const failure = (commandId: string, detail: string): AgentPanelMessage => ({
     type: "conversation-result",
     payload: { commandId, ok: false, error: { code: "broker-unavailable", detail } },
   });
+
+  /** A refusal no broker gave: to the settings page that sent the command, else to every panel. */
+  const refuse = (commandId: string, detail: string, page: SettingsReplyTarget | undefined): void => {
+    if (page === undefined) {
+      toPanels(failure(commandId, detail));
+      return;
+    }
+    stopWaiting(commandId);
+    page.result({ commandId, ok: false, error: { code: "broker-unavailable", detail } });
+  };
 
   /**
    * T610: a refused open that had switched the panel goes back to the conversation open before it -
@@ -258,10 +333,12 @@ export function createConversationRelay(options: {
     for (const [commandId, command] of pending) {
       if (command.type === "worker.conversation.page") continue;
       switchBack(command);
-      toPanels(failure(commandId, "Hallpass's helper on this computer stopped before it answered."));
+      refuse(commandId, "Hallpass's helper on this computer stopped before it answered.", command.page);
     }
     pending.clear();
     paging.clear();
+    // 024 R-387: a reply the broker that left still owed will not come.
+    diagnosticsWaiting.length = 0;
   };
 
   const requestPages = (conversationId: string, fromSeq: number): void => {
@@ -333,6 +410,17 @@ export function createConversationRelay(options: {
         moved = false;
       }
       if (moved) changed();
+    }
+    if (command.page !== undefined) {
+      // 024 R-373: a settings page's command is answered to that page alone; no value rides along
+      // (none of the page's commands has one).
+      if (frame.ok) {
+        command.page.result({ commandId: frame.commandId, ok: true });
+      } else {
+        stopWaiting(frame.commandId);
+        command.page.result({ commandId: frame.commandId, ok: false, error: frame.error });
+      }
+      return;
     }
     const { type: _type, sessionId: _sessionId, ...payload } = frame;
     toPanels({ type: "conversation-result", payload } as AgentPanelMessage);
@@ -419,10 +507,24 @@ export function createConversationRelay(options: {
           forward(frame.conversationId, frame.seq, frame.event, true);
           break;
         case "conversation-diagnostics": {
-          // 023 R-367: the broker's reply to a diagnostics request, already scrubbed there. Passed on
-          // whole to every panel document; never logged or kept here.
-          const { type: _type, sessionId: _sessionId, ...payload } = frame;
-          toPanels({ type: "conversation-diagnostics", payload });
+          // 023 R-367: the broker's reply to a diagnostics request, already scrubbed there. Never
+          // logged or kept here.
+          const { agent, readAt, conversationId, lines } = frame;
+          if (agent !== undefined && readAt !== undefined) {
+            // 024 R-387: a reply by agent is the settings page's, to the first page waiting on that
+            // agent and to no panel. A page that went waits no more.
+            pruneClosedWaits();
+            const at = diagnosticsWaiting.findIndex((entry) => entry.agent === agent);
+            if (at === -1) {
+              report("agent.conversation.diagnostics-unclaimed");
+              break;
+            }
+            const [waiting] = diagnosticsWaiting.splice(at, 1);
+            waiting!.page.diagnostics({ agent, readAt, ...(conversationId === undefined ? {} : { conversationId }), lines });
+            break;
+          }
+          // A reply by conversation, as in 023: passed on to every panel document.
+          if (conversationId !== undefined) toPanels({ type: "conversation-diagnostics", payload: { conversationId, lines } });
           break;
         }
         case "conversation-page":
@@ -450,7 +552,7 @@ export function createConversationRelay(options: {
       attachedUnder.set(conversationId, token);
       options.sendAttached({ type: "conversation-browser-attached", sessionId: broker, conversationId });
     },
-    command(command) {
+    command(command, page) {
       if (command.type === "ui.conversation.resync") {
         const { conversationId, fromSeq } = command.payload;
         // The panel is showing it: a worker that restarted has forgotten which one was open.
@@ -464,10 +566,15 @@ export function createConversationRelay(options: {
       const { commandId: given, ...forwarded } = command;
       const commandId = given ?? mintId();
       if (broker === undefined || options.sendFrame === undefined) {
-        toPanels(failure(commandId, "Hallpass's helper on this computer is not connected."));
+        refuse(commandId, "Hallpass's helper on this computer is not connected.", page);
         return;
       }
       const payload = forwarded.payload as { conversationId?: string; granted?: boolean; agent?: ConversationAgent; folder?: ConversationFolder };
+      // 024 R-387: a page asking for an agent's last output waits for the reply that names that agent.
+      if (page !== undefined && forwarded.type === "ui.conversation.diagnostics" && payload.agent !== undefined) {
+        pruneClosedWaits();
+        waitForDiagnostics({ commandId, agent: payload.agent, page });
+      }
       // T610: the chosen conversation is shown at once; the broker answers only once its replay ends.
       const switching = forwarded.type === "ui.conversation.open" && payload.conversationId !== active;
       pending.set(commandId, {
@@ -475,6 +582,7 @@ export function createConversationRelay(options: {
         ...(payload.conversationId === undefined ? {} : { conversationId: payload.conversationId }),
         ...(payload.granted === undefined ? {} : { granted: payload.granted }),
         ...(switching ? { back: { to: active } } : {}),
+        ...(page === undefined ? {} : { page }),
         ...(forwarded.type === "ui.conversation.start"
           ? {
               start: {

@@ -16,14 +16,12 @@ import { appendLogEntry, type ConversationLogs } from "./conversation/conversati
 import { ConversationTab } from "./conversation/ConversationTab.js";
 import { useComposerMemory } from "./conversation/attachments/drafts.js";
 import { panelWindowMessage } from "../../panel-window.js";
-import { BrowserRow } from "./BrowserRow.js";
 import { NotConnected } from "./NotConnected.js";
-import { PanelConsentSwitch } from "./PanelConsentSwitch.js";
 import { NoticeCard, PromptCard } from "./PromptCard.js";
 import { SessionCard } from "./SessionCard.js";
-import { SiteList } from "./SiteList.js";
 import { StatusRow } from "./StatusRow.js";
 import "./tokens.css";
+import "./appearance.css";
 import "./agent.css";
 
 /**
@@ -460,12 +458,19 @@ function useAgentPort(): {
   return { state, logs, diagnostics, send, request, captureTab, lastError };
 }
 
-/** 019 D-019-3, FR-284: the two tabs, and the key the last one is remembered under. */
-export type AgentPanelTabName = "conversation" | "connections";
-const PANEL_TABS: readonly AgentPanelTabName[] = ["conversation", "connections"];
+/**
+ * 019 D-019-3, FR-284: the two tabs, and the key the last one is remembered under.
+ *
+ * 024 R-381: the second tab is Sessions (it was Connections & sites). A tab remembered under the old
+ * name, "connections", reads as "sessions".
+ */
+export type AgentPanelTabName = "conversation" | "sessions";
+const PANEL_TABS: readonly AgentPanelTabName[] = ["conversation", "sessions"];
 export const PANEL_TAB_STORAGE_KEY = "agentPanelTab";
 
-const isPanelTab = (value: unknown): value is AgentPanelTabName => PANEL_TABS.includes(value as AgentPanelTabName);
+/** The stored value as a tab, or `undefined` when it names none. */
+const readPanelTab = (value: unknown): AgentPanelTabName | undefined =>
+  value === "connections" ? "sessions" : PANEL_TABS.find((name) => name === value);
 
 /**
  * The tab on screen, opened on the one used last (FR-284, US7 scenario 3).
@@ -483,8 +488,8 @@ function usePanelTab(): [AgentPanelTabName, (tab: AgentPanelTabName) => void] {
       const read = chrome.storage?.local?.get?.(PANEL_TAB_STORAGE_KEY) as Promise<Record<string, unknown>> | undefined;
       void Promise.resolve(read)
         .then((items) => {
-          const stored = items?.[PANEL_TAB_STORAGE_KEY];
-          if (!disposed && !chosen.current && isPanelTab(stored)) setTab(stored);
+          const stored = readPanelTab(items?.[PANEL_TAB_STORAGE_KEY]);
+          if (!disposed && !chosen.current && stored !== undefined) setTab(stored);
         })
         .catch(() => reportTestDiagnostic("agent.panel.tab-unread"));
     } catch {
@@ -510,9 +515,10 @@ function usePanelTab(): [AgentPanelTabName, (tab: AgentPanelTabName) => void] {
 /**
  * 019 FR-284, US7 scenario 2: how many questions wait in the question slot - pairing, consent,
  * plan, site plan, browser choice. The slot shows one at a time above both tabs; the count on the
- * Connections tab is how the owner learns while in a conversation that more are waiting there.
+ * Sessions tab (024 R-381: it was Connections & sites) is how the owner learns while in a
+ * conversation that more are waiting there.
  */
-export function connectionsAttentionCount(state: AgentPanelState): number {
+export function sessionsAttentionCount(state: AgentPanelState): number {
   return [state.pending, state.prompt, state.plan, state.sitePlan, state.browserChoice].filter(
     (question) => question !== undefined,
   ).length;
@@ -587,7 +593,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
   const { state, logs, diagnostics, send, request, captureTab, lastError } = useAgentPort();
   /**
    * T633 (FR-335): the composer's drafts and transfers live here, above the tab switch, so showing
-   * Connections & sites gives up nothing; only this document going away does (with the cancel of
+   * Sessions gives up nothing; only this document going away does (with the cancel of
    * every begun attachment in `useAgentPort`).
    */
   const composer = useComposerMemory();
@@ -630,66 +636,41 @@ export function AgentShell(props: { locale: string }): ReactElement {
     .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== undefined)
     .sort((left, right) => right.at - left.at)[0];
 
-  /**
-   * 018 FR-268, FR-279: "This browser" with its rename, whenever the link is up and the worker
-   * named the browser - before any agent pairs too, so the owner can name it first.
-   */
-  const browserRow =
-    state.browser !== undefined && state.bridge === "connected" ? (
-      <BrowserRow
-        browser={state.browser}
-        locale={props.locale}
-        onRename={(name) => {
-          send({ type: "ui.agent.browser-rename", payload: { name } });
-        }}
-      />
-    ) : null;
+  /** 024 FR-384, FR-393: the settings page, opened at a place in it (the worker opens or focuses the tab). */
+  const openSettings = (route: string): void => {
+    send({ type: "ui.agent.open-settings", payload: { route } });
+  };
 
   /**
-   * 019 FR-282: Connections & sites is everything the panel showed before this feature, unchanged
-   * (the 006 compositions, the 016 status row, the 018 browser row).
+   * 024 R-381, FR-392: Sessions is the connection line, the way back when the link is down, and the
+   * session cards. The browser name, the panel consent, the site list, the upload folders and Unpair
+   * moved to the settings page; this tab links there instead of duplicating them.
    */
-  /**
-   * 019 FR-309, T555: the panel consent, beside the browser it is about. Present whenever the
-   * projection offers conversations - also before any external agent has paired, since the side
-   * panel's own agent needs no pairing.
-   */
-  const consentSwitch =
-    state.conversation === undefined ? null : (
-      <PanelConsentSwitch consent={state.conversation.consent} locale={props.locale} send={send} />
-    );
   /** T607 (Q1): the conversation part says the helper cannot be reached (the Conversation tab's own page for it). */
   const helperDown = state.conversation?.available === false && state.conversation.reason === "broker-unavailable";
   const connections =
     composition === "not-connected" ? (
-      <>
-        <NotConnected
-          variant={state.paired.length > 0 ? "bridge-lost" : helperDown ? "helper-down" : "not-paired"}
-          diagnostics={state.diagnostics ?? {}}
-          locale={props.locale}
-          onRetry={() => {
-            send({ type: "ui.agent.retry-bridge", payload: {} });
-          }}
-        />
-        {browserRow}
-        {consentSwitch}
-      </>
+      <NotConnected
+        variant={state.paired.length > 0 ? "bridge-lost" : helperDown ? "helper-down" : "not-paired"}
+        diagnostics={state.diagnostics ?? {}}
+        locale={props.locale}
+        onRetry={() => {
+          send({ type: "ui.agent.retry-bridge", payload: {} });
+        }}
+      />
     ) : (
       <>
-        <StatusRow
-          sessionCount={state.sessions.length}
-          paired={state.paired}
-          locale={props.locale}
-          uploadListPath={state.uploadRoots?.path}
-          onUnpair={(agentId) => {
-            // 016 FR-223: the agent the owner chose, and no other - the menu names each one.
-            send({ type: "ui.agent.unpair", payload: { agentId } });
-          }}
-        />
-        {browserRow}
-        {consentSwitch}
-        {/* T605: the session cards under a small heading of their own, as the sites have one. */}
-        {sessions.length === 0 ? null : (
+        <StatusRow sessionCount={state.sessions.length} locale={props.locale} onOpenSettings={() => openSettings("#agents")} />
+        {sessions.length === 0 ? (
+          // 024 FR-392: an empty tab says so and points at the page where connections are set up.
+          <div className="agent-sessions-empty" data-sessions-empty="">
+            <p>{t("agent.sessions.empty")}</p>
+            <button type="button" className="agent-quiet" onClick={() => openSettings("#agents")}>
+              {t("agent.sessions.openSettings")}
+            </button>
+          </div>
+        ) : (
+          // T605: the session cards under a small heading of their own.
           <h2 className="agent-section-heading" data-sessions-heading="">
             {t("agent.sessionsTitle")}
           </h2>
@@ -701,6 +682,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
             agentName={agentName(session.agentId)}
             locale={props.locale}
             now={now}
+            onManageSite={(site) => openSettings(`#sites?site=${encodeURIComponent(site)}`)}
             onStop={() => {
               send({ type: "ui.agent.session-stop", payload: { sessionId: session.sessionId } });
             }}
@@ -715,18 +697,11 @@ export function AgentShell(props: { locale: string }): ReactElement {
             }}
           />
         ))}
-        <SiteList
-          sites={state.sites}
-          transitions={state.transitions}
-          uploadRoots={state.uploadRoots}
-          locale={props.locale}
-          send={send}
-        />
       </>
     );
 
-  /** 019 FR-284: the count shows on the Connections tab only while the other tab is shown. */
-  const attention = connectionsAttentionCount(state);
+  /** 019 FR-284: the count shows on the Sessions tab only while the other tab is shown. */
+  const attention = sessionsAttentionCount(state);
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     // The ARIA tabs pattern: arrows move and wrap, Home/End jump; selection follows focus.
     const index = PANEL_TABS.indexOf(tab);
@@ -765,7 +740,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
           <div role="tablist" aria-label={t("agent.tabs.label")} className="agent-tabs" onKeyDown={onTabKeyDown}>
             {PANEL_TABS.map((name) => {
               const selected = tab === name;
-              const count = name === "connections" && !selected ? attention : 0;
+              const count = name === "sessions" && !selected ? attention : 0;
               return (
                 <button
                   key={name}
@@ -781,7 +756,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
                   }}
                   onClick={() => chooseTab(name)}
                 >
-                  {t(name === "conversation" ? "agent.tabs.conversation" : "agent.tabs.connections")}
+                  {t(name === "conversation" ? "agent.tabs.conversation" : "agent.tabs.sessions")}
                   {count > 0 ? (
                     <>
                       <span className="agent-tab-count" data-tab-count aria-hidden="true">
@@ -808,7 +783,7 @@ export function AgentShell(props: { locale: string }): ReactElement {
                 {...(activeTabId === undefined ? {} : { activeTabId })}
                 {...(activeTab.url === undefined ? {} : { activeTabUrl: activeTab.url })}
                 {...(lastError === undefined ? {} : { lastError })}
-                onGoConnections={() => chooseTab("connections")}
+                onGoConnections={() => chooseTab("sessions")}
               />
             ) : (
               connections

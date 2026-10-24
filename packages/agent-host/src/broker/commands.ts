@@ -1,11 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import {
   agentBrowserIdSchema,
   CONVERSATION_AGENTS,
   CONVERSATION_MAX_ENTRIES,
   conversationCommandFrameSchema,
+  type AgentInstallState,
   type ConversationAgent,
   type ConversationAgentAvailability,
   type ConversationError,
@@ -16,22 +18,38 @@ import {
 } from "@hallpass/contracts";
 import { launchSettings, writeLaunchFiles } from "./agent-launch-settings.js";
 import type { ConversationListNotice } from "./index-store.js";
-import { writeHostFileAtomically } from "../bridge-link.js";
+import { isProcessAlive, writeHostFileAtomically } from "../bridge-link.js";
 import { isWindowsDeviceName } from "../host-paths.js";
 import {
   AGENT_ADAPTERS,
   AGENT_DESCRIPTIONS,
+  LAUNCH_EXEC_BOUND_MS,
   TESTED_AGENT_VERSIONS,
   adapterLaunchSpec,
   agentAvailability,
   type AdapterLaunchSpec,
   type AgentPorts,
+  type ReadinessAttempt,
 } from "./agents.js";
 import type { ConversationIndex, FolderList } from "./conversation-index.js";
 import type { CommandOutcome, ConversationPool, LaunchResolution, ResumeGate } from "./conversation.js";
 import type { FolderActions } from "./folders.js";
-import type { InstallProgress, InstallResult } from "./install.js";
-import { redact } from "./redact.js";
+import { INSTALL_CANCELLED_DETAIL, type InstallControl, type InstallEstimate, type InstallProgress, type InstallResult } from "./install.js";
+import { redact, withoutUserProfile } from "./redact.js";
+import {
+  acquireInstallLock,
+  isRunningInstallPhase,
+  liveInstallLockHolder,
+  readInstallState,
+  readSharedState,
+  SHARED_STATE_POLL_MS,
+  shownInstallState,
+  watchSharedState,
+  writeInstallState,
+  type InstallLockHolder,
+  type SharedStateSnapshot,
+  type SharedStateWatch,
+} from "./shared-agent-state.js";
 
 /**
  * The broker's side of the panel's commands (019 T540; contracts/conversation-frames.md). A
@@ -52,6 +70,14 @@ import { redact } from "./redact.js";
  */
 
 const DETAIL_MAX = 600;
+
+/**
+ * 024 R-375: how long after the last `ui.conversation.check-agents` - which the settings page sends on
+ * every connect - the shared files are still watched while no install or test runs in this broker and
+ * the shared files show no download under way in a live broker (another browser's). Then the watch
+ * ends by itself; the page's next connect starts it again.
+ */
+export const SHARED_STATE_WATCH_IDLE_MS = 60_000;
 
 /** What a command produced: `start` names the conversation it minted, the rest nothing. */
 type Outcome = CommandOutcome | CommandOutcome<{ conversationId: string }>;
@@ -192,6 +218,7 @@ export type ConversationPoolPort = Pick<
   | "cancelAttachment"
   | "agentAccepts"
   | "diagnostics"
+  | "latestRun"
 >;
 
 export type CommandHandlerOptions = {
@@ -206,8 +233,27 @@ export type CommandHandlerOptions = {
   /** The folder dialog and Explorer (T562, `folders.ts`). */
   folderActions: FolderActions;
   availability: (agent: ConversationAgent) => Promise<ConversationAgentAvailability>;
-  /** `installAgent` with the broker's ports (install.ts); `onProgress` hears each phase (T547, G2). */
-  install: (agent: ConversationAgent, onProgress?: (progress: InstallProgress) => void) => Promise<InstallResult>;
+  /**
+   * 024 R-374: the settings page's readiness check (`checkAgentReadiness`, 5 s per command). When
+   * given, it is what the overview's agents come from; `availability` stays the launch's own check.
+   * A result with `versionTimedOut` is checked once more in the background with `attempt` (the
+   * launch bound, and a signal that ends it when a newer check or the shutdown comes first).
+   */
+  checkAgent?: (agent: ConversationAgent, attempt?: ReadinessAttempt) => Promise<ReadinessResult>;
+  /**
+   * `installAgent` with the broker's ports (install.ts); `onProgress` hears each phase (T547, G2),
+   * `control` carries the cancel signal and the estimates (024 R-376, R-377).
+   */
+  install: (agent: ConversationAgent, onProgress?: (progress: InstallProgress) => void, control?: InstallControl) => Promise<InstallResult>;
+  /**
+   * 024 R-375: the files every broker on this computer shares (`shared-agent-state.ts`) - the install
+   * state, its lock and the last test. Absent: none are read or written (one broker alone, as before).
+   */
+  shared?: SharedStateOptions;
+  /** 024 R-379: the settings page's Test, outside the pool (`agent-test.ts`). */
+  tests?: AgentTestRunnerPort;
+  /** 024 R-387: the user's profile folder, said as `%USERPROFILE%` in diagnostics by agent (default: this process's). */
+  userProfile?: string;
   /**
    * T563: what the list could not keep (`index-store.ts`), read for every overview. A code only, so
    * neither the broker's text nor the kept file's name reaches the panel.
@@ -216,8 +262,39 @@ export type CommandHandlerOptions = {
   log?: (code: string, detail?: string) => void;
 };
 
+/** 024 R-374: one agent's readiness, and whether its found program's `--version` timed out. */
+export type ReadinessResult = { availability: ConversationAgentAvailability; versionTimedOut?: boolean };
+
+export type SharedStateOptions = {
+  /** `%LOCALAPPDATA%\hallpass`. */
+  dataDir: string;
+  /** This broker's browser and process, as its install state and lock name them. */
+  browserId: string;
+  pid: number;
+  /** How often a broker following another's install looks at its lock and state (default 1 s). */
+  followIntervalMs?: number;
+  isAlive?: (pid: number) => boolean;
+};
+
+/** 024 R-379: what the handler needs of the test runner (`agent-test.ts`). */
+export type AgentTestRunnerPort = {
+  /** Starts the agent's test, or joins the one running; resolves when it is under way (the result goes to `last-test.json`). */
+  start(agent: ConversationAgent, onDone: () => void): void;
+  running(agent: ConversationAgent): boolean;
+  /** R-387: the test's latest run of the agent, for diagnostics by agent. */
+  latestRun(agent: ConversationAgent): { serial: number; lines: string[] } | undefined;
+};
+
 export type CommandHandler = {
   handle(frame: unknown): Promise<void>;
+  /**
+   * 024 R-375: stops watching the shared files now (the link to the worker went, or the broker is
+   * shutting down). The watch also ends by itself `SHARED_STATE_WATCH_IDLE_MS` after the last
+   * check-agents once nothing runs here or in another live broker's download; a check-agents starts it again.
+   */
+  stopWatching(): void;
+  /** 024 R-374: ends the readiness retries running in the background (the broker is shutting down); none is applied after. */
+  stopChecks(): void;
   /** Sends a fresh overview soon; several calls in one turn of the event loop send one. */
   scheduleOverview(): void;
   sendOverview(): Promise<void>;
@@ -255,13 +332,116 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
   /** Asked by the pool before a resume starts an agent run (T558 follow-up): granted, or `consent-needed`. */
   const consentGate: ResumeGate = async () => ((await consent.read()) === "granted" ? { ok: true } : needsConsent());
 
-  const refreshAgents = async (): Promise<void> => {
-    agents = await Promise.all(
-      CONVERSATION_AGENTS.map((agent) =>
-        options.availability(agent).catch((): ConversationAgentAvailability => ({ agent, availability: "missing" })),
-      ),
+  const isAlive = options.shared?.isAlive ?? isProcessAlive;
+  /** 024 R-374: the readiness check when there is one, else the launch's own. */
+  const check = (agent: ConversationAgent, attempt?: ReadinessAttempt): Promise<ReadinessResult> =>
+    options.checkAgent !== undefined ? options.checkAgent(agent, attempt) : options.availability(agent).then((availability) => ({ availability }));
+  /**
+   * 024 R-374: each agent's check generation - the newest started, and the one whose result the
+   * overview holds. A result older than the one held is dropped, and a background retry counts only
+   * while its check is still the newest: no late answer overwrites a newer one.
+   */
+  const startedChecks = new Map<ConversationAgent, number>();
+  const heldChecks = new Map<ConversationAgent, number>();
+  /** The background retry of each agent whose found program did not answer `--version` in time. */
+  const retries = new Map<ConversationAgent, AbortController>();
+  let checksStopped = false;
+  /** 024 R-377: the cancel of each install this broker runs itself (not one it follows). */
+  const cancels = new Map<ConversationAgent, AbortController>();
+  /** 024 R-375: polling the shared files while a settings page asked lately, or something runs here or a live broker's download runs. */
+  let watch: SharedStateWatch | undefined;
+  /** When the last check-agents came (`Date.now()`). */
+  let lastCheckAt = 0;
+  /** The shared files as the last overview carried them, so the watch does not send the same again. */
+  let sentShared: string | undefined;
+  const busyHere = (): boolean => installs.size > 0 || CONVERSATION_AGENTS.some((agent) => options.tests?.running(agent) === true);
+  /** The shared files as last read show a download under way whose broker is alive. */
+  const runningInstallIn = (snapshot: SharedStateSnapshot | undefined): boolean =>
+    snapshot !== undefined &&
+    CONVERSATION_AGENTS.some((agent) => {
+      const install = snapshot[agent]?.install;
+      return install !== undefined && isRunningInstallPhase(install.phase) && isAlive(install.pid);
+    });
+
+  /**
+   * The agents' state, kept until asked again (024 R-374): every agent, or `only` one of them once
+   * all are known. The settings page asks on connect and on Check again; an install's end asks too.
+   */
+  const refreshAgents = async (only?: ConversationAgent): Promise<void> => {
+    const targets = only === undefined || !agentsKnown ? CONVERSATION_AGENTS : [only];
+    const generations = targets.map((agent) => {
+      const generation = (startedChecks.get(agent) ?? 0) + 1;
+      startedChecks.set(agent, generation);
+      // An older check's retry is superseded: its program's tree ends, and its answer is not kept.
+      retries.get(agent)?.abort();
+      retries.delete(agent);
+      return generation;
+    });
+    const fresh = await Promise.all(
+      targets.map((agent) => check(agent).catch((): ReadinessResult => ({ availability: { agent, availability: "missing" } }))),
     );
+    targets.forEach((agent, at) => {
+      const generation = generations[at] ?? 0;
+      const result = fresh[at];
+      if (result === undefined || generation <= (heldChecks.get(agent) ?? 0)) return;
+      hold(agent, generation, result.availability);
+      if (result.versionTimedOut === true && generation === startedChecks.get(agent)) retryVersion(agent, generation);
+    });
     agentsKnown = true;
+  };
+
+  const hold = (agent: ConversationAgent, generation: number, availability: ConversationAgentAvailability): void => {
+    heldChecks.set(agent, generation);
+    agents = agents.map((entry) => (entry.agent === agent ? availability : entry));
+  };
+
+  /**
+   * 024 R-374: a found program whose `--version` did not answer within 5 s (a slow `hermes --version`
+   * takes 6-11 s, T794) is checked once more, in the background, at the launch bound. The first check's
+   * answer - Not installed, with the timed-out reason - is already in the overview; this one replaces it
+   * only while its check is still the agent's newest, and only with an answer: timed out again, or still
+   * no version, the first answer stands. A newer check or `stopChecks` aborts it, which ends its tree.
+   */
+  const retryVersion = (agent: ConversationAgent, generation: number): void => {
+    if (checksStopped) return;
+    const controller = new AbortController();
+    retries.set(agent, controller);
+    const current = () => !controller.signal.aborted && startedChecks.get(agent) === generation && heldChecks.get(agent) === generation;
+    void check(agent, { boundMs: LAUNCH_EXEC_BOUND_MS, signal: controller.signal })
+      .then(
+        (result) => {
+          const next = result.availability;
+          if (!current() || result.versionTimedOut === true || (next.availability === "version-problem" && next.version === undefined)) return;
+          hold(agent, generation, next);
+          scheduleOverview();
+        },
+        () => log("broker.agent-recheck-failed", agent),
+      )
+      .finally(() => {
+        if (retries.get(agent) === controller) retries.delete(agent);
+      });
+  };
+
+  const stopChecks = (): void => {
+    checksStopped = true;
+    for (const controller of retries.values()) controller.abort();
+    retries.clear();
+  };
+
+  const startWatching = (): void => {
+    lastCheckAt = Date.now();
+    if (options.shared === undefined || watch?.watching === true) return;
+    watch = watchSharedState({
+      dataDir: options.shared.dataDir,
+      // This broker's own install writes its state and sends an overview of it: the watch reading the same is no news.
+      onChange: (snapshot) => {
+        if (JSON.stringify(snapshot) !== sentShared) scheduleOverview();
+      },
+      // A download that runs anywhere - here, or in another browser's broker whose pid lives - keeps the
+      // page's picture of it current to its end (FR-396); with nothing running, the watch expires as before.
+      keepWatching: (last) => Date.now() - lastCheckAt < SHARED_STATE_WATCH_IDLE_MS || busyHere() || runningInstallIn(last),
+    });
+    void watch.start().catch(() => log("broker.shared-watch-failed"));
   };
 
   const sendOverview = async (): Promise<void> => {
@@ -269,14 +449,26 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
     // First: reading the list is what finds an unreadable index, so the notice below is current.
     const conversations = (await pool.views()).slice(0, CONVERSATION_MAX_ENTRIES);
     const notice = options.listNotice?.();
+    // 024 R-375: what every broker on this computer shares - a download's state (another browser's
+    // too, without its pid), the last test's result.
+    const facts = options.shared === undefined ? undefined : await readSharedState(options.shared.dataDir).catch(() => undefined);
+    if (facts !== undefined) sentShared = JSON.stringify(facts);
     const listed = agents.map((entry) => {
       const phase = installPhases.get(entry.agent);
       // 022 R-344: what the agent said it accepts when it last started here, so the panel can tell before a start.
       const accepts = pool.agentAccepts(entry.agent);
+      const file = facts?.[entry.agent];
+      const install = file?.install === undefined ? undefined : shownInstallState(file.install, isAlive);
+      // Another broker's download in flight shows as this agent downloading here as well.
+      const following = phase === undefined && install !== undefined && isRunningInstallPhase(install.phase) ? (install.phase as ConversationInstallPhase) : undefined;
+      const installing = phase ?? following;
       return {
         ...entry,
-        ...(phase === undefined ? {} : { installing: phase }),
+        ...(installing === undefined ? {} : { installing }),
         ...(accepts === undefined ? {} : { accepts }),
+        ...(install === undefined ? {} : { install }),
+        ...(file?.lastTest === undefined ? {} : { lastTest: file.lastTest }),
+        ...(options.tests?.running(entry.agent) === true ? { testing: true } : {}),
       };
     });
     options.send({
@@ -324,20 +516,132 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
     }
   };
 
+  /**
+   * 024 R-375 / R-376: `install-state.json` of this broker's own download - Preparing (no percent)
+   * until the first package folder, then the estimate each count, then how it ended - written whole,
+   * one write after another, each followed by an overview.
+   */
+  const installStateWriter = (agent: ConversationAgent, shared: SharedStateOptions) => {
+    const startedAt = new Date().toISOString();
+    let phase: ConversationInstallPhase = "preparing";
+    let estimate: Pick<InstallEstimate, "percent" | "etaSeconds"> = { percent: null, etaSeconds: null };
+    let chain: Promise<void> = Promise.resolve();
+    const owner = { startedAt, browserId: shared.browserId, pid: shared.pid };
+    const write = (state: AgentInstallState): Promise<void> => {
+      chain = chain
+        .then(() => writeInstallState(shared.dataDir, agent, state))
+        .then(scheduleOverview, () => log("broker.install-state-failed", agent));
+      return chain;
+    };
+    const writeRunning = () =>
+      void write({
+        ...owner,
+        phase: phase === "downloading" && estimate.percent === null ? "preparing" : phase,
+        percent: estimate.percent,
+        etaSeconds: phase === "downloading" ? estimate.etaSeconds : null,
+      });
+    writeRunning();
+    return {
+      phase(next: ConversationInstallPhase): void {
+        if (next === phase) return;
+        phase = next;
+        writeRunning();
+      },
+      estimate(next: InstallEstimate): void {
+        estimate = { percent: next.percent, etaSeconds: next.etaSeconds };
+        writeRunning();
+      },
+      end(result: InstallResult, cancelled: boolean): Promise<void> {
+        const endedAt = new Date().toISOString();
+        if (result.ok) return write({ ...owner, phase: "done", percent: 100, etaSeconds: null, endedAt });
+        return write({
+          ...owner,
+          phase: cancelled ? "cancelled" : "failed",
+          percent: estimate.percent,
+          etaSeconds: null,
+          endedAt,
+          ...(cancelled ? {} : { error: result.error.detail.slice(0, DETAIL_MAX) }),
+        });
+      },
+    };
+  };
+
+  /** This broker's own `npm ci` of the agent, cancellable (R-377), its state in the shared file (R-375). */
+  const runInstall = async (agent: ConversationAgent, controller: AbortController): Promise<InstallResult> => {
+    const state = options.shared === undefined ? undefined : installStateWriter(agent, options.shared);
+    let result: InstallResult;
+    try {
+      result = await options.install(
+        agent,
+        ({ phase }) => {
+          state?.phase(phase);
+          // T547 (G2): every phase change is an overview, so the panel shows the phase it is told.
+          if (installPhases.get(agent) === phase) return;
+          installPhases.set(agent, phase);
+          scheduleOverview();
+        },
+        { signal: controller.signal, ...(state === undefined ? {} : { onEstimate: (estimate) => state.estimate(estimate) }) },
+      );
+    } catch (error) {
+      result = failure("install-failed", `The install failed: ${error instanceof Error ? error.message : ""}`);
+    }
+    const cancelled = controller.signal.aborted && !result.ok;
+    if (cancelled) result = failure("install-failed", INSTALL_CANCELLED_DETAIL);
+    await state?.end(result, cancelled);
+    return result;
+  };
+
+  /**
+   * 024 R-375: another live broker holds this agent's install lock - its download is the one: no
+   * second `npm ci`. Its progress reaches this broker's overview from the shared file; the answer
+   * is how that download ended once its lock is gone (a holder that died reads as interrupted).
+   */
+  const follow = async (agent: ConversationAgent, shared: SharedStateOptions): Promise<InstallResult> => {
+    log("broker.install-following", agent);
+    const interval = shared.followIntervalMs ?? SHARED_STATE_POLL_MS;
+    scheduleOverview();
+    while ((await liveInstallLockHolder(shared.dataDir, agent, isAlive)) !== undefined) {
+      await delay(interval);
+      scheduleOverview();
+    }
+    const state = await readInstallState(shared.dataDir, agent);
+    if (state?.phase === "done") return { ok: true, directory: join(shared.dataDir, "agents", agent) };
+    const shown = state === undefined ? undefined : shownInstallState(state, isAlive);
+    return failure(
+      "install-failed",
+      shown?.phase === "cancelled"
+        ? "The download was cancelled in another browser."
+        : (shown?.error ?? "The download in another browser did not finish."),
+    );
+  };
+
   const install = (agent: ConversationAgent): Promise<InstallResult> => {
     const running = installs.get(agent);
     if (running !== undefined) return running;
-    const started = options
-      .install(agent, ({ phase }) => {
-        // T547 (G2): every phase change is an overview, so the panel shows the phase it is told.
-        if (installPhases.get(agent) === phase) return;
-        installPhases.set(agent, phase);
-        scheduleOverview();
-      })
-      .finally(() => {
-        installs.delete(agent);
-        installPhases.delete(agent);
-      });
+    // Registered at once, so a cancel that comes while the lock is being taken still reaches it.
+    const controller = new AbortController();
+    cancels.set(agent, controller);
+    const started = (async (): Promise<InstallResult> => {
+      const shared = options.shared;
+      if (shared === undefined) return runInstall(agent, controller);
+      const self: InstallLockHolder = { pid: shared.pid, browserId: shared.browserId };
+      const lock = await acquireInstallLock(shared.dataDir, agent, self, isAlive);
+      if (!lock.acquired) {
+        // Not this broker's to cancel: the other browser's page has the Cancel of it.
+        cancels.delete(agent);
+        return follow(agent, shared);
+      }
+      try {
+        return await runInstall(agent, controller);
+      } finally {
+        // After the final state is written: a follower that sees the lock gone reads how it ended.
+        await lock.release();
+      }
+    })().finally(() => {
+      cancels.delete(agent);
+      installs.delete(agent);
+      installPhases.delete(agent);
+    });
     installs.set(agent, started);
     return started;
   };
@@ -427,10 +731,55 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       case "ui.conversation.remove":
         return { outcome: await pool.remove(command.payload.conversationId), after: scheduleOverview };
       case "ui.conversation.diagnostics": {
-        // 023 R-367 (FR-372): the latest run's scrubbed lines, after the result; none for an unknown or removed one.
-        const { conversationId } = command.payload;
-        const lines = pool.diagnostics(conversationId);
-        return { outcome: { ok: true }, after: () => options.send({ type: "conversation-diagnostics", sessionId, conversationId, lines }) };
+        const { payload } = command;
+        if ("conversationId" in payload) {
+          // 023 R-367 (FR-372): the latest run's scrubbed lines, after the result; none for an unknown or removed one.
+          const { conversationId } = payload;
+          const lines = pool.diagnostics(conversationId);
+          return { outcome: { ok: true }, after: () => options.send({ type: "conversation-diagnostics", sessionId, conversationId, lines }) };
+        }
+        // 024 R-387 (FR-387): the agent's most recent run in this broker, a conversation's or a test's,
+        // read now; the user's profile folder is not said. None for an agent that has not run here.
+        const { agent } = payload;
+        const conversationRun = pool.latestRun(agent);
+        const testRun = options.tests?.latestRun(agent);
+        const latest =
+          testRun !== undefined && (conversationRun === undefined || testRun.serial > conversationRun.serial)
+            ? { lines: testRun.lines }
+            : conversationRun;
+        const frame = {
+          type: "conversation-diagnostics",
+          sessionId,
+          agent,
+          readAt: new Date().toISOString(),
+          ...(latest !== undefined && "conversationId" in latest ? { conversationId: latest.conversationId } : {}),
+          lines: (latest?.lines ?? []).map((line) => withoutUserProfile(line, options.userProfile ?? process.env.USERPROFILE)),
+        };
+        return { outcome: { ok: true }, after: () => options.send(frame) };
+      }
+      case "ui.conversation.check-agents": {
+        // 024 R-374: the page asks on connect and on Check again; the shared files are watched from now
+        // until SHARED_STATE_WATCH_IDLE_MS passes with no check-agents and nothing running here (R-375).
+        startWatching();
+        await refreshAgents(command.payload.agent);
+        return { outcome: { ok: true }, after: scheduleOverview };
+      }
+      case "ui.conversation.install-cancel": {
+        // 024 R-377: this broker's own download ends - npm's tree, its folder and the lock gone - before the answer.
+        // Nothing running here (none, or another browser's): ok, nothing changes.
+        const controller = cancels.get(command.payload.agent);
+        if (controller === undefined) return { outcome: { ok: true } };
+        controller.abort();
+        await installs.get(command.payload.agent)?.catch(() => undefined);
+        return { outcome: { ok: true }, after: scheduleOverview };
+      }
+      case "ui.conversation.test": {
+        // 024 R-379: an agent process starts, so the consent applies as to a start (FR-299). The answer
+        // comes at once; the result reaches the page in the overview (`testing`, then `lastTest`).
+        if (options.tests === undefined) return { outcome: failure("broker-unavailable", "Hallpass cannot test agents here.") };
+        if ((await consent.read()) !== "granted") return { outcome: needsConsent() };
+        options.tests.start(command.payload.agent, scheduleOverview);
+        return { outcome: { ok: true }, after: scheduleOverview };
       }
       case "ui.conversation.add-folder": {
         // T562 (R-320): the Windows folder dialog; the chosen folder reaches the panel in the overview.
@@ -487,9 +836,11 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       reply(commandId, result.outcome);
       result.after?.();
     },
+    stopWatching: () => watch?.stop(),
+    stopChecks,
     scheduleOverview,
     sendOverview,
-    refreshAgents,
+    refreshAgents: () => refreshAgents(),
     eventFrame: (payload) => ({ type: "conversation-event", sessionId, ...payload }),
   };
 }

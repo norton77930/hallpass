@@ -2,7 +2,8 @@ import type { Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -69,6 +70,8 @@ test.describe("agent actions", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     try {
@@ -89,8 +92,8 @@ test.describe("agent actions", () => {
       expect(foreign.isError).toBe(true);
       expect(foreign.json).toMatchObject({ outcome: "denied", reason: "not-yours" });
 
-      // --- The owner puts this site into skip-checks, from the panel's own site list. ---
-      await setSiteMode(panel, SITE, "skip-checks");
+      // --- The owner puts this site into skip-checks, on the settings page, the owner's own control (024 FR-385). ---
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // ================= click =================
       const ordinary = await agentPage(extensionContext, `${SITE}/ordinary`);
@@ -223,7 +226,7 @@ test.describe("agent actions", () => {
       expect(second.json).toMatchObject({ outcome: "busy" });
 
       // ================= ask: the owner is shown the question, and says no (SC-023) =================
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const before = await ordinaryAgain.locator("#clicked").textContent();
       const denyRef = await refFor(call, tabId, "Safe action");
       const asked = client.callTool("click", { tabId, target: { ref: denyRef } });
@@ -304,33 +307,4 @@ async function agentPage(
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`agent-tab-not-found:${url}`);
-}
-
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage: the
- * claim is that the owner can decide from what they are shown, and poking the store behind the
- * panel would prove only that the store works.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  // The worker answers with a fresh projection; waiting for it is what makes the next call's mode
-  // the one just chosen rather than a race with it.
-  await expect
-    .poll(
-      async () => panel.evaluatePanel(
-        `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-          `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-      ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

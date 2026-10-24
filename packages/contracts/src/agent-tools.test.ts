@@ -60,3 +60,79 @@ describe("022 tab-capture-result", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * 024 T744 - the panel projection additions (contracts/frames.md "Panel projection additions"):
+ * `conversation.choices` (AgentChoices, R-380) and a session card's `site` for the permissions link.
+ * Both optional, so a 0.15 projection still parses.
+ */
+describe("024 panel projection additions", () => {
+  const base = { paired: [], sessions: [], tabs: [], sites: [], bridge: "connected" };
+  const conversation = { available: true, consent: "granted", conversations: [], agents: [], folders: [] };
+  const choices = { enabled: { "claude-code": true, codex: false, hermes: true, deepseek: true }, default: "hermes" };
+  const session = { sessionId: "s-1", agentId: "a-1", tabs: [] };
+  const state = (payload: Record<string, unknown>) => agentPanelMessageSchema.safeParse({ type: "worker.agent.state", payload }).success;
+
+  it("conversation carries the owner's choices, and still parses without them", () => {
+    expect(state({ ...base, conversation })).toBe(true);
+    expect(state({ ...base, conversation: { ...conversation, choices } })).toBe(true);
+    expect(state({ ...base, conversation: { ...conversation, choices: { ...choices, default: "codex" } } })).toBe(false);
+  });
+
+  it("a session names the canonical origin it acts on, or nothing", () => {
+    expect(state({ ...base, sessions: [session] })).toBe(true);
+    expect(state({ ...base, sessions: [{ ...session, site: "https://example.test" }] })).toBe(true);
+    expect(state({ ...base, sessions: [{ ...session, site: "https://example.test/path" }] })).toBe(false);
+  });
+});
+
+/**
+ * 024 T753 - the panel's link into the settings page (R-372): `ui.agent.open-settings { route }`,
+ * with the routes R-372 lists and nothing else, so a panel command can never open another page.
+ */
+describe("024 ui.agent.open-settings", () => {
+  const open = (route: unknown) => agentPanelCommandSchema.safeParse({ type: "ui.agent.open-settings", payload: { route } }).success;
+
+  it("takes each route R-372 lists", () => {
+    for (const route of [
+      "#agents",
+      "#agents/claude-code",
+      "#agents/codex",
+      "#agents/hermes",
+      "#agents/deepseek",
+      "#sites",
+      "#sites?site=https://github.com",
+      "#sites?site=http://localhost:5173",
+      `#sites?site=${encodeURIComponent("https://docs.example.test")}`,
+      "#tools",
+      "#connection",
+    ]) {
+      expect(open(route), route).toBe(true);
+    }
+  });
+
+  it("refuses another page, an unknown agent or section, a site that is not a canonical origin, and extra fields", () => {
+    for (const route of [
+      "",
+      "agents",
+      "#",
+      "#agents/other",
+      "#agents/",
+      "#sessions",
+      "#sites?site=",
+      "#sites?site=https://github.com/path",
+      "#sites?site=https://github.com&x=1",
+      "#sites?other=https://github.com",
+      "#tools/extra",
+      "https://evil.test/#agents",
+      "side-panel.html#agents",
+      `#sites?site=https://${"a".repeat(600)}.test`,
+    ]) {
+      expect(open(route), route).toBe(false);
+    }
+    expect(open(7)).toBe(false);
+    expect(
+      agentPanelCommandSchema.safeParse({ type: "ui.agent.open-settings", payload: { route: "#agents", url: "https://evil.test" } }).success,
+    ).toBe(false);
+  });
+});

@@ -61,15 +61,41 @@ export async function isAgentPaired(panel: PairingPanel, locale: AppLocale): Pro
 }
 
 /**
- * Unpairs from the status row (006 FR-083): the control sits behind the overflow menu, so it is
- * opened first. Resolves once the shell is back on the not-connected page.
+ * The part of `SettingsPageDriver` (`settings-page-driver.ts`) the unpair helper uses, named
+ * structurally for the same reason `PairingPanel` is: the helper is also driven against a rendered
+ * settings view in jsdom.
  */
-export async function unpairAgent(panel: PairingPanel, options: PairingOptions): Promise<void> {
-  const { locale, timeoutMs = 30_000, pollMs = 250 } = options;
-  const opened = await panel.clickIfPresent(lookup("agent.status.menu", locale));
-  if (!opened) throw new Error("agent-status-menu-missing");
-  const clicked = await panel.clickIfPresent(lookup("agent.unpair", locale));
-  if (!clicked) throw new Error("agent-unpair-missing");
+export type PairingSettings = {
+  /** Moves the page to a route (`#sites`) and waits for that section. */
+  goto(route: string): Promise<void>;
+  evaluateSettings(expression: string, userGesture?: boolean): Promise<unknown>;
+};
+
+/**
+ * Unpairs on the settings page (024 FR-385, R-385): Sites & permissions lists the paired outside
+ * agents, each with its own Unpair - the status row's menu holds only "Settings" now (FR-392). With
+ * `agentName` it is that agent's row, otherwise the first one. Resolves once the side panel is back on
+ * the not-connected page, which is the signal that is false while anything is still paired.
+ */
+export async function unpairAgent(
+  panel: PairingPanel,
+  settings: PairingSettings,
+  options: PairingOptions & { agentName?: string },
+): Promise<void> {
+  const { locale, timeoutMs = 30_000, pollMs = 250, agentName } = options;
+  await settings.goto("#sites");
+  const unpairText = lookup("settings.outside.unpair", locale);
+  const label =
+    agentName === undefined ? undefined : lookup("settings.outside.unpairLabel", locale).replace("{name}", () => agentName);
+  const clicked = await settings.evaluateSettings(
+    `(()=>{const b=[...document.querySelectorAll('[data-paired] button')].find((x)=>${
+      label === undefined
+        ? `x.textContent?.trim()===${JSON.stringify(unpairText)}`
+        : `x.getAttribute('aria-label')===${JSON.stringify(label)}`
+    });if(!b)return false;b.click();return true})()`,
+    true,
+  );
+  if (clicked !== true) throw new Error(`agent-unpair-missing:${agentName ?? "first paired agent"}`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if ((await panel.evaluatePanel(`(()=>${SHELL_STATE_EXPRESSION})()`)) === "not-connected") return;

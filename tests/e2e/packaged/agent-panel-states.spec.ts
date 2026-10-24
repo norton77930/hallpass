@@ -1,7 +1,8 @@
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall, isAgentPaired } from "../fixtures/agent-pairing.js";
-import { copyFor, localeFromEnv, clickLabelled, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -71,15 +72,13 @@ test.describe("agent panel states", () => {
     await expect.poll(() => shellState(panel), { timeout: 15_000 }).toBe("not-connected");
     await panel.waitForText(ui("agent.notPaired.title"));
     const notPaired = await panel.panelText();
-    expect(notPaired).not.toContain(ui("agent.sitesTitle"));
+    // 024 FR-385: no site list in the panel at all - it lives on the settings page.
+    expect(await panel.evaluatePanel("document.querySelectorAll('[data-site]').length")).toBe(0);
     expect(notPaired).not.toContain(ui("agent.status.connected"));
     expect(notPaired).not.toContain(ui("agent.session.stop"));
-    // Exactly one landmark region: the page itself - beside 019's panel consent switch (FR-309, T555),
-    // which is shown before any external agent pairs because the panel's own agent needs no pairing.
-    expect(
-      await panel.evaluatePanel("document.querySelectorAll('section:not(.agent-panel-consent)').length"),
-    ).toBe(1);
-    expect(await panel.evaluatePanel("document.querySelectorAll('section.agent-panel-consent').length")).toBe(1);
+    // Exactly one landmark region: the page itself. 019's panel consent switch (FR-309) moved to the
+    // settings page's Browser tools (024 FR-386), so nothing stands beside it any more.
+    expect(await panel.evaluatePanel("document.querySelectorAll('section').length")).toBe(1);
     expect(await isAgentPaired(panel, locale)).toBe(false);
 
     let alpha: McpHarnessClient | undefined;
@@ -117,10 +116,12 @@ test.describe("agent panel states", () => {
       await panel.waitForText(ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1"));
 
       // --- switching the site to `ask` makes the next effect prompt; the consent card is on top ---
-      await setSiteMode(panel, SITE, "skip-checks");
+      // 024 FR-385: the site's mode is set on the settings page.
+      const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+      await settings.setSiteMode(SITE, "skip-checks");
       const refA = await refFor((tool, args) => callOn(a, tool, args), tabA, "Safe action");
       await callOn(a, "click", { tabId: tabA, target: { ref: refA } });
-      await setSiteMode(panel, SITE, "ask");
+      await settings.setSiteMode(SITE, "ask");
       const refAsk = await refFor((tool, args) => callOn(a, tool, args), tabA, "Safe action");
       const asked = a.callTool("click", { tabId: tabA, target: { ref: refAsk } });
       await panel.waitForText(ui("agent.promptTitle"));
@@ -139,12 +140,14 @@ test.describe("agent panel states", () => {
       await panel.waitForText(ui("agent.promptTitle"));
       await panel.clickButton(ui("agent.allowAlways"));
       expect((await always).isError, `stderr:\n${a.stderr()}`).toBe(false);
-      await expect.poll(() => modeOf(panel, SITE), { timeout: 15_000 }).toBe("skip-checks");
-      expect(await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE)}] [data-site-mode]')?.getAttribute('data-permissive') === 'true'`)).toBe(true);
+      await expect.poll(() => settings.siteMode(SITE), { timeout: 15_000 }).toBe("skip-checks");
+      // 024 FR-385: the settings row says what skip-checks means under the chosen mode.
+      expect(
+        await settings.evaluateSettings(`document.querySelector('li.site[data-site=${JSON.stringify(SITE)}] .mode-help')?.textContent ?? null`),
+      ).toBe(settings.t("settings.mode.skip-checks.meaning"));
 
-      // --- revoking the site removes the row; the default (ask) applies to the next effect ---
-      await panel.evaluatePanel(`document.querySelector('[data-site=${JSON.stringify(SITE)}] .agent-site-more-button')?.click(), true`, true);
-      await clickLabelled(panel, ui("agent.siteRevoke").replace("{site}", SITE));
+      // --- revoking the site clears its record (the row stays at Ask while this session is on it); the default applies to the next effect ---
+      await settings.revokeSite(SITE);
       await expect.poll(() => storedModeOf(extensionWorker, SITE), { timeout: 15_000 }).toBeUndefined();
       const refDefault = await refFor((tool, args) => callOn(a, tool, args), tabA, "Safe action");
       const askedAgain = a.callTool("click", { tabId: tabA, target: { ref: refDefault } });
@@ -217,13 +220,6 @@ async function shellState(panel: SidePanelDriver): Promise<unknown> {
   return panel.evaluatePanel("document.querySelector('[data-agent-state]')?.getAttribute('data-agent-state') ?? null");
 }
 
-/** The mode the panel shows for one site, or `null` when the row is gone. */
-async function modeOf(panel: SidePanelDriver, site: string): Promise<unknown> {
-  return panel.evaluatePanel(
-    `document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]')?.getAttribute('data-mode') ?? null`,
-  );
-}
-
 /** The stored decision for one site, read from the worker; `undefined` once revoked. */
 async function storedModeOf(worker: PackagedWorker, site: string): Promise<unknown> {
   return worker.evaluate(async (origin: string) => {
@@ -242,24 +238,6 @@ async function clickOnCard(panel: SidePanelDriver, sessionId: string, label: str
     true,
   );
   expect(clicked, `no ${label} on the card for ${sessionId}`).toBe(true);
-}
-
-/**
- * Sets one site's mode through the panel's own control, never by writing storage (the same helper
- * `agent-actions.spec.ts` carries): the claim is that the owner can decide from what they are shown.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(async()=>{const chip=document.querySelector('[data-site=${JSON.stringify(site)}] [data-site-mode]');` +
-      `if(!chip)return false;if(chip.getAttribute('data-mode')===${JSON.stringify(mode)})return true;chip.click();` +
-      `await new Promise((r)=>requestAnimationFrame(()=>r()));` +
-      `const item=document.querySelector('[data-site=${JSON.stringify(site)}] [role=menuitemradio][data-mode=${JSON.stringify(mode)}]');` +
-      `if(!item)return false;item.click();return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect.poll(() => modeOf(panel, site), { timeout: 15_000 }).toBe(mode);
 }
 
 async function refFor(

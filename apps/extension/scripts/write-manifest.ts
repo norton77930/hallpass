@@ -80,12 +80,14 @@ function placeEmittedDocument(outDir: string, sourceDir: string, documentName: s
 }
 
 /**
- * Both documents are moved before the emitted `src` tree goes, so run order cannot leave a
+ * Every document is moved before the emitted `src` tree goes, so run order cannot leave a
  * half-emptied directory behind.
  */
 function placeDocuments(outDir: string): void {
   placeEmittedDocument(outDir, "side-panel", "side-panel.html");
   placeEmittedDocument(outDir, "offscreen", "offscreen.html");
+  // 024 T750: the options page the manifest names.
+  placeEmittedDocument(outDir, "settings", "settings.html");
   rmSync(resolve(outDir, "src"), { recursive: true, force: true });
 }
 

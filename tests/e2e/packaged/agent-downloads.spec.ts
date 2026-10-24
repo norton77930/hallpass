@@ -3,6 +3,7 @@ import type { BrowserContext } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
@@ -86,6 +87,8 @@ test.describe("agent downloads", () => {
       copy,
     });
     await waitForAgentPanel(panel);
+    // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
 
     let client: McpHarnessClient | undefined;
     let successor: McpHarnessClient | undefined;
@@ -109,8 +112,8 @@ test.describe("agent downloads", () => {
       const created = (await call("tabs_create", { url: `${SITE}/download` })) as { tabId: number };
       const tabId = created.tabId;
       // The click is an effect and the site has no mode yet: the owner puts it into skip-checks
-      // from the panel, as `agent-actions` does, so the click lands without a prompt.
-      await setSiteMode(panel, SITE, "skip-checks");
+      // on the settings page (024 FR-385), as `agent-actions` does, so the click lands without a prompt.
+      await settings.setSiteMode(SITE, "skip-checks");
 
       // ============= 1. click, then wait: the file is small, so it is done before the wait =============
       const link = await refFor(call, tabId, "Download report");
@@ -183,11 +186,11 @@ test.describe("agent downloads", () => {
     extensionWorker,
   }) => {
     test.setTimeout(300_000);
-    const { panel, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    const { settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
     const saved: string[] = [];
     try {
       const tabId = ((await call("tabs_create", { url: `${SITE}/two-downloads` })) as { tabId: number }).tabId;
-      await setSiteMode(panel, SITE, "skip-checks");
+      await settings.setSiteMode(SITE, "skip-checks");
 
       const trigger = await refFor(call, tabId, "Download both");
       await call("click", { tabId, target: { ref: trigger } });
@@ -237,7 +240,7 @@ async function pairedSession(fixtures: {
   extensionContext: BrowserContext;
   extensionId: string;
   extensionWorker: PackagedWorker;
-}): Promise<{ panel: SidePanelDriver; client: McpHarnessClient; call: (tool: string, args?: Record<string, unknown>) => Promise<unknown> }> {
+}): Promise<{ panel: SidePanelDriver; settings: SettingsPageDriver; client: McpHarnessClient; call: (tool: string, args?: Record<string, unknown>) => Promise<unknown> }> {
   const { extensionContext, extensionId, extensionWorker } = fixtures;
   const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
   await ownerPage.goto(`${SITE}/waiting`);
@@ -249,6 +252,8 @@ async function pairedSession(fixtures: {
   });
   const panel = await openSidePanel({ context: extensionContext, extensionId, fixturePage: ownerPage, tabId: ownerTabId, copy });
   await waitForAgentPanel(panel);
+  // 024 FR-385: the per-site controls (mode, diagnostics grant) are on the settings page, the owner's own control now.
+  const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
   const client = await startMcpClient({ clientName: "Claude Code" });
   await panel.clickIfPresent(ui("agent.retry"));
   await pairWithFirstCall(client, panel, { locale });
@@ -257,7 +262,7 @@ async function pairedSession(fixtures: {
     expect(result.isError, `${tool} failed: ${result.text}\nstderr:\n${client.stderr()}`).toBe(false);
     return result.json;
   };
-  return { panel, client, call };
+  return { panel, settings, client, call };
 }
 
 async function refFor(
@@ -273,29 +278,4 @@ async function refFor(
   const first = found.matches[0]?.ref;
   expect(first, `find '${query}' returned no ref`).toBeTruthy();
   return first as string;
-}
-
-/**
- * Sets one site's mode through the panel's own control (FR-042), never by writing storage - the
- * same helper `agent-actions` uses, for the same reason.
- */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect
-    .poll(
-      async () => panel.evaluatePanel(
-        `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-          `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-      ),
-      { timeout: 15_000 },
-    )
-    .toBe(mode);
 }

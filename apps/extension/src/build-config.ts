@@ -144,6 +144,8 @@ export type ManifestV3 = {
   action: { default_title: string };
   background: { service_worker: string; type: "module" };
   side_panel: { default_path: string };
+  /** 024 R-372: the settings page, which Chrome's "Extension options" opens in a tab. */
+  options_ui: { page: string; open_in_tab: true };
   commands: {
     _execute_action: { suggested_key: { default: string }; description: string };
   };
@@ -181,7 +183,7 @@ const AGENT_CONTENT_SCRIPTS = [
  * takes its name from the manifest, and the MCP host answers with the same literal so a client that
  * asks who it is talking to cannot be told a different release than the one loaded.
  */
-export const AGENT_EXTENSION_VERSION = "0.15.2";
+export const AGENT_EXTENSION_VERSION = "0.16.0";
 
 export function createManifest(
   config: ExtensionBuildConfig,
@@ -198,6 +200,8 @@ export function createManifest(
     action: { default_title: "__MSG_extActionTitle__" },
     background: { service_worker: "service-worker.js", type: "module" },
     side_panel: { default_path: "side-panel.html" },
+    // 024 T751: no permission of its own - a page of the extension, served its projection by the worker.
+    options_ui: { page: "settings.html", open_in_tab: true },
     commands: {
       _execute_action: {
         suggested_key: { default: "Alt+A" },

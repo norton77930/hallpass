@@ -42,6 +42,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  *                         (`envNames`, names only) and the values of Hallpass's own launch settings
  *                         (`launch`: HERMES_MANAGED_DIR, DSH_PERMISSION_MODE, DSH_TELEMETRY_MODE).
  * - FAKE_ACP_HANG_AT=initialize|new   never answer that request (a start that takes forever, T658).
+ *                         `prompt` (024 R-379): every turn (not a `/rename`) says its answer, then
+ *                         never ends until `session/cancel`.
  * - FAKE_ACP_RESET_ERROR  (021) after a `drift:`, refuse the session/set_mode that puts the mode back
  *                         with this text; `{env:NAME}` in it is replaced by that variable's value.
  * - FAKE_ACP_TURN_ERROR   the message `fail:turn` fails the turn with (T660); `{env:NAME}` in it
@@ -60,7 +62,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  * - FAKE_ACP_CHUNK_DELAY_MS    pause between chunks (default 0).
  * - FAKE_ACP_FAIL_AT=initialize|new   refuse that request with a JSON-RPC internal error (-32603),
  *                         the way an adapter that cannot start does (T534); `new` lets initialize
- *                         succeed and fails session/new.
+ *                         succeed and fails session/new; `prompt` (024 R-379) starts and fails every
+ *                         session/prompt but a `/rename` (after counting it), as a model or key that
+ *                         refuses does.
  * - FAKE_ACP_FAIL_MESSAGE the error text for FAKE_ACP_FAIL_AT (default `fake agent failed at <step>`).
  * - FAKE_ACP_EXIT_AT=initialize   (021 R-358) exit with code 1 on `initialize` without answering, so the
  *                         connection closes - an agent that crashes at boot (dsh without its bindings).
@@ -71,6 +75,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  * - FAKE_ACP_STDERR_LINES (023) at start, then write this many lines to stderr, each
  *                         FAKE_ACP_STDERR_LINE (default `stderr line {n}`) with `{n}` the line number
  *                         and `{env:NAME}` that variable's value; then log `{ event: "stderr-written" }`.
+ * - FAKE_ACP_VERSION      (024) what `fake-acp-agent.ts --version` prints (default `0.0.0 (fake-acp-agent)`);
+ *                         run with `--version` the process prints that line and exits 0 without speaking ACP.
+ * - FAKE_ACP_VERSION_HANG=1  (024 R-374) the `--version` invocation never prints and never exits: a CLI
+ *                         that hangs the readiness check until the caller's bound ends it.
+ * - FAKE_ACP_COUNT_PROMPTS=<path>  (024 R-379) append one line per `session/prompt` received, so a test
+ *                         can count model calls (a test run sends exactly one).
+ *
+ * A slow fake install (024 R-376, R-377) lives beside this file in `fake-acp-agent-install.ts`.
  *
  * Prompt keywords (whitespace-separated, executed left to right; text with none is echoed)
  * - chunks:N          N `agent_message_chunk` updates, text `part-1;` ... `part-N;`.
@@ -564,9 +576,9 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     prompt.map((block) => (block.type === "text" ? block.text : "")).join("");
 
   /** FAKE_ACP_FAIL_AT: refuse that request the way a mismatched adapter does (T534, R-315). */
-  const failIfAsked = (step: "initialize" | "new") => {
+  const failIfAsked = (step: "initialize" | "new" | "prompt") => {
     if (env.FAKE_ACP_FAIL_AT !== step) return;
-    const message = env.FAKE_ACP_FAIL_MESSAGE ?? `fake agent failed at ${step === "new" ? "session/new" : "initialize"}`;
+    const message = env.FAKE_ACP_FAIL_MESSAGE ?? `fake agent failed at ${step === "initialize" ? "initialize" : `session/${step}`}`;
     log({ event: "fail", step, message });
     throw new acp.RequestError(-32603, message);
   };
@@ -689,14 +701,25 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     async prompt(params) {
       const text = textOf(params.prompt);
       log({ method: "session/prompt", params: { sessionId: params.sessionId, text } });
+      // 024 R-379: one line per model call, for tests that count them.
+      if (env.FAKE_ACP_COUNT_PROMPTS) appendFileSync(env.FAKE_ACP_COUNT_PROMPTS, `${params.sessionId}\n`);
       const session = sessions.get(params.sessionId);
       if (!session) throw new acp.RequestError(-32002, `Session not found: ${params.sessionId}`);
       session.transcript.push({ role: "user", text });
       save(params.sessionId);
+      // 024 R-379: every turn fails as a model or key that refuses does - the Test's fixed prompt
+      // included; the broker's own `/rename` is answered locally, as without the knob.
+      const modelTurn = !/^\/rename(?:\s|$)/u.test(text.trim());
+      if (modelTurn) failIfAsked("prompt");
       const abort = new AbortController();
       aborts.set(params.sessionId, abort);
       try {
         await runTurn(params.sessionId, text, abort.signal);
+        // 024 R-379: the answer is said, then the turn never ends until session/cancel.
+        if (modelTurn && env.FAKE_ACP_HANG_AT === "prompt") {
+          log({ event: "hang", step: "prompt" });
+          await unlessCancelled(abort.signal, new Promise<never>(() => {}));
+        }
         return { stopReason: "end_turn" };
       } catch (error) {
         if (error instanceof Cancelled) return { stopReason: "cancelled" };
@@ -730,8 +753,22 @@ async function writeStderr(env: Record<string, string | undefined>): Promise<voi
   if (env.FAKE_ACP_LOG) appendFileSync(env.FAKE_ACP_LOG, `${JSON.stringify({ event: "stderr-written" })}\n`);
 }
 
+/**
+ * 024 R-374: `--version` as a CLI answers it - one line and exit 0 - or, with FAKE_ACP_VERSION_HANG=1,
+ * never: the process stays alive and silent until the caller ends it.
+ */
+async function answerVersion(env: Record<string, string | undefined>): Promise<void> {
+  if (env.FAKE_ACP_VERSION_HANG === "1") {
+    setInterval(() => {}, 60_000);
+    await new Promise<never>(() => {});
+  }
+  await new Promise<void>((done) => process.stdout.write(`${env.FAKE_ACP_VERSION ?? "0.0.0 (fake-acp-agent)"}\n`, () => done()));
+  process.exit(0);
+}
+
 /** The process entry: serve on stdio and leave when the client closes it. */
 export async function main(): Promise<void> {
+  if (process.argv.slice(2).includes("--version")) return answerVersion(process.env);
   await writeStderr(process.env);
   const stream = acp.ndJsonStream(
     Writable.toWeb(process.stdout) as WritableStream<Uint8Array>,

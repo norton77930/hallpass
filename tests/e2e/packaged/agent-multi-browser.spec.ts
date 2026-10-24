@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient, type ToolCallResult } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
+import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import {
   copyFor,
   localeFromEnv,
@@ -176,7 +177,7 @@ test.describe("agent: two browsers", () => {
 
       const tabId = ((await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
       // Effects run without a card in A so the sweep below is one uninterrupted pass over the families.
-      await setSiteMode(a.panel, SITE, "skip-checks");
+      await setSiteMode(a, SITE, "skip-checks");
 
       await call("navigate", { tabId, url: `${SITE}/ordinary` });
       await call("read_page", { tabId, filter: "all" });
@@ -219,7 +220,7 @@ test.describe("agent: two browsers", () => {
       await callOk(client, "select_browser", { browserId: a.browserId });
       await pairIn(client, a);
       const tabInA = ((await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
-      await setSiteMode(a.panel, SITE, "skip-checks");
+      await setSiteMode(a, SITE, "skip-checks");
       const refInA = await refFor(call, tabInA, "Safe action");
       await call("click", { tabId: tabInA, target: { ref: refInA } });
       expect(await a.panel.panelText(), "no consent card in A under skip-checks").not.toContain(ui("agent.promptTitle"));
@@ -236,8 +237,8 @@ test.describe("agent: two browsers", () => {
 
       // --- On the same site, B follows B's own mode: it asks, and a refusal leaves the page alone. ---
       const tabInB = ((await call("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
-      await b.panel.waitForText(SITE);
-      expect(await siteModeOf(b.panel, SITE)).not.toBe("skip-checks");
+      await expect.poll(() => siteModeOf(b, SITE), { timeout: 20_000, message: "B's settings page never listed the site" }).not.toBeNull();
+      expect(await siteModeOf(b, SITE)).not.toBe("skip-checks");
       const pageInB = await pageAt(b.context, `${SITE}/ordinary`);
       const before = await pageInB.locator("#clicked").textContent();
       const refInB = await refFor(call, tabInB, "Safe action");
@@ -508,6 +509,7 @@ type Side = {
   worker: PackagedWorker;
   ownerPage: Page;
   ownerTabId: number;
+  extensionId: string;
   panel: SidePanelDriver;
   browserId: string;
   /** Tabs and tab groups before the agent did anything: what "untouched" is compared to. */
@@ -556,7 +558,7 @@ async function openSide(
   const browserId = await browserIdOfWorker(worker);
   const state = await browserState(worker);
   const siteTabs = await tabsMatching(worker, SITE);
-  return { context, endpoint, worker, ownerPage, ownerTabId, panel, browserId, baseline: { ...state, siteTabs } };
+  return { context, endpoint, worker, ownerPage, ownerTabId, extensionId, panel, browserId, baseline: { ...state, siteTabs } };
 }
 
 async function startClient(clientName: string, sides: Side[]): Promise<McpHarnessClient> {
@@ -656,25 +658,18 @@ async function pageAt(context: BrowserContext, url: string): Promise<Page> {
   throw new Error(`page-not-found:${url}`);
 }
 
-/** The site list's mode control for `site`, as the panel renders it (the owner's own control). */
-async function siteModeOf(panel: SidePanelDriver, site: string): Promise<string | null> {
-  const value = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));return row?.querySelector('select')?.value ?? null})()`,
-  );
-  return typeof value === "string" ? value : null;
+/**
+ * The mode the settings page (024 FR-385) shows for `site` in one browser - the owner's own view of it.
+ * The page is opened on demand in that browser, so a browser that came back from a relaunch is looked
+ * at through its new worker, not through a page the old one served.
+ */
+async function siteModeOf(side: Side, site: string): Promise<string | null> {
+  const settings = await openSettingsPage({ context: side.context, worker: side.worker, extensionId: side.extensionId, locale, route: "#sites" });
+  return settings.siteMode(site);
 }
 
-/** As in `agent-actions.spec.ts`: the owner's per-site mode, set through the panel's own control. */
-async function setSiteMode(panel: SidePanelDriver, site: string, mode: string): Promise<void> {
-  await panel.waitForText(site);
-  const set = await panel.evaluatePanel(
-    `(()=>{const site=${JSON.stringify(site)};const rows=[...document.querySelectorAll('li')];` +
-      `const row=rows.find((r)=>r.textContent?.includes(site));const sel=row?.querySelector('select');` +
-      `if(!sel)return false;const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;` +
-      `setter.call(sel,${JSON.stringify(mode)});sel.dispatchEvent(new Event('change',{bubbles:true}));return true})()`,
-    true,
-  );
-  expect(set, `the panel offers no mode control for ${site}`).toBe(true);
-  await expect.poll(() => siteModeOf(panel, site), { timeout: 15_000 }).toBe(mode);
+/** As in `agent-actions.spec.ts`: the owner's per-site mode, set on that browser's settings page (the owner's own control, 024 FR-385). */
+async function setSiteMode(side: Side, site: string, mode: "ask" | "follow-a-plan" | "skip-checks"): Promise<void> {
+  const settings = await openSettingsPage({ context: side.context, worker: side.worker, extensionId: side.extensionId, locale, route: "#sites" });
+  await settings.setSiteMode(site, mode);
 }

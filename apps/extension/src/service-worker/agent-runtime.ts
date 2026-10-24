@@ -13,6 +13,7 @@ import {
   type AgentPanelState,
   type ConversationPanelCommand,
   type ConversationPanelState,
+  type AgentChoices,
   type AgentPanelTab,
   type AgentToolName,
   type SiteMode,
@@ -79,7 +80,14 @@ import {
   type PromptWaitingTick,
 } from "./agent-tools/prompts.js";
 import { summariseToolCall } from "./agent-tools/summaries.js";
-import { BROKER_GREETING_WINDOW_MS, createConversationRelay, type ConversationLinkFrame } from "./conversation-relay.js";
+import {
+  BROKER_GREETING_WINDOW_MS,
+  createConversationRelay,
+  type ConversationLinkFrame,
+  type SettingsBrokerCommand,
+  type SettingsReplyTarget,
+} from "./conversation-relay.js";
+import { createAgentChoicesStore, type AgentChoicesOutcome, type AgentChoicesPatch } from "./agent-choices.js";
 import { createPanelConsentStore } from "./panel-consent.js";
 import { createPanelTokens, isPanelAgentId, panelAgentId } from "./panel-sessions.js";
 import { createAgentReads } from "./agent-tools/reads.js";
@@ -445,9 +453,10 @@ export type AgentRuntime = {
   /**
    * The panel's rename of this browser (018 FR-268). Control characters stripped, trimmed, 1-40
    * characters or refused; stored, then sent to the relay. The owner's path only - no agent tool
-   * reaches it.
+   * reaches it. 024: settles with what became of it - stored and sent, refused as no name at all, or
+   * not stored - so the settings page can say so; the panel ignores it and re-reads the picture.
    */
-  renameBrowser: (name: string) => Promise<void>;
+  renameBrowser: (name: string) => Promise<"renamed" | "name-refused" | "failed">;
   /**
    * The owner's answer on the "Use this browser?" card (018 FR-274): sent back on the choose link
    * once. False, and nothing sent, for a request that was withdrawn, expired or never raised.
@@ -496,8 +505,20 @@ export type AgentRuntime = {
    * is how the panel port hears the results, events and pages it fans out to every document.
    */
   conversation: {
-    command: (command: ConversationPanelCommand) => void;
+    /**
+     * 024 R-373: also a settings page's broker command (`page` given), whose answers go to that page
+     * alone. The consent command takes the same path from either port.
+     */
+    command: (command: ConversationPanelCommand | SettingsBrokerCommand, page?: SettingsReplyTarget) => void;
     onPanelMessage: (listener: (message: AgentPanelMessage) => void) => void;
+  };
+  /**
+   * 024 R-380 (agent-choices.ts): the owner's enabled agents and default, read and changed against the
+   * broker's current readiness. A change that went through tells every subscriber.
+   */
+  agentChoices: {
+    read: () => Promise<AgentChoices>;
+    set: (patch: AgentChoicesPatch) => Promise<AgentChoicesOutcome>;
   };
 };
 
@@ -733,6 +754,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    */
   const panelTokens = createPanelTokens();
   const panelConsent = createPanelConsentStore();
+  /** 024 R-380: the owner's enabled agents and default; this worker is the record's only writer. */
+  const agentChoices = createAgentChoicesStore({ reportDiagnostic: reportTestDiagnostic });
   const conversations = createConversationRelay({
     deliver: (frame) => options.onConversationFrame?.(frame),
     reportDiagnostic: reportTestDiagnostic,
@@ -2175,9 +2198,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    */
   async function conversationProjection(): Promise<ConversationPanelState> {
     const part = conversations.panelState(bridge.status() === "connected");
+    // 024 R-380: the owner's enabled agents and default, for the picker.
+    const choices = await agentChoices.read(part.agents);
     const own = await panelConsent.read();
-    if (own !== "unknown") return { ...part, consent: own };
-    return part.consent === "granted" ? { ...part, consent: "unknown" } : part;
+    if (own !== "unknown") return { ...part, consent: own, choices };
+    return part.consent === "granted" ? { ...part, consent: "unknown", choices } : { ...part, choices };
   }
 
   /**
@@ -2810,6 +2835,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         startedAt?: string;
         colour?: (typeof AGENT_SESSION_COLOURS)[number];
         sitePlan?: { origins: string[] };
+        site?: string;
       }> = [];
       for (const [id, session] of sessions) {
         // 019 R-321: and a panel session only while it is admitted.
@@ -2819,14 +2845,25 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         const identity = await tabs.identity(id).catch(() => undefined);
         // 017 FR-259: the plan the card shows is the one the gate reads, from the same store.
         const sitePlan = await planOf(id).catch(() => undefined);
+        const sessionTabs = (await tabs.context(id)).tabs;
+        /**
+         * 024 FR-393 (frames.md "Session card: `site`"): the site the session is acting on - its main
+         * tab's (the tab it last opened, claimed or acted on) canonical origin, as the site modes key
+         * it - for the card's link to that site's permissions. A web page only: a tab on another
+         * scheme has no permissions to manage.
+         */
+        const mainTabId = await tabs.mainTabId(id).catch(() => undefined);
+        const mainUrl = sessionTabs.find((tab) => tab.tabId === mainTabId)?.url;
+        const actingOn = mainUrl === undefined ? undefined : siteOfUrl(mainUrl);
         live.push({
           sessionId: id,
           agentId: session.agentId,
           // The greeting's name, not the pairing record's: one agent id is shared by every MCP
           // client on the machine, and the record names whichever client paired first.
           agentName: session.agentName,
-          tabs: (await tabs.context(id)).tabs,
+          tabs: sessionTabs,
           lastActivityAt: session.lastActivityAt,
+          ...(actingOn === undefined || !isWebOrigin(actingOn) ? {} : { site: actingOn }),
           ...(identity === undefined
             ? {}
             : {
@@ -2973,15 +3010,24 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       };
     },
     conversation: {
-      command(command) {
+      command(command, page) {
         if (command.type === "ui.conversation.consent") {
           // 019 FR-309, T555: the worker's own record first, so admission follows the owner's
           // answer before the broker has heard it; a withdrawal tears every panel session down.
+          // 024 R-373: the same path whether the panel's switch or the settings page's sent it.
           void answerPanelConsent(command.payload.granted).catch(() => reportTestDiagnostic("agent.panel.consent-failed"));
         }
-        conversations.command(command);
+        conversations.command(command, page);
       },
       onPanelMessage: (listener) => void panelMessageListeners.push(listener),
+    },
+    agentChoices: {
+      read: () => agentChoices.read(conversations.panelState(bridge.status() === "connected").agents),
+      async set(patch) {
+        const outcome = await agentChoices.set(patch, conversations.panelState(bridge.status() === "connected").agents);
+        if (outcome.ok) notify();
+        return outcome;
+      },
     },
     bindPanelPresence(presence: AgentPanelPresence): void {
       panelPresence = presence;
@@ -3163,22 +3209,23 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       await queueTransition(() => transitionStore.forget(from, to));
       notify();
     },
-    async renameBrowser(raw: string): Promise<void> {
+    async renameBrowser(raw: string): Promise<"renamed" | "name-refused" | "failed"> {
       // 018 T501: the worker is the authority on the name - the panel's command only bounds its
       // length - so what is stored and sent always fits the relay's schema.
       const name = normalizeBrowserName(raw);
       if (name === undefined) {
         reportTestDiagnostic("agent.browser.rename-refused");
-        return;
+        return "name-refused";
       }
       const renamed = await browserIdentity.rename(name).catch(() => undefined);
       if (renamed === undefined) {
         reportTestDiagnostic("agent.browser.rename-failed");
-        return;
+        return "failed";
       }
       // Lost with no link, which costs nothing: the next ack carries the stored name.
       bridge.sendBrowserName(name);
       notify();
+      return "renamed";
     },
     decideBrowserChoice(requestId: string, confirm: boolean): boolean {
       return choices.decide(requestId, confirm);

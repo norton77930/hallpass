@@ -201,6 +201,11 @@ export function SessionCard(props: {
   onInterrupt: () => void;
   /** 017 FR-259: ends this session's site plan at once; the session goes on. */
   onWithdrawSitePlan: () => void;
+  /**
+   * 024 FR-393, R-381: opens the settings page at the site this session acts on. The card offers the
+   * link only when the worker named a site; the panel sends one `ui.agent.open-settings`.
+   */
+  onManageSite?: (site: string) => void;
 }): ReactElement {
   const t = (key: string): string => lookup(key, props.locale);
   const { session } = props;
@@ -264,6 +269,17 @@ export function SessionCard(props: {
           <p className="agent-session-state">{stateText(session, props.now, t)}</p>
         </div>
         <p className="agent-session-sites">{holdsText(session, t)}</p>
+        {/* 024 FR-393: the standing permissions are on the settings page; this card links to the site it acts on. */}
+        {session.site === undefined || props.onManageSite === undefined ? null : (
+          <button
+            type="button"
+            className="agent-quiet agent-session-manage"
+            aria-label={t("agent.session.manageSiteLabel").replace("{site}", () => displayOrigin(session.site ?? ""))}
+            onClick={() => props.onManageSite?.(session.site ?? "")}
+          >
+            {t("agent.session.manageSite")}
+          </button>
+        )}
         {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
             recording and none has been exported - a card that said "no recording" would be a fact
             about nothing on every card the owner ever sees. */}

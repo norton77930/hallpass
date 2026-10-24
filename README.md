@@ -122,9 +122,9 @@ the host needs no reinstall.
 
 ### More than one browser
 
-Every browser (or browser profile) that runs Hallpass is served at the same time. The side panel
-shows what this browser is called — rename it there, e.g. "Work Edge" — and how many other browsers
-are connected.
+Every browser (or browser profile) that runs Hallpass is served at the same time. The settings
+page's *Connection & diagnostics* shows what this browser is called — rename it there, e.g.
+"Work Edge" — and the other browsers connected on this computer.
 
 - With **one** browser running, nothing changes: the agent uses it.
 - With **several**, the agent's first browser tool is refused until you say which one: it lists the
@@ -136,21 +136,41 @@ are connected.
 - Each browser keeps its own consent: the agent is paired, and every site asks, separately in each
   browser. Approving something in one browser never allows anything in another.
 
+### The settings page
+
+Standing decisions live on a settings page in a full tab: open it from the side panel's menu, from
+the agent picker, or from *Extension options* at `chrome://extensions`. It has four sections:
+
+- **Agents**: one card per side-panel agent with its state (ready, ready with warnings, needs a
+  download, downloading, not installed), version and checks; the download it needs, with progress and
+  Cancel; **Test**, one short model call that says whether the agent starts, answers and gets the
+  browser tools; an **Enabled** switch and **Make default** for what the side panel offers.
+- **Sites & permissions**: the paired agents with Unpair, every site's mode and diagnostics grant with
+  Revoke (and Undo), and the upload folders. A session card's *Manage this site's permissions ↗* opens
+  this section at its site.
+- **Browser tools**: which agents can use Hallpass's browser tools, and the switch that lets side-panel
+  agents use them.
+- **Connection & diagnostics**: whether the helper is connected, the versions, this browser's name, and
+  an agent's last lines of output when you ask, with secrets removed.
+
+No API key is asked for, shown or stored there; key variables are named only.
+
 ## Talk to your agent in the side panel
 
 Everything above is a coding agent in a terminal using your browser. The side panel can also go the
 other way: its **Conversation** tab lets you talk to the Claude Code or Codex already installed on
 your computer, about the page you are looking at, without switching to a terminal. The other tab,
-**Connections & sites**, holds everything described above, and a consent card from an external agent
-stays above both tabs.
+**Sessions**, shows the connection and the sessions described above, and a consent card from an
+external agent stays above both tabs.
 
 - **It is your own agent.** The panel drives the Claude Code or Codex you installed and signed in to
   (it must be installed; Hallpass does not install or log in to it for you). It has the same sign-in,
   settings, instruction files, MCP servers and hooks as in your terminal, and its conversation is
   kept by the agent itself. Hallpass keeps only a short list of recent conversations (title, agent,
   folder, mode, last used) so you can continue one later.
-- **One-time download, with your consent.** The first time you use an agent, the panel shows what it
-  is about to fetch and waits for you: a small pinned *connector* (about 60 MB for Claude Code, about
+- **One-time download, with your consent.** An agent that needs a download says so in the panel's
+  agent picker, with a link to its card on the settings page; the card shows what it is about to fetch
+  and waits for you: a small pinned *connector* (about 60 MB for Claude Code, about
   20 MB for Codex) that lets the panel talk to the agent you already have. It is downloaded by the
   `npm` that comes with your Node.js, with `npm ci` against a lockfile shipped in the Hallpass
   package: every file is checked against its pinned hash, no install script runs, and the connector
@@ -160,8 +180,9 @@ stays above both tabs.
 - **One-time consent to use this browser.** The first conversation also asks whether agents started
   from the side panel may use this browser. There is no per-conversation pairing; the same site modes
   and the same consent cards apply as for an external agent, and the decisions are shared with them.
-  The site list says whether the panel or an external agent last changed a site. Take the consent
-  back with **Side-panel agent may use this browser** under *Connections & sites*.
+  The settings page's site list says whether the panel or an external agent last changed a site. Take
+  the consent back with **Let side-panel agents use the browser tools** under *Browser tools* on the
+  settings page.
 - **One folder per conversation.** A conversation starts in its own *scratch folder* under
   `%LOCALAPPDATA%\hallpass\scratch\`, or in a project folder you add through the Windows folder
   dialog. The folder is shown in the conversation and never changes; to work somewhere else, start a
@@ -202,7 +223,7 @@ stays above both tabs.
   JavaScript, uploads and a move to an undecided site still ask, and unlisted sites are unchanged.
 - **Reads never ask.** Reading the page, finding elements, screenshots and waiting need no consent.
 - **Diagnostics** (console, network records, evaluating script) need a separate per-site grant you
-  tick in the panel. Evaluating script also counts as an action.
+  tick on the settings page (*Sites & permissions*). Evaluating script also counts as an action.
 - **Uploads** are limited to directories you list in `%LOCALAPPDATA%\hallpass\config.json` under
   `uploadRoots` (empty by default). A file outside them is not refused any more: the panel asks,
   and *this directory from now on* adds it to the list for you.
