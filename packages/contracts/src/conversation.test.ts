@@ -363,6 +363,12 @@ describe("024 overview fields on an agent's availability", () => {
     expect(parse({ browserTools: "maybe" })).toBe(false);
   });
 
+  it("takes versionTimedOut (R-374: a found program's --version missed the readiness bound), a boolean only", () => {
+    expect(parse({ availability: "version-problem", versionTimedOut: true })).toBe(true);
+    expect(parse({ versionTimedOut: false })).toBe(true);
+    expect(parse({ versionTimedOut: "yes" })).toBe(false);
+  });
+
   it("takes Hermes' setup steps, and only Hermes'", () => {
     const setupSteps = ["git", "hermes", "mcp-component", "key-variable", "browser-restart"].map((step) => ({ step, found: step !== "git" }));
     expect(parse({ setupSteps })).toBe(true);

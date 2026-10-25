@@ -1771,7 +1771,40 @@ export class Conversation {
   }
 }
 
+/**
+ * What an agent's error says, as the notices show it (after scrubbing and their own cut). 0.16.1: the
+ * Codex connector fails a turn its account cannot run (usage limit, a refused sign-in) with the
+ * generic JSON-RPC -32603 "Internal error" and puts Codex's own words in `data.message` (the ACP SDK's
+ * own wrapping: `data.details`); those words are said, in place of a bare "Internal error".
+ */
 function errorMessage(error: unknown): string {
+  const message = plainErrorMessage(error);
+  const detail = errorDataText(error);
+  if (detail === "" || message.includes(detail)) return message;
+  return message === "" || GENERIC_RPC_MESSAGE.test(message) ? detail : `${message}: ${detail}`;
+}
+
+/** The JSON-RPC message that says nothing beyond its code: replaced by the error's detail when it has one. */
+const GENERIC_RPC_MESSAGE = /^internal error$/iu;
+
+/**
+ * 0.16.1: the text of an error's `data` - itself, or its `message` / `details` / `detail` - read up
+ * to `OUTPUT_LINE_READ_MAX`. Every notice that says it scrubs it and then cuts it far shorter, so a
+ * value this read limit cuts never reaches what is shown.
+ */
+function errorDataText(error: unknown): string {
+  const data = error && typeof error === "object" ? (error as { data?: unknown }).data : undefined;
+  let text = "";
+  if (typeof data === "string") text = data;
+  else if (data && typeof data === "object") {
+    const fields = data as { message?: unknown; details?: unknown; detail?: unknown };
+    const found = [fields.message, fields.details, fields.detail].find((value) => typeof value === "string" && value.trim() !== "");
+    text = typeof found === "string" ? found : "";
+  }
+  return text.trim().slice(0, OUTPUT_LINE_READ_MAX);
+}
+
+function plainErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
     return (error as { message: string }).message;
@@ -1850,7 +1883,7 @@ function keyEnvHint(agent: ConversationAgent, variable: string): string {
 /** R-319: a `session/load` refused for an unknown session marks the entry "cannot continue" (FR-304). */
 function isUnknownSession(error: unknown): boolean {
   const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
-  return code === -32002 || /not found|unknown session|no such session/iu.test(errorMessage(error));
+  return code === -32002 || /not found|unknown session|no such session/iu.test(plainErrorMessage(error));
 }
 
 /* ------------------------------------------------------------------------------------------- */

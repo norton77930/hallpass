@@ -599,8 +599,11 @@ export type ReadinessStatus = AgentStatus & {
 
 const boundedUserEnvironment: UserEnvironmentPorts = {
   readText: (path) => readFile(path, "utf8"),
-  run: async (file, args) => {
-    const { code, stdout } = await runCommand(file, args, { timeoutMs: READINESS_EXEC_BOUND_MS });
+  run: async (file, args, options) => {
+    const { code, stdout } = await runCommand(file, args, {
+      timeoutMs: READINESS_EXEC_BOUND_MS,
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
+    });
     return { code, stdout };
   },
 };
@@ -659,7 +662,7 @@ async function hermesSetupSteps(
     const dotEnv = await withinBound(userEnvironment.readText(win32.join(home, ".env")).catch(() => ""), "");
     const inBrowser = Object.keys(env).some((key) => same(key) && env[key] !== undefined) || dotEnvNames(dotEnv).some(same);
     if (inBrowser) return { inBrowser, set: true };
-    const userNames = await withinBound(userEnvironmentNames(userEnvironment), []);
+    const userNames = await withinBound(userEnvironmentNames(userEnvironment, options.signal), []);
     return { inBrowser, set: userNames.some(same) };
   };
   const [git, mcp, key] = await Promise.all([

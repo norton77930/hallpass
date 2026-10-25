@@ -90,11 +90,20 @@ const key = (path: string): string => win32.resolve(path).toLowerCase();
 /** Hermes' MCP component as `agents.ts` looks for it beside the program (`..\Lib\site-packages\mcp\__init__.py`). */
 const mcpComponentPath = (cliPath: string): string => win32.join(win32.dirname(cliPath), "..", "Lib", "site-packages", "mcp", "__init__.py");
 
-/** A `--version` that never answers: settles only at the bound it was given, as `runCommand` ends a hung program. */
-const hung = (timeoutMs: number): Promise<ExecResult> =>
+/**
+ * A `--version` that never answers: settles only at the bound it was given, as `runCommand` ends a
+ * hung program - or at once when `signal` is aborted (024 R-374: a superseded readiness retry).
+ */
+const hung = (timeoutMs: number, signal?: AbortSignal): Promise<ExecResult> =>
   new Promise((done) => {
     const timer = setTimeout(() => done({ code: null, stdout: "", stderr: "", timedOut: true }), timeoutMs);
     timer.unref?.();
+    const onAbort = () => {
+      clearTimeout(timer);
+      done({ code: null, stdout: "", stderr: "", timedOut: false });
+    };
+    if (signal?.aborted === true) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
   });
 
 /** `ports` on the made-up `machine`; inside `ports.dataDir` the file system stays the real one. */
@@ -126,6 +135,7 @@ export function testMachinePorts(ports: AgentPorts, machine: TestMachine, run: t
     },
     exec: async (file, args, options) => {
       const timeoutMs = options?.timeoutMs ?? LAUNCH_EXEC_BOUND_MS;
+      const signal = options?.signal;
       if (/^where(?:\.exe)?$/iu.test(file)) {
         const name = args[0] ?? "";
         if (name.toLowerCase() === "bash") return machine.gitBash === false ? notFound : { code: 0, stdout: `${gitBash}\r\n`, stderr: "" };
@@ -142,10 +152,14 @@ export function testMachinePorts(ports: AgentPorts, machine: TestMachine, run: t
       const { entry } = program;
       if (entry.program !== undefined) {
         const [command, ...rest] = entry.program;
-        const result = await run(command!, [...rest, ...args], { timeoutMs, env: { ...process.env, ...(entry.env ?? {}) } });
+        const result = await run(command!, [...rest, ...args], {
+          timeoutMs,
+          env: { ...process.env, ...(entry.env ?? {}) },
+          ...(signal === undefined ? {} : { signal }),
+        });
         return { code: result.code, stdout: result.stdout, stderr: result.stderr, timedOut: result.timedOut };
       }
-      if (entry.hang === true) return hung(timeoutMs);
+      if (entry.hang === true) return hung(timeoutMs, signal);
       return { code: 0, stdout: entry.version === undefined ? "" : `${entry.version}\r\n`, stderr: "" };
     },
   };

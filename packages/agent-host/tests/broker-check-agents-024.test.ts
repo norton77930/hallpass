@@ -9,7 +9,14 @@ import {
   type ConversationAgent,
   type ConversationAgentAvailability,
 } from "@hallpass/contracts";
-import { LAUNCH_EXEC_BOUND_MS, READINESS_EXEC_BOUND_MS, checkAgentReadiness, type AgentPorts, type ExecResult } from "../src/broker/agents.js";
+import {
+  LAUNCH_EXEC_BOUND_MS,
+  READINESS_EXEC_BOUND_MS,
+  checkAgentReadiness,
+  defaultAgentPorts,
+  type AgentPorts,
+  type ExecResult,
+} from "../src/broker/agents.js";
 import { SHARED_STATE_WATCH_IDLE_MS, createCommandHandler, type ConsentStore } from "../src/broker/commands.js";
 import type { InstallResult } from "../src/broker/install.js";
 import { writeInstallState, writeLastTest } from "../src/broker/shared-agent-state.js";
@@ -425,7 +432,13 @@ describe("024 T755 / R-375 how long the shared files are watched", () => {
 
 describe("024 R-374 a found program whose --version is slower than the readiness bound", () => {
   const HERMES = "C:\\Tools\\hermes\\Scripts\\hermes.exe";
-  type VersionExec = { timeoutMs: number | undefined; signal: AbortSignal | undefined; answer: (version: string) => void };
+  type VersionExec = {
+    timeoutMs: number | undefined;
+    signal: AbortSignal | undefined;
+    answer: (version: string) => void;
+    /** Answers code 0 with `stdout` as it is (no version line around it). */
+    answerRaw: (stdout: string) => void;
+  };
   type Check = NonNullable<Parameters<typeof createCommandHandler>[0]["checkAgent"]>;
 
   /**
@@ -450,6 +463,7 @@ describe("024 R-374 a found program whose --version is slower than the readiness
             timeoutMs: options?.timeoutMs,
             signal: options?.signal,
             answer: (version) => done({ code: 0, stdout: `Hermes Agent v${version} (2026.9.24)\r\n`, stderr: "" }),
+            answerRaw: (stdout) => done({ code: 0, stdout, stderr: "" }),
           });
         });
       },
@@ -538,6 +552,84 @@ describe("024 R-374 a found program whose --version is slower than the readiness
       await pool.shutdown();
     }
   });
+
+  it("the overview names the timed-out answer (versionTimedOut, in the contract), and drops it once the retry answers", async () => {
+    const { versions, check } = slowHermes();
+    const { handler, run, hermes, pool } = retryHandler(check);
+    try {
+      await run({ type: "ui.conversation.check-agents", payload: {} });
+      await waitFor(() => hermes() !== undefined, "the check's overview");
+      expect(hermes()).toMatchObject({ availability: "version-problem", detail: TIMED_OUT_5S, versionTimedOut: true });
+      expect(conversationAgentAvailabilitySchema.safeParse(hermes()).success).toBe(true);
+      await waitFor(() => versions.length === 1, "the retry under way");
+      versions[0]?.answer("0.22.2");
+      await waitFor(() => hermes()?.availability === "ready", "the retry's overview");
+      expect(hermes()?.versionTimedOut).toBeUndefined();
+    } finally {
+      handler.stopChecks();
+      await pool.shutdown();
+    }
+  });
+
+  it("a retry whose --version answers code 0 with no version in it keeps the first, timed-out answer", async () => {
+    const { versions, check } = slowHermes();
+    const { handler, run, hermes, pool } = retryHandler(check);
+    try {
+      await run({ type: "ui.conversation.check-agents", payload: {} });
+      await waitFor(() => versions.length === 1, "the retry under way");
+      versions[0]?.answerRaw("usage: hermes [options]\r\n");
+      await sleep(100);
+      await handler.sendOverview();
+      expect(hermes()).toMatchObject({ availability: "version-problem", detail: TIMED_OUT_5S, versionTimedOut: true });
+      expect(hermes()?.version).toBeUndefined();
+    } finally {
+      handler.stopChecks();
+      await pool.shutdown();
+    }
+  });
+
+  it("the check's abort reaches the HKCU\\Environment query of Hermes' key step", async () => {
+    const home = "C:\\Users\\owner\\.hermes";
+    const signals: (AbortSignal | undefined)[] = [];
+    const environment: UserEnvironmentPorts = {
+      readText: async (path) => {
+        if (path === win32.join(home, "config.yaml")) return `model:\n  provider: custom\n  key_env: ${KEY_NAME}\n`;
+        throw Object.assign(new Error("not there"), { code: "ENOENT" });
+      },
+      run: async (_file, _args, options) => {
+        signals.push(options?.signal);
+        return { code: 0, stdout: "" };
+      },
+    };
+    const controller = new AbortController();
+    const ports: AgentPorts = {
+      dataDir: "C:\\Data\\hallpass",
+      env: {},
+      nodePath: process.execPath,
+      codexShimEntry: "C:\\no-shim.js",
+      fs: { exists: async () => false, readText: async () => "", writeText: async () => undefined },
+      exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+    };
+    await checkAgentReadiness("hermes", ports, { env: { HERMES_HOME: home }, userEnvironment: environment, signal: controller.signal });
+    expect(signals).toEqual([controller.signal]);
+  });
+
+  it("defaultAgentPorts.exec hands its signal to the command: aborted, a sleeping child ends at once", async () => {
+    const pidFile = join(dir, "child.pid");
+    const script = `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 60000);`;
+    const ports = defaultAgentPorts(join(dir, "no-shim.js"), {});
+    const controller = new AbortController();
+    const started = Date.now();
+    // A bound well inside the test's: without the signal the run would end only there, timed out.
+    const exec = ports.exec(process.execPath, ["-e", script], { timeoutMs: 20_000, signal: controller.signal });
+    await waitFor(() => exists(pidFile), "the child under way");
+    const pid = Number(await readFile(pidFile, "utf8"));
+    controller.abort();
+    const result = await exec;
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(result.timedOut).toBe(false);
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 30_000);
 
   it("a retry that also times out leaves Not installed with the timed-out reason", async () => {
     const { check } = slowHermes(60_000);

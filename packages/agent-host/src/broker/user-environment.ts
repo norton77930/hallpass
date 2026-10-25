@@ -22,8 +22,11 @@ import { runCommand } from "./run-command.js";
 export type UserEnvironmentPorts = {
   /** A file's text; rejects when it cannot be read (not there, no access). */
   readText(path: string): Promise<string>;
-  /** Runs the names-only query to the end. May reject when it cannot be started. */
-  run(file: string, args: readonly string[]): Promise<{ code: number | null; stdout: string }>;
+  /**
+   * Runs the names-only query to the end. May reject when it cannot be started. Aborted by `signal`
+   * (024 R-374: a superseded readiness retry), it ends at once.
+   */
+  run(file: string, args: readonly string[], options?: { signal?: AbortSignal }): Promise<{ code: number | null; stdout: string }>;
 };
 
 /**
@@ -42,8 +45,11 @@ const QUERY_TIMEOUT_MS = 10_000;
 
 export const defaultUserEnvironmentPorts: UserEnvironmentPorts = {
   readText: (path) => readFile(path, "utf8"),
-  run: async (file, args) => {
-    const { code, stdout } = await runCommand(file, args, { timeoutMs: QUERY_TIMEOUT_MS });
+  run: async (file, args, options) => {
+    const { code, stdout } = await runCommand(file, args, {
+      timeoutMs: QUERY_TIMEOUT_MS,
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
+    });
     return { code, stdout };
   },
 };
@@ -107,10 +113,11 @@ export function dotEnvNames(text: string): string[] {
   return names;
 }
 
-/** The names of the user's environment settings; none when the query fails. */
-export async function userEnvironmentNames(ports: UserEnvironmentPorts): Promise<string[]> {
+/** The names of the user's environment settings; none when the query fails or `signal` ends it. */
+export async function userEnvironmentNames(ports: UserEnvironmentPorts, signal?: AbortSignal): Promise<string[]> {
   try {
-    const { code, stdout } = await ports.run(USER_ENVIRONMENT_NAMES_QUERY.file, USER_ENVIRONMENT_NAMES_QUERY.args);
+    const { file, args } = USER_ENVIRONMENT_NAMES_QUERY;
+    const { code, stdout } = await (signal === undefined ? ports.run(file, args) : ports.run(file, args, { signal }));
     if (code !== 0) return [];
     return stdout
       .split(/\r?\n/u)

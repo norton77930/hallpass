@@ -384,7 +384,8 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       const generation = generations[at] ?? 0;
       const result = fresh[at];
       if (result === undefined || generation <= (heldChecks.get(agent) ?? 0)) return;
-      hold(agent, generation, result.availability);
+      // The overview names a timed-out answer, so the page does not read it as "no version number".
+      hold(agent, generation, result.versionTimedOut === true ? { ...result.availability, versionTimedOut: true } : result.availability);
       if (result.versionTimedOut === true && generation === startedChecks.get(agent)) retryVersion(agent, generation);
     });
     agentsKnown = true;

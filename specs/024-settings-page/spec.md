@@ -495,3 +495,7 @@ side-panel-agent switch; with no session it shows the empty line and the setting
   `--version` timed out at 5 s shows Not installed with the timed-out reason first. It is then retried
   once in the background at the launch bound (15 s), and an answer updates the settings page and side
   panel. SC-177 is unchanged. See R-374's amendment.
+- **2026-10-26 — timed-out wording** (0.16.1, owner approved the contract change): an agent's overview
+  entry carries `versionTimedOut` while its answer is the timed-out one, and the card says the program did
+  not answer `--version` in time and is asked once more, instead of "did not report a version number". The
+  retry's abort also ends Hermes' user-environment query. See R-374's second amendment.

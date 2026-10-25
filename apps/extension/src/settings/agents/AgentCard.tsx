@@ -203,7 +203,10 @@ function Notes(props: {
     }
   }
   if (kind === "notInstalled" && props.enabled) {
-    if (entry.availability === "version-problem") {
+    if (entry.availability === "version-problem" && entry.versionTimedOut === true) {
+      // 024 R-374: a slow `--version` is not one that printed no version; the broker retries it.
+      infos.push(t("settings.warning.versionTimedOut", { agent: name }));
+    } else if (entry.availability === "version-problem") {
       infos.push(entry.version === undefined || entry.detail === undefined ? t("settings.warning.versionUnreadable", { agent: name }) : entry.detail);
     } else {
       infos.push(t("settings.note.programMissing", { agent: name }));

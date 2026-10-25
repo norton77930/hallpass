@@ -762,6 +762,8 @@ export const messages = {
     "Hallpass works with {agent} {tested}; this computer has {agent} {version}.",
   "settings.warning.versionUnreadable":
     "{agent} was found, but it did not report a version number.",
+  "settings.warning.versionTimedOut":
+    "{agent} was found, but it did not answer --version in time. Hallpass asked it once more in the background; if this stays, press Check again.",
   "settings.warning.mcpMissing":
     "Browser tools not attached: the optional MCP component is missing.",
   "settings.warning.keyVariable":
