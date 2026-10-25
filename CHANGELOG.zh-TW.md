@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.16.1 — 2026-10-26
+
+- **`--version` 回應慢**：電腦上找得到、但 `--version` 沒在檢查時間內回應的 agent(Hermes 可能要好幾秒),卡片會照實說明，不再寫「沒有回報版本號碼」;Hallpass 會在背景再問一次，回應後卡片就變成可以使用。
+- **失敗時顯示 agent 自己的說明**:agent 的回合或設定頁的「測試」失敗時，側欄和卡片會顯示 agent 說的話(例如 Codex 的用量上限和解除時間),不再只寫「Internal error」。
+- **停止背景檢查**時，查詢 Windows 環境變數的動作也會立刻結束。
+
 ## 0.16.0 — 2026-10-25
 
 - **設定頁**:用完整分頁開啟(側欄選單,或擴充功能的「選項」),分成四區:Agent、網站與權限、瀏覽器工具、連線與診斷。不需網路,有英文和繁體中文、淺色和深色,375 px 寬也能用。

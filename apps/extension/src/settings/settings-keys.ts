@@ -103,6 +103,7 @@ export const SETTINGS_KEYS: readonly string[] = [
   "settings.note.preRelease",
   "settings.note.versionMismatch",
   "settings.warning.versionUnreadable",
+  "settings.warning.versionTimedOut",
   "settings.warning.mcpMissing",
   "settings.warning.keyVariable",
   // Actions on a card and the check again (FR-379, FR-380).

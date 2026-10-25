@@ -131,7 +131,7 @@ main at the end of S2 (T752) and not touched by S3/S4.
 - [X] T793 `acceptance-verifier`: judge L2, L3, L5, L11, L12, L13 screenshots against prototype A (judged diff list, not pixel-exact) with gates in `.claude/acceptance/024-settings-page.json`
 - [X] T794 Owner machine (with the owner's agreement, three short model calls): Test on the real Claude, Codex and Hermes once each; record outcomes in `.scratch/024/real-agents.md`
 - [X] T795 `code-reviewer` on the combined diff; fix findings; amend 019 change log if any panel behaviour beyond FR-282/FR-309 placement changed
-- [ ] T796 Release 0.16.0 per the release recipe (bump, `npm run package`, host reinstall) — `human` gate: merge, public snapshot and tag only with the owner's approval
+- [X] T796 Release 0.16.0 per the release recipe (bump, `npm run package`, host reinstall) — `human` gate: merge, public snapshot and tag only with the owner's approval
 
 ## Dependencies
 

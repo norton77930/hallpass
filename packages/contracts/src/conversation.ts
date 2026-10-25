@@ -249,6 +249,12 @@ export const conversationAgentAvailabilitySchema = z.strictObject({
   notes: z.array(z.enum(CONVERSATION_AGENT_NOTES)).max(CONVERSATION_AGENT_NOTES.length).optional(),
   /** 024 R-374: when the local check behind this entry ran. */
   checkedAt: isoTimeSchema.optional(),
+  /**
+   * 024 R-374: the program was found, but its `--version` did not answer within the readiness
+   * bound; the broker asks it once more in the background. A host before 0.16.1 never sends it; an
+   * extension before 0.16.1 refuses it (strict schema), so host and extension upgrade together.
+   */
+  versionTimedOut: z.boolean().optional(),
   /** 024 frames.md: Hermes only - each setup step and whether the check found it. */
   setupSteps: z
     .array(z.strictObject({ step: z.enum(CONVERSATION_SETUP_STEPS), found: z.boolean() }))

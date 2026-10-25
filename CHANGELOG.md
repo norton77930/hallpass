@@ -5,6 +5,19 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.16.1 — 2026-10-26
+
+**Clearer answers when an agent is slow or out of quota.**
+
+- **Slow `--version`.** An agent found on the machine whose `--version` does not answer within the
+  check's time (Hermes can take several seconds) is now described as such on its card, not as
+  "did not report a version number". Hallpass asks it once more in the background, and the card turns
+  Ready when it answers.
+- **The agent's own words on failure.** When an agent's turn or the settings page's Test fails, the
+  side panel and the card show what the agent said (for example Codex's usage-limit message and when it
+  lifts) instead of a bare "Internal error".
+- **Stopping a background check** now also ends its Windows environment query at once.
+
 ## 0.16.0 — 2026-10-25
 
 **A settings page for agents, sites and the connection; the side panel keeps to what is happening now.**

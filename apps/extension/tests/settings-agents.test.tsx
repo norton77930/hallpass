@@ -57,6 +57,24 @@ describe("T756 state mapping (R-374, D-024-14)", () => {
     expect(card(second.container, "claude-code").getAttribute("data-state")).toBe("notInstalled");
   });
 
+  it("says a --version that did not answer in time (R-374 versionTimedOut), never 'did not report a version number'", () => {
+    const slow = withAgent(prototypeAState(NOW), "hermes", () => ({
+      agent: "hermes",
+      availability: "version-problem",
+      detail: "Hermes was found, but did not answer `--version` within 5 s.",
+      versionTimedOut: true,
+    }));
+    for (const locale of ["en-US", "zh-TW"] as const) {
+      const { container, unmount } = renderSettings({ state: slow, appearance: { theme: "system", language: locale } });
+      const hermes = card(container, "hermes");
+      if (disclosure(hermes).getAttribute("aria-expanded") !== "true") fireEvent.click(disclosure(hermes));
+      expect(hermes.getAttribute("data-state")).toBe("notInstalled");
+      expect(within(hermes).getByText(ui("settings.warning.versionTimedOut", { agent: "Hermes" }, locale))).toBeTruthy();
+      expect(within(hermes).queryByText(ui("settings.warning.versionUnreadable", { agent: "Hermes" }, locale))).toBeNull();
+      unmount();
+    }
+  });
+
   it("says Helper missing only for an agent that needs the download; a missing program's prerequisites wait for it", () => {
     const missing = withAgent(prototypeAState(NOW), "claude-code", () => ({ agent: "claude-code", availability: "missing" }));
     const { container } = renderSettings({ state: missing });

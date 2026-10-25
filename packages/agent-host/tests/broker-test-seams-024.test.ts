@@ -15,6 +15,7 @@ import {
 import { INSTALL_CANCELLED_DETAIL, installAgent, type InstallEstimate } from "../src/broker/install.js";
 import { readBrokerTestOverrides, testInstallRun } from "../src/broker/test-mode.js";
 import { readTestMachine, testMachineCliPath, testMachinePorts, testMachineReadinessEnv, type TestMachine } from "../src/broker/test-machine.js";
+import { runCommand } from "../src/broker/run-command.js";
 import { FAKE_AGENT, REPO_ROOT, makeTempDir, removeDir } from "./conversation-harness.js";
 
 /**
@@ -208,6 +209,26 @@ describe("the test machine (HALLPASS_BROKER_TEST_MACHINE) under the real readine
     },
     20_000,
   );
+
+  it("the check's abort reaches a machine program's run and ends a hung --version at once", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const run: typeof runCommand = async (_file, _args, options) => {
+      signals.push(options?.signal);
+      return { code: 0, stdout: "codex-cli 0.163.0\r\n", stderr: "", timedOut: false };
+    };
+    const controller = new AbortController();
+    const program = testMachinePorts(await realPorts(), { agents: { codex: { program: [process.execPath] } } }, run);
+    await program.exec(testMachineCliPath(data, "codex"), ["--version"], { timeoutMs: 60_000, signal: controller.signal });
+    expect(signals).toEqual([controller.signal]);
+
+    const hanging = testMachinePorts(await realPorts(), { agents: { hermes: { hang: true } } });
+    const started = Date.now();
+    const exec = hanging.exec(testMachineCliPath(data, "hermes"), ["--version"], { timeoutMs: 60_000, signal: controller.signal });
+    setTimeout(() => controller.abort(), 50);
+    const result = await exec;
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result).toMatchObject({ code: null, timedOut: false });
+  });
 
   it("names a program path inside the data folder that cmd.exe could take, never the owner's profile", () => {
     for (const agent of ["claude-code", "codex", "hermes"] as const) {

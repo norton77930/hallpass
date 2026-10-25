@@ -715,6 +715,7 @@ export const messages: Record<MessageKey, string> = {
   "settings.note.preRelease": "預先發行版本。Hallpass 只使用它測試過的那一個版本。",
   "settings.note.versionMismatch": "Hallpass 測試過的是 {agent} {tested}；這台電腦上的是 {agent} {version}。",
   "settings.warning.versionUnreadable": "找到了 {agent}，但它沒有回報版本號碼。",
+  "settings.warning.versionTimedOut": "找到了 {agent}，但它沒有及時回應 --version。Hallpass 已在背景再問一次；如果這段訊息還在，請按「重新檢查」。",
   "settings.warning.mcpMissing": "瀏覽器工具未連上：缺少選用的 MCP 元件。",
   "settings.warning.keyVariable": "金鑰變數 {variable} 已在 Windows 設定，但這個瀏覽器是在設定之前啟動的，所以看不到它。請完全結束瀏覽器（包含仍在背景執行的視窗），再重新開啟。",
   // Actions on a card and the check again (FR-379, FR-380).

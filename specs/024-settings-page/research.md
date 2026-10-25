@@ -64,6 +64,12 @@ plan.md; the plan proceeds on the recommended answer and changes if the owner pi
   out again or reads no version leaves it. Each check carries a generation per agent: a newer check or
   the broker's shutdown aborts the retry, which ends its process tree, and a result older than the one held
   is dropped (`commands.ts` `refreshAgents` / `retryVersion`).
+- **Amendment (2026-10-26, 0.16.1)**: the timed-out answer reached the page as a `version-problem` with
+  no version, which the card read as "did not report a version number". The availability entry now has
+  an optional `versionTimedOut` (packages/contracts, optional so a 0.16.1 extension still parses a 0.16.0 host; a 0.16.0 extension refuses it, so host and extension upgrade together as for every 024 field); the broker
+  sets it on the held answer when the readiness result timed out, and a retry that answers replaces the
+  entry without it. The card shows `settings.warning.versionTimedOut` for it. The retry's signal now also
+  reaches the `HKCU\Environment` names query and the test machine's exec, so an aborted retry ends at once.
 - **State mapping** (D-024-14): `ready` without warnings → Ready; `ready` with notes (`git-missing`,
   `pre-release`) or Hermes setup steps not done → Ready with warnings; `needs-install` → Needs a download;
   `installing` → Downloading; `missing` or `version-problem` → Not installed, with the reason line
