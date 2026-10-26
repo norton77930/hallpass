@@ -353,6 +353,151 @@ describe("fake ACP agent knobs (024 T741)", () => {
   });
 });
 
+describe("fake ACP agent models (025 T802, FAKE_ACP_MODELS)", () => {
+  type Option = { id: string; type: string; category?: string; currentValue: unknown; options?: unknown[] };
+  const optionsOf = (answer: unknown) => ((answer as { configOptions?: Option[] }).configOptions ?? []) as Option[];
+  const current = (answer: unknown, category: string) => optionsOf(answer).find((option) => option.category === category)?.currentValue;
+  const requestLog = (path: string) => logLines(path).map((line) => line.method as string);
+
+  it("reports nothing about models without FAKE_ACP_MODELS, and `none` is the same", async () => {
+    for (const env of [{}, { FAKE_ACP_MODELS: "none" }]) {
+      const agent = start(env);
+      await init(agent);
+      const session = (await newSession(agent)) as Record<string, unknown>;
+      expect(session.configOptions).toBeUndefined();
+      expect(session.models).toBeUndefined();
+    }
+  });
+
+  it("`config`: a model and an effort select with a default entry, beside a mode select and a boolean; set answers the full options", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "config" });
+    await init(agent);
+    const session = await newSession(agent);
+    const options = optionsOf(session);
+    expect(options.map((option) => [option.id, option.type, option.category ?? null])).toEqual([
+      ["mode", "select", "mode"],
+      ["model", "select", "model"],
+      ["effort", "select", "thought_level"],
+      ["fast", "boolean", null],
+    ]);
+    expect(current(session, "model")).toBe("default");
+    expect(current(session, "thought_level")).toBe("default");
+
+    const answer = await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "model-beta" });
+    expect(current(answer, "model")).toBe("model-beta");
+    const effort = await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "effort", value: "high" });
+    expect(current(effort, "model")).toBe("model-beta");
+    expect(current(effort, "thought_level")).toBe("high");
+    await expect(
+      agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "no-such-model" }),
+    ).rejects.toMatchObject({ code: -32602 });
+  });
+
+  it("`config-no-effort`: a grouped model select with JSON-tuple values and no effort", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "config-no-effort" });
+    await init(agent);
+    const session = await newSession(agent);
+    const model = optionsOf(session).find((option) => option.category === "model")!;
+    expect(optionsOf(session).some((option) => option.category === "thought_level")).toBe(false);
+    expect((model.options as { group: string; options: unknown[] }[]).map((group) => group.group)).toEqual(["acme", "zenith"]);
+    expect(JSON.parse(model.currentValue as string)).toEqual(["acme", "model-one"]);
+  });
+
+  it("`models`: the older list only, set with session/set_model", async () => {
+    const log = join(dir, "requests.jsonl");
+    const agent = start({ FAKE_ACP_MODELS: "models", FAKE_ACP_REQUEST_LOG: log });
+    await init(agent);
+    const session = (await newSession(agent)) as Record<string, any>;
+    expect(session.configOptions).toBeUndefined();
+    expect(session.models.currentModelId).toBe("acme:model-one");
+    const ids = session.models.availableModels.map((model: { modelId: string }) => model.modelId);
+    expect(ids.slice(0, 3)).toEqual(["acme:model-one", "acme:model-two", "zenith:model-three"]);
+    expect(ids).toHaveLength(15);
+    expect(ids.at(-1)).toBe("orbit:model-fifteen");
+    await agent.connection.extMethod("session/set_model", { sessionId: session.sessionId, modelId: "zenith:model-three" });
+    await expect(agent.connection.extMethod("session/set_model", { sessionId: session.sessionId, modelId: "nope" })).rejects.toMatchObject({
+      code: -32602,
+    });
+    expect(requestLog(log)).toEqual(["initialize", "session/new", "session/set_model", "session/set_model"]);
+    expect(logLines(log)[2]).toMatchObject({ params: { modelId: "zenith:model-three" } });
+  });
+
+  it("`refuse`: the config shape, every set refused with FAKE_ACP_MODELS_ERROR", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "refuse", FAKE_ACP_MODELS_ERROR: "no switching for {env:FAKE_SECRET}", FAKE_SECRET: "s3cr3t-value" });
+    await init(agent);
+    const session = await newSession(agent);
+    expect(current(session, "model")).toBe("default");
+    await expect(
+      agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "model-beta" }),
+    ).rejects.toMatchObject({ message: expect.stringContaining("no switching for s3cr3t-value") });
+  });
+
+  it("`effort-moves`: Model Gamma offers only low and medium, so a change to it moves a high effort to medium", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "effort-moves" });
+    await init(agent);
+    const session = await newSession(agent);
+    await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "effort", value: "high" });
+    const answer = await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "model-gamma" });
+    expect(current(answer, "model")).toBe("model-gamma");
+    expect(current(answer, "thought_level")).toBe("medium");
+    const efforts = optionsOf(answer).find((option) => option.category === "thought_level")!.options as { value: string }[];
+    expect(efforts.map((entry) => entry.value)).toEqual(["low", "medium"]);
+  });
+
+  it("`self-model:<value>` switches its own model mid-turn and says so with config_option_update", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "config" });
+    await init(agent);
+    const session = await newSession(agent);
+    await say(agent, session.sessionId, "self-model:model-gamma");
+    const update = agent.updates.find((entry) => entry.sessionUpdate === "config_option_update");
+    expect(update).toBeDefined();
+    expect(current(update, "model")).toBe("model-gamma");
+  });
+
+  it("a load answers with the shape's defaults: the session's model is not kept across a load", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "config" });
+    await init(agent);
+    const session = await newSession(agent);
+    await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "model-beta" });
+    const loaded = await agent.connection.loadSession({ sessionId: session.sessionId, cwd: dir, mcpServers: [] });
+    expect(current(loaded, "model")).toBe("default");
+  });
+
+  it("FAKE_ACP_REQUEST_LOG gets one line per request in the order received", async () => {
+    const log = join(dir, "requests.jsonl");
+    const agent = start({ FAKE_ACP_MODELS: "config", FAKE_ACP_REQUEST_LOG: log });
+    await init(agent);
+    const session = await newSession(agent);
+    await agent.connection.setSessionMode({ sessionId: session.sessionId, modeId: "default" });
+    await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "model-alpha" });
+    await say(agent, session.sessionId, "chunks:1");
+    expect(requestLog(log)).toEqual(["initialize", "session/new", "session/set_mode", "session/set_config_option", "session/prompt"]);
+    expect(logLines(log)[3]).toMatchObject({ params: { sessionId: session.sessionId, configId: "model", value: "model-alpha" } });
+  });
+
+  it("FAKE_ACP_SET_DELAY_MS holds a set's answer after logging it", async () => {
+    const log = join(dir, "requests.jsonl");
+    const agent = start({ FAKE_ACP_MODELS: "config", FAKE_ACP_REQUEST_LOG: log, FAKE_ACP_SET_DELAY_MS: "400" });
+    await init(agent);
+    const session = await newSession(agent);
+    const began = Date.now();
+    await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "effort", value: "low" });
+    expect(Date.now() - began).toBeGreaterThanOrEqual(350);
+    expect(requestLog(log).at(-1)).toBe("session/set_config_option");
+  });
+
+  it("FAKE_ACP_SET_DELAY_COUNT holds only the first N sets", async () => {
+    const agent = start({ FAKE_ACP_MODELS: "config", FAKE_ACP_SET_DELAY_MS: "3000", FAKE_ACP_SET_DELAY_COUNT: "1" });
+    await init(agent);
+    const session = await newSession(agent);
+    const held = agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "effort", value: "low" });
+    const began = Date.now();
+    await agent.connection.setSessionConfigOption({ sessionId: session.sessionId, configId: "model", value: "model-beta" });
+    expect(Date.now() - began).toBeLessThan(2_000);
+    await held;
+  });
+});
+
 describe("fake slow install (024 T741)", () => {
   it("writes its files into the target over the given time, then a done marker", async () => {
     const target = join(dir, "tree");

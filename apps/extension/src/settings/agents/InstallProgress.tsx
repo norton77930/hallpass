@@ -16,6 +16,13 @@ export function progressText(install: ConversationInstallState | undefined): { p
   return { percent, minutes: seconds === undefined ? undefined : Math.max(1, Math.round(seconds / 60)) };
 }
 
+/** The time-left line: under a minute says so, else whole minutes; none when the worker has no estimate. */
+export function etaText(install: ConversationInstallState | undefined, t: Translate): string {
+  const seconds = install?.etaSeconds ?? undefined;
+  if (seconds === undefined) return "";
+  return seconds < 60 ? t("settings.progress.timeLeftShort") : t("settings.progress.timeLeft", { minutes: progressText(install).minutes ?? 1 });
+}
+
 function label(agent: ConversationAgent, name: string, t: Translate): string {
   return downloadKind(agent) === "helper" ? t("settings.progress.helper") : t("settings.progress.agent", { agent: name });
 }
@@ -28,8 +35,7 @@ export function InstallProgress(props: {
   t: Translate;
 }): ReactElement {
   const { t, install } = props;
-  const { percent, minutes } = progressText(install);
-  const seconds = install?.etaSeconds ?? undefined;
+  const { percent } = progressText(install);
   const heading = label(props.agent, props.name, t);
   return (
     <div className="progress" data-progress={props.agent}>
@@ -52,9 +58,7 @@ export function InstallProgress(props: {
         <span>
           {downloadKind(props.agent) === "agent" ? t("settings.progress.firstDownload", { estimate: AGENT_DOWNLOAD_MINUTES }) : ""}
         </span>
-        <span className="eta">
-          {seconds === undefined ? "" : seconds < 60 ? t("settings.progress.timeLeftShort") : t("settings.progress.timeLeft", { minutes: minutes ?? 1 })}
-        </span>
+        <span className="eta">{etaText(install, t)}</span>
       </div>
       <div className="row">
         <span>{t("settings.progress.keepsGoing")}</span>
@@ -71,6 +75,7 @@ export function MiniProgress(props: {
   t: Translate;
 }): ReactElement {
   const { percent } = progressText(props.install);
+  const eta = etaText(props.install, props.t);
   const heading = `${label(props.agent, props.name, props.t)}: ${props.name}`;
   return (
     <span className="acard-dl">
@@ -86,6 +91,7 @@ export function MiniProgress(props: {
         <span style={{ width: `${percent ?? 0}%` }} />
       </span>
       <span className="meta">{percent === undefined ? props.t("settings.progress.preparing") : `${percent} %`}</span>
+      {eta === "" ? null : <span className="meta">{eta}</span>}
     </span>
   );
 }

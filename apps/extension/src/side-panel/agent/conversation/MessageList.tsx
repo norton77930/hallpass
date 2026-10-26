@@ -5,7 +5,7 @@ import { actionWords } from "./action-words.js";
 import { SentAttachments } from "./attachments/AttachmentChips.js";
 import { groupTurns, type TimelineItem } from "./conversation-log.js";
 import { useFollowEnd } from "./follow-end.js";
-import { errorDetailWords, keyEnvHintIn, modelUnreachableHint, noticeWords } from "./broker-words.js";
+import { errorDetailWords, keyEnvHintIn, modelNoticeWords, modelUnreachableHint, noticeWords } from "./broker-words.js";
 import { DownIcon } from "./icons.js";
 import { InlineCode } from "./inline-code.js";
 import { Reply } from "./Reply.js";
@@ -114,6 +114,17 @@ export function MessageList(props: {
               </p>
             ) : null;
           }
+          if (item.kind === "model") {
+            // 025 FR-404, D-025-12: one centred line for an accepted change; the names are the agent's own.
+            const key =
+              item.effort === undefined ? "conversation.model.changed" : item.effortChanged === true ? "conversation.model.changedEffort" : "conversation.model.effortChanged";
+            const words = t(key).replace(/\{(model|effort)\}/gu, (_, name: string) => (name === "model" ? item.model : (item.effort ?? "")));
+            return (
+              <div key={item.key} className="agent-conversation-change" role="note" data-model-line="">
+                <span>{words}</span>
+              </div>
+            );
+          }
           if (item.kind === "turn-actions") {
             return <TurnActions key={item.key} group={item} t={t} liveElsewhere />;
           }
@@ -166,6 +177,16 @@ export function MessageList(props: {
             return (
               <div key={item.key} className="agent-conversation-notice" data-notice-code={code}>
                 <p>{t("conversation.notice.key-env-not-in-browser").replace("{variable}", () => variable)}</p>
+              </div>
+            );
+          }
+          // 025 R-402: the two model notices, said whole in the owner's language when the broker's text
+          // carries the names (the agent's own words stay values); any other text falls to the generic path.
+          const modelWords = modelNoticeWords(code, text, props.agentName, t);
+          if (modelWords !== undefined) {
+            return (
+              <div key={item.key} className="agent-conversation-notice" data-notice-code={code}>
+                <p>{modelWords}</p>
               </div>
             );
           }

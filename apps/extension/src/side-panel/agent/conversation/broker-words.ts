@@ -174,6 +174,46 @@ export function keyEnvHintIn(detail: string, t: T): { words: string; rest: strin
   };
 }
 
+/**
+ * 025 R-402: the broker's two model notices, built from the names the agent itself reports -
+ * `<agent> kept <kept>: it refused <asked> (<the agent's own text>).` and
+ * `<agent> no longer offers <model>; the conversation uses <default> instead.` The panel says them in
+ * the owner's language with the conversation's agent name and keeps the names and the agent's text as
+ * values (inert); text that is not one of the templates is left to the caller (`undefined`).
+ */
+const MODEL_REFUSED = new RegExp(`^${LABEL}? kept ([\\s\\S]{1,200}?): it refused ([\\s\\S]{1,200}?)(?: \\(([\\s\\S]{0,1024})\\))?\\.$`, "u");
+/** 025 (0.17.0): `<agent> did not answer within <n> s, so the model is unchanged: it keeps <kept> and did not switch to <asked>.` */
+const MODEL_TIMED_OUT = new RegExp(
+  `^${LABEL}? did not answer within (\\d{1,6}) s, so the model is unchanged: it keeps ([\\s\\S]{1,200}?) and did not switch to ([\\s\\S]{1,200}?)\\.$`,
+  "u",
+);
+const MODEL_UNAVAILABLE = new RegExp(`^${LABEL}? no longer offers ([\\s\\S]{1,200}?); the conversation uses [\\s\\S]{1,200}? instead\\.$`, "u");
+
+export function modelNoticeWords(code: string, text: string, agentName: string, t: T): string | undefined {
+  // One pass, so a value that looks like a placeholder is never filled in again.
+  const fill = (key: string, values: Record<string, string>): string => t(key).replace(/\{(\w+)\}/gu, (whole, name: string) => values[name] ?? whole);
+  if (code === "model-refused") {
+    // The agent's refusal first: its own text may sound like the timeout, never the other way round.
+    const match = MODEL_REFUSED.exec(text);
+    if (match === null) {
+      const late = MODEL_TIMED_OUT.exec(text);
+      return late === null ? undefined : fill("conversation.notice.model-refused.timeout", { agent: agentName, seconds: late[1]!, kept: late[2]!, asked: late[3]! });
+    }
+    const reason = match[3] ?? "";
+    return fill(reason === "" ? "conversation.notice.model-refused.namedShort" : "conversation.notice.model-refused.named", {
+      agent: agentName,
+      asked: match[2]!,
+      kept: match[1]!,
+      reason,
+    });
+  }
+  if (code === "model-unavailable") {
+    const match = MODEL_UNAVAILABLE.exec(text);
+    return match === null ? undefined : fill("conversation.notice.model-unavailable.named", { agent: agentName, model: match[1]! });
+  }
+  return undefined;
+}
+
 /** The words for a notice the broker sent with a code of its own, or its own text when it is not a known template. */
 export function noticeWords(code: string, text: string, t: T): string {
   const templates = code.startsWith("stop-") ? [TURN_ENDED] : (NOTICE_TEXTS[code] ?? []);

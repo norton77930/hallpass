@@ -81,6 +81,42 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  *                         that hangs the readiness check until the caller's bound ends it.
  * - FAKE_ACP_COUNT_PROMPTS=<path>  (024 R-379) append one line per `session/prompt` received, so a test
  *                         can count model calls (a test run sends exactly one).
+ * - FAKE_ACP_MODELS       (025 T802) what the agent reports about its models, in the answers of
+ *                         `session/new`, `session/load` and `session/resume` (shapes of research R-398,
+ *                         invented names only):
+ *                         unset / `none`: nothing (no `configOptions`, no `models`).
+ *                         `config` (Claude-like): `configOptions` = a `mode` select (category mode),
+ *                         a `model` select (category model; `default` "Default (recommended)",
+ *                         `model-alpha`, `model-beta`, `model-gamma`), an `effort` select (category
+ *                         thought_level; `default`, `low`, `medium`, `high`) and a `fast` boolean;
+ *                         current model and effort `default`.
+ *                         `config-no-effort` (DeepSeek-like): one `model` select, grouped by provider
+ *                         (`acme`: Model One / Model Two, `zenith`: Model Three), each value a JSON
+ *                         tuple string (`["acme","model-one"]`), no default, no effort; current Model One.
+ *                         `models` (Hermes-like): no `configOptions`; `models.availableModels`
+ *                         `acme:model-one`, `acme:model-two`, `zenith:model-three` and twelve
+ *                         `orbit:model-four`..`orbit:model-fifteen` (a list that scrolls), current
+ *                         `acme:model-one`; set with `session/set_model { sessionId, modelId }`.
+ *                         `refuse`: the `config` shape; every `session/set_config_option` and
+ *                         `session/set_model` is refused (-32603) with FAKE_ACP_MODELS_ERROR (default
+ *                         `fake agent refused the model change`; `{env:NAME}` becomes that value).
+ *                         `effort-moves`: the `config` shape, but `model-gamma` offers only `low` and
+ *                         `medium`: a change to it with any other effort moves the effort to `medium`.
+ *                         `session/set_config_option` answers the full `configOptions` (as ACP says);
+ *                         an unknown option or value is refused -32602. A load or resume answers with
+ *                         the shape's defaults: the fake does not keep a session's model across one.
+ * - FAKE_ACP_SET_DELAY_MS (025) pause before answering session/set_config_option and session/set_model
+ *                         (after logging the request), so a test can act while a change is in flight.
+ * - FAKE_ACP_SET_DELAY_COUNT=<n>  (025) only the first n sets of this process are held; later ones answer
+ *                         at once (unset: every one is held).
+ * - FAKE_ACP_REQUEST_LOG=<path>  (025 T802) append one JSON line per request (and `session/cancel`) in
+ *                         the order received: `{ method, params }`, params a summary - `sessionId`,
+ *                         and `modeId` / `configId` + `value` / `modelId` / `text` where the request has
+ *                         one. What the model gates read for "every set before the first prompt".
+ *
+ * Under the broker's test agent these reach the fake through the browser's environment, fixed for the
+ * run; `fake-acp-agent-switch.ts` (FAKE_ACP_SWITCH_FILE) changes them between launches, e.g.
+ * `{"FAKE_ACP_MODELS":"refuse"}` for a gate's refusal step.
  *
  * A slow fake install (024 R-376, R-377) lives beside this file in `fake-acp-agent-install.ts`.
  *
@@ -105,6 +141,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  * - tool:unannounced  (021) a permission request for an id no `tool_call` announced, carrying only
  *                     that id, with the scenario's options; then one chunk `done:<id>` or `refused:<id>`.
  * - fail:turn         (021) the turn fails with a JSON-RPC internal error, text FAKE_ACP_TURN_ERROR.
+ * - self-model:<value>  (025) with a `config`-type FAKE_ACP_MODELS, the agent switches its own model
+ *                     to <value> and says so with a `config_option_update` (the full options).
  * - crash             the process exits with code 3 mid-turn.
  * - hang              the turn never ends until `session/cancel` (then stopReason `cancelled`).
  * - /rename <title>   (the whole prompt) answered locally: one chunk `renamed:<title>`, no tool
@@ -156,6 +194,42 @@ const MODE_SETS: Record<string, { modes: Mode[]; current: string }> = {
   },
 };
 
+/** 025 (FAKE_ACP_MODELS): invented names in the shapes of research R-398. */
+type ModelShape = "none" | "config" | "config-no-effort" | "models" | "refuse" | "effort-moves";
+const MODEL_SHAPES: readonly ModelShape[] = ["none", "config", "config-no-effort", "models", "refuse", "effort-moves"];
+type Choice = { value: string; name: string; description?: string };
+const CONFIG_MODELS: Choice[] = [
+  { value: "default", name: "Default (recommended)", description: "Model Alpha for most tasks" },
+  { value: "model-alpha", name: "Model Alpha" },
+  { value: "model-beta", name: "Model Beta" },
+  { value: "model-gamma", name: "Model Gamma" },
+];
+const CONFIG_EFFORTS: Choice[] = [
+  { value: "default", name: "Default" },
+  { value: "low", name: "Low" },
+  { value: "medium", name: "Medium" },
+  { value: "high", name: "High" },
+];
+/** `effort-moves`: what `model-gamma` offers, and where another effort goes on a change to it. */
+const GAMMA_EFFORTS = ["low", "medium"];
+const GAMMA_EFFORT_FALLBACK = "medium";
+const tuple = (provider: string, model: string) => JSON.stringify([provider, model]);
+const GROUPED_MODELS = [
+  { group: "acme", name: "Acme", options: [{ value: tuple("acme", "model-one"), name: "Model One" }, { value: tuple("acme", "model-two"), name: "Model Two" }] },
+  { group: "zenith", name: "Zenith", options: [{ value: tuple("zenith", "model-three"), name: "Model Three" }] },
+];
+const LIST_MODELS = [
+  { modelId: "acme:model-one", name: "Model One" },
+  { modelId: "acme:model-two", name: "Model Two", description: "Acme's second model" },
+  { modelId: "zenith:model-three", name: "Model Three" },
+  // A long tail, so the panel's model list has to scroll (025 visual state 5).
+  ...["four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen"].map((n) => ({
+    modelId: `orbit:model-${n}`,
+    name: `Model ${n[0]!.toUpperCase()}${n.slice(1)}`,
+  })),
+];
+type SessionModel = { model: string; effort?: string };
+
 type Scenario = "claude" | "codex" | "hermes" | "deepseek";
 const SCENARIOS: readonly Scenario[] = ["claude", "codex", "hermes", "deepseek"];
 
@@ -188,6 +262,15 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
   const log = (entry: Record<string, unknown>) => {
     if (logPath) appendFileSync(logPath, `${JSON.stringify(entry)}\n`);
   };
+  /** 025: one line per request, in the order received (FAKE_ACP_REQUEST_LOG). */
+  const requestLogPath = env.FAKE_ACP_REQUEST_LOG;
+  const logRequest = (method: string, params: Record<string, unknown> = {}) => {
+    if (requestLogPath) appendFileSync(requestLogPath, `${JSON.stringify({ method, params })}\n`);
+  };
+  const modelShape: ModelShape = MODEL_SHAPES.find((name) => name === env.FAKE_ACP_MODELS) ?? "none";
+  const configShaped = modelShape === "config" || modelShape === "refuse" || modelShape === "effort-moves";
+  /** 025: each session's model and effort, in this process only (a load starts from the defaults). */
+  const sessionModels = new Map<string, SessionModel>();
 
   const sessions = new Map<string, StoredSession>();
   /** Sessions whose agent switched its own mode (`drift:`), for FAKE_ACP_RESET_ERROR. */
@@ -219,6 +302,92 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
   });
   /** DeepSeek has no ACP modes: nothing about modes in its answers. */
   const modesOf = (session: StoredSession) => (scenario === "deepseek" ? {} : { modes: modeState(session) });
+
+  /* 025 (FAKE_ACP_MODELS) ------------------------------------------------------------------- */
+
+  const defaultModel = (): SessionModel | undefined => {
+    switch (modelShape) {
+      case "none":
+        return undefined;
+      case "config-no-effort":
+        return { model: tuple("acme", "model-one") };
+      case "models":
+        return { model: "acme:model-one" };
+      default:
+        return { model: "default", effort: "default" };
+    }
+  };
+  const effortsFor = (model: string): Choice[] =>
+    modelShape === "effort-moves" && model === "model-gamma" ? CONFIG_EFFORTS.filter((entry) => GAMMA_EFFORTS.includes(entry.value)) : CONFIG_EFFORTS;
+  const configOptionsOf = (session: StoredSession, current: SessionModel): unknown[] => {
+    if (modelShape === "config-no-effort") {
+      return [{ id: "model", name: "Model", type: "select", category: "model", currentValue: current.model, options: GROUPED_MODELS }];
+    }
+    const modes = (MODE_SETS[session.scenario] ?? MODE_SETS.claude!).modes;
+    return [
+      { id: "mode", name: "Mode", type: "select", category: "mode", currentValue: session.modeId, options: modes.map((mode) => ({ value: mode.id, name: mode.name })) },
+      { id: "model", name: "Model", type: "select", category: "model", currentValue: current.model, options: CONFIG_MODELS },
+      { id: "effort", name: "Reasoning effort", type: "select", category: "thought_level", currentValue: current.effort, options: effortsFor(current.model) },
+      { id: "fast", name: "Fast mode", type: "boolean", currentValue: false },
+    ];
+  };
+  /** What a session's answer says about its models: the shape's defaults for a new, loaded or resumed session. */
+  const modelsOf = (sessionId: string, session: StoredSession): Record<string, unknown> => {
+    const current = defaultModel();
+    if (current === undefined) return {};
+    sessionModels.set(sessionId, current);
+    if (modelShape === "models") return { models: { availableModels: LIST_MODELS, currentModelId: current.model } };
+    return { configOptions: configOptionsOf(session, current) };
+  };
+  const refuseModelChange = () => {
+    if (modelShape !== "refuse") return;
+    const message = (env.FAKE_ACP_MODELS_ERROR ?? "fake agent refused the model change").replace(/\{env:([A-Za-z0-9_]+)\}/g, (_all, name: string) => env[name] ?? "");
+    throw new acp.RequestError(-32603, message);
+  };
+  const modelSessionOf = (sessionId: string): { session: StoredSession; current: SessionModel } => {
+    const session = sessions.get(sessionId);
+    const current = sessionModels.get(sessionId);
+    if (!session || !current) throw new acp.RequestError(-32002, `Session not found: ${sessionId}`);
+    return { session, current };
+  };
+  /** `session/set_config_option`: the model or the effort, answered with the full options. */
+  const setConfigOption = (params: { sessionId: string; configId: string; value: unknown }) => {
+    if (!configShaped && modelShape !== "config-no-effort") throw acp.RequestError.methodNotFound("session/set_config_option");
+    const { session, current } = modelSessionOf(params.sessionId);
+    refuseModelChange();
+    const value = params.value;
+    const listed = (choices: Choice[]) => typeof value === "string" && choices.some((entry) => entry.value === value);
+    if (params.configId === "model") {
+      const models = modelShape === "config-no-effort" ? GROUPED_MODELS.flatMap((group) => group.options) : CONFIG_MODELS;
+      if (!listed(models)) throw acp.RequestError.invalidParams({ value }, "Unknown model");
+      current.model = value as string;
+      if (current.effort !== undefined && !effortsFor(current.model).some((entry) => entry.value === current.effort)) current.effort = GAMMA_EFFORT_FALLBACK;
+    } else if (params.configId === "effort" && configShaped) {
+      if (!listed(effortsFor(current.model))) throw acp.RequestError.invalidParams({ value }, "Unknown effort");
+      current.effort = value as string;
+    } else {
+      throw acp.RequestError.invalidParams({ configId: params.configId }, "Unknown option");
+    }
+    return { configOptions: configOptionsOf(session, current) };
+  };
+  /** FAKE_ACP_SET_DELAY_MS: a model or effort change that takes a while to answer (FAKE_ACP_SET_DELAY_COUNT: only the first N). */
+  let setsDelayed = 0;
+  const setDelay = async (): Promise<void> => {
+    const ms = Number(env.FAKE_ACP_SET_DELAY_MS ?? 0);
+    const count = env.FAKE_ACP_SET_DELAY_COUNT === undefined ? Number.POSITIVE_INFINITY : Number(env.FAKE_ACP_SET_DELAY_COUNT);
+    if (ms <= 0 || setsDelayed >= count) return;
+    setsDelayed += 1;
+    await sleep(ms);
+  };
+  /** `session/set_model` (the older list, Hermes-like). */
+  const setModel = (params: Record<string, unknown>) => {
+    if (modelShape !== "models" && modelShape !== "refuse") throw acp.RequestError.methodNotFound("session/set_model");
+    const { current } = modelSessionOf(String(params.sessionId));
+    refuseModelChange();
+    if (!LIST_MODELS.some((entry) => entry.modelId === params.modelId)) throw acp.RequestError.invalidParams({ modelId: params.modelId }, "Unknown model");
+    current.model = params.modelId as string;
+    return {};
+  };
 
   const launch: Record<string, string> = {};
   for (const name of LAUNCH_VARIABLES) if (env[name] !== undefined) launch[name] = env[name]!;
@@ -525,6 +694,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       const tool = /^tool:(edit|execute|mcp)$/.exec(token);
       const drift = /^drift:(.+)$/.exec(token);
       const mcp = /^mcp:([a-z_]+)(?::(.+))?$/.exec(token);
+      const selfModel = /^self-model:(.+)$/.exec(token);
       if (chunks) {
         matched = true;
         for (let index = 1; index <= Number(chunks[1]); index++) {
@@ -559,6 +729,14 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
         drifted.add(sessionId);
         save(sessionId);
         await update(sessionId, { sessionUpdate: "current_mode_update", currentModeId: drift[1]! });
+      } else if (selfModel) {
+        matched = true;
+        // 025: the agent changes its own model and says so (R-406: the client follows, adds no line).
+        const current = sessionModels.get(sessionId);
+        if (current !== undefined && modelShape !== "models") {
+          current.model = selfModel[1]!;
+          await update(sessionId, { sessionUpdate: "config_option_update", configOptions: configOptionsOf(session, current) as acp.SessionConfigOption[] });
+        }
       } else if (token === "crash") {
         await chunk(sessionId, "crashing");
         await sleep(20);
@@ -618,6 +796,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
   const agent: acp.Agent = {
     async initialize(params) {
       log({ method: "initialize", params: { protocolVersion: params.protocolVersion } });
+      logRequest("initialize");
       await hangIfAsked("initialize");
       if (env.FAKE_ACP_EXIT_AT === "initialize") {
         log({ event: "exit", step: "initialize" });
@@ -635,6 +814,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     },
     async newSession(params) {
       log({ event: "session/new-received" });
+      logRequest("session/new");
       await hangIfAsked("new");
       const newDelay = Number(env.FAKE_ACP_NEW_DELAY_MS ?? 0);
       if (newDelay > 0) await sleep(newDelay);
@@ -655,9 +835,10 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
           meta: params._meta ?? null,
         },
       });
-      return { sessionId, ...modesOf(session) };
+      return { sessionId, ...modesOf(session), ...modelsOf(sessionId, session) };
     },
     async loadSession(params) {
+      logRequest("session/load", { sessionId: params.sessionId });
       log({
         method: "session/load",
         params: { sessionId: params.sessionId, cwd: params.cwd, servers: params.mcpServers, meta: params._meta ?? null },
@@ -672,17 +853,19 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
           content: { type: "text", text: entry.text },
         });
       }
-      return { ...modesOf(session) };
+      return { ...modesOf(session), ...modelsOf(params.sessionId, session) };
     },
     /** 021: DeepSeek continues a session without replaying it; the other scenarios do not offer it. */
     async resumeSession(params) {
+      logRequest("session/resume", { sessionId: params.sessionId });
       log({ method: "session/resume", params: { sessionId: params.sessionId, cwd: params.cwd, servers: params.mcpServers ?? [] } });
       if (scenario !== "deepseek") throw acp.RequestError.methodNotFound("session/resume");
-      findSession(params.sessionId);
+      const session = findSession(params.sessionId);
       rememberBrowserServer(params.sessionId, params.mcpServers ?? []);
-      return {};
+      return { ...modelsOf(params.sessionId, session) };
     },
     async setSessionMode(params) {
+      logRequest("session/set_mode", { sessionId: params.sessionId, modeId: params.modeId });
       log({ method: "session/set_mode", params: { sessionId: params.sessionId, modeId: params.modeId } });
       if (scenario === "deepseek") throw acp.RequestError.methodNotFound("session/set_mode");
       const session = sessions.get(params.sessionId);
@@ -700,6 +883,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     },
     async prompt(params) {
       const text = textOf(params.prompt);
+      logRequest("session/prompt", { sessionId: params.sessionId, text });
       log({ method: "session/prompt", params: { sessionId: params.sessionId, text } });
       // 024 R-379: one line per model call, for tests that count them.
       if (env.FAKE_ACP_COUNT_PROMPTS) appendFileSync(env.FAKE_ACP_COUNT_PROMPTS, `${params.sessionId}\n`);
@@ -728,7 +912,24 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
         aborts.delete(params.sessionId);
       }
     },
+    /** 025: the model or the effort (`config` shapes), answered with the full options. */
+    async setSessionConfigOption(params) {
+      const value = "value" in params ? params.value : undefined;
+      logRequest("session/set_config_option", { sessionId: params.sessionId, configId: params.configId, value });
+      log({ method: "session/set_config_option", params: { sessionId: params.sessionId, configId: params.configId, value } });
+      await setDelay();
+      return setConfigOption({ sessionId: params.sessionId, configId: params.configId, value }) as acp.SetSessionConfigOptionResponse;
+    },
+    /** 025: `session/set_model` (Hermes-like `models`) is not in the SDK's agent interface; it arrives here. */
+    async extMethod(method, params) {
+      if (method !== "session/set_model") throw acp.RequestError.methodNotFound(method);
+      logRequest(method, { sessionId: params.sessionId, modelId: params.modelId });
+      log({ method, params: { sessionId: params.sessionId, modelId: params.modelId } });
+      await setDelay();
+      return setModel(params);
+    },
     cancel(params) {
+      logRequest("session/cancel", { sessionId: params.sessionId });
       log({ method: "session/cancel", params: { sessionId: params.sessionId } });
       aborts.get(params.sessionId)?.abort();
     },

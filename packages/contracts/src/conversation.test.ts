@@ -220,7 +220,7 @@ describe("023 conversation-browser-attached (worker to broker)", () => {
 
 describe("023 notice codes", () => {
   it("lists browser-tools-missing and key-env-not-in-browser beside the 019 notice", () => {
-    expect(contracts.CONVERSATION_NOTICES).toEqual(["sandbox-permissions-declined", "browser-tools-missing", "key-env-not-in-browser"]);
+    expect(contracts.CONVERSATION_NOTICES.slice(0, 3)).toEqual(["sandbox-permissions-declined", "browser-tools-missing", "key-env-not-in-browser"]);
   });
 
   it("browser-tools-missing names the agent", () => {
@@ -402,5 +402,225 @@ describe("024 overview fields on an agent's availability", () => {
     expect(parse({ lastTest: { ...lastTest, keyHint: "KEY=sk-abc" } })).toBe(false);
     expect(parse({ lastTest: { ...lastTest, start: "crashed" } })).toBe(false);
     expect(contracts.agentTestResultSchema.safeParse(lastTest).success).toBe(true);
+  });
+});
+
+/**
+ * 025 T798 - the model picker's additions (contracts/frames.md, data-model.md, R-398 - R-402): the
+ * offer and its entries, the choice, the live state, `model` on start, `ui.conversation.set-model`,
+ * the `model` event and the optional fields on availability, view and index entry.
+ */
+describe("025 model picker contracts", () => {
+  const entry = { value: "alpha", name: "Alpha", description: "Fast" };
+  const configOffer = {
+    source: "config",
+    configIds: { model: "model", effort: "effort" },
+    models: [{ value: "default", name: "Default" }, entry],
+    efforts: [{ value: "low", name: "Low" }],
+    defaultModel: "default",
+    defaultEffort: "low",
+  };
+  const modelsOffer = { source: "models", models: [entry], efforts: [] };
+  const offerOk = (value: unknown) => contracts.conversationModelOfferSchema.safeParse(value).success;
+  const many = (n: number) => Array.from({ length: n }, (_, i) => ({ value: `v${i}`, name: `N${i}` }));
+
+  it("takes a model entry with an optional description and refuses every bound", () => {
+    const ok = (value: unknown) => contracts.conversationModelEntrySchema.safeParse(value).success;
+    expect(ok(entry)).toBe(true);
+    expect(ok({ value: "alpha", name: "Alpha" })).toBe(true);
+    expect(ok({ value: "", name: "Alpha" })).toBe(false);
+    expect(ok({ value: "v".repeat(513), name: "Alpha" })).toBe(false);
+    expect(ok({ value: "v".repeat(512), name: "n".repeat(120), description: "d".repeat(300) })).toBe(true);
+    expect(ok({ value: "alpha", name: "" })).toBe(false);
+    expect(ok({ value: "alpha", name: "n".repeat(121) })).toBe(false);
+    expect(ok({ value: "alpha", name: "Alpha", description: "" })).toBe(false);
+    expect(ok({ value: "alpha", name: "Alpha", description: "d".repeat(301) })).toBe(false);
+    expect(ok({ ...entry, extra: 1 })).toBe(false);
+  });
+
+  it("takes an offer from the session options or from the older list, and one that reports none", () => {
+    expect(offerOk(configOffer)).toBe(true);
+    expect(offerOk({ source: "config", configIds: { model: "model" }, models: [entry], efforts: [] })).toBe(true);
+    expect(offerOk(modelsOffer)).toBe(true);
+    expect(offerOk({ source: "models", models: [], efforts: [] })).toBe(true);
+    expect(offerOk({ ...modelsOffer, defaultModel: "alpha" })).toBe(true);
+  });
+
+  it("keeps configIds for the session options only, and no efforts for the older list", () => {
+    expect(offerOk({ ...configOffer, configIds: undefined })).toBe(false);
+    expect(offerOk({ ...modelsOffer, configIds: { model: "model" } })).toBe(false);
+    expect(offerOk({ ...modelsOffer, efforts: [{ value: "low", name: "Low" }] })).toBe(false);
+    expect(offerOk({ ...configOffer, source: "other" })).toBe(false);
+  });
+
+  it("names defaults that are listed values", () => {
+    expect(offerOk({ ...configOffer, defaultModel: "gamma" })).toBe(false);
+    expect(offerOk({ ...configOffer, defaultEffort: "high" })).toBe(false);
+    expect(offerOk({ ...modelsOffer, defaultModel: "gamma" })).toBe(false);
+    expect(offerOk({ ...modelsOffer, defaultEffort: "low" })).toBe(false);
+  });
+
+  it("bounds the lists at 64 models and 16 efforts, and the option ids", () => {
+    expect(offerOk({ ...modelsOffer, models: many(64) })).toBe(true);
+    expect(offerOk({ ...modelsOffer, models: many(65) })).toBe(false);
+    expect(offerOk({ source: "config", configIds: { model: "m", effort: "e" }, models: [], efforts: many(16) })).toBe(true);
+    expect(offerOk({ source: "config", configIds: { model: "m", effort: "e" }, models: [], efforts: many(17) })).toBe(false);
+    expect(offerOk({ ...configOffer, configIds: { model: "" } })).toBe(false);
+    expect(offerOk({ ...configOffer, extra: 1 })).toBe(false);
+  });
+
+  it("takes a choice of values and refuses anything else", () => {
+    const ok = (value: unknown) => contracts.conversationModelChoiceSchema.safeParse(value).success;
+    expect(ok({ model: "alpha" })).toBe(true);
+    expect(ok({ model: "alpha", effort: "low" })).toBe(true);
+    expect(ok({ model: "v".repeat(512), effort: "e".repeat(512) })).toBe(true);
+    expect(ok({ model: "" })).toBe(false);
+    expect(ok({ model: "v".repeat(513) })).toBe(false);
+    expect(ok({ effort: "low" })).toBe(false);
+    expect(ok({ model: "alpha", effort: "" })).toBe(false);
+    expect(ok({ model: "alpha", name: "Alpha" })).toBe(false);
+  });
+
+  it("takes the live state as an offer with what the agent last reported, under the offer's own rules", () => {
+    const ok = (value: unknown) => contracts.conversationModelStateSchema.safeParse(value).success;
+    expect(ok({ ...configOffer, current: { model: "alpha", effort: "low" } })).toBe(true);
+    expect(ok({ ...modelsOffer, current: { model: "alpha" } })).toBe(true);
+    expect(ok(configOffer)).toBe(false);
+    expect(ok({ ...configOffer, current: { effort: "low" } })).toBe(false);
+    expect(ok({ ...modelsOffer, defaultModel: "gamma", current: { model: "alpha" } })).toBe(false);
+    expect(ok({ ...modelsOffer, current: { model: "alpha" }, extra: 1 })).toBe(false);
+  });
+
+  describe("ui.conversation.start", () => {
+    const start = (payload: Record<string, unknown>) => ({ type: "ui.conversation.start", payload });
+    const base = { agent: "claude-code", folder: { kind: "scratch" } };
+
+    it("takes the chip's choice, and still starts without one", () => {
+      expect(conversationCommandSchema.safeParse(start(base)).success).toBe(true);
+      expect(conversationCommandSchema.safeParse(start({ ...base, model: { model: "alpha", effort: "low" } })).success).toBe(true);
+      expect(conversationPanelCommandSchema.safeParse({ ...start({ ...base, model: { model: "alpha" } }), commandId: "c-1" }).success).toBe(true);
+      expect(agentPanelCommandSchema.safeParse({ ...start({ ...base, model: { model: "alpha" } }), commandId: "c-1" }).success).toBe(true);
+    });
+
+    it("takes an effort alone, as set-model does", () => {
+      expect(conversationCommandSchema.safeParse(start({ ...base, model: { effort: "high" } })).success).toBe(true);
+      expect(conversationPanelCommandSchema.safeParse({ ...start({ ...base, model: { effort: "high" } }), commandId: "c-1" }).success).toBe(true);
+      expect(agentPanelCommandSchema.safeParse({ ...start({ ...base, model: { effort: "high" } }), commandId: "c-1" }).success).toBe(true);
+    });
+
+    it("refuses a choice that is not values", () => {
+      expect(conversationCommandSchema.safeParse(start({ ...base, model: {} })).success).toBe(false);
+      expect(conversationCommandSchema.safeParse(start({ ...base, model: { model: "alpha", name: "Alpha" } })).success).toBe(false);
+      expect(conversationCommandSchema.safeParse(start({ ...base, model: "alpha" })).success).toBe(false);
+    });
+  });
+
+  describe("ui.conversation.set-model", () => {
+    const setModel = (payload: Record<string, unknown>) => ({ type: "ui.conversation.set-model", payload });
+    const okIn = (schema: { safeParse(value: unknown): { success: boolean } }, payload: Record<string, unknown>) =>
+      schema.safeParse(setModel(payload)).success;
+
+    it("takes a model, an effort or both, in the broker and panel unions and on the link", () => {
+      for (const part of [{ model: "alpha" }, { effort: "low" }, { model: "alpha", effort: "low" }]) {
+        const payload = { conversationId: CONVERSATION, ...part };
+        expect(okIn(conversationCommandSchema, payload), JSON.stringify(part)).toBe(true);
+        expect(conversationPanelCommandSchema.safeParse({ ...setModel(payload), commandId: "c-1" }).success).toBe(true);
+        expect(conversationPanelCommandSchema.safeParse(setModel(payload)).success).toBe(true);
+        expect(agentPanelCommandSchema.safeParse({ ...setModel(payload), commandId: "c-1" }).success).toBe(true);
+        expect(
+          agentLinkFrameSchema.safeParse({ type: "conversation-command", sessionId: "s-1", commandId: "c-1", command: setModel(payload) }).success,
+        ).toBe(true);
+      }
+    });
+
+    it("needs at least one of model and effort, and nothing else", () => {
+      expect(okIn(conversationCommandSchema, { conversationId: CONVERSATION })).toBe(false);
+      expect(okIn(conversationPanelCommandSchema, { conversationId: CONVERSATION })).toBe(false);
+      expect(okIn(conversationCommandSchema, { conversationId: CONVERSATION, model: "" })).toBe(false);
+      expect(okIn(conversationCommandSchema, { conversationId: CONVERSATION, model: "v".repeat(513) })).toBe(false);
+      expect(okIn(conversationCommandSchema, { conversationId: "nope", model: "alpha" })).toBe(false);
+      expect(okIn(conversationCommandSchema, { conversationId: CONVERSATION, model: "alpha", mode: "strict" })).toBe(false);
+    });
+  });
+
+  describe("the model event", () => {
+    const ok = (event: Record<string, unknown>) => conversationEventSchema.safeParse({ type: "model", ...event }).success;
+
+    it("names the model, the effort and whether the effort moved", () => {
+      expect(ok({ model: "Alpha" })).toBe(true);
+      expect(ok({ model: "Alpha", effort: "Low" })).toBe(true);
+      expect(ok({ model: "Alpha", effort: "Low", effortChanged: true })).toBe(true);
+      expect(ok({ model: "Alpha", effortChanged: false })).toBe(false);
+      expect(ok({})).toBe(false);
+      expect(ok({ model: "" })).toBe(false);
+      expect(ok({ model: "n".repeat(121) })).toBe(false);
+      expect(ok({ model: "Alpha", effort: "e".repeat(121) })).toBe(false);
+      expect(ok({ model: "Alpha", value: "alpha" })).toBe(false);
+    });
+  });
+
+  describe("availability, view and entry", () => {
+    const view = {
+      conversationId: CONVERSATION,
+      agent: "claude-code",
+      title: "Tidy",
+      folder: { kind: "scratch" },
+      mode: "strict",
+      createdAt: "2026-10-26T00:00:00.000Z",
+      lastUsedAt: "2026-10-26T00:00:00.000Z",
+      resumable: true,
+      state: "idle",
+    };
+    const { state: _state, ...viewFields } = view;
+    const indexEntry = { ...viewFields, agentSessionId: "sess-1" };
+
+    it("carries the remembered offer and the last choice on an agent entry", () => {
+      const agent = { agent: "claude-code", availability: "ready" };
+      const ok = (extra: Record<string, unknown>) => conversationAgentAvailabilitySchema.safeParse({ ...agent, ...extra }).success;
+      expect(ok({})).toBe(true);
+      expect(ok({ models: { offer: configOffer } })).toBe(true);
+      expect(ok({ models: { offer: configOffer, choice: { model: "alpha", effort: "low" } } })).toBe(true);
+      expect(ok({ models: { choice: { model: "alpha" } } })).toBe(false);
+      expect(ok({ models: { offer: configOffer, current: { model: "alpha" } } })).toBe(false);
+      expect(ok({ models: { offer: { ...configOffer, defaultModel: "gamma" } } })).toBe(false);
+    });
+
+    it("carries the live state or the stored choice on a view", () => {
+      const ok = (extra: Record<string, unknown>) => conversationViewSchema.safeParse({ ...view, ...extra }).success;
+      expect(ok({})).toBe(true);
+      expect(ok({ models: { ...configOffer, current: { model: "alpha", effort: "low" } } })).toBe(true);
+      expect(ok({ model: { model: "alpha", effort: "low" } })).toBe(true);
+      expect(ok({ models: configOffer })).toBe(false);
+      expect(ok({ model: { effort: "low" } })).toBe(false);
+    });
+
+    it("carries the choice on an index entry", () => {
+      const ok = (extra: Record<string, unknown>) => contracts.conversationEntrySchema.safeParse({ ...indexEntry, ...extra }).success;
+      expect(ok({})).toBe(true);
+      expect(ok({ model: { model: "alpha" } })).toBe(true);
+      expect(ok({ model: { model: "alpha", effort: "low" } })).toBe(true);
+      expect(ok({ model: { effort: "low" } })).toBe(false);
+      expect(ok({ model: "alpha" })).toBe(false);
+    });
+  });
+
+  it("answers model-unknown and model-refused", () => {
+    for (const code of ["model-unknown", "model-refused"]) {
+      expect(CONVERSATION_ERROR_CODES).toContain(code);
+      expect(
+        conversationResultFrameSchema.safeParse({
+          type: "conversation-result",
+          sessionId: "s-1",
+          commandId: "c-1",
+          ok: false,
+          error: { code, detail: "The agent said no." },
+        }).success,
+        code,
+      ).toBe(true);
+    }
+  });
+
+  it("names the two notices", () => {
+    expect(contracts.CONVERSATION_NOTICES).toEqual(expect.arrayContaining(["model-refused", "model-unavailable"]));
   });
 });

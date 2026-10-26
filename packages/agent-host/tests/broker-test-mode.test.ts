@@ -47,4 +47,17 @@ describe("readBrokerTestOverrides", () => {
       });
     }
   });
+
+  it("025: reads the model set bound in test mode only, a whole number of ms from 1 s to 10 min", () => {
+    expect(readBrokerTestOverrides({ HALLPASS_BROKER_TEST_MODEL_SET_MS: "2000" })).toEqual({ codes: [] });
+    expect(readBrokerTestOverrides({ HALLPASS_TEST_MODE: "1", HALLPASS_BROKER_TEST_MODEL_SET_MS: "2000" })).toEqual({
+      modelSetBoundMs: 2_000,
+      codes: ["broker.test-model-set"],
+    });
+    for (const raw of ["abc", "0", "999", "1.5", String(10 * 60_000 + 1)]) {
+      expect(readBrokerTestOverrides({ HALLPASS_TEST_MODE: "1", HALLPASS_BROKER_TEST_MODEL_SET_MS: raw })).toEqual({
+        codes: ["broker.test-model-set-invalid"],
+      });
+    }
+  });
 });

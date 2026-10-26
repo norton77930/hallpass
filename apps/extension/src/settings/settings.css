@@ -919,6 +919,11 @@ body:has(.agent-shell.settings-page) {
   gap: var(--sp-2);
 }
 
+.settings-page .prefs .pref-label {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
 .settings-page .prefs .sel {
   min-height: 28px;
   font-size: var(--fs-1);
@@ -976,6 +981,20 @@ body:has(.agent-shell.settings-page) {
 
 .settings-page .toast .btn:hover {
   background: color-mix(in srgb, var(--bg) 15%, transparent);
+}
+
+/* The close button: a 24 px hit area at least, and a ring that shows on the toast's dark background (#19). */
+.settings-page .toast .toast-close {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-3);
+  line-height: 1;
+}
+
+.settings-page .toast .toast-close:focus-visible {
+  outline: 2px solid var(--bg);
+  outline-offset: 2px;
 }
 
 /* ---------- collapsible agent card ---------- */

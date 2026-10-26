@@ -193,7 +193,7 @@ function Notes(props: {
     infos.push(
       downloadKind(agent) === "helper"
         ? t("settings.note.helperWhy", { agent: name, size: DOWNLOAD_SIZE[agent] ?? "" })
-        : t("settings.note.notInstalled", { estimate: AGENT_DOWNLOAD_MINUTES }),
+        : t("settings.note.notInstalled", { size: DOWNLOAD_SIZE[agent] ?? "", estimate: AGENT_DOWNLOAD_MINUTES }),
     );
   }
   if (kind === "needsDownload") {
@@ -287,7 +287,7 @@ function Checks(props: { agent: ConversationAgent; entry: ConversationAgentAvail
       <dt>{t("settings.check.attach")}</dt>
       <dd>
         {entry.accepts === undefined ? (
-          <Mark kind="muted" />
+          <span className="meta">{t("settings.attach.unknown")}</span>
         ) : (
           chips.map(([label, accepted]) => (
             <span key={label} className={`chip${accepted === true ? "" : " no"}`}>
@@ -424,7 +424,7 @@ function PrimaryAction(props: {
             ? t("settings.action.tryAgain")
             : downloadKind(agent) === "helper"
               ? t("settings.action.downloadHelper", { size: DOWNLOAD_SIZE[agent] ?? "" })
-              : t("settings.action.downloadAgent")}
+              : t("settings.action.downloadAgent", { size: DOWNLOAD_SIZE[agent] ?? "" })}
         </button>
         {installedByOwner(agent) ? checkAgain : null}
       </>

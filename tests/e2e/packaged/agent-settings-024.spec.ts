@@ -246,6 +246,19 @@ test.describe("024 settings page (quickstart L1-L14)", () => {
     await expect.poll(async () => (await cardStates(settings)).codex, { timeout: 20_000 }).toBe("downloading");
     await expect.poll(async () => (await settings.downloadPercent("codex")) ?? 0, { timeout: 30_000, message: "the download stopped while the page was closed" }).toBeGreaterThan(before);
 
+    // 025 #19: the time left is shown while downloading, once the worker has an estimate (from 10 %).
+    const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const [leftBefore = "", leftAfter = ""] = ui("settings.progress.timeLeft").split("{minutes}");
+    const timeLeft = new RegExp(`${escape(leftBefore)}\\d+${escape(leftAfter)}`, "u");
+    await settings.setCardOpen("codex", true);
+    await expect
+      .poll(async () => {
+        const text = await settings.cardText("codex");
+        return text.includes(ui("settings.progress.timeLeftShort")) || timeLeft.test(text);
+      }, { timeout: 30_000, message: "no time-left line while downloading" })
+      .toBe(true);
+    await settings.screenshot(join(SHOTS, `L3-time-left-${locale}.png`));
+
     // Cancel: Needs a download again, and the install's folder is gone (the files are the evidence).
     await settings.pressCancel("codex");
     await expect.poll(async () => (await cardStates(settings)).codex, { timeout: 15_000 }).toBe("needsDownload");
@@ -762,9 +775,8 @@ test.describe("024 settings page (quickstart L1-L14)", () => {
     // kill, so all four are shown just past 5 s - not after a launch's 15 s, nor never.
     expect(shownMs, "states were held past the 5 s bound").toBeLessThan(8_000);
     await settings.setCardOpen("codex", true);
-    // The card words a version problem with no version read as "did not report a version number"
-    // (AgentCard: the broker's "did not answer within 5 s" detail is shown only beside a version).
-    expect(await settings.cardText("codex")).toContain(ui("settings.warning.versionUnreadable", { agent: agentName("codex") }));
+    // A --version that timed out is worded as such, not as an unreadable number (versionTimedOut, 0.16.1).
+    expect(await settings.cardText("codex")).toContain(ui("settings.warning.versionTimedOut", { agent: agentName("codex") }));
     await settings.screenshot(join(SHOTS, `L14-hung-version-${locale}.png`));
     expect((await promptLines()).length, "the check asked a model").toBe(prompts);
   });

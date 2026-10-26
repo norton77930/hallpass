@@ -506,6 +506,24 @@ export const messages = {
   "conversation.chip.folder": "Folder: {folder}",
   "conversation.chip.mode": "Mode: {mode}",
   "conversation.chip.fixed": "Fixed for this conversation. For another agent or folder, start a new conversation.",
+  // 025 FR-398 - FR-405, R-407: the model chip, its popup, the change line and the two notices.
+  "conversation.chip.model": "Model: {model}",
+  "conversation.model.label": "Model",
+  "conversation.model.effortLabel": "Reasoning effort",
+  "conversation.model.default": "Default",
+  "conversation.model.noList": "The list of models appears once the conversation starts.",
+  "conversation.model.busy": "The model can be changed once the answer is finished.",
+  "conversation.model.changed": "Model changed to {model}",
+  "conversation.model.changedEffort": "Model changed to {model}; reasoning effort is now {effort}",
+  "conversation.model.effortChanged": "Reasoning effort changed to {effort}",
+  "conversation.notice.model-refused": "The agent did not switch models and keeps the one it had.",
+  "conversation.notice.model-refused.named": "{agent} did not switch to {asked} and keeps using {kept}. It said: “{reason}”",
+  "conversation.notice.model-refused.namedShort": "{agent} did not switch to {asked} and keeps using {kept}.",
+  "conversation.notice.model-refused.timeout": "{agent} did not answer within {seconds} s, so the model is unchanged: it keeps using {kept} and did not switch to {asked}.",
+  "conversation.notice.model-unavailable": "The agent no longer offers the model this conversation used, so it uses its default model.",
+  "conversation.notice.model-unavailable.named": "{agent} no longer offers {model}; using its default model.",
+  "conversation.error.model-refused": "The agent did not change its model.",
+  "conversation.error.model-unknown": "That model is not on the agent's list any more. Open the list again and choose another.",
   "conversation.agentMenu.label": "Choose an agent",
   "conversation.new": "New conversation",
   // 020 US5, FR-321, T598: the header's list button and the drawer of conversations.
@@ -746,6 +764,7 @@ export const messages = {
   "settings.attach.files": "Files",
   "settings.attach.accepted": "accepted",
   "settings.attach.refused": "not accepted",
+  "settings.attach.unknown": "Not known yet",
   // Browser tools status, shared by the card and the Browser tools table (FR-386).
   "settings.toolStatus.available": "Available",
   "settings.toolStatus.needsComponent": "Needs its MCP component",
@@ -754,7 +773,7 @@ export const messages = {
   // Notes and warnings in the owner's words (FR-378). Key variables are named, never valued (FR-388).
   "settings.note.helperWhy": "{agent} needs a helper of about {size} to run in the side panel.",
   "settings.note.notInstalled":
-    "Not installed. Press Download and install; it takes about {estimate} minutes (estimate).",
+    "Not installed. Press Download and install; the download is about {size} and takes about {estimate} minutes (estimate).",
   "settings.note.gitMissing":
     "Git for Windows was not found. Hermes needs it to run commands in automatic mode.",
   "settings.note.preRelease": "Pre-release version. Hallpass keeps exactly the version it tested.",
@@ -770,7 +789,7 @@ export const messages = {
     "Key variable {variable} is set in Windows, but this browser started before it was set, so it cannot see it. Quit the browser completely (including any copy still running in the background) and open it again.",
   // Actions on a card and the check again (FR-379, FR-380).
   "settings.action.downloadHelper": "Download helper (about {size})",
-  "settings.action.downloadAgent": "Download and install",
+  "settings.action.downloadAgent": "Download and install (about {size})",
   "settings.action.cancel": "Cancel",
   "settings.action.tryAgain": "Try again",
   "settings.action.checkAgain": "Check again",

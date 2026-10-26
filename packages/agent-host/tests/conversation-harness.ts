@@ -8,6 +8,7 @@ import { launchSettings, writeLaunchFiles } from "../src/broker/agent-launch-set
 import type { AdapterLaunchSpec } from "../src/broker/agents.js";
 import { ConversationPool, type Clock, type ClockTimer, type ConversationPoolOptions } from "../src/broker/conversation.js";
 import { memoryConversationIndex, memoryFolderList, type ConversationIndex } from "../src/broker/conversation-index.js";
+import { memoryModelStore, type ModelStore } from "../src/broker/model-store.js";
 import type { ConversationBrowserAccess } from "../src/broker/browser-token.js";
 import type { UserEnvironmentPorts } from "../src/broker/user-environment.js";
 
@@ -180,6 +181,10 @@ export type PoolHarnessOptions = {
   browser?: ConversationPoolOptions["browser"];
   /** 023 R-369: what the "machine" holds for the key-name check (default: nothing at all). */
   userEnvironment?: ConversationPoolOptions["userEnvironment"];
+  /** 025: the remembered offers and choices (default: a fresh one in memory). */
+  models?: ModelStore;
+  /** 025: the bound on a model or effort set request (default the product's MODEL_SET_BOUND_MS). */
+  modelSetBoundMs?: number;
 };
 
 /**
@@ -220,11 +225,13 @@ const SCENARIO: Readonly<Record<ConversationAgent, string>> = {
 export async function poolHarness(options: PoolHarnessOptions = {}) {
   const dir = options.dir ?? (await makeTempDir("hallpass-conv-"));
   const logPath = join(dir, "fake-acp.log");
+  const requestLogPath = join(dir, "fake-acp-requests.log");
   const storePath = join(dir, "fake-acp-store.json");
   const clock = options.clock ?? new TestClock();
   const rec = recorder(clock);
   const index = options.index ?? memoryConversationIndex();
   const folders = memoryFolderList();
+  const models = options.models ?? memoryModelStore();
   const dataDir = join(dir, "data");
   const pool = new ConversationPool({
     dataDir,
@@ -232,6 +239,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     brokerPid: options.brokerPid ?? process.pid,
     index,
     folders,
+    models,
     clock,
     ...(options.cap === undefined ? {} : { cap: options.cap }),
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
@@ -239,6 +247,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     ...(options.onChange === undefined ? {} : { onChange: options.onChange }),
     ...(options.log === undefined ? {} : { log: options.log }),
     ...(options.browser === undefined ? {} : { browser: options.browser }),
+    ...(options.modelSetBoundMs === undefined ? {} : { modelSetBoundMs: options.modelSetBoundMs }),
     userEnvironment: options.userEnvironment ?? NO_USER_ENVIRONMENT,
     onEvent: rec.onEvent,
     // 021: the mode's launch settings as a real launch applies them (Hermes' managed layer written
@@ -256,6 +265,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
         ok: true,
         spec: fakeAgentSpec({
           FAKE_ACP_LOG: logPath,
+          FAKE_ACP_REQUEST_LOG: requestLogPath,
           ...(options.store === false ? {} : { FAKE_ACP_STORE: storePath }),
           FAKE_ACP_SCENARIO: SCENARIO[agent],
           ...settings.env,
@@ -286,7 +296,24 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     if (options.dir === undefined) await removeDir(dir);
   };
 
-  return { dir, dataDir, logPath, storePath, clock, rec, index, folders, pool, start, turn, cleanup, log: () => readFakeLog(logPath) };
+  return {
+    dir,
+    dataDir,
+    logPath,
+    storePath,
+    clock,
+    rec,
+    index,
+    folders,
+    models,
+    pool,
+    start,
+    turn,
+    cleanup,
+    log: () => readFakeLog(logPath),
+    /** 025: every request the fake agents received, in order (FAKE_ACP_REQUEST_LOG). */
+    requests: () => readFakeLog(requestLogPath),
+  };
 }
 
 /**

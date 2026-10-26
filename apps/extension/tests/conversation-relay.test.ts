@@ -377,6 +377,51 @@ describe("T547 conversation relay: forwarding (pure)", () => {
     for (const frame of frames) expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
   });
 
+  // 025 R-408: the relay carries the picker's command and the start's choice as they came - no policy.
+  it("025 forwards set-model and a start's model choice unchanged", () => {
+    const { relay, frames } = harness();
+    relay.relayStarted();
+    relay.announce(BROKER);
+
+    const setModel = { type: "ui.conversation.set-model", payload: { conversationId: CONVERSATION, model: "opus", effort: "high" } };
+    const start = {
+      type: "ui.conversation.start",
+      payload: { agent: "claude-code", folder: { kind: "scratch" }, model: { model: "opus", effort: "high" } },
+    };
+    relay.command({ ...setModel, commandId: "p-1" } as never);
+    relay.command({ ...start, commandId: "p-2" } as never);
+
+    expect(frames).toEqual([
+      { type: "conversation-command", sessionId: BROKER, commandId: "p-1", command: setModel },
+      { type: "conversation-command", sessionId: BROKER, commandId: "p-2", command: start },
+    ]);
+    for (const frame of frames) expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
+  });
+
+  it("025 projects the overview's remembered offers and a view's models as they came", () => {
+    const { relay } = harness();
+    relay.relayStarted();
+    relay.announce(BROKER);
+    const offer = {
+      source: "config" as const,
+      configIds: { model: "model", effort: "effort" },
+      models: [{ value: "default", name: "Default (recommended)" }, { value: "opus", name: "Opus 5.5" }],
+      efforts: [{ value: "high", name: "High" }],
+      defaultModel: "default",
+    };
+    const running = { ...VIEW, state: "idle" as const, models: { ...offer, current: { model: "opus", effort: "high" } } };
+    relay.receive({
+      ...fullOverview(),
+      conversations: [running],
+      agents: [{ agent: "claude-code", availability: "ready", models: { offer, choice: { model: "opus", effort: "high" } } }],
+    } as never);
+
+    const state = relay.panelState(true);
+    expect(state.agents[0]).toMatchObject({ models: { offer, choice: { model: "opus", effort: "high" } } });
+    expect(state.conversations[0]).toMatchObject({ models: { current: { model: "opus", effort: "high" } } });
+    expect(agentPanelStateSchema.shape.conversation.safeParse(state).success).toBe(true);
+  });
+
   it("answers a command at once with broker-unavailable when no broker is attached", () => {
     const { relay, frames, panels } = harness();
 

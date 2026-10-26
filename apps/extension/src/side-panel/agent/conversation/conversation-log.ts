@@ -39,8 +39,14 @@ type ToolEvent = Extract<ConversationEvent, { type: "tool" }>;
 type PermissionEvent = Extract<ConversationEvent, { type: "permission" }>;
 type NoticeEvent = Extract<ConversationEvent, { type: "notice" }>;
 type PermissionClosedEvent = Extract<ConversationEvent, { type: "permission-closed" }>;
+type ModelEvent = Extract<ConversationEvent, { type: "model" }>;
 
 export type TimelineItem =
+  /**
+   * 025 FR-404: one accepted change of model or effort, by the agent's own names. An `effort` without
+   * `effortChanged` is a change of the effort alone; with it, the model moved the effort (D-025-12).
+   */
+  | { kind: "model"; key: string; model: string; effort?: string; effortChanged?: true }
   /** 022 R-343: the owner's message may carry its attachments (as the broker summed them up). */
   | { kind: "text"; key: string; role: "agent" | "owner"; text: string; attachments?: ConversationAttachmentSummary[] }
   | { kind: "actions"; key: string; actions: ToolEvent[] }
@@ -132,6 +138,9 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
       case "notice":
         timeline.push({ kind: "notice", key: `notice-${seq}`, notice: event });
         break;
+      case "model":
+        timeline.push(modelLine(seq, event));
+        break;
       case "activity":
         if (timeline[timeline.length - 1]?.kind !== "thinking") timeline.push({ kind: "thinking", key: `thinking-${seq}` });
         break;
@@ -140,6 +149,14 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
   picture.permissions = [...permissions.values()];
   return picture;
 }
+
+const modelLine = (seq: number, event: ModelEvent): Extract<TimelineItem, { kind: "model" }> => ({
+  kind: "model",
+  key: `model-${seq}`,
+  model: event.model,
+  ...(event.effort === undefined ? {} : { effort: event.effort }),
+  ...(event.effortChanged === undefined ? {} : { effortChanged: true as const }),
+});
 
 /** 020 FR-318: one turn's actions, as the conversation shows them. */
 export type TurnActionGroup = {

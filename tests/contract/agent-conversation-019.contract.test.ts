@@ -51,6 +51,9 @@ const ERROR_CODES = [
   "agent-model-unreachable",
   // 021 D-021-16: a mode change of an agent whose mode is fixed once started.
   "mode-fixed",
+  // 025 R-402: a set-model value not in the live offer, and one the agent refused.
+  "model-unknown",
+  "model-refused",
 ];
 
 const VIEW = {
@@ -220,9 +223,9 @@ describe("T519 conversation link frames (R-323)", () => {
     expectRejected(f, { ...base, ok: false, error: { code: "folder-missing" } }, "an error without its detail");
   });
 
-  it("names exactly the twenty-seven ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command and 021's three", () => {
+  it("names exactly the twenty-nine ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command, 021's three and 025's two", () => {
     const f = frame();
-    expect(ERROR_CODES).toHaveLength(27);
+    expect(ERROR_CODES).toHaveLength(29);
     for (const code of ERROR_CODES) {
       expectAccepted(
         f,
@@ -244,10 +247,14 @@ describe("T519 conversation link frames (R-323)", () => {
       "sandbox-permissions-declined",
       "browser-tools-missing",
       "key-env-not-in-browser",
+      "model-refused",
+      "model-unavailable",
     ]);
     const extra: Record<string, Record<string, string>> = {
       "browser-tools-missing": { agent: "hermes" },
       "key-env-not-in-browser": { agent: "hermes", variable: "MODEL_API_KEY" },
+      "model-refused": { agent: "codex" },
+      "model-unavailable": { agent: "codex" },
     };
     const f = frame();
     for (const code of contractExport<readonly string[]>("CONVERSATION_NOTICES")) {

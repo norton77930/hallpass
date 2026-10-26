@@ -52,7 +52,9 @@ gate never need a real agent: `tests/harness/fake-acp-agent.ts` is a small stand
 ACP subset the broker uses (streamed text, permission requests, modes, session load, a crash, child
 processes, calls to Hallpass's browser tools). It is not a model: each behaviour is chosen by a
 keyword in the prompt or by an environment variable such as `FAKE_ACP_SCENARIO` (`claude` or `codex`
-modes); the header of the file lists them. Its own tests run with
+modes); the header of the file lists them. `FAKE_ACP_MODELS` chooses the model list it reports for the
+model picker (`config`, `config-no-effort`, `models`, `none`, `refuse`, `effort-moves`), with invented
+model names, and `FAKE_ACP_REQUEST_LOG` records every request it receives in order. Its own tests run with
 `npx vitest run --project unit tests/harness/fake-acp-agent.test.ts`.
 
 To put the fake agent behind the broker in the packaged gate, set these for the **browser's** process
@@ -92,6 +94,10 @@ assets, identifiers, protocols or internal structure from any other browser exte
 product into this repository. If you studied one to understand a behaviour, describe the behaviour
 in your own words in the design notes, and implement it independently. A contract test keeps
 shipped source free of test tooling and of references to those products.
+
+This holds for open-source projects too, whatever their licence: reading them, learning from their
+approach and following public standards (such as the Agent Client Protocol) is fine, but code
+Hallpass uses from them comes in as an installed dependency, never copied into this repository.
 
 ## Specifications
 

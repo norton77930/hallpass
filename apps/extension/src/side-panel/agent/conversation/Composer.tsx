@@ -163,8 +163,11 @@ export function Composer(props: {
   );
 }
 
-/** Which chip it is: T605 keeps the chips on one row, and the folder's gives way first. */
-export type ChipKind = "agent" | "folder" | "mode";
+/**
+ * Which chip it is: T605 keeps the chips on one row, and the folder's gives way first. 025: the model
+ * chip comes after the mode chip and, when the row is full, wraps to a second line beside Send.
+ */
+export type ChipKind = "agent" | "folder" | "mode" | "model";
 
 /** A chip that opens something: the agent menu, the folder chooser, the mode choice. */
 export function Chip(props: {
