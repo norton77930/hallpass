@@ -208,6 +208,7 @@ export type ConversationPoolPort = Pick<
   | "stop"
   | "answer"
   | "setMode"
+  | "setModel"
   | "open"
   | "remove"
   | "page"
@@ -217,6 +218,7 @@ export type ConversationPoolPort = Pick<
   | "attach"
   | "cancelAttachment"
   | "agentAccepts"
+  | "agentModels"
   | "diagnostics"
   | "latestRun"
 >;
@@ -454,6 +456,8 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
     // too, without its pid), the last test's result.
     const facts = options.shared === undefined ? undefined : await readSharedState(options.shared.dataDir).catch(() => undefined);
     if (facts !== undefined) sentShared = JSON.stringify(facts);
+    // 025 R-401: each agent's remembered offer and last choice, so the chip can show before a start.
+    const remembered = await pool.agentModels();
     const listed = agents.map((entry) => {
       const phase = installPhases.get(entry.agent);
       // 022 R-344: what the agent said it accepts when it last started here, so the panel can tell before a start.
@@ -463,6 +467,7 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       // Another broker's download in flight shows as this agent downloading here as well.
       const following = phase === undefined && install !== undefined && isRunningInstallPhase(install.phase) ? (install.phase as ConversationInstallPhase) : undefined;
       const installing = phase ?? following;
+      const models = remembered[entry.agent];
       return {
         ...entry,
         ...(installing === undefined ? {} : { installing }),
@@ -470,6 +475,7 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
         ...(install === undefined ? {} : { install }),
         ...(file?.lastTest === undefined ? {} : { lastTest: file.lastTest }),
         ...(options.tests?.running(entry.agent) === true ? { testing: true } : {}),
+        ...(models === undefined ? {} : { models: { offer: models.offer, ...(models.choice === undefined ? {} : { choice: models.choice }) } }),
       };
     });
     options.send({
@@ -691,7 +697,8 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
         if ((await consent.read()) !== "granted") return { outcome: needsConsent() };
         // T572: asked again by the pool after discovery, right before the agent is launched.
         // 021 FR-361: the mode chosen before the first message goes with the start (D-021-16: for good).
-        const started = await pool.start(command.payload.agent, command.payload.folder, consentGate, command.payload.mode);
+        // 025 R-403: and the chip's model choice, applied before the first prompt.
+        const started = await pool.start(command.payload.agent, command.payload.folder, consentGate, command.payload.mode, command.payload.model);
         if (!started.ok && (started.error.code === "agent-missing" || started.error.code === "agent-version" || started.error.code === "install-needed")) {
           await refreshAgents();
         }
@@ -724,6 +731,11 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       case "ui.conversation.set-mode":
         // 021 R-351: a launch-time mode change starts a new agent run, so it needs the consent as a start does.
         return { outcome: await pool.setMode(command.payload.conversationId, command.payload.mode, consentGate) };
+      case "ui.conversation.set-model": {
+        // 025 R-402: between turns; the `model` line and the views follow an accepted change.
+        const { conversationId, ...wanted } = command.payload;
+        return { outcome: await pool.setModel(conversationId, wanted), after: scheduleOverview };
+      }
       case "ui.conversation.open": {
         const { conversationId } = command.payload;
         const opened = await pool.open(conversationId, consentGate);

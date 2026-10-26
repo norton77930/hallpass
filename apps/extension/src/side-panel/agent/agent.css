@@ -1168,6 +1168,30 @@
   font-size: var(--fs-1);
 }
 
+/* 025 FR-404: one centred line, ruled on both sides, for an accepted change of model or effort. */
+.agent-conversation-change {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-change::before,
+.agent-conversation-change::after {
+  content: "";
+  flex: 1 1 0;
+  height: 1px;
+  background: var(--line);
+}
+
+.agent-conversation-change span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
 .agent-conversation > .agent-conversation-state {
   flex: none;
   margin: 0;
@@ -1665,6 +1689,153 @@
   color: var(--accent);
   font-size: var(--fs-1);
   text-decoration: underline;
+}
+
+/*
+ * 025 R-407, D-025-9: the model chip and its popup (prototype A). The chip sits after the mode chip; when
+ * the row is full it wraps to a second line beside Send, so the folder chip keeps its name. It wears the
+ * accent border of a chip that is the owner's to change; shown but not open (a turn runs, a card waits) or
+ * not running, it is quiet like a disabled control.
+ */
+.agent-conversation-chips:has(> .agent-conversation-chip[data-chip="model"]) {
+  flex-wrap: wrap;
+}
+
+.agent-shell .agent-conversation-chip[data-chip="model"] {
+  border-color: var(--accent-line);
+}
+
+.agent-shell .agent-conversation-chip[data-chip="model"] .agent-conversation-chip-text {
+  max-width: 190px;
+}
+
+.agent-shell .agent-conversation-chip[data-chip="model"][aria-disabled="true"],
+.agent-shell .agent-conversation-chip[data-chip="model"]:disabled {
+  border-color: var(--line);
+  color: var(--text-3);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.agent-shell button.agent-conversation-chip[data-chip="model"][aria-disabled="true"]:hover,
+.agent-shell button.agent-conversation-chip[data-chip="model"]:disabled:hover {
+  background: var(--bg);
+}
+
+.agent-conversation-model {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-conversation-model-title {
+  padding: var(--sp-1) 10px 2px;
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  font-weight: 600;
+}
+
+.agent-conversation-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-shell .agent-conversation-model-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: var(--sp-2) 10px;
+  border: 0;
+  border-radius: var(--r-2);
+  background: transparent;
+  text-align: start;
+}
+
+.agent-shell .agent-conversation-model-option:hover {
+  background: var(--surface-2);
+}
+
+.agent-shell .agent-conversation-model-option[aria-checked="true"] {
+  background: var(--accent-soft);
+}
+
+.agent-conversation-model-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* A name that does not fit ends in an ellipsis; the whole name is the title and the accessible name. */
+.agent-conversation-model-name,
+.agent-conversation-model-description {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-conversation-model-name {
+  font-weight: 500;
+}
+
+.agent-conversation-model-description {
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-model-check {
+  display: inline-flex;
+  flex: none;
+  justify-content: center;
+  width: 14px;
+  color: var(--accent);
+}
+
+.agent-conversation-model-hint {
+  margin: 0;
+  padding: 6px 10px var(--sp-1);
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+.agent-conversation-model-divider {
+  height: 1px;
+  margin: 6px 0;
+  background: var(--line);
+}
+
+.agent-conversation-model-efforts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-1) 10px 6px;
+}
+
+.agent-shell .agent-conversation-model-pill {
+  min-height: 26px;
+  padding: 2px 10px;
+  border-color: var(--line-strong);
+  border-radius: var(--r-pill);
+  background: var(--bg);
+  font-size: var(--fs-1);
+}
+
+.agent-shell .agent-conversation-model-pill:hover {
+  background: var(--surface-2);
+}
+
+.agent-shell .agent-conversation-model-pill[aria-checked="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+/* FR-403: why the chip is not open - quiet, not the warning colour of the mode notes. */
+.agent-conversation-note.agent-conversation-model-note {
+  color: var(--text-3);
 }
 
 /* 019 T563: the folder chooser (in the popup). */

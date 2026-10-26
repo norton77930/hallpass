@@ -5,6 +5,27 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.17.0 — 2026-10-26
+
+**Pick the model and reasoning effort for a side-panel conversation.**
+
+- **Model chip.** The composer has a model chip after the mode chip. Its popup lists the models the agent
+  offers (its default first) and, where the agent has them, the reasoning-effort levels. Works for Claude
+  Code, Codex, Hermes and DeepSeek, with whatever each agent reports; an agent that reports no models shows
+  no chip.
+- **Before and during a conversation.** Pick before the first message, or between turns; a change adds one
+  line to the conversation. While the agent answers or a card waits, the chip says when it can change.
+- **Remembered.** Hallpass remembers each agent's list and your last choice in its own data folder and
+  applies the choice when a conversation starts or continues. It never writes an agent's own settings.
+- **Honest fallbacks.** If an agent refuses a change, the conversation keeps its model and shows what the
+  agent said; if a remembered model is no longer offered, the agent's default is used and the panel says so.
+  An agent that does not answer a change within 30 s is treated as refusing it, so the conversation never
+  waits longer than that.
+- **Settings page.** DeepSeek's card shows its download size; the download row shows the time left; clearer
+  toast close button, "Not known yet" for unknown input types, visible Theme and Language labels, and zh-TW
+  wording.
+- Host and extension must both be 0.17.0: reinstall the host and reload the extension.
+
 ## 0.16.1 — 2026-10-26
 
 **Clearer answers when an agent is slow or out of quota.**

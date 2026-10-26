@@ -9,6 +9,8 @@ import { runCommand } from "./run-command.js";
  *   tests and the packaged gate run the fake ACP agent instead of an installed one;
  * - `HALLPASS_BROKER_TEST_IDLE_MS`, the idle limit (FR-297) in place of ten minutes, so the gate can
  *   watch an idle stop and the resume that follows (US4.3) - the "fake clock" of T564;
+ * - `HALLPASS_BROKER_TEST_MODEL_SET_MS` (025), the bound on a model or effort set request in place of
+ *   30 s (`MODEL_SET_BOUND_MS`), so the gate can watch a slow agent's change run out;
  * - `HALLPASS_BROKER_TEST_MACHINE` (024), the absolute path of a JSON file, read at every readiness
  *   check, saying what "the machine" holds - which agent programs, what their `--version` prints,
  *   Hermes' MCP component, Git Bash (`test-machine.ts`) - so the settings page's gate can show each
@@ -24,6 +26,7 @@ import { runCommand } from "./run-command.js";
 export type BrokerTestOverrides = {
   agent?: AdapterLaunchSpec;
   idleMs?: number;
+  modelSetBoundMs?: number;
   machineFile?: string;
   install?: TestCommand;
   codes: string[];
@@ -35,6 +38,9 @@ export type TestCommand = { command: string; args: string[] };
 /** Bounds on the idle override: at least a second, at most a day. */
 const IDLE_MIN_MS = 1_000;
 const IDLE_MAX_MS = 24 * 60 * 60_000;
+/** Bounds on the model set override: at least a second, at most ten minutes. */
+const MODEL_SET_MIN_MS = 1_000;
+const MODEL_SET_MAX_MS = 10 * 60_000;
 
 /** A JSON array of one or more strings, as a command line; undefined otherwise. */
 function parseArgv(raw: string): TestCommand | undefined {
@@ -75,6 +81,17 @@ export function readBrokerTestOverrides(env: Record<string, string | undefined>)
       overrides.codes.push("broker.test-idle");
     } else {
       overrides.codes.push("broker.test-idle-invalid");
+    }
+  }
+
+  const rawModelSet = env.HALLPASS_BROKER_TEST_MODEL_SET_MS;
+  if (rawModelSet !== undefined && rawModelSet.length > 0) {
+    const boundMs = /^\d+$/u.test(rawModelSet) ? Number(rawModelSet) : Number.NaN;
+    if (Number.isSafeInteger(boundMs) && boundMs >= MODEL_SET_MIN_MS && boundMs <= MODEL_SET_MAX_MS) {
+      overrides.modelSetBoundMs = boundMs;
+      overrides.codes.push("broker.test-model-set");
+    } else {
+      overrides.codes.push("broker.test-model-set-invalid");
     }
   }
 

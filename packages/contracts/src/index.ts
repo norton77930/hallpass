@@ -370,6 +370,14 @@ export {
   conversationCheckAgentsCommandSchema,
   conversationInstallCancelCommandSchema,
   conversationTestCommandSchema,
+  // 025: the model picker's offer, choice and live state.
+  CONVERSATION_MODEL_MAX_ENTRIES,
+  CONVERSATION_EFFORT_MAX_ENTRIES,
+  conversationModelEntrySchema,
+  conversationModelOfferSchema,
+  conversationModelChoiceSchema,
+  conversationModelWantSchema,
+  conversationModelStateSchema,
 } from "./conversation.js";
 export type {
   ConversationAgent,
@@ -398,6 +406,11 @@ export type {
   AgentInstallState,
   ConversationInstallState,
   AgentTestResult,
+  ConversationModelEntry,
+  ConversationModelOffer,
+  ConversationModelChoice,
+  ConversationModelWant,
+  ConversationModelState,
 } from "./conversation.js";
 
 // 024: the settings page's port, commands, messages and the two per-browser records.

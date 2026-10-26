@@ -21,6 +21,7 @@ import { codexConfigPath } from "./broker/codex-config.js";
 import { createAgentLauncher, createCommandHandler, fileConsentStore, type CommandHandler, type ReadinessResult } from "./broker/commands.js";
 import { createFolderActions, fileFolderList, folderListPath } from "./broker/folders.js";
 import { conversationIndexPath, fileConversationIndex } from "./broker/index-store.js";
+import { agentModelsPath, fileModelStore } from "./broker/model-store.js";
 import { ConversationPool, spawnAgentProcess } from "./broker/conversation.js";
 import { installAgent, prepareAgentsAtStart, shippedManifestsDirectory } from "./broker/install.js";
 import { createKillOnCloseJob } from "./broker/job.js";
@@ -58,7 +59,8 @@ import { hostDataDirectory, isWindowsDeviceName } from "./host-paths.js";
  * tests can put a real tree under the job without an installed agent - and
  * `HALLPASS_BROKER_TEST_IDLE_MS` shortens the idle limit for the packaged gate (`broker/test-mode.ts`);
  * for the settings page's gate (024), `HALLPASS_BROKER_TEST_MACHINE` makes up the machine the readiness
- * check looks at and `HALLPASS_BROKER_TEST_INSTALL` runs in place of `npm ci`.
+ * check looks at and `HALLPASS_BROKER_TEST_INSTALL` runs in place of `npm ci`; for the model picker's
+ * (025), `HALLPASS_BROKER_TEST_MODEL_SET_MS` shortens the 30 s bound on a model or effort set request.
  */
 
 const logPath = join(hostDataDirectory(), "broker.log");
@@ -230,6 +232,8 @@ async function main(): Promise<void> {
     brokerPid: process.pid,
     index,
     folders,
+    // 025 R-401: each agent's last offer and the owner's last choice, shared with other browsers' brokers.
+    models: fileModelStore({ path: agentModelsPath(dataDir), log }),
     resolveLaunch: launcher.resolveLaunch,
     onEvent: (payload) => {
       if (handler !== undefined) send(handler.eventFrame(payload));
@@ -252,6 +256,7 @@ async function main(): Promise<void> {
     }),
     log,
     ...(testMode.idleMs === undefined ? {} : { idleMs: testMode.idleMs }),
+    ...(testMode.modelSetBoundMs === undefined ? {} : { modelSetBoundMs: testMode.modelSetBoundMs }),
   });
   // 024 R-379 (T767): Tests run beside the pool, never in it - no cap, no index entry, no browser token.
   const tests = createAgentTestRunner({

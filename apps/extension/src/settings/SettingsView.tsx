@@ -204,7 +204,7 @@ export function SettingsView(props: SettingsViewProps): ReactElement {
           </span>
           <span className="grow" />
           <div className="prefs">
-            <label className="sr-only" htmlFor="settings-theme">
+            <label className="pref-label" htmlFor="settings-theme">
               {t("settings.themeLabel")}
             </label>
             <select
@@ -219,7 +219,7 @@ export function SettingsView(props: SettingsViewProps): ReactElement {
                 </option>
               ))}
             </select>
-            <label className="sr-only" htmlFor="settings-language">
+            <label className="pref-label" htmlFor="settings-language">
               {t("settings.languageLabel")}
             </label>
             <select
@@ -308,7 +308,7 @@ export function SettingsView(props: SettingsViewProps): ReactElement {
                   {notice.action.label}
                 </button>
               )}
-              <button type="button" className="btn" aria-label={t("settings.toast.dismiss")} onClick={() => setNotice(undefined)}>
+              <button type="button" className="btn toast-close" aria-label={t("settings.toast.dismiss")} onClick={() => setNotice(undefined)}>
                 ×
               </button>
             </div>

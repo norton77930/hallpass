@@ -199,6 +199,14 @@ external agent stays above both tabs.
   too; commands your own Codex rules allow still run without asking, and the panel says so. A card left
   unanswered keeps the agent waiting; it never expires into an approval. "Allow for this conversation"
   covers that kind of action in that conversation only.
+- **Model and reasoning effort.** The model chip after the mode chip lists the models the agent itself
+  offers (its default first) and, where it has them, its reasoning-effort levels. Pick before the first
+  message or between turns; a change adds one line to the conversation. Hallpass remembers each agent's
+  list and your last choice in its own data folder and asks the agent to switch when a conversation
+  starts or continues; it never writes the agent's own settings. If the agent refuses, the conversation
+  keeps its model and shows what the agent said; an agent that does not answer within 30 s is treated
+  the same way. Hermes may refuse a model of another provider than the
+  one it is set up with; that refusal is Hermes's own.
 - **The browser tools are the same tools.** When the agent uses the page, the call is listed in the
   conversation and the site's mode applies exactly as for an external agent; a site on **ask** raises
   its consent card first. The agent starts on the tab you were viewing when you sent the message, and

@@ -105,6 +105,9 @@ export const WINDOW_STATE_KEYS: Record<"maximized" | "fullscreen", string> = {
  */
 export const CONVERSATION_NOTICE_KEYS: Record<(typeof CONVERSATION_NOTICES)[number], string> = {
   "sandbox-permissions-declined": "conversation.notice.sandbox-permissions-declined",
+  // 025 R-402: the generic sentences; the log says them with the names when the broker's text carries them.
+  "model-refused": "conversation.notice.model-refused",
+  "model-unavailable": "conversation.notice.model-unavailable",
   // 023 R-368: the two notices that carry the agent (and a variable's name); the panel words both.
   "browser-tools-missing": "conversation.notice.browser-tools-missing",
   "key-env-not-in-browser": "conversation.notice.key-env-not-in-browser",

@@ -8,6 +8,7 @@ import {
   type ConversationError,
   type ConversationFolder,
   type ConversationMode,
+  type ConversationModelWant,
   type ConversationPanelState,
   type ConversationView,
 } from "@hallpass/contracts";
@@ -47,11 +48,27 @@ import { PassIcon } from "./icons.js";
 import { enabledAgents, startingAgent } from "./agent-choice.js";
 import { MessageList } from "./MessageList.js";
 import { ModeMenu } from "./ModeMenu.js";
+import { ModelMenu } from "./ModelMenu.js";
+import { modelChipText, type ModelOfferView } from "./model-words.js";
 import { PermissionCard } from "./PermissionCard.js";
 
 type T = (key: string) => string;
 
 const SCRATCH: ConversationFolder = { kind: "scratch" };
+
+/**
+ * 025 R-407: the model chip before a conversation starts - the offer the worker remembers for the
+ * agent (`undefined`: nothing remembered yet, the chip says Default), the model and effort shown
+ * (the owner's pick, else the remembered choice, else the agent's default) and what a choice does.
+ */
+type ModelChipState = {
+  offer: ModelOfferView | undefined;
+  model: string | undefined;
+  effort: string | undefined;
+  onChange: (change: { model: string } | { effort: string }) => void;
+};
+/** What the owner picked on the chip for one agent, before the start; the rest comes from the remembered choice. */
+type ModelPick = { model?: string; effort?: string };
 
 /**
  * 021 D-021-16: the agent keeps the mode its conversation started with (DeepSeek), so the chosen mode
@@ -254,6 +271,8 @@ export function ConversationTab(props: {
   /** The folder a new conversation would start in, as the owner last picked it (FR-303). */
   const [pickedFolder, setPickedFolder] = useState<ConversationFolder>(SCRATCH);
   const [newMode, setNewMode] = useState<ConversationMode>("strict");
+  /** 025 FR-401: the model and effort the owner picked on the chip, per agent; view state until Send. */
+  const [modelPicks, setModelPicks] = useState<Partial<Record<ConversationAgent, ModelPick>>>({});
   // 022 US5: the empty conversation's words live in the draft store with its attachments.
   const newDraft = drafts.get(NEW_DRAFT_KEY);
   const draft = newDraft.text;
@@ -272,13 +291,33 @@ export function ConversationTab(props: {
   const consented = conversation.consent === "granted";
   const freshError = props.lastError !== undefined && props.lastError !== handledError ? props.lastError : undefined;
 
+  /**
+   * 025 FR-401: what the model chip chose for this agent, whole (model and effort), when the owner
+   * chose anything; otherwise nothing goes with the start and the broker applies the remembered choice.
+   * An effort alone when no model is known (no default, nothing remembered): the agent keeps its own.
+   */
+  const pickedModel = (agent: ConversationAgent): ConversationModelWant | undefined => {
+    const pick = modelPicks[agent];
+    if (pick === undefined) return undefined;
+    const remembered = availabilityOf(agent)?.models;
+    const model = pick.model ?? remembered?.choice?.model ?? remembered?.offer.defaultModel;
+    const effort = pick.effort ?? remembered?.choice?.effort;
+    if (model === undefined && effort === undefined) return undefined;
+    return { ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
+  };
+
   const start = (agent: ConversationAgent, folder: ConversationFolder, mode: ConversationMode): void => {
     setHandledError(props.lastError);
     const known = new Set(conversation.conversations.map((entry) => entry.conversationId));
     setHeld((message) => (message === undefined ? undefined : { ...message, known }));
+    const model = pickedModel(agent);
     // 021 FR-361: the chip's mode goes with the start, for every agent - a switch sent beside the first
-    // message raced it (Hermes' restart refused `busy`, Claude's reload refusing the message).
-    send({ type: "ui.conversation.start", payload: { agent, folder, ...(mode === "strict" ? {} : { mode }) } });
+    // message raced it (Hermes' restart refused `busy`, Claude's reload refusing the message). 025:
+    // the model chip's choice goes the same way (FR-401).
+    send({
+      type: "ui.conversation.start",
+      payload: { agent, folder, ...(mode === "strict" ? {} : { mode }), ...(model === undefined ? {} : { model }) },
+    });
   };
 
   const startable = pendingStart !== undefined && availabilityOf(pendingStart.agent)?.availability === "ready" && consented;
@@ -314,6 +353,8 @@ export function ConversationTab(props: {
     // FR-361: the mode went with the start; nothing is switched beside the first message.
     // T701: the choice was that conversation's - the next new one starts strict (D-019 default).
     setNewMode("strict");
+    // 025: the model chip's pick was that conversation's too; the next one shows the remembered choice.
+    setModelPicks({});
     // 024: likewise the agent - the next new conversation starts on the owner's default again.
     setOwnerAgent(undefined);
     if (held.attachments !== undefined && held.attachments.length > 0 && attachSupport !== undefined) {
@@ -518,6 +559,7 @@ export function ConversationTab(props: {
         header={{ ...header, onNew: () => setComposing(true) }}
         logs={props.logs}
         agentName={agentName(view.agent)}
+        {...(availabilityOf(view.agent)?.models === undefined ? {} : { rememberedOffer: availabilityOf(view.agent)!.models!.offer })}
         t={t}
         send={send}
         {...(props.activeTabId === undefined ? {} : { activeTabId: props.activeTabId })}
@@ -549,6 +591,21 @@ export function ConversationTab(props: {
   const openSettings = (target: ConversationAgent | undefined): void =>
     send({ type: "ui.agent.open-settings", payload: { route: target === undefined ? "#agents" : `#agents/${target}` } });
 
+  // 025 FR-400, US4: the chip shows what the worker remembers for the agent on the chip - its offer and
+  // last choice - and none when the agent is known to report no models; with nothing remembered it
+  // says Default. A pick is kept per agent, so going back to an agent finds it as it was left.
+  const rememberedModels = availabilityOf(agent)?.models;
+  const modelPick = modelPicks[agent];
+  const modelChip: ModelChipState | undefined =
+    rememberedModels !== undefined && rememberedModels.offer.models.length === 0
+      ? undefined
+      : {
+          offer: rememberedModels?.offer,
+          model: modelPick?.model ?? rememberedModels?.choice?.model ?? rememberedModels?.offer.defaultModel,
+          effort: modelPick?.effort ?? rememberedModels?.choice?.effort ?? rememberedModels?.offer.defaultEffort,
+          onChange: (change) => setModelPicks((picks) => ({ ...picks, [agent]: { ...picks[agent], ...change } })),
+        };
+
   // T606 (A1): the new-conversation button is always there; here it only puts the focus in the box.
   const focusBox = (): void => frame.current?.querySelector<HTMLTextAreaElement>(".agent-conversation-composer textarea")?.focus();
   return withDrawer(
@@ -563,6 +620,7 @@ export function ConversationTab(props: {
       folder={folder}
       folders={conversation.folders}
       mode={newMode}
+      {...(modelChip === undefined ? {} : { modelChip })}
       draft={draft}
       composerDraft={newDraft}
       {...(attachSupport === undefined ? {} : { attach: { ...attachSupport, accepts: availabilityOf(agent)?.accepts } })}
@@ -634,6 +692,8 @@ function NewConversation(props: {
   folder: ConversationFolder;
   folders: ConversationPanelState["folders"];
   mode: ConversationMode;
+  /** 025: the model chip's state; absent when the agent is known to report no models. */
+  modelChip?: ModelChipState;
   draft: string;
   /** 022: the empty conversation's whole draft - the words and the attachments. */
   composerDraft: ComposerDraft;
@@ -660,11 +720,14 @@ function NewConversation(props: {
   onCancel: () => void;
 }): ReactElement {
   const { t, agent } = props;
-  const [opened, setOpened] = useState<"agent" | "folder" | "mode" | undefined>(undefined);
+  const [opened, setOpened] = useState<"agent" | "folder" | "mode" | "model" | undefined>(undefined);
   const section = useRef<HTMLElement>(null);
   const agentChip = useRef<HTMLButtonElement>(null);
   const modeChip = useRef<HTMLButtonElement>(null);
-  const ids = { agent: useId(), folder: useId(), mode: useId() };
+  const modelChipRef = useRef<HTMLButtonElement>(null);
+  const ids = { agent: useId(), folder: useId(), mode: useId(), model: useId() };
+  const modelState = props.modelChip;
+  const modelText = modelState === undefined ? "" : modelChipText(modelState.offer, modelState, t);
   const name = props.agentName(agent);
   const entry = props.agents.find((candidate) => candidate.agent === agent);
   // 024 FR-384: an agent that is not ready - not installed, still to be downloaded, a version that does
@@ -673,7 +736,7 @@ function NewConversation(props: {
   const holding = props.held || props.asking;
   // 022 FR-336: words or a ready attachment, and nothing still being prepared.
   const sendable = draftSendable(props.composerDraft) && reachable;
-  const toggle = (which: "agent" | "folder" | "mode") => setOpened((current) => (current === which ? undefined : which));
+  const toggle = (which: "agent" | "folder" | "mode" | "model") => setOpened((current) => (current === which ? undefined : which));
   const closeAgentMenu = (): void => {
     setOpened(undefined);
     agentChip.current?.focus();
@@ -795,6 +858,18 @@ function NewConversation(props: {
               disabled={holding}
               onToggle={() => toggle("mode")}
             />
+            {modelState === undefined ? null : (
+              <Chip
+                kind="model"
+                ref={modelChipRef}
+                label={t("conversation.chip.model").replace("{model}", () => modelText)}
+                text={modelText}
+                expanded={opened === "model"}
+                controls={ids.model}
+                disabled={holding}
+                onToggle={() => toggle("model")}
+              />
+            )}
           </>
         }
         popup={
@@ -838,6 +913,20 @@ function NewConversation(props: {
               onClose={() => {
                 setOpened(undefined);
                 modeChip.current?.focus();
+              }}
+              onDismiss={() => setOpened(undefined)}
+            />
+          ) : opened === "model" && !holding && modelState !== undefined ? (
+            <ModelMenu
+              id={ids.model}
+              t={t}
+              offer={modelState.offer}
+              model={modelState.model}
+              effort={modelState.effort}
+              onChange={modelState.onChange}
+              onClose={() => {
+                setOpened(undefined);
+                modelChipRef.current?.focus();
               }}
               onDismiss={() => setOpened(undefined)}
             />
@@ -959,6 +1048,8 @@ function OpenConversation(props: {
   view: ConversationView;
   logs: ConversationLogs;
   agentName: string;
+  /** 025 R-407: the agent's remembered offer, for the names of a stopped conversation's model. */
+  rememberedOffer?: ModelOfferView;
   t: T;
   send: SendCommand;
   activeTabId?: number;
@@ -986,6 +1077,10 @@ function OpenConversation(props: {
   const modeChip = useRef<HTMLButtonElement>(null);
   const modeMenuId = useId();
   const modeFixedId = useId();
+  const [modelOpen, setModelOpen] = useState(false);
+  const modelChip = useRef<HTMLButtonElement>(null);
+  const modelMenuId = useId();
+  const modelBusyId = useId();
   // 021 D-021-16: DeepSeek keeps the mode its conversation started with; the chip shows it, offers nothing.
   const modeFixed = modeFixedOnceStarted(view.agent);
   const picture = pictureOf(props.logs[conversationId] ?? []);
@@ -993,6 +1088,18 @@ function OpenConversation(props: {
   const state = picture.state ?? view.state;
   const busy = BUSY_STATES.has(state);
   const waiting = picture.permissions.length > 0;
+  // 025 FR-403, FR-398: the running agent's offer and what it reports now, while it runs; a conversation
+  // that is not running shows the model it was left on (the entry's), by the names the agent last offered.
+  const liveModels = view.models !== undefined && view.models.models.length > 0 ? view.models : undefined;
+  const modelBusy = busy || waiting;
+  const modelText =
+    liveModels !== undefined
+      ? modelChipText(liveModels, liveModels.current, t)
+      : view.model === undefined
+        ? undefined
+        : modelChipText(props.rememberedOffer, view.model, t);
+  // The command's refusal of a change is the log's notice (FR-405): it is not said a second time here.
+  const shownError = props.error?.code === "model-refused" ? undefined : props.error;
   // The live line names what waits: the card's title, or (blank title) its detail's first line.
   const first = picture.permissions[0];
   const waitingWords = first === undefined ? undefined : actionWords(first.title, t, first.detail);
@@ -1049,8 +1156,8 @@ function OpenConversation(props: {
       />
       {/* The broker's own words about the mode it set, if it had any (inert text). */}
       {picture.modeNote === undefined ? null : <p className="agent-conversation-detail">{picture.modeNote}</p>}
-      {props.error === undefined ? null : (
-        <ErrorNotice error={props.error} t={t} agent={view.agent} {...(props.errorAction === undefined ? {} : { action: props.errorAction })} />
+      {shownError === undefined ? null : (
+        <ErrorNotice error={shownError} t={t} agent={view.agent} {...(props.errorAction === undefined ? {} : { action: props.errorAction })} />
       )}
       {/* 021 FR-357: the agent continues this conversation without replaying it. */}
       {view.replay === "none" && !ended ? (
@@ -1158,12 +1265,47 @@ function OpenConversation(props: {
               warn={mode !== "strict"}
               disabled={ended}
               {...(modeFixed ? { unavailable: { describedBy: modeFixedId } } : {})}
-              onToggle={() => setModeOpen((open) => !open)}
+              onToggle={() => {
+                setModelOpen(false);
+                setModeOpen((open) => !open);
+              }}
             />
+            {/* 025 FR-398, FR-403: the model chip - open between turns, shown but not open while one runs. */}
+            {modelText === undefined ? null : (
+              <Chip
+                kind="model"
+                ref={modelChip}
+                label={t("conversation.chip.model").replace("{model}", () => modelText)}
+                text={modelText}
+                expanded={modelOpen && liveModels !== undefined && !modelBusy}
+                controls={modelMenuId}
+                // Not running: what the conversation was left on, not offered until it runs again.
+                disabled={liveModels === undefined || ended}
+                {...(liveModels !== undefined && modelBusy ? { unavailable: { describedBy: modelBusyId } } : {})}
+                onToggle={() => {
+                  setModeOpen(false);
+                  setModelOpen((open) => !open);
+                }}
+              />
+            )}
           </>
         }
         popup={
-          modeOpen && !modeFixed ? (
+          modelOpen && liveModels !== undefined && !modelBusy && !modeOpen ? (
+            <ModelMenu
+              id={modelMenuId}
+              t={t}
+              offer={liveModels}
+              model={liveModels.current.model}
+              effort={liveModels.current.effort}
+              onChange={(change) => send({ type: "ui.conversation.set-model", payload: { conversationId, ...change } })}
+              onClose={() => {
+                setModelOpen(false);
+                modelChip.current?.focus();
+              }}
+              onDismiss={() => setModelOpen(false)}
+            />
+          ) : modeOpen && !modeFixed ? (
             <ModeMenu
               id={modeMenuId}
               agent={view.agent}
@@ -1180,14 +1322,22 @@ function OpenConversation(props: {
           ) : null
         }
         below={
-          modeFixed ? (
-            <p id={modeFixedId} className="agent-conversation-note">
-              {t("conversation.mode.fixedNote").replace("{agent}", () => props.agentName)}
-            </p>
-          ) : !modeOpen && view.agent === "codex" && mode === "strict" ? (
-            // FR-293: a disclosure stays on screen; with the menu open it sits under the strict choice.
-            <p className="agent-conversation-note">{t("conversation.mode.codexStrictNote")}</p>
-          ) : null
+          <>
+            {modeFixed ? (
+              <p id={modeFixedId} className="agent-conversation-note">
+                {t("conversation.mode.fixedNote").replace("{agent}", () => props.agentName)}
+              </p>
+            ) : !modeOpen && view.agent === "codex" && mode === "strict" ? (
+              // FR-293: a disclosure stays on screen; with the menu open it sits under the strict choice.
+              <p className="agent-conversation-note">{t("conversation.mode.codexStrictNote")}</p>
+            ) : null}
+            {/* 025 FR-403: why the model chip is not open, and when it will be (its accessible description). */}
+            {liveModels !== undefined && modelBusy ? (
+              <p id={modelBusyId} className="agent-conversation-note agent-conversation-model-note">
+                {t("conversation.model.busy")}
+              </p>
+            ) : null}
+          </>
         }
       />
     </section>

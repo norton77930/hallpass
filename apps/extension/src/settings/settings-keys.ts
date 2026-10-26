@@ -91,6 +91,7 @@ export const SETTINGS_KEYS: readonly string[] = [
   "settings.attach.files",
   "settings.attach.accepted",
   "settings.attach.refused",
+  "settings.attach.unknown",
   // Browser tools status, shared by the card and the Browser tools table (FR-386).
   "settings.toolStatus.available",
   "settings.toolStatus.needsComponent",

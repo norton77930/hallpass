@@ -70,6 +70,97 @@ export type ConversationFolderEntry = z.infer<typeof conversationFolderEntrySche
 /** The index stores at most 50 entries (data-model); the overview carries the same set. */
 export const CONVERSATION_MAX_ENTRIES = 50;
 
+/* ------------------------------------------------------------------------------------------- */
+/* 025 model picker (data-model.md, contracts/frames.md, R-398 - R-402)                          */
+/* ------------------------------------------------------------------------------------------- */
+
+/** R-400: how many models and efforts one offer carries; keeps the overview far under the 1 MB link cap. */
+export const CONVERSATION_MODEL_MAX_ENTRIES = 64;
+export const CONVERSATION_EFFORT_MAX_ENTRIES = 16;
+
+/** R-398: one choice the agent offers. `value` is the agent's own and opaque; the rest is for the owner's eyes. */
+export const conversationModelEntrySchema = z.strictObject({
+  value: z.string().min(1).max(512),
+  name: z.string().min(1).max(120),
+  /** The agent's description, or the group's name when the agent grouped its options (DeepSeek). */
+  description: z.string().min(1).max(300).optional(),
+});
+export type ConversationModelEntry = z.infer<typeof conversationModelEntrySchema>;
+
+/**
+ * R-399 / R-400: the model offer shape, shared by the offer and the live state. `source` says which
+ * of the agent's two reports it came from: `config` (session options, set with
+ * `session/set_config_option` under `configIds`) or `models` (the older list, `session/set_model`, no
+ * effort). An empty `models` means the agent reports none, so there is no chip.
+ */
+const modelOfferShape = {
+  source: z.enum(["config", "models"]),
+  configIds: z
+    .strictObject({ model: z.string().min(1).max(200), effort: z.string().min(1).max(200).optional() })
+    .optional(),
+  models: z.array(conversationModelEntrySchema).max(CONVERSATION_MODEL_MAX_ENTRIES),
+  efforts: z.array(conversationModelEntrySchema).max(CONVERSATION_EFFORT_MAX_ENTRIES),
+  /** An entry's `value` (`default` when the agent lists it). */
+  defaultModel: z.string().min(1).max(512).optional(),
+  defaultEffort: z.string().min(1).max(512).optional(),
+};
+type ModelOfferParts = {
+  source: "config" | "models";
+  configIds?: unknown | undefined;
+  models: { value: string }[];
+  efforts: { value: string }[];
+  defaultModel?: string | undefined;
+  defaultEffort?: string | undefined;
+};
+const checkModelOffer = (offer: ModelOfferParts, ctx: z.RefinementCtx): void => {
+  if ((offer.source === "config") !== (offer.configIds !== undefined)) {
+    ctx.addIssue({ code: "custom", message: "configIds go with the session options, and only with them", path: ["configIds"] });
+  }
+  if (offer.source === "models" && offer.efforts.length > 0) {
+    ctx.addIssue({ code: "custom", message: "the older list has no efforts", path: ["efforts"] });
+  }
+  if (offer.defaultModel !== undefined && !offer.models.some((entry) => entry.value === offer.defaultModel)) {
+    ctx.addIssue({ code: "custom", message: "the default model is a listed value", path: ["defaultModel"] });
+  }
+  if (offer.defaultEffort !== undefined && !offer.efforts.some((entry) => entry.value === offer.defaultEffort)) {
+    ctx.addIssue({ code: "custom", message: "the default effort is a listed value", path: ["defaultEffort"] });
+  }
+};
+
+export const conversationModelOfferSchema = z.strictObject(modelOfferShape).superRefine(checkModelOffer);
+export type ConversationModelOffer = z.infer<typeof conversationModelOfferSchema>;
+
+/** The owner's choice as values, never names: the start command, the store, the index entry and a stopped view. */
+export const conversationModelChoiceSchema = z.strictObject({
+  model: z.string().min(1).max(512),
+  effort: z.string().min(1).max(512).optional(),
+});
+export type ConversationModelChoice = z.infer<typeof conversationModelChoiceSchema>;
+
+/**
+ * 025 R-402: what the start asks for - a model, an effort, or both (an effort alone when the chip
+ * named no model and the agent has no default). The store and the index keep a `ConversationModelChoice`.
+ */
+export const conversationModelWantSchema = z
+  .strictObject({
+    model: z.string().min(1).max(512).optional(),
+    effort: z.string().min(1).max(512).optional(),
+  })
+  .refine((want) => want.model !== undefined || want.effort !== undefined, {
+    message: "the start's model names a model, an effort, or both",
+    path: ["model"],
+  });
+export type ConversationModelWant = z.infer<typeof conversationModelWantSchema>;
+
+/** R-406: the offer plus what the running agent last reported as current. */
+export const conversationModelStateSchema = z
+  .strictObject({
+    ...modelOfferShape,
+    current: z.strictObject({ model: z.string().min(1).max(512), effort: z.string().min(1).max(512).optional() }),
+  })
+  .superRefine(checkModelOffer);
+export type ConversationModelState = z.infer<typeof conversationModelStateSchema>;
+
 /** One entry of the host's conversation index (data-model "Conversation index"). */
 export const conversationEntrySchema = z.strictObject({
   conversationId: conversationIdSchema,
@@ -81,6 +172,8 @@ export const conversationEntrySchema = z.strictObject({
   createdAt: isoTimeSchema,
   lastUsedAt: isoTimeSchema,
   resumable: z.boolean(),
+  /** 025 R-404: what the agent reported after the start, each accepted change and each re-apply. */
+  model: conversationModelChoiceSchema.optional(),
   /** Set while an agent runs it; another browser's `open` is refused while `pid` is alive (R-319). */
   lease: z
     .strictObject({
@@ -133,6 +226,10 @@ export const conversationViewSchema = z.strictObject({
   accepts: conversationAcceptsSchema.optional(),
   /** 021 R-352: the agent continues this conversation without replaying it (DeepSeek's `session/resume`). */
   replay: z.literal("none").optional(),
+  /** 025 R-406: the running agent's offer and current values, once it has reported. */
+  models: conversationModelStateSchema.optional(),
+  /** 025 R-404: from the index entry, when the agent is not running. */
+  model: conversationModelChoiceSchema.optional(),
 });
 export type ConversationView = z.infer<typeof conversationViewSchema>;
 
@@ -268,6 +365,8 @@ export const conversationAgentAvailabilitySchema = z.strictObject({
   lastTest: agentTestResultSchema.optional(),
   /** 024 R-379: a test of this agent is running now. */
   testing: z.boolean().optional(),
+  /** 025 R-401: the remembered offer and last choice from the host's store; absent = never seen. */
+  models: z.strictObject({ offer: conversationModelOfferSchema, choice: conversationModelChoiceSchema.optional() }).optional(),
 }).refine((entry) => entry.setupSteps === undefined || entry.agent === "hermes", {
   message: "only Hermes has setup steps",
   path: ["setupSteps"],
@@ -317,6 +416,9 @@ export const CONVERSATION_ERROR_CODES = [
   // 021 D-021-16 (R-359): the agent keeps the mode its conversation started with; another mode is a
   // new conversation.
   "mode-fixed",
+  // 025 R-402: `set-model` with a value the conversation's live offer does not list / one the agent refused.
+  "model-unknown",
+  "model-refused",
 ] as const;
 export const conversationErrorSchema = z.strictObject({
   code: z.enum(CONVERSATION_ERROR_CODES),
@@ -330,7 +432,14 @@ export type ConversationError = z.infer<typeof conversationErrorSchema>;
  * broker's redacted detail). R-317 / SC-135: `sandbox-permissions-declined` - in strict mode the broker
  * declined Codex's request for wider sandbox permissions, which would have held for the rest of the turn.
  */
-export const CONVERSATION_NOTICES = ["sandbox-permissions-declined", "browser-tools-missing", "key-env-not-in-browser"] as const;
+export const CONVERSATION_NOTICES = [
+  "sandbox-permissions-declined",
+  "browser-tools-missing",
+  "key-env-not-in-browser",
+  // 025 R-402: the agent refused a model change / no longer offers the remembered model.
+  "model-refused",
+  "model-unavailable",
+] as const;
 
 /** 023 R-367 / FR-371: what the broker keeps of an agent run's own output, and so what it can reply with. */
 export const CONVERSATION_DIAGNOSTIC_LINES_MAX = 50;
@@ -490,6 +599,17 @@ export const conversationEventSchema = z.discriminatedUnion("type", [
     mode: conversationModeSchema,
     note: z.string().max(400).optional(),
   }),
+  /**
+   * 025 R-402 / FR-404: one accepted owner change of model or effort, by the agent's own names so the
+   * line and a replay need no lookup. `effortChanged` marks a model change that moved the effort
+   * (D-025-12). Never written at a start or a re-apply (FR-401).
+   */
+  z.strictObject({
+    type: z.literal("model"),
+    model: z.string().min(1).max(120),
+    effort: z.string().min(1).max(120).optional(),
+    effortChanged: z.literal(true).optional(),
+  }),
   z.strictObject({
     type: z.literal("state"),
     state: conversationStateSchema,
@@ -567,7 +687,13 @@ const conversationTarget = z.strictObject({ conversationId: conversationIdSchema
  */
 const START = {
   type: z.literal("ui.conversation.start"),
-  payload: z.strictObject({ agent: conversationAgentSchema, folder: conversationFolderSchema, mode: conversationModeSchema.optional() }),
+  payload: z.strictObject({
+    agent: conversationAgentSchema,
+    folder: conversationFolderSchema,
+    mode: conversationModeSchema.optional(),
+    /** 025 R-402: the chip's choice (values from the offer, an effort alone allowed), applied before the first prompt; absent = the store's, else the agent's own. */
+    model: conversationModelWantSchema.optional(),
+  }),
 };
 const SEND = {
   type: z.literal("ui.conversation.send"),
@@ -646,6 +772,23 @@ const SET_MODE = {
   type: z.literal("ui.conversation.set-mode"),
   payload: z.strictObject({ conversationId: conversationIdSchema, mode: conversationModeSchema }),
 };
+/**
+ * 025 R-402: change the running conversation's model, its effort, or both (values from its live
+ * offer). Refused `busy`, `model-unknown` or `model-refused` by the broker.
+ */
+const SET_MODEL = {
+  type: z.literal("ui.conversation.set-model"),
+  payload: z
+    .strictObject({
+      conversationId: conversationIdSchema,
+      model: z.string().min(1).max(512).optional(),
+      effort: z.string().min(1).max(512).optional(),
+    })
+    .refine((payload) => payload.model !== undefined || payload.effort !== undefined, {
+      message: "set-model names a model, an effort, or both",
+      path: ["model"],
+    }),
+};
 const OPEN = { type: z.literal("ui.conversation.open"), payload: conversationTarget };
 const REMOVE = { type: z.literal("ui.conversation.remove"), payload: conversationTarget };
 /** No path opens the folder dialog; a path is the owner's typed answer after `path-entry` (T563). */
@@ -699,6 +842,7 @@ export const conversationCommandSchema = z.discriminatedUnion("type", [
   z.strictObject(STOP),
   z.strictObject(ANSWER),
   z.strictObject(SET_MODE),
+  z.strictObject(SET_MODEL),
   z.strictObject(OPEN),
   z.strictObject(REMOVE),
   z.strictObject(ADD_FOLDER),
@@ -740,6 +884,7 @@ export const conversationPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ ...STOP, ...COMMAND_ID }),
   z.strictObject({ ...ANSWER, ...COMMAND_ID }),
   z.strictObject({ ...SET_MODE, ...COMMAND_ID }),
+  z.strictObject({ ...SET_MODEL, ...COMMAND_ID }),
   z.strictObject({ ...OPEN, ...COMMAND_ID }),
   z.strictObject({ ...REMOVE, ...COMMAND_ID }),
   z.strictObject({ ...ADD_FOLDER, ...COMMAND_ID }),

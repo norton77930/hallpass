@@ -55,8 +55,8 @@ describe("T764 download from the card (FR-379)", () => {
     });
     const { container, commands } = renderSettings({ state });
     const deepseek = card(container, "deepseek");
-    expect(within(deepseek).getByText(ui("settings.note.notInstalled", { estimate: "5–6" }))).toBeTruthy();
-    fireEvent.click(within(deepseek).getByRole("button", { name: ui("settings.action.downloadAgent") }));
+    expect(within(deepseek).getByText(ui("settings.note.notInstalled", { size: "730 MB", estimate: "5–6" }))).toBeTruthy();
+    fireEvent.click(within(deepseek).getByRole("button", { name: ui("settings.action.downloadAgent", { size: "730 MB" }) }));
     expect(commands()[0]).toMatchObject({ type: "ui.conversation.install", payload: { agent: "deepseek" } });
   });
 

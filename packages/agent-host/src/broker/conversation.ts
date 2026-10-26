@@ -22,6 +22,10 @@ import {
   type ConversationEventPayload,
   type ConversationFolder,
   type ConversationMode,
+  type ConversationModelChoice,
+  type ConversationModelOffer,
+  type ConversationModelState,
+  type ConversationModelWant,
   type ConversationState,
   type ConversationView,
 } from "@hallpass/contracts";
@@ -38,6 +42,8 @@ import { ATTACHMENT_IDLE_MS, AttachmentStore, type AttachPiece, type ReadyAttach
 import { PANEL_SERVER_NAME, type ConversationBrowserAccess, type PanelServerName } from "./browser-token.js";
 import type { ConversationIndex, FolderList } from "./conversation-index.js";
 import { ConversationEventLog, type ConversationPage } from "./event-log.js";
+import { currentOf, readModelOffer, requestsFor, resolveTarget } from "./model-offer.js";
+import { memoryModelStore, type AgentModels, type ModelStore } from "./model-store.js";
 import { ensureScratchFolder, isDirectory, scratchFolderPath } from "./folders.js";
 import { redact, withoutEnvironmentValues, withoutUserProfile } from "./redact.js";
 import { killTree } from "./run-command.js";
@@ -234,6 +240,63 @@ function clip(text: string, max: number): string {
 }
 
 const shown = (text: string, max: number) => clip(redact(text), max);
+
+/* 025 model picker helpers (R-398 - R-406) */
+type ModelCurrent = ConversationModelState["current"];
+/** R-398: "reports none" - no chip. */
+const NO_MODELS: ConversationModelOffer = { source: "models", models: [], efforts: [] };
+/** The `model` event's names and the notices' names (contracts: 120). */
+const NAME_MAX = 120;
+/** The agent's own words inside a `model-refused` notice. */
+const REFUSAL_TEXT_MAX = 1024;
+/** FR-403: `set-model`s that may wait behind the one in flight; one more is refused `busy`. */
+const MODEL_SWITCH_QUEUE_MAX = 4;
+/**
+ * 0.17.0 (owner 2026-10-26): how long a model or effort set request may go unanswered before the
+ * change is `model-refused` (a real Hermes took 114 s). The gate shortens it in test mode.
+ */
+export const MODEL_SET_BOUND_MS = 30_000;
+
+/** R-406: live state only when the agent lists a model and names its current one. */
+function modelStateOf(offer: ConversationModelOffer, current: ModelCurrent | undefined): ConversationModelState | undefined {
+  if (offer.models.length === 0 || current === undefined) return undefined;
+  return { ...offer, current: { ...current } };
+}
+
+/** The parser's shapes (no explicit `undefined` under exactOptionalPropertyTypes). */
+const currentParts = (current: ModelCurrent): { model: string; effort?: string } => ({
+  model: current.model,
+  ...(current.effort === undefined ? {} : { effort: current.effort }),
+});
+const wantedParts = (wanted: { model?: string | undefined; effort?: string | undefined }): { model?: string; effort?: string } => ({
+  ...(wanted.model === undefined ? {} : { model: wanted.model }),
+  ...(wanted.effort === undefined ? {} : { effort: wanted.effort }),
+});
+
+/**
+ * 0.17.0: what a session opening leaves in the index entry - what the agent reports, except when its
+ * set went unanswered within the bound: the agent did not say no, so the choice it was asked for
+ * (the entry's, or a start's target) stays, and the next opening asks again.
+ */
+function openedModel(conversation: Conversation, remembered: ConversationModelWant | undefined): ConversationModelChoice | undefined {
+  const reported = conversation.modelChoice;
+  if (conversation.modelOpening.outcome !== "timed-out" || remembered === undefined) return reported;
+  const model = remembered.model ?? reported?.model;
+  if (model === undefined) return reported;
+  // The part it did not ask for is what the agent reported (data-model: the entry's `model`).
+  const effort = remembered.effort ?? reported?.effort;
+  return { model, ...(effort === undefined ? {} : { effort }) };
+}
+
+function offerOf(state: ConversationModelState): ConversationModelOffer {
+  const { current: _current, ...offer } = state;
+  return offer;
+}
+
+const modelName = (state: ConversationModelState, value: string): string =>
+  state.models.find((entry) => entry.value === value)?.name ?? clip(value, NAME_MAX);
+const effortName = (state: ConversationModelState, value: string): string =>
+  state.efforts.find((entry) => entry.value === value)?.name ?? clip(value, NAME_MAX);
 
 type ToolKind = (typeof CONVERSATION_TOOL_KINDS)[number];
 
@@ -448,7 +511,19 @@ export type ConversationDeps = {
   log?: (code: string, detail?: string) => void;
   /** 023 R-369: what the key-name check reads; the machine's own by default. */
   userEnvironment?: UserEnvironmentPorts;
+  /** 025 R-406: the agent itself reported other models or values (`config_option_update`); the overview follows. */
+  onModelChange?: (conversation: Conversation) => void;
+  /** 025: the bound on each model or effort set request (MODEL_SET_BOUND_MS). */
+  modelSetBoundMs?: number;
 };
+
+/**
+ * 025 R-403 / R-405: how the last session opening's model target went - nothing to send (none
+ * wanted, or the agent already reports it), sent and accepted, refused by the agent, not answered
+ * within MODEL_SET_BOUND_MS (0.17.0: the agent did not say no - the entry keeps the choice and the
+ * next opening asks again), or no longer offered.
+ */
+export type ModelOpeningOutcome = "kept" | "applied" | "refused" | "timed-out" | "unavailable";
 
 export type StartRequest = {
   cwd: string;
@@ -468,6 +543,12 @@ export type StartRequest = {
    * whether no withdrawal came since the caller's consent check began; `false` starts nothing.
    */
   mayHandOut?: () => boolean;
+  /**
+   * 025 R-403: the model (and effort) this opening ends on - the start's choice, the store's, or the
+   * index entry's - applied after the mode is confirmed and before the start returns. Absent: the
+   * agent's own. The start's may name an effort alone.
+   */
+  model?: ConversationModelWant;
 };
 
 export type StartOutcome =
@@ -499,6 +580,13 @@ const settle = () => new Promise<void>((done) => setImmediate(done));
 class AgentExited extends Error {
   constructor(readonly code: number | null) {
     super(`the agent exited${code === null ? "" : ` (exit ${code})`}`);
+  }
+}
+
+/** A model or effort set request the agent did not answer within the bound. */
+class ModelSetTimedOut extends Error {
+  constructor(readonly boundMs: number) {
+    super(`no answer within ${boundMs} ms`);
   }
 }
 
@@ -593,6 +681,22 @@ export class Conversation {
   private outputLines: string[] = [];
   /** 024 R-387: when this conversation's latest run started, among every run of this broker; 0 before one. */
   private runSerialValue = 0;
+  /** 025 R-406: the running agent's offer and what it reports as current; none until it reports a model. */
+  private modelStateValue: ConversationModelState | undefined;
+  /** 025 R-401: the offer the last session opening reported (empty when the agent reports none). */
+  private openedOfferValue: ConversationModelOffer | undefined;
+  private openedOutcomeValue: ModelOpeningOutcome = "kept";
+  /** 025 FR-403: a `set-model` in flight or queued behind one; nothing else is sent meanwhile. */
+  private switching = false;
+  /** 025 FR-403: the `set-model`s waiting behind the one in flight, oldest first; `false` when the run ended. */
+  private switchQueue: Array<(go: boolean) => void> = [];
+  /**
+   * 0.17.0: per part, the serial of the newest set request sent, and of the newest whose word was
+   * followed (an answer in time or late; the agent's own report or a session opening counts as the
+   * newest sent). A late answer is followed only when it is newer than what was followed.
+   */
+  private readonly modelSetSent = { model: 0, effort: 0 };
+  private readonly modelSetFollowed = { model: 0, effort: 0 };
 
   constructor(
     readonly conversationId: string,
@@ -641,7 +745,23 @@ export class Conversation {
 
   /** Idle for the cap: no turn and no card (data-model: only `idle` counts). */
   get evictable(): boolean {
-    return this.stateValue === "idle" && this.turn === undefined && this.cards.size === 0 && !this.reloading;
+    return this.stateValue === "idle" && this.turn === undefined && this.cards.size === 0 && !this.reloading && !this.switching;
+  }
+
+  /** 025 R-406: the running agent's models and current values, once it reported them. */
+  get models(): ConversationModelState | undefined {
+    return this.live ? this.modelStateValue : undefined;
+  }
+
+  /** 025 R-404: what the agent reports as current, as values (the index entry's `model`). */
+  get modelChoice(): ConversationModelChoice | undefined {
+    const current = this.modelStateValue?.current;
+    return current === undefined ? undefined : { ...current };
+  }
+
+  /** 025 R-401 / R-405: what the last session opening reported and how its target went (the pool writes the store). */
+  get modelOpening(): { offer?: ConversationModelOffer; outcome: ModelOpeningOutcome } {
+    return { ...(this.openedOfferValue === undefined ? {} : { offer: this.openedOfferValue }), outcome: this.openedOutcomeValue };
   }
 
   /* ----------------------------------------------------------------------------------------- */
@@ -678,6 +798,12 @@ export class Conversation {
     this.turnWentThrough = false;
     this.keyNameChecked = false;
     this.keyNameCheck = undefined;
+    // 025: a new run reports its models afresh (R-406).
+    this.modelStateValue = undefined;
+    this.openedOfferValue = undefined;
+    this.openedOutcomeValue = "kept";
+    this.dropQueuedSwitches();
+    this.switching = false;
     this.setState("starting");
     // R-322: decided once per run (the owner's Codex config may have changed since the last one),
     // read while the agent initialises.
@@ -720,7 +846,10 @@ export class Conversation {
       );
     this.connection = connection;
 
-    let step: "initialize" | "session/new" | "session/load" | "session/resume" | "session/set_mode" = "initialize";
+    let step: "initialize" | "session/new" | "session/load" | "session/resume" | "session/set_mode" | "model" = "initialize";
+    /** 025 R-398: the session answer, read for its models once the mode is confirmed. */
+    let opened: unknown;
+    let modelNotices: ConversationEvent[] = [];
     try {
       const init = await this.request(() =>
         connection.agent.request("initialize", {
@@ -746,6 +875,7 @@ export class Conversation {
         await settle();
         if (!this.contentShown) this.replayNoneValue = true;
         modes = resumed.modes;
+        opened = resumed;
       } else if (request.resume !== undefined) {
         step = "session/load";
         if (init.agentCapabilities?.loadSession !== true) throw new Error("the agent cannot load a conversation");
@@ -765,6 +895,7 @@ export class Conversation {
         this.flushText();
         this.replay = "off";
         modes = loaded.modes;
+        opened = loaded;
       } else {
         step = "session/new";
         const created = await this.request(() =>
@@ -772,6 +903,7 @@ export class Conversation {
         );
         this.sessionId = created.sessionId;
         modes = created.modes;
+        opened = created;
         this.renamePending = RENAME_FIRST[this.agent];
       }
 
@@ -791,6 +923,9 @@ export class Conversation {
         }
       }
       this.watchingMode = true;
+      // 025 R-403 (SC-179): the model target, after the mode and before the start returns - so before any prompt.
+      step = "model";
+      modelNotices = await this.openModels(connection, this.sessionId!, opened, request.model);
     } catch (error) {
       this.replay = "off";
       await this.kill();
@@ -838,11 +973,312 @@ export class Conversation {
       return this.startCancelled();
     }
     this.enqueue({ type: "mode", mode, ...(request.restart === undefined ? {} : { note: RESTART_NOTE[mode] }) });
+    for (const notice of modelNotices) this.enqueue(notice);
     this.touch();
     this.setState("idle");
     this.armIdle();
     this.checkBrowserTools();
     return { ok: true, agentSessionId: this.sessionId! };
+  }
+
+  /* ----------------------------------------------------------------------------------------- */
+  /* 025 The model and its effort                                                               */
+  /* ----------------------------------------------------------------------------------------- */
+
+  /**
+   * R-398 / R-403 / R-405: a session was opened (new, load, resume) and its mode confirmed. Reads the
+   * offer and current from the agent's answer, then ends on `wanted` sending only the parts that
+   * differ. Not a change: no `model` line (FR-401). A value no longer offered sends nothing and says
+   * `model-unavailable`; a refusal says `model-refused` and the opening goes on with the agent's own.
+   * Returns the notices to show after the mode line. An agent that ends meanwhile throws (`AgentExited`).
+   */
+  private async openModels(
+    connection: acp.ClientConnection,
+    sessionId: string,
+    answer: unknown,
+    wanted: ConversationModelWant | undefined,
+  ): Promise<ConversationEvent[]> {
+    const offer = readModelOffer(answer) ?? NO_MODELS;
+    this.openedOfferValue = offer;
+    this.openedOutcomeValue = "kept";
+    this.modelStateValue = modelStateOf(offer, currentOf(answer));
+    // The opening's answer is the agent's word: a late answer from before it is older (a mode reload).
+    this.followedAllSent();
+    const state = this.modelStateValue;
+    if (state === undefined) return [];
+    const target = resolveTarget(offer, currentParts(state.current), wanted === undefined ? undefined : wantedParts(wanted));
+    if (target.kind === "none") return [];
+    if (target.kind === "unavailable") {
+      this.openedOutcomeValue = "unavailable";
+      return [this.modelNotice("model-unavailable", `${this.label} no longer offers ${clip(target.model, NAME_MAX)}; the conversation uses ${modelName(state, state.current.model)} instead.`)];
+    }
+    const refused = await this.applyModel(connection, sessionId, wantedParts(wanted!), () => undefined);
+    this.openedOutcomeValue = refused === undefined ? "applied" : refused.timedOut ? "timed-out" : "refused";
+    return refused === undefined ? [] : [refused.notice];
+  }
+
+  /**
+   * R-399 / R-403: the model first, then the effort as the agent's answer to the model left it (a
+   * model change may move or narrow the efforts, D-025-12) - each one request, never retried, no slash
+   * command (FR-402). `accepted` hears each part the agent took, with what was current before it.
+   * Returns the first part refused - its `model-refused` notice and the agent's scrubbed text (nothing after it is sent).
+   */
+  private async applyModel(
+    connection: acp.ClientConnection,
+    sessionId: string,
+    wanted: { model?: string; effort?: string },
+    accepted: (part: "model" | "effort", before: ModelCurrent) => void,
+  ): Promise<{ notice: ConversationEvent; text: string; timedOut?: true } | undefined> {
+    for (const part of ["model", "effort"] as const) {
+      const value = wanted[part];
+      const state = this.modelStateValue;
+      if (value === undefined || state === undefined) continue;
+      const target = resolveTarget(offerOf(state), currentParts(state.current), { [part]: value });
+      if (target.kind !== "send" || target[part] === undefined) continue;
+      const request = requestsFor(offerOf(state), sessionId, { [part]: value })[0];
+      if (request === undefined) continue;
+      const before = { ...state.current };
+      const serial = ++this.modelSetSent[part];
+      try {
+        const answer = await this.request(() =>
+          this.boundedSet(
+            () =>
+              request.method === "session/set_config_option"
+                ? connection.agent.request("session/set_config_option", request.params)
+                : connection.agent.request("session/set_model", request.params),
+            (late) => this.followLateAnswer(connection, part, value, serial, late),
+          ),
+        );
+        await settle();
+        this.followModelAnswer(answer, part, value);
+        this.modelSetFollowed[part] = Math.max(this.modelSetFollowed[part], serial);
+      } catch (error) {
+        if (error instanceof AgentExited || !this.live) throw error;
+        // Its output closed before the exit was reported: the agent went away, it did not refuse.
+        if (connection.signal.aborted) throw new AgentExited(null);
+        if (error instanceof ModelSetTimedOut) {
+          this.deps.log?.("conversation.model-set-timed-out", `${this.conversationId} ${request.method}`);
+          // What is current now: the agent may have reported a change while this one waited.
+          const text = this.modelTimedOutText(part, value, this.modelStateValue?.current ?? before, error.boundMs);
+          return { notice: this.modelNotice("model-refused", text), text, timedOut: true };
+        }
+        const text = this.scrubbed(errorMessage(error));
+        return { notice: this.modelRefused(part, value, before, text), text };
+      }
+      accepted(part, before);
+    }
+    return undefined;
+  }
+
+  /**
+   * 0.17.0: one set request, bounded at MODEL_SET_BOUND_MS - past it, `ModelSetTimedOut`. The late
+   * answer resolves nothing: a success goes to `onLate`, a late refusal says nothing.
+   */
+  private boundedSet(send: () => Promise<unknown>, onLate: (answer: unknown) => void): Promise<unknown> {
+    const boundMs = this.deps.modelSetBoundMs ?? MODEL_SET_BOUND_MS;
+    return new Promise((resolve, reject) => {
+      let late = false;
+      const timer = this.deps.clock.setTimer(() => {
+        late = true;
+        reject(new ModelSetTimedOut(boundMs));
+      }, boundMs);
+      send().then(
+        (answer) => {
+          if (late) {
+            onLate(answer);
+            return;
+          }
+          timer.cancel();
+          resolve(answer);
+        },
+        (error: unknown) => {
+          if (late) return;
+          timer.cancel();
+          reject(error);
+        },
+      );
+    });
+  }
+
+  /**
+   * 0.17.0: a timed-out set the agent answered after all - it did switch. Followed as the agent's own
+   * report is (R-406): the answer's session options when it carries them, else the asked value (a
+   * `session/set_model` answers `{}`); no line, no second result, the entry follows (`onModelChange`).
+   * Not for another run, nor when the word followed for that part is newer (`serial` not above
+   * `modelSetFollowed`): a later request's answer, the agent's own report or a session opening.
+   */
+  private followLateAnswer(connection: acp.ClientConnection, part: "model" | "effort", value: string, serial: number, answer: unknown): void {
+    if (this.connection !== connection || !this.live || this.modelStateValue === undefined) return;
+    if (serial <= this.modelSetFollowed[part]) return;
+    this.modelSetFollowed[part] = serial;
+    this.followModelAnswer(answer, part, value);
+    this.deps.onModelChange?.(this);
+  }
+
+  /**
+   * R-406 (FR-409): what the agent reports by itself in a `config_option_update` replaces the live
+   * offer and current, with no line. Followed once the opening has read the session's models; the
+   * older list is never in it.
+   */
+  private followReportedModels(answer: unknown): void {
+    if (this.modelStateValue?.source !== "config") return;
+    const reported = modelStateOf(readModelOffer(answer) ?? NO_MODELS, currentOf(answer));
+    if (reported === undefined || reported.source !== "config") return;
+    this.modelStateValue = reported;
+    this.followedAllSent();
+    this.deps.onModelChange?.(this);
+  }
+
+  /** 0.17.0: the agent's own word on both parts - every set request sent so far is older than it. */
+  private followedAllSent(): void {
+    this.modelSetFollowed.model = this.modelSetSent.model;
+    this.modelSetFollowed.effort = this.modelSetSent.effort;
+  }
+
+  /**
+   * R-406: an accepted request's answer replaces the offer and current when it carries the session
+   * options (`session/set_config_option`); one that says nothing (`session/set_model` answers `{}`)
+   * leaves the offer and makes the asked value current.
+   */
+  private followModelAnswer(answer: unknown, part: "model" | "effort", value: string): void {
+    const state = this.modelStateValue;
+    if (state === undefined) return;
+    const reported = state.source === "config" ? modelStateOf(readModelOffer(answer) ?? NO_MODELS, currentOf(answer)) : undefined;
+    if (reported !== undefined && reported.source === "config") {
+      this.modelStateValue = reported;
+      return;
+    }
+    this.modelStateValue = { ...state, current: { ...state.current, [part]: value } };
+  }
+
+  /**
+   * R-402 (FR-403 - FR-405): the owner's change between turns - refused `busy` while a turn runs, a
+   * card waits or a mode switch is under way; `model-unknown` for a value the live offer does not
+   * list. A change that arrives while another is in flight waits behind it (at most
+   * MODEL_SWITCH_QUEUE_MAX; one more is `busy`) and is then judged against what the agent reports at
+   * that moment - a part already current sends nothing; the run ending meanwhile answers
+   * `agent-exited`. One `model` line per part the agent accepted (D-025-12: a model change that
+   * moved the effort names it, `effortChanged`); a refusal keeps what the agent reports and says
+   * `model-refused` - in a notice and in the result.
+   */
+  async setModel(wanted: { model?: string; effort?: string }): Promise<CommandOutcome> {
+    if (this.reloading) return failure("busy", "The conversation is already changing its mode; try again in a moment.");
+    if (this.switching) {
+      if (this.switchQueue.length >= MODEL_SWITCH_QUEUE_MAX) {
+        return failure("busy", "The conversation is already changing its model; try again in a moment.");
+      }
+      const child = this.child;
+      const go = await new Promise<boolean>((resolve) => this.switchQueue.push(resolve));
+      if (!go) return failure("agent-exited", `${this.label} ended while changing its model.`);
+      // The switch is this change's now: every way out hands it on.
+      const refused = this.child === child ? this.modelChangeRefusal(wanted) : failure("agent-exited", `${this.label} ended while changing its model.`);
+      if (refused !== undefined) {
+        this.releaseSwitch();
+        return refused;
+      }
+    } else {
+      const refused = this.modelChangeRefusal(wanted);
+      if (refused !== undefined) return refused;
+      this.switching = true;
+    }
+    const connection = this.connection!;
+    const sessionId = this.sessionId!;
+    this.cancelIdle();
+    try {
+      const refused = await this.applyModel(connection, sessionId, wanted, (part, before) => {
+        this.enqueue(this.modelLine(part, before, wanted));
+        this.touch();
+      });
+      if (refused === undefined) return { ok: true };
+      this.enqueue(refused.notice);
+      return failure("model-refused", refused.text.trim() === "" ? `${this.label} refused the change.` : refused.text);
+    } catch {
+      return failure("agent-exited", `${this.label} ended while changing its model.`);
+    } finally {
+      this.releaseSwitch();
+    }
+  }
+
+  /**
+   * Why a change may not go now (switching aside): not running - or leaving, its output closed before
+   * its exit is seen - a turn or card, or a value not offered.
+   */
+  private modelChangeRefusal(wanted: { model?: string; effort?: string }): CommandOutcome | undefined {
+    if (this.connection === undefined || this.connection.signal.aborted || this.sessionId === undefined || !this.live || !this.watchingMode) {
+      return failure("agent-exited", "The agent is not running; the model applies when the conversation continues.");
+    }
+    if (this.stateValue !== "idle" || this.turn !== undefined || this.cards.size > 0 || this.modeReset !== undefined) {
+      return failure("busy", "The agent is still answering; stop it or wait for the end of its turn, then change the model.");
+    }
+    const state = this.modelStateValue;
+    if (state === undefined) return failure("model-unknown", `${this.label} reports no models Hallpass could choose from.`);
+    if (wanted.model !== undefined && !state.models.some((entry) => entry.value === wanted.model)) {
+      return failure("model-unknown", `That model is not one ${this.label} offers in this conversation.`);
+    }
+    if (wanted.effort !== undefined && !state.efforts.some((entry) => entry.value === wanted.effort)) {
+      return failure("model-unknown", `That reasoning effort is not one ${this.label} offers in this conversation.`);
+    }
+    return undefined;
+  }
+
+  /** FR-403: the switch goes to the oldest queued change, or ends (the idle countdown starts again). */
+  private releaseSwitch(): void {
+    const next = this.switchQueue.shift();
+    if (next !== undefined) {
+      next(true);
+      return;
+    }
+    this.switching = false;
+    this.armIdle();
+  }
+
+  /** FR-403: the run ended - every queued change answers `agent-exited`, none is sent. */
+  private dropQueuedSwitches(): void {
+    for (const go of this.switchQueue.splice(0)) go(false);
+  }
+
+  /**
+   * FR-404 / D-025-12, by the agent's own names: a model part names the model, plus the effort with
+   * `effortChanged` when the model moved it (and the owner did not ask for another one); an effort
+   * part names the model and the effort.
+   */
+  private modelLine(part: "model" | "effort", before: ModelCurrent, wanted: { model?: string; effort?: string }): ConversationEvent {
+    const state = this.modelStateValue!;
+    const model = modelName(state, state.current.model);
+    const effort = state.current.effort;
+    if (part === "effort") return { type: "model", model, ...(effort === undefined ? {} : { effort: effortName(state, effort) }) };
+    const moved = effort !== undefined && effort !== before.effort && effort !== wanted.effort;
+    const followed = wanted.effort !== undefined && state.efforts.some((entry) => entry.value === wanted.effort);
+    return { type: "model", model, ...(moved && !followed ? { effort: effortName(state, effort), effortChanged: true as const } : {}) };
+  }
+
+  /** R-402: "<agent> kept <kept>: it refused <asked> (<the agent's own text>)." - names, and the agent's text scrubbed. */
+  private modelRefused(part: "model" | "effort", asked: string, before: ModelCurrent, agentText: string): ConversationEvent {
+    const state = this.modelStateValue!;
+    const name = part === "model" ? (value: string) => modelName(state, value) : (value: string) => effortName(state, value);
+    const kept = part === "model" ? name(before.model) : before.effort === undefined ? "its own effort" : name(before.effort);
+    const reason = clip(agentText.trim(), REFUSAL_TEXT_MAX);
+    return this.modelNotice("model-refused", `${this.label} kept ${kept}: it refused ${name(asked)}${reason === "" ? "" : ` (${reason})`}.`);
+  }
+
+  /**
+   * 0.17.0: "<agent> did not answer within <n> s, so the model is unchanged: it keeps <kept> and did
+   * not switch to <asked>." - names only; the panel says it in the owner's language.
+   */
+  private modelTimedOutText(part: "model" | "effort", asked: string, before: ModelCurrent, boundMs: number): string {
+    const state = this.modelStateValue!;
+    const name = part === "model" ? (value: string) => modelName(state, value) : (value: string) => effortName(state, value);
+    const kept = part === "model" ? name(before.model) : before.effort === undefined ? "its own effort" : name(before.effort);
+    const seconds = Math.max(1, Math.round(boundMs / 1000));
+    return `${this.label} did not answer within ${seconds} s, so the model is unchanged: it keeps ${kept} and did not switch to ${name(asked)}.`;
+  }
+
+  private modelNotice(code: "model-refused" | "model-unavailable", text: string): ConversationEvent {
+    return { type: "notice", code, agent: this.agent, text: shown(text, 2048) };
+  }
+
+  private get label(): string {
+    return AGENT_ADAPTERS[this.agent].label;
   }
 
   /**
@@ -1061,7 +1497,7 @@ export class Conversation {
     if (this.connection === undefined || this.sessionId === undefined || !this.live) {
       return failure("agent-exited", "The agent is not running.");
     }
-    if (this.stateValue !== "idle" || this.turn !== undefined || this.reloading) {
+    if (this.stateValue !== "idle" || this.turn !== undefined || this.reloading || this.switching) {
       // T547 (G3): its own code, so the panel can say "wait or stop" rather than "the helper is gone".
       return failure("busy", "The agent is still answering; stop it or wait for the end of its turn.");
     }
@@ -1204,7 +1640,7 @@ export class Conversation {
    * running agent, idle, no turn, no card, no mode switch under way (refused `busy` as a reload is).
    */
   canRestart(): CommandOutcome {
-    if (this.reloading) return failure("busy", "The conversation is already switching its mode; try again in a moment.");
+    if (this.reloading || this.switching) return failure("busy", "The conversation is already switching its mode; try again in a moment.");
     if (this.connection === undefined || this.sessionId === undefined || !this.live || !this.watchingMode) {
       return failure("agent-exited", "The agent is not running; it starts in strict mode when the conversation continues.");
     }
@@ -1242,6 +1678,8 @@ export class Conversation {
       resume: sessionId,
       mode,
       restart: true,
+      // 025 R-403: the new run ends on the model this one had.
+      ...(this.modelChoice === undefined ? {} : { model: this.modelChoice }),
       ...(launch.mayHandOut === undefined ? {} : { mayHandOut: launch.mayHandOut }),
     });
     return started.ok ? { ok: true } : { ok: false, error: started.error };
@@ -1258,7 +1696,7 @@ export class Conversation {
   async setMode(mode: ConversationMode): Promise<CommandOutcome> {
     if (this.modeFixedAgainst(mode)) return modeFixed(this.agent);
     const connection = this.connection;
-    if (this.reloading) return failure("busy", "The conversation is already switching its mode; try again in a moment.");
+    if (this.reloading || this.switching) return failure("busy", "The conversation is already switching its mode or model; try again in a moment.");
     if (connection === undefined || this.sessionId === undefined || !this.live || !this.watchingMode) {
       return failure("agent-exited", "The agent is not running; it starts in strict mode when the conversation continues.");
     }
@@ -1306,10 +1744,13 @@ export class Conversation {
     this.reloading = true;
     this.cancelIdle();
     this.watchingMode = false;
+    // 025 R-403: the reloaded session ends on the model it had.
+    const keep = this.modelChoice;
+    let modelNotices: ConversationEvent[] = [];
     try {
       // The agent replays the conversation on load; this broker already shows it.
       this.replay = "drop";
-      await this.request(() =>
+      const loaded = await this.request(() =>
         connection.agent.request("session/load", {
           sessionId,
           cwd: this.cwd!,
@@ -1326,6 +1767,7 @@ export class Conversation {
       if (this.reportedModeId !== undefined && this.reportedModeId !== targetId) {
         throw new Error(`the agent reported "${this.reportedModeId}" after being set to "${targetId}"`);
       }
+      modelNotices = await this.openModels(connection, sessionId, loaded, keep);
     } catch (error) {
       this.replay = "off";
       this.reloading = false;
@@ -1347,6 +1789,7 @@ export class Conversation {
     this.ownerModeId = targetId;
     this.watchingMode = true;
     this.enqueue({ type: "mode", mode, note: RELOAD_NOTE[mode] });
+    for (const notice of modelNotices) this.enqueue(notice);
     this.touch();
     this.armIdle();
     return { ok: true };
@@ -1431,6 +1874,11 @@ export class Conversation {
         if (this.watchingMode && this.ownerModeId !== undefined && update.currentModeId !== this.ownerModeId) {
           this.onDrift(update.currentModeId);
         }
+        return;
+      }
+      case "config_option_update": {
+        // 025 R-406 (FR-409): the agent's own report replaces the live offer and current - no line.
+        this.followReportedModels({ configOptions: update.configOptions });
         return;
       }
       default:
@@ -1625,6 +2073,8 @@ export class Conversation {
     this.watchingMode = false;
     this.cancelIdle();
     this.cancelBrowserCheck();
+    // FR-403: changes queued behind a switch never reach a later run; the one in flight hears the exit itself.
+    this.dropQueuedSwitches();
     this.turn = undefined;
     this.announced.clear();
     for (const card of [...this.cards.values()]) this.closeCard(card, "agent-exited", { outcome: { outcome: "cancelled" } });
@@ -1906,6 +2356,8 @@ export type ConversationPoolOptions = {
   clock?: Clock;
   cap?: number;
   idleMs?: number;
+  /** 025: the bound on each model or effort set request (MODEL_SET_BOUND_MS; shortened in test mode). */
+  modelSetBoundMs?: number;
   isAlive?: (pid: number) => boolean;
   spawnAgent?: (spec: AdapterLaunchSpec, cwd: string) => ChildProcess;
   /** S6 (T552): each agent run's browser token and `hallpass` entry (`browser-token.ts`). */
@@ -1915,6 +2367,8 @@ export type ConversationPoolOptions = {
   log?: (code: string, detail?: string) => void;
   /** 023 R-369: what the key-name check reads (Hermes' files, the user's variable names); the machine's own by default. */
   userEnvironment?: UserEnvironmentPorts;
+  /** 025 R-401: each agent's last offer and the owner's last choice (`agent-models.json`); in memory by default. */
+  models?: ModelStore;
 };
 
 /**
@@ -1966,7 +2420,11 @@ export class ConversationPool {
    */
   private readonly firstStarts = new Map<string, { agent: ConversationAgent; folder: ConversationFolder; mode: ConversationMode; at: string }>();
 
+  /** 025 R-401: each agent's remembered offer and choice. */
+  private readonly models: ModelStore;
+
   constructor(private readonly options: ConversationPoolOptions) {
+    this.models = options.models ?? memoryModelStore();
     this.clock = options.clock ?? systemClock;
     this.cap = options.cap ?? CONVERSATION_RUNNING_CAP;
     this.brokerPid = options.brokerPid ?? process.pid;
@@ -1994,6 +2452,7 @@ export class ConversationPool {
     folder: ConversationFolder,
     mayStart?: ResumeGate,
     mode: ConversationMode = "strict",
+    model?: ConversationModelWant,
   ): Promise<CommandOutcome<{ conversationId: string }>> {
     if (this.shuttingDown) return failure("broker-unavailable", "Hallpass is shutting down.");
     const mayHandOut = this.noWithdrawalSinceNow();
@@ -2010,7 +2469,7 @@ export class ConversationPool {
     this.firstStarts.set(conversationId, { agent, folder, mode, at: this.iso() });
     this.options.onChange?.();
     try {
-      return await this.startNew(conversation, folder, mode, launch, mayStart, mayHandOut);
+      return await this.startNew(conversation, folder, mode, launch, mayStart, mayHandOut, model);
     } finally {
       // The list follows: the entry is now in the index, or gone with a failed or cancelled start.
       this.firstStarts.delete(conversationId);
@@ -2025,6 +2484,7 @@ export class ConversationPool {
     launch: Extract<LaunchResolution, { ok: true }>,
     mayStart: ResumeGate | undefined,
     mayHandOut: () => boolean,
+    model: ConversationModelWant | undefined,
   ): Promise<CommandOutcome<{ conversationId: string }>> {
     const { conversationId, agent } = conversation;
     const admitted = await this.admit(conversation);
@@ -2046,15 +2506,26 @@ export class ConversationPool {
         return allowed;
       }
     }
+    // 025 R-403: the chip's choice, else the store's last one for this agent, else the agent's own.
+    const target = model ?? (await this.agentModels())[agent]?.choice;
     // Nothing awaits between the consent above and the spawn (and the token's mint) inside `start`.
-    const started = await conversation.start({ cwd, spec: launch.spec, versions: launch.versions, mode, mayHandOut });
+    const started = await conversation.start({
+      cwd,
+      spec: launch.spec,
+      versions: launch.versions,
+      mode,
+      mayHandOut,
+      ...(target === undefined ? {} : { model: target }),
+    });
     if (!started.ok) {
       this.conversations.delete(conversationId);
       this.options.onChange?.();
       return { ok: false, error: started.error };
     }
     this.noteAccepts(conversation);
+    await this.recordModels(conversation, "new", model !== undefined);
     const at = this.iso();
+    const reported = openedModel(conversation, target);
     await this.write(async () =>
       this.options.index.put({
         conversationId,
@@ -2066,6 +2537,7 @@ export class ConversationPool {
         createdAt: at,
         lastUsedAt: at,
         resumable: true,
+        ...(reported === undefined ? {} : { model: reported }),
         lease: this.lease(),
       }),
     );
@@ -2221,13 +2693,55 @@ export class ConversationPool {
     }
     if (restartsForMode(conversation.agent, conversation.mode, mode)) {
       const restarted = await this.restart(conversation, mode, mayRestart);
-      if (restarted.ok) await this.update(conversationId, (entry) => ({ ...entry, mode, lastUsedAt: this.iso() }));
+      if (restarted.ok) await this.afterModeOpening(conversation, { mode, lastUsedAt: this.iso() });
       this.options.onChange?.();
       return restarted;
     }
     const changed = await conversation.setMode(mode);
-    if (changed.ok) await this.update(conversationId, (entry) => ({ ...entry, mode }));
+    if (changed.ok) await this.afterModeOpening(conversation, { mode });
     return changed;
+  }
+
+  /** 025 R-403 / R-404: a reload or restart for a mode opened the session again - the entry keeps what the agent reports. */
+  private async afterModeOpening(conversation: Conversation, fields: Pick<ConversationEntry, "mode"> & Partial<Pick<ConversationEntry, "lastUsedAt">>): Promise<void> {
+    await this.recordModels(conversation, "continued", false);
+    await this.update(conversation.conversationId, (entry) => {
+      const reported = openedModel(conversation, entry.model);
+      return { ...entry, ...fields, ...(reported === undefined ? {} : { model: reported }) };
+    });
+  }
+
+  /**
+   * 025 R-402 (FR-403 - FR-405): change a running conversation's model or effort. Accepted: the entry
+   * and the store's choice become what the agent then reports. Not running: `agent-exited`, and the
+   * entry keeps the asked values for when it continues (R-403 applies them, or says they are gone).
+   */
+  async setModel(conversationId: string, asked: { model?: string | undefined; effort?: string | undefined }): Promise<CommandOutcome> {
+    const wanted = wantedParts(asked);
+    const conversation = this.conversations.get(conversationId);
+    if (conversation?.live) {
+      const changed = await conversation.setModel(wanted);
+      const reported = conversation.modelChoice;
+      if (changed.ok && reported !== undefined) {
+        await this.update(conversationId, (entry) => ({ ...entry, model: reported }));
+        try {
+          await this.models.recordChoice(conversation.agent, reported);
+        } catch {
+          this.options.log?.("broker.models-write-failed", conversationId);
+        }
+        this.options.onChange?.();
+      }
+      return changed;
+    }
+    const entry = await this.options.index.get(conversationId);
+    if (entry === undefined && conversation === undefined) return unknown();
+    const model = wanted.model ?? entry?.model?.model;
+    if (entry !== undefined && model !== undefined && !this.foreign(entry)) {
+      // An effort the agent does not offer with that model is dropped when it continues (R-403).
+      const effort = wanted.effort ?? entry.model?.effort;
+      await this.update(conversationId, (current) => ({ ...current, model: { model, ...(effort === undefined ? {} : { effort }) } }));
+    }
+    return failure("agent-exited", "The agent is not running; the model applies when the conversation continues.");
   }
 
   /** FR-304: opening an entry replays it from the agent's own record (a resume); a live one is just there. */
@@ -2281,7 +2795,8 @@ export class ConversationPool {
       }));
     return [...starting, ...entries.map((entry) => {
       const conversation = this.conversations.get(entry.conversationId);
-      const { agentSessionId: _session, lease: _lease, ...shownEntry } = entry;
+      const { agentSessionId: _session, lease: _lease, model: entryModel, ...shownEntry } = entry;
+      const live = conversation?.live === true;
       return {
         ...shownEntry,
         mode: conversation?.live ? conversation.mode : entry.mode,
@@ -2291,8 +2806,35 @@ export class ConversationPool {
         ...(conversation?.live && conversation.accepts !== undefined ? { accepts: conversation.accepts } : {}),
         // 021 R-352 (T666): continued without a replay, so the earlier turns are not in the panel's log.
         ...(conversation?.replayNone ? { replay: "none" as const } : {}),
+        // 025 R-406 / R-404: a running agent's own report; otherwise what the entry kept.
+        ...(live && conversation.models !== undefined ? { models: conversation.models } : {}),
+        ...(!live && entryModel !== undefined ? { model: entryModel } : {}),
       };
     })];
+  }
+
+  /** 025 R-401: every agent's remembered offer and last choice (the overview's `agents[].models`); none when unreadable. */
+  async agentModels(): Promise<AgentModels> {
+    return this.models.read().catch((): AgentModels => ({}));
+  }
+
+  /**
+   * 025 R-401 / R-405: after a session opening - the offer replaces the stored one only at a
+   * `session/new`; the choice becomes what the agent reports when the start carried one that was not
+   * refused, or when the remembered one is no longer offered. A failed write is logged, never the
+   * opening's failure.
+   */
+  private async recordModels(conversation: Conversation, opening: "new" | "continued", carried: boolean): Promise<void> {
+    const { offer, outcome } = conversation.modelOpening;
+    const current = conversation.modelChoice;
+    try {
+      if (opening === "new" && offer !== undefined) await this.models.recordOffer(conversation.agent, offer, this.iso());
+      if (current !== undefined && (outcome === "unavailable" || (carried && outcome !== "refused" && outcome !== "timed-out"))) {
+        await this.models.recordChoice(conversation.agent, current);
+      }
+    } catch {
+      this.options.log?.("broker.models-write-failed", conversation.conversationId);
+    }
   }
 
   folderOf(entry: ConversationEntry): string {
@@ -2401,7 +2943,11 @@ export class ConversationPool {
       onEvent: this.options.onEvent,
       onStateChange: (changed) => this.onStateChange(changed),
       onIdle: (idle) => void idle.close("stopped"),
+      // 025 R-406 / R-404: the agent's own change shows in the views, and the conversation follows it -
+      // the entry takes it, so a later resume ends on it; the store's choice stays the owner's.
+      onModelChange: (changed) => void this.followAgentModel(changed),
       ...(this.options.idleMs === undefined ? {} : { idleMs: this.options.idleMs }),
+      ...(this.options.modelSetBoundMs === undefined ? {} : { modelSetBoundMs: this.options.modelSetBoundMs }),
       ...(this.options.spawnAgent === undefined ? {} : { spawnAgent: this.options.spawnAgent }),
       ...(this.options.browser === undefined ? {} : { browser: this.options.browser }),
       ...(this.options.log === undefined ? {} : { log: this.options.log }),
@@ -2409,6 +2955,15 @@ export class ConversationPool {
     });
     this.conversations.set(conversationId, conversation);
     return conversation;
+  }
+
+  /** 025 R-406 / R-404: the agent changed its own model or effort - the entry's `model` becomes what it reports. */
+  private async followAgentModel(conversation: Conversation): Promise<void> {
+    this.options.onChange?.();
+    await this.update(conversation.conversationId, (entry) => {
+      const reported = conversation.modelChoice;
+      return reported === undefined ? entry : { ...entry, model: reported };
+    });
   }
 
   private onStateChange(conversation: Conversation): void {
@@ -2474,6 +3029,8 @@ export class ConversationPool {
         resume: entry.agentSessionId,
         mode,
         mayHandOut,
+        // 025 R-403 / R-404: a continued conversation ends on the model it had.
+        ...(entry.model === undefined ? {} : { model: entry.model }),
       });
       if (!started.ok) {
         if (started.unknownSession) await this.update(conversationId, (current) => ({ ...current, resumable: false }));
@@ -2482,7 +3039,11 @@ export class ConversationPool {
         return outcome;
       }
       this.noteAccepts(conversation);
-      await this.update(conversationId, (current) => ({ ...current, mode, lastUsedAt: this.iso(), lease: this.lease() }));
+      await this.recordModels(conversation, "continued", false);
+      await this.update(conversationId, (current) => {
+        const reported = openedModel(conversation, current.model);
+        return { ...current, mode, lastUsedAt: this.iso(), ...(reported === undefined ? {} : { model: reported }), lease: this.lease() };
+      });
       this.options.onChange?.();
       outcome = { ok: true, value: conversation };
       return outcome;

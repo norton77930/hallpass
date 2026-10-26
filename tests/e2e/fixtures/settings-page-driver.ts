@@ -441,6 +441,12 @@ export function settingsPageDriver(page: Page, locale: AppLocale): SettingsPageD
     },
     async pressDownload(agent) {
       await ensure("agents");
+      // Download is in the open card only. A card opens by itself from the state it first shows (FR-377):
+      // one first shown in another state and needing a download only later stays shut, so open it as the
+      // owner would (#20: in one of three runs Codex read Needs a download with its card shut).
+      const disc = card(agent).locator("button.disc");
+      if ((await disc.getAttribute("aria-expanded")) !== "true") await disc.click();
+      await expect(disc).toHaveAttribute("aria-expanded", "true");
       const button = page.locator(`[data-fid=${JSON.stringify(`download-${agent}`)}]`);
       await expect(button).toBeEnabled({ timeout: 15_000 });
       await button.click();
