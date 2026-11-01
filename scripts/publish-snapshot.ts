@@ -71,25 +71,38 @@ function runSnapshotCheck(privateRoot: string): void {
 
 /**
  * The extracted files carry no exec bit on Windows (tar cannot set it, core.filemode is false), so the
- * public index takes each regular file's mode from the private HEAD: 100755 gets `+x`, 100644 gets `-x`
- * (a file that lost its bit privately loses it publicly). Only files that were staged are touched.
+ * public index takes each regular file's mode from the private HEAD: 100755 or 100644, wherever the
+ * public index differs (a file that lost its bit privately loses it publicly). Only files that were
+ * staged are touched; symlinks and other modes are left alone.
+ *
+ * The entries go through `update-index --index-info`, with the blob the add just staged, and not through
+ * `--chmod`: `--chmod` re-hashes the path from the work tree on Linux, without the add's
+ * `core.autocrlf=input`, and would commit a CRLF file as CRLF. `--index-info` never reads the work tree,
+ * so the add's LF normalisation stands.
  */
 function mirrorFileModes(privateRoot: string, publicRoot: string, staged: ReadonlySet<string>): void {
-  const executable: string[] = [];
-  const plain: string[] = [];
+  const privateModes = new Map<string, string>();
   for (const entry of git(privateRoot, ["ls-tree", "-r", "-z", "HEAD"]).split("\0")) {
     const tab = entry.indexOf("\t");
     if (tab < 0) continue;
     const mode = entry.slice(0, entry.indexOf(" "));
+    if (mode === "100755" || mode === "100644") privateModes.set(entry.slice(tab + 1), mode);
+  }
+  // `git()` trims, which would eat a leading/trailing byte of the NUL-separated list: read it raw.
+  const publicIndex = execFileSync("git", ["ls-files", "-s", "-z"], { cwd: publicRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  let infos = "";
+  for (const entry of publicIndex.split("\0")) {
+    const tab = entry.indexOf("\t");
+    if (tab < 0) continue;
+    const [mode, sha] = entry.slice(0, tab).split(" ");
     const path = entry.slice(tab + 1);
-    if (!staged.has(path)) continue;
-    if (mode === "100755") executable.push(path);
-    else if (mode === "100644") plain.push(path);
+    const wanted = privateModes.get(path);
+    if (!staged.has(path) || wanted === undefined || mode === wanted) continue;
+    if (mode !== "100755" && mode !== "100644") continue;
+    infos += `${wanted} ${sha}\t${path}\0`;
   }
-  for (const [flag, paths] of [["--chmod=+x", executable], ["--chmod=-x", plain]] as const) {
-    if (paths.length === 0) continue;
-    execFileSync("git", ["update-index", flag, "-z", "--stdin"], { cwd: publicRoot, input: paths.join("\0") + "\0", stdio: ["pipe", "pipe", "pipe"] });
-  }
+  if (infos === "") return;
+  execFileSync("git", ["update-index", "-z", "--index-info"], { cwd: publicRoot, input: infos, stdio: ["pipe", "pipe", "pipe"] });
 }
 
 export function publishSnapshot(options: PublishOptions): PublishOutcome {

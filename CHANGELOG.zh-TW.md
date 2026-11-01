@@ -3,6 +3,10 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.18.2 — 2026-11-02
+
+- **維護者**:`publish:snapshot` 只透過 index 設定檔案權限，在 Linux 和 macOS 上 CRLF 檔案進公開 repo 時也會維持 LF(0.18.1 在那些系統上可能從磁碟重新讀取)。檔案權限和 `uninstall.sh --purge` 的 contract 測試在 Linux 和 macOS 上也能通過。使用者端行為沒有改變。
+
 ## 0.18.1 — 2026-11-01
 
 - **從 clone 安裝 Linux 與 macOS**:公開 repo 裡的 `install.sh` 和 `uninstall.sh` 恢復成可執行檔(0.18.0 的發佈流程弄掉了執行權限；zip 用 `sh` 執行，不受影響)。

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -102,12 +102,15 @@ describe("publish:snapshot", { timeout: SLOW_GIT_MS }, () => {
   });
 
   it("mirrors the private file modes: 100755 stays executable and a file no longer executable privately loses the bit", () => {
-    // --chmod in the index works whatever core.filemode says, as on a Windows checkout.
+    // --chmod in the index works whatever core.filemode says, as on a Windows checkout; where
+    // core.filemode is true (POSIX) the work tree must carry the same bit or the checkout is dirty.
     write(privateRoot, { "scripts/run.sh": "#!/bin/sh\n", "scripts/plain.sh": "#!/bin/sh\n", "scripts/was-exec.sh": "#!/bin/sh\n" });
+    chmodSync(join(privateRoot, "scripts/run.sh"), 0o755);
     git(privateRoot, "add", "-A");
     git(privateRoot, "update-index", "--chmod=+x", "scripts/run.sh");
     git(privateRoot, "commit", "-q", "-m", "scripts");
     write(publicRoot, { "scripts/was-exec.sh": "#!/bin/sh\n" });
+    chmodSync(join(publicRoot, "scripts/was-exec.sh"), 0o755);
     git(publicRoot, "add", "-A");
     git(publicRoot, "update-index", "--chmod=+x", "scripts/was-exec.sh");
     git(publicRoot, "commit", "-q", "-m", "earlier release");
