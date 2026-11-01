@@ -43,6 +43,9 @@ function commitAll(cwd: string, message: string): void {
 
 const publish = (push = false) => publishSnapshot({ privateRoot, publicRoot, push, check: quiet, log: quiet });
 
+/** Each test spawns a dozen or more git processes; on a busy Windows machine that passes 15 s. */
+const SLOW_GIT_MS = 120_000;
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "hallpass-publish-test-"));
   privateRoot = join(root, "private");
@@ -69,13 +72,13 @@ beforeEach(() => {
   git(publicRoot, "config", "user.email", "test@example.invalid");
   git(publicRoot, "config", "commit.gpgsign", "false");
   git(publicRoot, "config", "tag.gpgsign", "false");
-});
+}, SLOW_GIT_MS);
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("publish:snapshot", () => {
+describe("publish:snapshot", { timeout: SLOW_GIT_MS }, () => {
   it("one Hallpass <version> commit and tag: the archive of HEAD, export-ignore honoured, removals carried, untracked files kept", () => {
     const outcome = publish();
     expect(outcome).toMatchObject({ published: true, version: "1.2.3" });
@@ -96,6 +99,24 @@ describe("publish:snapshot", () => {
     expect(existsSync(join(publicRoot, "node_modules", "kept.js"))).toBe(true);
     // A stray untracked file stays where it is and is not published.
     expect(git(publicRoot, "status", "--porcelain")).toBe("?? node_modules/\n?? stray-note.md");
+  });
+
+  it("mirrors the private file modes: 100755 stays executable and a file no longer executable privately loses the bit", () => {
+    // --chmod in the index works whatever core.filemode says, as on a Windows checkout.
+    write(privateRoot, { "scripts/run.sh": "#!/bin/sh\n", "scripts/plain.sh": "#!/bin/sh\n", "scripts/was-exec.sh": "#!/bin/sh\n" });
+    git(privateRoot, "add", "-A");
+    git(privateRoot, "update-index", "--chmod=+x", "scripts/run.sh");
+    git(privateRoot, "commit", "-q", "-m", "scripts");
+    write(publicRoot, { "scripts/was-exec.sh": "#!/bin/sh\n" });
+    git(publicRoot, "add", "-A");
+    git(publicRoot, "update-index", "--chmod=+x", "scripts/was-exec.sh");
+    git(publicRoot, "commit", "-q", "-m", "earlier release");
+
+    publish();
+    const modes = (cwd: string) =>
+      Object.fromEntries(git(cwd, "ls-tree", "-r", "HEAD").split("\n").map((line) => [line.split("\t")[1], line.split(" ")[0]]));
+    expect(modes(privateRoot)["scripts/run.sh"]).toBe("100755");
+    expect(modes(publicRoot)).toMatchObject({ "scripts/run.sh": "100755", "scripts/plain.sh": "100644", "scripts/was-exec.sh": "100644", "README.md": "100644" });
   });
 
   it("refuses an uncommitted private change, a failed snapshot check, disagreeing versions, a dirty public checkout and an existing tag", () => {

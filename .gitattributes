@@ -12,3 +12,4 @@ tests/acceptance/owner-remaining-runbook.md export-ignore
 tests/acceptance/local-run-checklist.md export-ignore
 tests/acceptance/evidence-index.md export-ignore
 tests/acceptance/browser-matrix.md export-ignore
+*.sh text eol=lf

@@ -32,6 +32,7 @@ const browserNotices = (h: Awaited<ReturnType<typeof poolHarness>>, id: string) 
     .filter((event): event is Extract<ConversationEvent, { type: "notice" }> => event.type === "notice" && event.code === "browser-tools-missing");
 
 const TEN_SECONDS = 10_000;
+const BOUNDARY_MARGIN = 2_000;
 
 describe("023 T714 Hermes: a greeting within 10 s, or one notice", () => {
   it("says nothing when the conversation's server greeted", async () => {
@@ -57,9 +58,11 @@ describe("023 T714 Hermes: a greeting within 10 s, or one notice", () => {
   it("says browser-tools-missing once, 10 s after session/new, and not again after a restart", async () => {
     const { h } = await setup();
     const id = await h.start("hermes");
-    h.clock.advance(TEN_SECONDS - 1);
+    // TestClock keeps real time under its offset, so the real milliseconds since session/new count
+    // too: a 1 ms boundary fails on a slow machine (macOS CI 0.18.0). A 2 s margin keeps the claim.
+    h.clock.advance(TEN_SECONDS - BOUNDARY_MARGIN);
     expect(browserNotices(h, id)).toEqual([]);
-    h.clock.advance(1);
+    h.clock.advance(BOUNDARY_MARGIN);
     const notices = browserNotices(h, id);
     expect(notices).toHaveLength(1);
     expect(notices[0]).toMatchObject({ type: "notice", code: "browser-tools-missing", agent: "hermes" });
