@@ -5,6 +5,12 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.18.1 — 2026-11-01
+
+- **Linux and macOS from a clone**: `install.sh` and `uninstall.sh` are executable in the public repository again (the 0.18.0 snapshot dropped the bit; the zip was not affected, since it runs them with `sh`).
+- **Tests and CI**: test-only fixes for the first Windows/Linux/macOS CI run - file locking on Windows, case-insensitive volumes on macOS and a timing margin on slow machines. No behaviour change.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.18.0 — 2026-11-01
 
 - **Linux and macOS** (#1). `install.sh` / `uninstall.sh` install the host for this user (no sudo) into

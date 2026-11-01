@@ -15,9 +15,19 @@ const FAKE = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "harne
 const children: ChildProcess[] = [];
 let cwd: string;
 
+/** Resolves once the child has exited (immediately if it already has). */
+function exited(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((done) => child.once("exit", () => done()));
+}
+
 afterEach(async () => {
-  for (const child of children.splice(0)) child.kill();
-  await rm(cwd, { recursive: true, force: true });
+  const spawned = children.splice(0);
+  for (const child of spawned) child.kill();
+  // A just-exited child can still hold its working directory for a moment on Windows (EBUSY), so
+  // wait for the exit and let the removal retry.
+  await Promise.all(spawned.map(exited));
+  await rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 });
 
 async function fake(env: Record<string, string> = {}): Promise<ChildProcess> {

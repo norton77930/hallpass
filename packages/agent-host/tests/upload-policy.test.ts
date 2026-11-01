@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -170,7 +170,8 @@ describe("T062 upload policy", () => {
   /**
    * C7 — two ways a root check can be wrong on Windows, both about string comparison standing in
    * for a path comparison: a sibling directory whose name merely starts with the root's, and the
-   * same directory spelled with different case.
+   * same directory spelled with different case (which is the same directory only where the file
+   * system folds case, so the expectation follows the volume, not the platform).
    */
   it("does not mistake a sibling directory for a root, and accepts the root in any case", async () => {
     const sibling = `${root}-extra`;
@@ -187,8 +188,13 @@ describe("T062 upload policy", () => {
     const shouted = await resolveUploadFiles([join(root, "receipt.txt")], {
       uploadRoots: [root.toUpperCase()],
     });
-    // One directory, two spellings, on a file system that does not distinguish them.
-    expect(shouted.ok).toBe(process.platform === "win32");
+    // One directory, two spellings: accepted exactly when the file system does not distinguish them
+    // (Windows and macOS by default; Linux does). Probe the volume rather than assume from the platform.
+    const caseInsensitive = await stat(join(root.toUpperCase(), "receipt.txt")).then(
+      () => true,
+      () => false,
+    );
+    expect(shouted.ok).toBe(caseInsensitive);
   });
 
   it("refuses a path that is not a file at all", async () => {

@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.18.1 — 2026-11-01
+
+- **從 clone 安裝 Linux 與 macOS**:公開 repo 裡的 `install.sh` 和 `uninstall.sh` 恢復成可執行檔(0.18.0 的發佈流程弄掉了執行權限；zip 用 `sh` 執行，不受影響)。
+- **測試與 CI**:針對第一次 Windows/Linux/macOS CI 只修測試，包括 Windows 的檔案鎖定、macOS 不分大小寫的磁碟，以及慢機器上的時序餘裕。行為沒有改變。
+- 主機和擴充功能要一起升級：重新安裝主機並重新載入擴充功能。
+
 ## 0.18.0 — 2026-11-01
 
 - **Linux 與 macOS**(#1):`install.sh` / `uninstall.sh` 為目前使用者安裝 host(不需要 sudo),位置是 `~/.local/share/hallpass` 或 `~/Library/Application Support/hallpass`,並在每個已安裝瀏覽器(Chrome、Chromium、Edge、Brave)的 native messaging 資料夾放入 host manifest。程式代理可以和 Windows 一樣透過 Hallpass 使用瀏覽器；側欄對話目前只支援 Windows,側欄和設定頁會說明。Linux 已用 Chromium 驗證;macOS 尚未在 Mac 上驗證。CI 改為在 Windows、Linux、macOS 上都跑。

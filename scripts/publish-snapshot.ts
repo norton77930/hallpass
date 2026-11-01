@@ -69,6 +69,29 @@ function runSnapshotCheck(privateRoot: string): void {
   });
 }
 
+/**
+ * The extracted files carry no exec bit on Windows (tar cannot set it, core.filemode is false), so the
+ * public index takes each regular file's mode from the private HEAD: 100755 gets `+x`, 100644 gets `-x`
+ * (a file that lost its bit privately loses it publicly). Only files that were staged are touched.
+ */
+function mirrorFileModes(privateRoot: string, publicRoot: string, staged: ReadonlySet<string>): void {
+  const executable: string[] = [];
+  const plain: string[] = [];
+  for (const entry of git(privateRoot, ["ls-tree", "-r", "-z", "HEAD"]).split("\0")) {
+    const tab = entry.indexOf("\t");
+    if (tab < 0) continue;
+    const mode = entry.slice(0, entry.indexOf(" "));
+    const path = entry.slice(tab + 1);
+    if (!staged.has(path)) continue;
+    if (mode === "100755") executable.push(path);
+    else if (mode === "100644") plain.push(path);
+  }
+  for (const [flag, paths] of [["--chmod=+x", executable], ["--chmod=-x", plain]] as const) {
+    if (paths.length === 0) continue;
+    execFileSync("git", ["update-index", flag, "-z", "--stdin"], { cwd: publicRoot, input: paths.join("\0") + "\0", stdio: ["pipe", "pipe", "pipe"] });
+  }
+}
+
 export function publishSnapshot(options: PublishOptions): PublishOutcome {
   const { privateRoot, publicRoot, push } = options;
   const log = options.log ?? ((line: string) => process.stdout.write(`${line}\n`));
@@ -100,6 +123,7 @@ export function publishSnapshot(options: PublishOptions): PublishOutcome {
     writeFileSync(pathspec, listed.join("\n"));
     // The public tree holds LF: the files a Windows checkout stores as CRLF are normalised on any machine.
     git(publicRoot, ["-c", "core.autocrlf=input", "-c", "core.safecrlf=false", "add", "--force", `--pathspec-from-file=${pathspec}`]);
+    mirrorFileModes(privateRoot, publicRoot, new Set(listed));
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
