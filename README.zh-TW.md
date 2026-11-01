@@ -9,7 +9,7 @@ Hallpass 是一個 Chrome 擴充功能加一個本機 MCP server。Claude Code�
 每一個網站、每一個會改變頁面的動作,都受你在側欄做的決定管:只允許這一次、這個網站以後都允許、或拒絕。
 你隨時可以停止 agent,把分頁拿回來。
 
-> **平台**:Windows 11 + Google Chrome。Microsoft Edge 已於 2026-10-03 實機驗證;Brave 有註冊但未驗證(issue #2);macOS / Linux 尚未支援,見 issue #1。
+> **平台**:Windows 11、Linux、macOS + Google Chrome。Microsoft Edge 已於 2026-10-03 實機驗證;Brave 有註冊但未驗證(issue #2)。Linux 與 macOS 上，程式代理可以和 Windows 一樣透過 Hallpass 使用瀏覽器，但**側欄對話目前只支援 Windows**。Linux 已用 Chromium 驗證;macOS 依照各瀏覽器公開的資料夾位置實作，尚未在 Mac 上實機驗證。Linux / macOS 請在解壓縮的資料夾執行 `sh ./install.sh`(不需要 sudo),移除用 `sh ./uninstall.sh`。
 > **授權**:Apache-2.0。
 
 ![coding agent 在使用者的 Chrome 裡用 DuckDuckGo 搜尋：輸入前、按 Enter 前，側邊面板都先問使用者，agent 等到按下「Allow once」才動手。頁面那一半是 Hallpass 自己的錄影，帶有動作標籤、步驟編號與浮水印](docs/media/demo.gif)
@@ -62,10 +62,15 @@ Claude Code 或 Codex 對話，談你正在看的頁面，不必切到終端機�
 
 - **Agent**:每個側欄 agent 一張卡片，顯示狀態(可以使用、可以使用但有警告、需要下載、下載中、未安裝)、版本和檢查結果；
   需要的下載在這裡進行，有進度和取消；**測試** 做一次簡短的模型呼叫，說明 agent 能不能啟動、有沒有回應、拿不拿得到瀏覽器工具；
-  **啟用** 開關和 **設為預設** 決定側欄提供哪些 agent。
+  **啟用** 開關和 **設為預設** 決定側欄提供哪些 agent。卡片下方的 **給程式代理的技能** 可把一份簡短說明
+  (`skills/hallpass/SKILL.md`)安裝到你個人資料夾裡 Claude Code 和共用 agent 的技能資料夾，讓外部 agent
+  知道配對和同意卡怎麼運作，不會重試你拒絕的動作。只有按「安裝」才會寫入，不會寫進任何專案；解除安裝時會一併移除(你改過的除外)。
 - **網站與權限**:已配對的 agent(可取消配對)、每個網站的模式和診斷授權(可撤銷，並可復原)、上傳資料夾。
   工作階段卡片上的「管理這個網站的權限 ↗」會開到這一區並標出該網站。
-- **瀏覽器工具**:哪些 agent 能用 Hallpass 的瀏覽器工具，以及讓側欄 agent 使用它們的開關。
+- **瀏覽器工具**:哪些 agent 能用 Hallpass 的瀏覽器工具，以及讓側欄 agent 使用它們的開關。下方的
+  **側邊欄對話的額外 MCP server**:在這裡加入的 server(指令、參數、需要的環境變數名稱，以及要給 Claude Code、
+  Codex、Hermes 中的哪幾個)會在側邊欄對話時和瀏覽器工具一起交給 agent，不會改動 agent 自己的設定。
+  **檢查** 會啟動它一次並列出它的工具。變數的值從你的環境讀取，不會儲存或顯示。程式會以你的權限執行，只加入你信任的。
 - **連線與診斷**:輔助程式是否連上、版本、這個瀏覽器的名稱(可重新命名),以及按需查看 agent 最後幾行輸出(機密已移除)。
 
 設定頁不會要求、顯示或儲存任何 API 金鑰，只會提到金鑰變數的名稱。

@@ -185,6 +185,8 @@ export type PoolHarnessOptions = {
   models?: ModelStore;
   /** 025: the bound on a model or effort set request (default the product's MODEL_SET_BOUND_MS). */
   modelSetBoundMs?: number;
+  /** 027: the extra MCP servers each agent run is handed (default none). */
+  extraServers?: ConversationPoolOptions["extraServers"];
 };
 
 /**
@@ -248,6 +250,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
     ...(options.log === undefined ? {} : { log: options.log }),
     ...(options.browser === undefined ? {} : { browser: options.browser }),
     ...(options.modelSetBoundMs === undefined ? {} : { modelSetBoundMs: options.modelSetBoundMs }),
+    ...(options.extraServers === undefined ? {} : { extraServers: options.extraServers }),
     userEnvironment: options.userEnvironment ?? NO_USER_ENVIRONMENT,
     onEvent: rec.onEvent,
     // 021: the mode's launch settings as a real launch applies them (Hermes' managed layer written

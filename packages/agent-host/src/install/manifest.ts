@@ -96,6 +96,25 @@ export function createLauncherScript(hostEntryPath: string, nodePath?: string): 
   ].join("\r\n");
 }
 
+/** A string the shell takes literally: single quotes, each `'` written as `'\''`. */
+const shellQuote = (text: string): string => `'${text.replace(/'/gu, "'\\''")}'`;
+
+/**
+ * 028 FR-435: the launcher on macOS and Linux, an executable shell script Chrome starts directly. As the
+ * `.cmd` shim does, it runs the node that ran the installer by absolute path when that file is still
+ * there, and `node` from the path otherwise, passing on the arguments Chrome appends (`"$@"`). `exec`
+ * replaces the shell, so Chrome's pipes and the relay's end are the node process's own.
+ */
+export function createPosixLauncherScript(hostEntryPath: string, nodePath?: string): string {
+  const entry = shellQuote(hostEntryPath);
+  const lines = ["#!/bin/sh", "# Hallpass native-messaging host launcher, written by the installer."];
+  if (nodePath !== undefined) {
+    lines.push(`NODE=${shellQuote(nodePath)}`, `if [ -x "$NODE" ]; then exec "$NODE" ${entry} "$@"; fi`);
+  }
+  lines.push(`exec node ${entry} "$@"`, "");
+  return lines.join("\n");
+}
+
 /**
  * Where the relay's entry point is, relative to the installer module itself (007/T201).
  *

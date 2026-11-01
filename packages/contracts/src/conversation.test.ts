@@ -369,6 +369,11 @@ describe("024 overview fields on an agent's availability", () => {
     expect(parse({ versionTimedOut: "yes" })).toBe(false);
   });
 
+  it("#25 takes versionRetried (the background retry timed out too), a boolean only", () => {
+    expect(parse({ availability: "version-problem", versionTimedOut: true, versionRetried: true })).toBe(true);
+    expect(parse({ versionRetried: "yes" })).toBe(false);
+  });
+
   it("takes Hermes' setup steps, and only Hermes'", () => {
     const setupSteps = ["git", "hermes", "mcp-component", "key-variable", "browser-restart"].map((step) => ({ step, found: step !== "git" }));
     expect(parse({ setupSteps })).toBe(true);
@@ -622,5 +627,122 @@ describe("025 model picker contracts", () => {
 
   it("names the two notices", () => {
     expect(contracts.CONVERSATION_NOTICES).toEqual(expect.arrayContaining(["model-refused", "model-unavailable"]));
+  });
+});
+
+describe("026 the Hallpass skill (contracts/frames.md)", () => {
+  const state = (extra: Record<string, unknown> = {}) => ({ location: "claude-code", state: "up-to-date", folder: "%USERPROFILE%\\.claude\\skills\\hallpass", ...extra });
+  const overview = (skills: unknown) => ({
+    type: "conversation-overview",
+    sessionId: "s",
+    conversations: [],
+    agents: [],
+    folders: [],
+    ...(skills === undefined ? {} : { skills }),
+  });
+
+  it("a location's state: the two locations, the five states, a folder, a detail for an unreadable copy", () => {
+    const parse = (value: unknown) => contracts.agentSkillStateSchema.safeParse(value).success;
+    expect(contracts.AGENT_SKILL_LOCATIONS).toEqual(["claude-code", "agents"]);
+    for (const value of contracts.AGENT_SKILL_STATES) expect(parse(state({ state: value }))).toBe(true);
+    expect([...contracts.AGENT_SKILL_STATES]).toEqual(["not-installed", "up-to-date", "update-available", "changed", "unreadable"]);
+    expect(parse(state({ state: "unreadable", detail: "EACCES: permission denied" }))).toBe(true);
+    expect(parse(state({ location: "project" }))).toBe(false);
+    expect(parse(state({ state: "installed" }))).toBe(false);
+    expect(parse(state({ folder: "" }))).toBe(false);
+    expect(parse(state({ hash: "abc" }))).toBe(false);
+  });
+
+  it("the overview may carry both locations, and a host without them still parses", () => {
+    expect(contracts.conversationOverviewFrameSchema.safeParse(overview(undefined)).success).toBe(true);
+    expect(contracts.conversationOverviewFrameSchema.safeParse(overview([state(), state({ location: "agents", state: "not-installed" })])).success).toBe(true);
+    expect(contracts.conversationOverviewFrameSchema.safeParse(overview([state(), state(), state()])).success).toBe(false);
+  });
+
+  it("ui.conversation.install-skill: a location, and replaceChanged only as true", () => {
+    const install = (payload: Record<string, unknown>) => conversationCommandSchema.safeParse({ type: "ui.conversation.install-skill", payload }).success;
+    expect(install({ location: "agents" })).toBe(true);
+    expect(install({ location: "claude-code", replaceChanged: true })).toBe(true);
+    expect(install({ location: "claude-code", replaceChanged: false })).toBe(false);
+    expect(install({ location: "repo" })).toBe(false);
+    expect(install({ location: "agents", folder: "C:\\elsewhere" })).toBe(false);
+  });
+
+  it("the worker's conversation state passes the skills on to the settings page", () => {
+    const panel = { available: true, consent: "granted", conversations: [], agents: [], folders: [] };
+    expect(contracts.conversationPanelStateSchema.safeParse({ ...panel, skills: [state()] }).success).toBe(true);
+    expect(contracts.conversationPanelStateSchema.safeParse(panel).success).toBe(true);
+  });
+
+  it("028: platform-unsupported is a reason the conversation part is unavailable", () => {
+    expect([...contracts.CONVERSATION_UNAVAILABLE_REASONS]).toEqual(["host-outdated", "broker-unavailable", "platform-unsupported"]);
+    const panel = { available: false, reason: "platform-unsupported", consent: "unknown", conversations: [], agents: [], folders: [] };
+    expect(contracts.conversationPanelStateSchema.safeParse(panel).success).toBe(true);
+  });
+
+  it("its two refusals are error codes", () => {
+    for (const code of ["skill-changed", "skill-write-failed"]) {
+      expect(CONVERSATION_ERROR_CODES).toContain(code);
+    }
+  });
+});
+
+describe("027 extra MCP servers for side-panel conversations (contracts/frames.md)", () => {
+  const server = (extra: Record<string, unknown> = {}) => ({
+    name: "github",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-github"],
+    variables: ["GITHUB_TOKEN"],
+    agents: ["claude-code", "codex", "hermes"],
+    ...extra,
+  });
+  const ok = (value: unknown) => contracts.panelMcpServerSchema.safeParse(value).success;
+
+  it("R-418: a server's name, command, arguments, variable names and agents, within their limits", () => {
+    expect(ok(server())).toBe(true);
+    expect(ok(server({ args: [], variables: [], agents: ["hermes"] }))).toBe(true);
+    // Hallpass's own names: the browser entry is `hallpass`, or `hallpass_panel` beside an owner's Codex `hallpass`.
+    for (const name of ["hallpass", "HallPass", "hallpass_panel", "Hallpass-extra", "", "a b", "x".repeat(41), "naïve"]) expect(ok(server({ name })), name).toBe(false);
+    expect(ok(server({ name: "my-hallpass" }))).toBe(true);
+    expect(ok(server({ command: "" }))).toBe(false);
+    expect(ok(server({ command: "c".repeat(401) }))).toBe(false);
+    expect(ok(server({ args: Array.from({ length: 31 }, () => "a") }))).toBe(false);
+    expect(ok(server({ variables: ["1BAD"] }))).toBe(false);
+    expect(ok(server({ variables: Array.from({ length: 11 }, (_, at) => `V${at}`) }))).toBe(false);
+    expect(ok(server({ agents: [] }))).toBe(false);
+    expect(ok(server({ agents: ["deepseek"] }))).toBe(false);
+    expect(ok(server({ env: { GITHUB_TOKEN: "secret" } }))).toBe(false);
+    expect([...contracts.PANEL_MCP_AGENTS]).toEqual(["claude-code", "codex", "hermes"]);
+  });
+
+  it("R-422: the view says set / not set for each variable, never a value, with the last check", () => {
+    const view = (extra: Record<string, unknown>) =>
+      contracts.panelMcpServerViewSchema.safeParse({ ...server(), variables: [{ name: "GITHUB_TOKEN", set: true }], ...extra }).success;
+    expect(view({})).toBe(true);
+    expect(view({ check: { outcome: "works", tools: ["create_issue"], toolCount: 26, at: "2026-10-28T00:00:00.000Z" } })).toBe(true);
+    expect(view({ check: { outcome: "failed", detail: "spawn npx ENOENT", at: "2026-10-28T00:00:00.000Z" } })).toBe(true);
+    expect(view({ checking: true, codexSkipped: true })).toBe(true);
+    expect(view({ variables: [{ name: "GITHUB_TOKEN", set: true, value: "secret" }] })).toBe(false);
+    expect(view({ check: { outcome: "works", tools: Array.from({ length: 51 }, (_, at) => `t${at}`), toolCount: 51, at: "2026-10-28T00:00:00.000Z" } })).toBe(false);
+  });
+
+  it("the overview, the panel state and the settings state may carry the list, or say it is unreadable", () => {
+    const base = { type: "conversation-overview", sessionId: "s", conversations: [], agents: [], folders: [] };
+    const list = { servers: [{ ...server(), variables: [{ name: "GITHUB_TOKEN", set: false }] }] };
+    expect(contracts.conversationOverviewFrameSchema.safeParse({ ...base, mcpServers: list }).success).toBe(true);
+    expect(contracts.conversationOverviewFrameSchema.safeParse({ ...base, mcpServers: { servers: [], unreadable: true } }).success).toBe(true);
+    const panel = { available: true, consent: "granted", conversations: [], agents: [], folders: [] };
+    expect(contracts.conversationPanelStateSchema.safeParse({ ...panel, mcpServers: list }).success).toBe(true);
+  });
+
+  it("save, remove and check commands", () => {
+    const parse = (type: string, payload: unknown) => conversationCommandSchema.safeParse({ type, payload }).success;
+    expect(parse("ui.conversation.mcp-server-save", { server: server() })).toBe(true);
+    expect(parse("ui.conversation.mcp-server-save", { server: server({ name: "gh" }), previousName: "github" })).toBe(true);
+    expect(parse("ui.conversation.mcp-server-save", { server: server({ name: "hallpass" }) })).toBe(false);
+    expect(parse("ui.conversation.mcp-server-remove", { name: "github" })).toBe(true);
+    expect(parse("ui.conversation.mcp-server-check", { name: "github" })).toBe(true);
+    expect(parse("ui.conversation.mcp-server-check", { name: "github", agent: "codex" })).toBe(false);
+    expect(CONVERSATION_ERROR_CODES).toContain("mcp-server-refused");
   });
 });

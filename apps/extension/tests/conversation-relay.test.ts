@@ -287,7 +287,7 @@ const eventFrame = (seq: number, text = `words-${seq}`, conversationId = CONVERS
 });
 
 describe("T547 conversation relay: forwarding (pure)", () => {
-  function harness(options: { windowMs?: number } = {}) {
+  function harness(options: { windowMs?: number; platformUnsupported?: () => boolean } = {}) {
     const frames: Array<Record<string, unknown>> = [];
     const panels: Array<Record<string, unknown>> = [];
     const timers: Array<() => void> = [];
@@ -303,6 +303,7 @@ describe("T547 conversation relay: forwarding (pure)", () => {
       now: () => clock,
       schedule: (callback) => void timers.push(callback),
       mintId: () => `w-${++ids}`,
+      ...(options.platformUnsupported === undefined ? {} : { platformUnsupported: options.platformUnsupported }),
     });
     return {
       relay,
@@ -340,6 +341,18 @@ describe("T547 conversation relay: forwarding (pure)", () => {
     expect(relay.panelState(true)).toMatchObject({ available: false, reason: "broker-unavailable" });
     // The link itself being down is never "host-outdated".
     expect(relay.panelState(false)).toMatchObject({ reason: "broker-unavailable" });
+  });
+
+  it("028 FR-437: outside Windows the reason is platform-unsupported, before and after the greeting window", () => {
+    let unsupported = true;
+    const { relay, advance } = harness({ platformUnsupported: () => unsupported });
+    expect(relay.panelState(false)).toMatchObject({ available: false, reason: "platform-unsupported" });
+    relay.relayStarted();
+    advance(15_000);
+    expect(relay.panelState(true)).toMatchObject({ available: false, reason: "platform-unsupported" });
+    // On Windows the reasons are as before.
+    unsupported = false;
+    expect(relay.panelState(true)).toMatchObject({ available: false, reason: "host-outdated" });
   });
 
   it("T563 projects the overview's list notice, and nothing when the overview has none", () => {

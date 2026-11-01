@@ -1383,3 +1383,113 @@ body:has(.agent-shell.settings-page) {
     display: none;
   }
 }
+
+/* 026: the skill for the owner's coding agents, below the agent cards. */
+.settings-page .skill-section {
+  max-width: 760px;
+  margin-top: var(--sp-5);
+}
+
+.settings-page .skill-rows {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.settings-page .skill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.settings-page .skill-name {
+  font-weight: 600;
+}
+
+.settings-page .skill-folder,
+.settings-page .skill-detail {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
+
+/* 027: extra MCP servers for side-panel conversations, below the browser-tools table. */
+.settings-page .mcp-block {
+  margin-top: var(--sp-4);
+}
+
+.settings-page .mcp-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.settings-page .mcp-row,
+.settings-page .mcp-form {
+  display: grid;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.settings-page .mcp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.settings-page .mcp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.settings-page .mcp-command {
+  overflow-wrap: anywhere;
+  font-size: var(--fs-1);
+}
+
+.settings-page .mcp-vars {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.settings-page .mcp-vars .var-unset,
+.settings-page .mcp-check.bad {
+  color: var(--danger, inherit);
+}
+
+.settings-page .mcp-form input,
+.settings-page .mcp-form textarea {
+  width: 100%;
+  max-width: 560px;
+  font: inherit;
+}
+
+.settings-page .mcp-agents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  border: 0;
+  padding: 0;
+  margin: var(--sp-1) 0 0;
+}
+
+.settings-page .mcp-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}

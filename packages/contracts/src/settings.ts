@@ -19,6 +19,13 @@ import {
   conversationInstallCancelCommandSchema,
   conversationPanelDiagnosticsMessageSchema,
   conversationTestCommandSchema,
+  conversationInstallSkillCommandSchema,
+  conversationMcpServerSaveCommandSchema,
+  conversationMcpServerRemoveCommandSchema,
+  conversationMcpServerCheckCommandSchema,
+  panelMcpServerListSchema,
+  agentSkillStateSchema,
+  AGENT_SKILL_LOCATIONS,
 } from "./conversation.js";
 
 /**
@@ -103,6 +110,12 @@ export const settingsCommandSchema = z.discriminatedUnion("type", [
   panelMember("ui.conversation.install").extend({ commandId }),
   conversationInstallCancelCommandSchema.extend({ commandId }),
   conversationTestCommandSchema.extend({ commandId }),
+  // 026 D-026-2: the skill's install or update.
+  conversationInstallSkillCommandSchema.extend({ commandId }),
+  // 027: the extra MCP servers for side-panel conversations.
+  conversationMcpServerSaveCommandSchema.extend({ commandId }),
+  conversationMcpServerRemoveCommandSchema.extend({ commandId }),
+  conversationMcpServerCheckCommandSchema.extend({ commandId }),
   diagnosticsByAgentCommandSchema.extend({ commandId }),
 ]);
 export type SettingsCommand = z.infer<typeof settingsCommandSchema>;
@@ -139,6 +152,10 @@ export const settingsStateSchema = z.strictObject({
   /** Why `agents` has nothing to say: the host is too old, or its broker is not there. */
   agentsUnavailable: z.enum(CONVERSATION_UNAVAILABLE_REASONS).optional(),
   choices: agentChoicesSchema,
+  /** 026: the Hallpass skill's state in each folder, from the latest overview; absent before one. */
+  skills: z.array(agentSkillStateSchema).max(AGENT_SKILL_LOCATIONS.length).optional(),
+  /** 027: the extra MCP servers for side-panel conversations, from the latest overview. */
+  mcpServers: panelMcpServerListSchema.optional(),
 });
 export type SettingsState = z.infer<typeof settingsStateSchema>;
 

@@ -54,6 +54,11 @@ const ERROR_CODES = [
   // 025 R-402: a set-model value not in the live offer, and one the agent refused.
   "model-unknown",
   "model-refused",
+  // 026 R-415: the Hallpass skill's install refused (changed copy) or not written.
+  "skill-changed",
+  "skill-write-failed",
+  // 027 R-418: an extra MCP server the broker would not keep.
+  "mcp-server-refused",
 ];
 
 const VIEW = {
@@ -223,9 +228,9 @@ describe("T519 conversation link frames (R-323)", () => {
     expectRejected(f, { ...base, ok: false, error: { code: "folder-missing" } }, "an error without its detail");
   });
 
-  it("names exactly the twenty-nine ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command, 021's three and 025's two", () => {
+  it("names exactly the thirty-two ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command, 021's three, 025's two, 026's two and 027's one", () => {
     const f = frame();
-    expect(ERROR_CODES).toHaveLength(29);
+    expect(ERROR_CODES).toHaveLength(32);
     for (const code of ERROR_CODES) {
       expectAccepted(
         f,

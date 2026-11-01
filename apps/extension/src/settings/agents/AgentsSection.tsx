@@ -4,6 +4,7 @@ import { AGENT_ORDER, agentState, needsAttention } from "../agent-model.js";
 import { useSettings } from "../context.js";
 import type { SettingsRoute } from "../routes.js";
 import { AgentCard } from "./AgentCard.js";
+import { SkillSection } from "./SkillSection.js";
 
 /**
  * 024 FR-376, FR-377, T757: the Agents section - what the helper cannot say is told first (the page
@@ -53,7 +54,15 @@ export function AgentsSection(props: { route: SettingsRoute }): ReactElement {
       <p className="def-hint" id="def-hint">
         {t("settings.agents.defaultHint")}
       </p>
-      {helperProblem ? (
+      {state.agentsUnavailable === "platform-unsupported" ? (
+        // 028 FR-437: not a fault to retry - side-panel agents are Windows-only for now.
+        <div className="note info" role="status">
+          <div className="notes">
+            <h3>{t("settings.helper.windowsOnlyTitle")}</h3>
+            <p>{t("settings.helper.windowsOnlyBody")}</p>
+          </div>
+        </div>
+      ) : helperProblem ? (
         <div className="note warn helper-missing" role="status">
           <div className="notes">
             <h3>{t(state.agentsUnavailable === "host-outdated" ? "settings.connection.helperNeedsUpdate" : "settings.helper.missingTitle")}</h3>
@@ -90,6 +99,8 @@ export function AgentsSection(props: { route: SettingsRoute }): ReactElement {
           ))}
         </div>
       )}
+      {/* 026: only while a helper of this release reports the folders. */}
+      {!helperProblem && state.skills !== undefined ? <SkillSection skills={state.skills} /> : null}
     </>
   );
 }

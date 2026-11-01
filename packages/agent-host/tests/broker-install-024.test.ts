@@ -189,7 +189,7 @@ describe("024 T758 the estimate (R-376 addendum)", () => {
 });
 
 describe("024 T758 progress in install-state.json", () => {
-  it("writes Preparing with no percent before the first folder, then the estimate each sample, at most 95 % until verified, then done", async () => {
+  it.runIf(process.platform === "win32")("writes Preparing with no percent before the first folder, then the estimate each sample, at most 95 % until verified, then done", async () => {
     const expected = await writeManifests();
     const seen: AgentInstallState[] = [];
     const record = async () => {
@@ -320,7 +320,7 @@ describe("024 T760 cancel (R-377)", () => {
       .filter(Boolean)
       .map(Number);
 
-  it("ends npm's process tree, removes its .install-* folder and the lock within 5 s; the agent needs a download again", async () => {
+  it.runIf(process.platform === "win32")("ends npm's process tree, removes its .install-* folder and the lock within 5 s; the agent needs a download again", async () => {
     const { ports, pids } = await slowNpm();
     const { run, overviewAgent, handler } = handlerFor({ install: (agent, onProgress, control) => installAgent(agent, ports, onProgress, control) });
     const download = run({ type: "ui.conversation.install", payload: { agent: "codex" } });
@@ -343,7 +343,7 @@ describe("024 T760 cancel (R-377)", () => {
     expect(overviewAgent("codex")).not.toHaveProperty("installing");
   }, 30_000);
 
-  it("cancel with nothing running is ok and changes nothing", async () => {
+  it.runIf(process.platform === "win32")("cancel with nothing running is ok and changes nothing", async () => {
     const { run } = handlerFor();
     await writeInstallState(data, "deepseek", {
       phase: "failed",
@@ -373,7 +373,7 @@ describe("024 T760 the tree's kill (R-377)", () => {
     return killer;
   };
 
-  it("runs taskkill by its System32 path and, when it cannot start, ends the process itself; a kill that fails says so", async () => {
+  it.runIf(process.platform === "win32")("runs taskkill by its System32 path and, when it cannot start, ends the process itself; a kill that fails says so", async () => {
     const seen: { file?: string; args?: readonly string[] } = {};
     const killed: number[] = [];
     expect(await killTreeAsync(4_000_123, { spawn: unstartable(seen), kill: (pid) => void killed.push(pid) })).toBe(true);
@@ -414,7 +414,7 @@ describe("024 T760 the tree's kill (R-377)", () => {
 });
 
 describe("024 T762 interrupted (R-378)", () => {
-  it("a state left running by a dead broker becomes interrupted at start, stays so until the next attempt, and cleanStaging still runs", async () => {
+  it.runIf(process.platform === "win32")("a state left running by a dead broker becomes interrupted at start, stays so until the next attempt, and cleanStaging still runs", async () => {
     const gone = await deadPid();
     const agentDir = join(data, "agents", "deepseek");
     await writeInstallState(data, "deepseek", {

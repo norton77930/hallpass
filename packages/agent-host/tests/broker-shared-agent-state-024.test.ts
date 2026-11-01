@@ -55,7 +55,7 @@ afterEach(async () => {
 });
 
 describe("024 T742 the shared state files", () => {
-  it("writes install-state.json whole under agents\\<agent>\\ and reads it back", async () => {
+  it.runIf(process.platform === "win32")("writes install-state.json whole under agents\\<agent>\\ and reads it back", async () => {
     await writeInstallState(data, "deepseek", state());
     expect(installStatePath(data, "deepseek")).toBe(join(data, "agents", "deepseek", "install-state.json"));
     expect(await readInstallState(data, "deepseek")).toEqual(state());
@@ -75,7 +75,7 @@ describe("024 T742 the shared state files", () => {
     await expect(writeInstallState(data, "codex", state({ percent: 100 }))).rejects.toThrow();
   });
 
-  it("writes and reads last-test.json", async () => {
+  it.runIf(process.platform === "win32")("writes and reads last-test.json", async () => {
     expect(await readLastTest(data, "hermes")).toBeUndefined();
     await writeLastTest(data, "hermes", test);
     expect(lastTestPath(data, "hermes")).toBe(join(data, "agents", "hermes", "last-test.json"));
@@ -112,7 +112,7 @@ describe("024 T742 the install lock", () => {
     expect(JSON.parse(await readFile(installLockPath(data, "codex"), "utf8"))).toEqual({ pid: process.pid, browserId: "edge-b2" });
   });
 
-  it("is removed at the end, and a release never removes another broker's lock", async () => {
+  it.runIf(process.platform === "win32")("is removed at the end, and a release never removes another broker's lock", async () => {
     const held = await acquireInstallLock(data, "deepseek", { pid: LIVE, browserId: "chrome-a1" }, isAlive);
     if (!held.acquired) throw new Error("not acquired");
     await held.release();

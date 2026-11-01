@@ -112,7 +112,7 @@ describe("QA package host bundle", () => {
     expect(broker).toContain("import.meta.url");
   });
 
-  it("stages koffi's win32-x64 file set and the pinned adapter manifests, and koffi loads from there", () => {
+  it.runIf(process.platform === "win32")("stages koffi's win32-x64 file set and the pinned adapter manifests, and koffi loads from there", () => {
     const staged = stageHostRuntime(outDir).sort();
     expect(staged).toEqual(
       [
@@ -206,7 +206,7 @@ describe("QA package 0.2.0 zip (only when a full run has produced one)", () => {
   });
 
   it.skipIf(!built)("stamps one version into the zip name, VERSION and the packed manifest", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.17.0");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.18.0");
     expect(readZipEntry(zipPath, "VERSION").trim()).toBe(AGENT_EXTENSION_VERSION);
     const manifest = JSON.parse(readZipEntry(zipPath, "extension/manifest.json")) as { version?: string };
     expect(manifest.version).toBe(AGENT_EXTENSION_VERSION);

@@ -196,8 +196,9 @@ describe("T257 CI runs on Windows with no browser, no secret and no paid call", 
   const workflow = read(".github/workflows/ci.yml");
   const steps = [...workflow.matchAll(/^\s*-?\s*run: +(.+?)\s*$/gm)].map((match) => match[1] ?? "");
 
-  it("runs the three suites and the snapshot check on windows-latest", () => {
-    expect(workflow).toMatch(/runs-on: +windows-latest/);
+  it("runs the three suites and the snapshot check on Windows, Linux and macOS (028 D-028-3)", () => {
+    expect(workflow).toMatch(/runs-on: +\$\{\{ *matrix\.os *\}\}/);
+    expect(workflow).toMatch(/os: +\[windows-latest, ubuntu-latest, macos-latest\]/);
     for (const command of [
       "npm ci",
       "npm run typecheck",

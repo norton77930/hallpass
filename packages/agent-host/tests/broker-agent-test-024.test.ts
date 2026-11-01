@@ -151,7 +151,7 @@ describe("024 T766 a test run", () => {
     expect(await lines(prompts)).toHaveLength(1);
   }, 120_000);
 
-  it("fails with the model's reason and, for Hermes, only the key variable's name", async () => {
+  it.runIf(process.platform === "win32")("fails with the model's reason and, for Hermes, only the key variable's name", async () => {
     const home = "C:\\hermes-home-for-test";
     const userEnvironment: UserEnvironmentPorts = {
       readText: async (path) => {
@@ -172,7 +172,7 @@ describe("024 T766 a test run", () => {
     for (const pid of await testPids()) expect(isAlive(pid)).toBe(false);
   }, 120_000);
 
-  it("waits for Hermes' key-name check when the prompt fails for the model: the variable's name is in last-test.json", async () => {
+  it.runIf(process.platform === "win32")("waits for Hermes' key-name check when the prompt fails for the model: the variable's name is in last-test.json", async () => {
     const home = "C:\\hermes-home-for-test";
     const userEnvironment: UserEnvironmentPorts = {
       readText: async (path) => {
@@ -208,7 +208,7 @@ describe("024 T766 a test run", () => {
     expect(result).toMatchObject({ outcome: "failed", start: "ok", model: { answered: false, reason: expect.stringMatching(/answered but did not finish within 90 s/u) } });
   }, 120_000);
 
-  it("fails with the start code when the agent cannot start or is not there", async () => {
+  it.runIf(process.platform === "win32")("fails with the start code when the agent cannot start or is not there", async () => {
     const { runner, harness } = await setup({ env: { FAKE_ACP_FAIL_AT: "initialize" } });
     expect(await runner.run("claude-code")).toMatchObject({ outcome: "failed", start: "agent-exited", model: { answered: false } });
 
@@ -221,7 +221,7 @@ describe("024 T766 a test run", () => {
     expect(await readdir(join(harness.dataDir, "agent-tests"))).toEqual([]);
   }, 120_000);
 
-  it("gives up at its bound with the process and folder gone", async () => {
+  it.runIf(process.platform === "win32")("gives up at its bound with the process and folder gone", async () => {
     const { runner, harness, testPids } = await setup({ env: { FAKE_ACP_HANG_AT: "new" }, boundMs: 3_000 });
     const started = Date.now();
     const result = await runner.run("claude-code");

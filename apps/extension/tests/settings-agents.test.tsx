@@ -75,6 +75,24 @@ describe("T756 state mapping (R-374, D-024-14)", () => {
     }
   });
 
+  it("#25 once the background retry timed out too, says the computer may be busy and to check again in a moment", () => {
+    const busy = withAgent(prototypeAState(NOW), "hermes", () => ({
+      agent: "hermes",
+      availability: "version-problem",
+      detail: "Hermes was found, but did not answer `--version` within 30 s.",
+      versionTimedOut: true,
+      versionRetried: true,
+    }));
+    for (const locale of ["en-US", "zh-TW"] as const) {
+      const { container, unmount } = renderSettings({ state: busy, appearance: { theme: "system", language: locale } });
+      const hermes = card(container, "hermes");
+      if (disclosure(hermes).getAttribute("aria-expanded") !== "true") fireEvent.click(disclosure(hermes));
+      expect(within(hermes).getByText(ui("settings.warning.versionBusy", { agent: "Hermes", seconds: 30 }, locale))).toBeTruthy();
+      expect(within(hermes).queryByText(ui("settings.warning.versionTimedOut", { agent: "Hermes" }, locale))).toBeNull();
+      unmount();
+    }
+  });
+
   it("says Helper missing only for an agent that needs the download; a missing program's prerequisites wait for it", () => {
     const missing = withAgent(prototypeAState(NOW), "claude-code", () => ({ agent: "claude-code", availability: "missing" }));
     const { container } = renderSettings({ state: missing });

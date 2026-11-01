@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 
 /**
  * Where every file the host owns lives, derived once.
@@ -10,26 +10,52 @@ import { join } from "node:path";
  * ask another where they are. A single derivation from the environment is what keeps the four in
  * agreement; a second hand-written path is how a server ends up dialling a file no relay wrote.
  *
- * The environment is a parameter rather than a read of `process.env` so the derivation is a pure
- * function under test: the directory this resolves to on the developer's machine is not something a
- * unit test may depend on.
+ * The environment and the platform are parameters rather than reads of `process` so the derivation is
+ * a pure function under test: the directory this resolves to on the developer's machine is not
+ * something a unit test may depend on.
  */
-export type HostEnvironment = { LOCALAPPDATA?: string | undefined };
+export type HostEnvironment = {
+  LOCALAPPDATA?: string | undefined;
+  /** 028: the home folder on macOS and Linux (`os.homedir()` when unset). */
+  HOME?: string | undefined;
+  /** 028: Linux's per-user data folder (`~/.local/share` when unset). */
+  XDG_DATA_HOME?: string | undefined;
+};
 
-/** The per-user data directory. `%LOCALAPPDATA%` on Windows; the same place by hand if it is unset. */
-export function hostDataDirectory(env: HostEnvironment = process.env): string {
-  const localAppData = env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
-  return join(localAppData, "hallpass");
+const pathsFor = (platform: NodeJS.Platform) => (platform === "win32" ? win32 : posix);
+
+/**
+ * The per-user data directory (028 FR-433): `%LOCALAPPDATA%\hallpass` on Windows,
+ * `~/Library/Application Support/hallpass` on macOS, `$XDG_DATA_HOME/hallpass` (`~/.local/share/hallpass`)
+ * on Linux. A set `LOCALAPPDATA` names the parent on every platform: it is how a test or gate run keeps
+ * its own host files apart from the owner's.
+ */
+export function hostDataDirectory(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  const { join } = pathsFor(platform);
+  if (env.LOCALAPPDATA !== undefined && env.LOCALAPPDATA !== "") return join(env.LOCALAPPDATA, "hallpass");
+  // Windows as before 028: the profile folder, never a shell's HOME (Git Bash sets one of its own).
+  if (platform === "win32") return join(homedir(), "AppData", "Local", "hallpass");
+  const home = env.HOME !== undefined && env.HOME !== "" ? env.HOME : homedir();
+  if (platform === "darwin") return join(home, "Library", "Application Support", "hallpass");
+  const data = env.XDG_DATA_HOME !== undefined && env.XDG_DATA_HOME !== "" ? env.XDG_DATA_HOME : join(home, ".local", "share");
+  return join(data, "hallpass");
 }
+
+/** A file or folder in the data directory, joined the way the platform does. */
+const inData = (env: HostEnvironment, platform: NodeJS.Platform, name: string): string =>
+  pathsFor(platform).join(hostDataDirectory(env, platform), name);
 
 /** Chrome's native-messaging host manifest, named after the host so the registry value is obvious. */
-export function hostManifestPath(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "com.hallpass.host.json");
+export function hostManifestPath(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "com.hallpass.host.json");
 }
 
-/** The `.cmd` shim Chrome actually spawns - Windows cannot spawn a `.js` file (R-101). */
-export function launcherPath(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "native-host.cmd");
+/**
+ * The launcher Chrome actually spawns: a `.cmd` shim on Windows, which cannot spawn a `.js` file (R-101);
+ * an executable shell script on macOS and Linux (028 FR-435).
+ */
+export function launcherPath(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, platform === "win32" ? "native-host.cmd" : "native-host.sh");
 }
 
 /**
@@ -38,8 +64,8 @@ export function launcherPath(env: HostEnvironment = process.env): string {
  * It is a file rather than a fixed port because the server takes an ephemeral port: a fixed port
  * would collide between two agent sessions and would be guessable by any other local process.
  */
-export function bridgeFilePath(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "bridge.json");
+export function bridgeFilePath(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "bridge.json");
 }
 
 /**
@@ -48,8 +74,8 @@ export function bridgeFilePath(env: HostEnvironment = process.env): string {
  * Beside the record rather than inside it: servers parse the record strictly, so only relays read
  * this file, to tell their own browser's previous relay from another browser's.
  */
-export function bridgeOwnerFilePath(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "bridge-owner.json");
+export function bridgeOwnerFilePath(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "bridge-owner.json");
 }
 
 /**
@@ -59,8 +85,8 @@ export function bridgeOwnerFilePath(env: HostEnvironment = process.env): string 
  * browser now and N browsers: each relay owns exactly its own file, and a server lists the folder
  * to see every connected browser. `bridge.json` stays where it is for servers older than 018 (R-277).
  */
-export function browsersDirectory(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "browsers");
+export function browsersDirectory(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "browsers");
 }
 
 /**
@@ -68,8 +94,8 @@ export function browsersDirectory(env: HostEnvironment = process.env): string {
  * "Broker sidecar"): `{ pid, browserRunId, secretSha256, startedAt }`, written by the relay that
  * spawned the broker, read by the next relay of that browser to adopt it, removed by the broker.
  */
-export function brokersDirectory(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "brokers");
+export function brokersDirectory(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "brokers");
 }
 
 /**
@@ -78,8 +104,8 @@ export function brokersDirectory(env: HostEnvironment = process.env): string {
  * One file per agent so that a later key cannot lose another agent's update; the agent id is the
  * per-Windows-user id `agentIdFilePath` holds, so every agent of one user shares the choice.
  */
-export function browserChoicesDirectory(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "choices");
+export function browserChoicesDirectory(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "choices");
 }
 
 /**
@@ -89,8 +115,8 @@ export function browserChoicesDirectory(env: HostEnvironment = process.env): str
  * has to outlive the process. It is created once and never rewritten; a new id would read to the
  * worker as a new agent and would ask the owner to pair again.
  */
-export function agentIdFilePath(env: HostEnvironment = process.env): string {
-  return join(hostDataDirectory(env), "agent-id");
+export function agentIdFilePath(env: HostEnvironment = process.env, platform: NodeJS.Platform = process.platform): string {
+  return inData(env, platform, "agent-id");
 }
 
 /**

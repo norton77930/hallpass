@@ -83,6 +83,15 @@ export function decideBrokerOnAck(
 }
 
 /** 32 random bytes, base64url: 43 characters, inside the greeting's 43-128 bound. */
+/**
+ * 028 (D-028-1, FR-437): side-panel conversations are Windows-only for now - the broker's agent installs,
+ * launches and process ends are Windows' own - so a relay elsewhere starts no broker and serves the agent
+ * link alone.
+ */
+export function brokerSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
+}
+
 export function mintBrokerSecret(): string {
   return randomBytes(32).toString("base64url");
 }

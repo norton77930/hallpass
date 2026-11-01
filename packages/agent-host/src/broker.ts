@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -9,7 +10,9 @@ import {
   agentLinkFrameSchema,
   type AgentTestResult,
   type ConversationAgent,
+  type PanelMcpServer,
 } from "@hallpass/contracts";
+import type * as acp from "@agentclientprotocol/sdk";
 import { dialRelay, isProcessAlive, type BridgeRecord, type RelayDial } from "./bridge-link.js";
 import { browserRecordPath, inspectBrowserRecord } from "./browser-record.js";
 import { removeOwnBrokerSidecar, removeOwnBrokerSidecarSync } from "./broker-launch.js";
@@ -18,6 +21,14 @@ import { checkAgentReadiness, defaultAgentPorts, type ReadinessAttempt } from ".
 import { watchBrowserProcess } from "./broker/browser-process.js";
 import { createBrowserAccess } from "./broker/browser-token.js";
 import { codexConfigPath } from "./broker/codex-config.js";
+import {
+  checkPanelMcpServer,
+  codexSkippedNames,
+  readPanelMcpServers,
+  removePanelMcpServer,
+  savePanelMcpServer,
+  sessionServersFor,
+} from "./broker/panel-mcp-servers.js";
 import { createAgentLauncher, createCommandHandler, fileConsentStore, type CommandHandler, type ReadinessResult } from "./broker/commands.js";
 import { createFolderActions, fileFolderList, folderListPath } from "./broker/folders.js";
 import { conversationIndexPath, fileConversationIndex } from "./broker/index-store.js";
@@ -25,6 +36,7 @@ import { agentModelsPath, fileModelStore } from "./broker/model-store.js";
 import { ConversationPool, spawnAgentProcess } from "./broker/conversation.js";
 import { installAgent, prepareAgentsAtStart, shippedManifestsDirectory } from "./broker/install.js";
 import { createKillOnCloseJob } from "./broker/job.js";
+import { installSkill, readSkillStates, type SkillEnvironment } from "./agent-skill.js";
 import { createBrokerLifetime } from "./broker/lifetime.js";
 import { redact } from "./broker/redact.js";
 import { runCommand } from "./broker/run-command.js";
@@ -218,6 +230,12 @@ async function main(): Promise<void> {
     if (machine === undefined) return { availability: { ...(await launcher.availability(agent)), checkedAt: new Date().toISOString(), browserTools: "available" } };
     return checkAgentReadiness(agent, testMachinePorts(ports, machine), { env: testMachineReadinessEnv(process.env, dataDir), ...retry });
   };
+  /**
+   * 026 (R-411): the Hallpass skill's folders - the owner's profile, or under the test agent a profile in
+   * the data folder, so a gate run never writes into the real one.
+   */
+  const skillEnv: SkillEnvironment =
+    testAgent === undefined ? process.env : { USERPROFILE: join(dataDir, "test-machine", "profile"), CLAUDE_CONFIG_DIR: undefined };
   /** 024 R-379 (T767): a Test's view of the browser tools, from the same local check. */
   const testBrowserTools = async (agent: ConversationAgent): Promise<AgentTestResult["browserTools"]> => {
     const tools = (await checkAgent(agent)).availability.browserTools;
@@ -226,6 +244,15 @@ async function main(): Promise<void> {
   };
   let handler: CommandHandler | undefined;
   const ownerCodexConfig = codexConfigPath(process.env);
+  /** 027 R-420: the owner's Codex config, read-only, for the names Codex is not handed. */
+  const codexSkipped = async (servers: readonly PanelMcpServer[]): Promise<ReadonlySet<string>> =>
+    codexSkippedNames(servers, ownerCodexConfig === undefined ? undefined : await readFile(ownerCodexConfig, "utf8").catch(() => undefined));
+  /** 027 R-419: what a side-panel run of `agent` is handed besides the browser entry; an unreadable list gives none. */
+  const extraServers = async (agent: ConversationAgent): Promise<acp.McpServer[]> => {
+    const list = await readPanelMcpServers(dataDir);
+    if (list.servers.length === 0) return [];
+    return sessionServersFor(agent, list.servers, process.env, agent === "codex" ? await codexSkipped(list.servers) : new Set());
+  };
   const pool = new ConversationPool({
     dataDir,
     browserRunId,
@@ -254,6 +281,8 @@ async function main(): Promise<void> {
       // T566 (R-322): read-only, for whether the owner's own Codex `hallpass` can be merged over.
       ...(ownerCodexConfig === undefined ? {} : { codexConfigPath: ownerCodexConfig }),
     }),
+    // 027 R-419: the owner's extra MCP servers, read once per run.
+    extraServers,
     log,
     ...(testMode.idleMs === undefined ? {} : { idleMs: testMode.idleMs }),
     ...(testMode.modelSetBoundMs === undefined ? {} : { modelSetBoundMs: testMode.modelSetBoundMs }),
@@ -283,6 +312,20 @@ async function main(): Promise<void> {
     // 024 R-375 / R-377: install state, last test and the install lock, shared with other browsers' brokers.
     shared: { dataDir, browserId, pid: process.pid },
     tests,
+    // 027: the extra MCP servers' list, the environment they read (set / not set only) and the Check.
+    mcpServers: {
+      env: process.env,
+      read: () => readPanelMcpServers(dataDir),
+      save: (server, previousName) => savePanelMcpServer(dataDir, server, previousName),
+      remove: (name) => removePanelMcpServer(dataDir, name),
+      check: (server) => checkPanelMcpServer(server, process.env),
+      codexSkipped,
+    },
+    // 026 D-026-2: read for every overview, written only on the settings page's install-skill.
+    skills: {
+      read: () => readSkillStates(skillEnv),
+      install: (location, replaceChanged) => installSkill(location, { env: skillEnv, ...(replaceChanged === undefined ? {} : { replaceChanged }) }),
+    },
     install: (agent, onProgress, control) =>
       installAgent(
         agent,

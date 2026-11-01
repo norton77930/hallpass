@@ -31,6 +31,7 @@ export const repoRoot = resolve(import.meta.dirname, "..");
 export const FORBIDDEN_PATHS = [
   "docs/reference-*.md",
   "tests/acceptance/probe-004/reports/**",
+  "tests/acceptance/probe-017/reports/**",
   ".claude/scheduled_tasks.lock",
   ".claude/settings*.json",
   ".claude/worktrees/**",

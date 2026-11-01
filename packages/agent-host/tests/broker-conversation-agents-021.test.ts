@@ -71,7 +71,7 @@ async function untilTurnEnds(harness: Harness, id: string, from: number) {
 }
 
 describe("T654 Hermes strict", () => {
-  it("starts with the managed layer named in its environment, sets `default`, asks before an edit; Reject answers `deny`", async () => {
+  it.runIf(process.platform === "win32")("starts with the managed layer named in its environment, sets `default`, asks before an edit; Reject answers `deny`", async () => {
     h = await poolHarness();
     const id = await h.start("hermes");
     expect(h.pool.state(id)).toBe("idle");
@@ -124,7 +124,7 @@ describe("T655 DeepSeek strict", () => {
 });
 
 describe("T658 stop while starting (R-354, SC-159)", () => {
-  it("kills the starting agent's process tree, ends the start `start-cancelled`, frees the cap slot; nothing is left within 5 s", async () => {
+  it.runIf(process.platform === "win32")("kills the starting agent's process tree, ends the start `start-cancelled`, frees the cap slot; nothing is left within 5 s", async () => {
     // Read at each launch: the first start hangs at `session/new` with a child process; later ones do not.
     const env: Record<string, string> = { FAKE_ACP_HANG_AT: "new", FAKE_ACP_SPAWN_CHILD: "1" };
     h = await poolHarness({ cap: 1, env });
@@ -210,7 +210,7 @@ describe("T662 / T663 a launch-time mode change restarts the agent between turns
   const modeEvents = (harness: Harness, id: string) =>
     harness.rec.of(id).flatMap((entry) => (entry.event.type === "mode" ? [entry.event] : []));
 
-  it("T662 Hermes strict -> automatic: a new run with the agent-review layer and `accept_edits`, continued with session/load", async () => {
+  it.runIf(process.platform === "win32")("T662 Hermes strict -> automatic: a new run with the agent-review layer and `accept_edits`, continued with session/load", async () => {
     h = await poolHarness();
     const id = await h.start("hermes");
     await h.turn(id, "hello");
@@ -401,12 +401,13 @@ describe("FR-361 a new conversation starts in the mode chosen before its first m
     harness.rec.of(id).flatMap((entry) => (entry.event.type === "mode" ? [entry.event] : []));
   const managed = (harness: Harness) => ({ HERMES_MANAGED_DIR: join(harness.dataDir, "agents", "hermes", "managed", "agent-review") });
 
-  it.each([
+  it.each(([
     ["claude-code", ["auto"], () => ({})],
     ["codex", ["agent"], () => ({})],
     ["hermes", ["accept_edits"], managed],
     ["deepseek", [], () => ({ DSH_PERMISSION_MODE: "workspace-write", DSH_TELEMETRY_MODE: "DISABLED" })],
-  ] as const)("%s: one run, in automatic from its start, reported and listed as automatic; the first message goes", async (agent, ids, launch) => {
+    // 028 D-028-3: Hermes' launch (its managed layer and cmd.exe) is Windows-only; the others run everywhere.
+  ] as const).filter(([agent]) => agent !== "hermes" || process.platform === "win32"))("%s: one run, in automatic from its start, reported and listed as automatic; the first message goes", async (agent, ids, launch) => {
     h = await poolHarness();
     const started = await h.pool.start(agent, { kind: "scratch" }, undefined, "agent-review");
     if (!started.ok) throw new Error(`start failed: ${started.error.code}`);
@@ -430,7 +431,7 @@ describe("FR-361 a new conversation starts in the mode chosen before its first m
  * every run the panel starts was actually given - each mode, a restart and a continued conversation.
  */
 describe("settings every panel run carries (FR-348, FR-352)", () => {
-  it("FR-348 every Hermes run has its saved-logins tool off: started strict, started automatic, restarted into another mode", async () => {
+  it.runIf(process.platform === "win32")("FR-348 every Hermes run has its saved-logins tool off: started strict, started automatic, restarted into another mode", async () => {
     h = await poolHarness();
     const strictId = await h.start("hermes");
     const automatic = await h.pool.start("hermes", { kind: "scratch" }, undefined, "agent-review");
@@ -591,7 +592,7 @@ describe("R-354 a new conversation is listed while its first start runs", () => 
 });
 
 describe("installed agents behind a batch file (Hermes' hermes-acp.cmd)", () => {
-  it("spawnAgentProcess keeps a verbatim cmd.exe command line as it is, a path with a space included", async () => {
+  it.runIf(process.platform === "win32")("spawnAgentProcess keeps a verbatim cmd.exe command line as it is, a path with a space included", async () => {
     const dir = await makeTempDir("hallpass-verbatim-");
     try {
       const folder = join(dir, "with space");

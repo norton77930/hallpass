@@ -75,6 +75,13 @@ describe("024 settingsCommandSchema", () => {
     command("ui.conversation.install-cancel", { agent: "codex" }),
     command("ui.conversation.test", { agent: "deepseek" }),
     command("ui.conversation.diagnostics", { agent: "claude-code" }),
+    // 026: the Hallpass skill's install or update.
+    command("ui.conversation.install-skill", { location: "claude-code" }),
+    command("ui.conversation.install-skill", { location: "agents", replaceChanged: true }),
+    // 027: the extra MCP servers for side-panel conversations.
+    command("ui.conversation.mcp-server-save", { server: { name: "gh", command: "npx", args: [], variables: [], agents: ["codex"] } }),
+    command("ui.conversation.mcp-server-remove", { name: "gh" }),
+    command("ui.conversation.mcp-server-check", { name: "gh" }),
   ];
 
   it("accepts each command frames.md lists, with its commandId", () => {
@@ -151,6 +158,14 @@ describe("024 worker to settings page", () => {
 
   it("worker.settings.state carries the settings projection", () => {
     expect(settingsMessageSchema.safeParse({ type: "worker.settings.state", payload: state }).success).toBe(true);
+  });
+
+  it("026: the projection may carry the skill's two locations", () => {
+    const skills = [
+      { location: "claude-code", state: "update-available", folder: "%USERPROFILE%\.claude\skills\hallpass" },
+      { location: "agents", state: "changed", folder: "%USERPROFILE%\.agents\skills\hallpass" },
+    ];
+    expect(settingsMessageSchema.safeParse({ type: "worker.settings.state", payload: { ...state, skills } }).success).toBe(true);
   });
 
   it("the projection has no prompts, sessions or conversations", () => {

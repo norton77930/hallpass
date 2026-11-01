@@ -52,9 +52,9 @@ describe("T239 the product's identity is Hallpass", () => {
     expect(zhMessages["extActionTitle.agent"]).toContain("Hallpass");
   });
 
-  it("advertises the MCP server as hallpass at version 0.17.0, the same version the extension carries", () => {
+  it("advertises the MCP server as hallpass at version 0.18.0, the same version the extension carries", () => {
     expect(SERVER_NAME).toBe("hallpass");
-    expect(SERVER_VERSION).toBe("0.17.0");
+    expect(SERVER_VERSION).toBe("0.18.0");
     expect(AGENT_EXTENSION_VERSION).toBe(SERVER_VERSION);
   });
 
@@ -63,8 +63,8 @@ describe("T239 the product's identity is Hallpass", () => {
     expect(createNativeHostManifest("C:\\x\\native-host.cmd").name).toBe("com.hallpass.host");
     expect(createNativeHostManifest("C:\\x\\native-host.cmd").description).not.toMatch(LEGACY);
     const env = { LOCALAPPDATA: "C:\\Users\\someone\\AppData\\Local" };
-    expect(hostDataDirectory(env)).toBe("C:\\Users\\someone\\AppData\\Local\\hallpass");
-    expect(hostManifestPath(env)).toBe("C:\\Users\\someone\\AppData\\Local\\hallpass\\com.hallpass.host.json");
+    expect(hostDataDirectory(env, "win32")).toBe("C:\\Users\\someone\\AppData\\Local\\hallpass");
+    expect(hostManifestPath(env, "win32")).toBe("C:\\Users\\someone\\AppData\\Local\\hallpass\\com.hallpass.host.json");
   });
 
   it("names the package and every workspace after the product", () => {

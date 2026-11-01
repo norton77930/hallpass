@@ -31,7 +31,6 @@ export type OwnerHallpassEntry = {
   enabled?: boolean;
 };
 
-const ENTRY_PATH = ["mcp_servers", "hallpass"] as const;
 
 /** Keys of the HTTP transport: a command entry merged over any of them is no longer a command entry. */
 const HTTP_KEYS = new Set(["url", "bearer_token", "bearer_token_env_var", "http_headers", "env_http_headers"]);
@@ -103,6 +102,12 @@ function inlineTable(value: string, entry: { keys: Set<string>; enabled?: boolea
 
 /** The owner's `[mcp_servers.hallpass]`, in whichever of TOML's ways it is written; undefined when absent. */
 export function findOwnerHallpass(toml: string): OwnerHallpassEntry | undefined {
+  return findOwnerEntry(toml, "hallpass");
+}
+
+/** 027 R-420: the owner's `[mcp_servers.<name>]` - the same question for an extra server's name. */
+export function findOwnerEntry(toml: string, name: string): OwnerHallpassEntry | undefined {
+  const ENTRY_PATH = ["mcp_servers", name] as const;
   const entry: { keys: Set<string>; enabled?: boolean } = { keys: new Set() };
   let found = false;
   let table: string[] = [];

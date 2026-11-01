@@ -167,6 +167,10 @@ type Overview = Pick<ConversationPanelState, "conversations" | "agents" | "folde
   consent?: ConversationPanelState["consent"];
   /** T563: a code only; the panel words it (the broker's text never reaches it). */
   notice?: ConversationPanelState["notice"];
+  /** 026: the Hallpass skill's folders, for the settings page. */
+  skills?: ConversationPanelState["skills"];
+  /** 027: the extra MCP servers, for the settings page. */
+  mcpServers?: ConversationPanelState["mcpServers"];
 };
 
 export function createConversationRelay(options: {
@@ -188,6 +192,8 @@ export function createConversationRelay(options: {
    */
   onBrowserToken?: (grant: { conversationId: string; token: string | null; startTabId?: number }) => void;
   greetingWindowMs?: number;
+  /** 028 FR-437: this browser runs outside Windows, where side-panel conversations are not offered yet. */
+  platformUnsupported?: () => boolean;
   now?: () => number;
   schedule?: (callback: () => void, delayMs: number) => void;
   mintId?: () => string;
@@ -483,7 +489,7 @@ export function createConversationRelay(options: {
       if (frame.type !== "conversation-browser-token" && frame.type !== "conversation-diagnostics") options.deliver?.(frame);
       switch (frame.type) {
         case "conversation-overview": {
-          const { conversations, agents, folders, consent, notice } = frame;
+          const { conversations, agents, folders, consent, notice, skills, mcpServers } = frame;
           // T610: a refusal the broker now shows itself (or an entry no longer listed) needs no stand-in.
           for (const conversationId of refusedResume) {
             const listed = conversations.find((entry) => entry.conversationId === conversationId);
@@ -495,6 +501,8 @@ export function createConversationRelay(options: {
             folders,
             ...(consent === undefined ? {} : { consent }),
             ...(notice === undefined ? {} : { notice }),
+            ...(skills === undefined ? {} : { skills }),
+            ...(mcpServers === undefined ? {} : { mcpServers }),
           };
           claimStarts(conversations);
           changed();
@@ -618,7 +626,7 @@ export function createConversationRelay(options: {
       if (!available) {
         return {
           available: false,
-          reason: outdated ? "host-outdated" : "broker-unavailable",
+          reason: options.platformUnsupported?.() === true ? "platform-unsupported" : outdated ? "host-outdated" : "broker-unavailable",
           consent,
           conversations: [],
           agents: [],
@@ -645,6 +653,10 @@ export function createConversationRelay(options: {
         agents: overview?.agents ?? [],
         folders: overview?.folders ?? [],
         ...(overview?.notice === undefined ? {} : { notice: overview.notice }),
+        // 026: for the settings page's skill section.
+        ...(overview?.skills === undefined ? {} : { skills: overview.skills }),
+        // 027: for the settings page's extra MCP servers.
+        ...(overview?.mcpServers === undefined ? {} : { mcpServers: overview.mcpServers }),
       };
     },
   };

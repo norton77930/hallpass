@@ -164,6 +164,22 @@ describe("025 the bound on a model or effort set request", () => {
     expect((await h.index.get(id))?.model).toEqual({ model: "model-gamma", effort: "default" });
   });
 
+  it("#24 a late answer takes only the part it asked: an effort accepted meanwhile is not undone by its older snapshot", async () => {
+    // The model set's answer is taken on arrival and held 6 s; the effort set goes after its bound and answers at once.
+    h = await poolHarness({
+      env: { FAKE_ACP_MODELS: "config", FAKE_ACP_SET_DELAY_MS: "6000", FAKE_ACP_SET_DELAY_COUNT: "1", FAKE_ACP_SET_SNAPSHOT_EARLY: "1" },
+      modelSetBoundMs: BOUND_MS,
+    });
+    const id = await startWith(h, "claude-code");
+    expect(await h.pool.setModel(id, { model: "model-beta" })).toMatchObject({ ok: false, error: { code: "model-refused" } });
+    expect(await h.pool.setModel(id, { effort: "high" })).toEqual({ ok: true });
+    expect(await current(h, id)).toEqual({ model: "model-beta", effort: "high" });
+    // Past the late answer, which still says effort `default`.
+    await new Promise((done) => setTimeout(done, 6_000));
+    expect(await current(h, id)).toEqual({ model: "model-beta", effort: "high" });
+    expect((await h.index.get(id))?.model).toEqual({ model: "model-beta", effort: "high" });
+  });
+
   it("the timeout notice names what is current when it is said, not what was current when the request went", async () => {
     // The first set's late answer (at 4.5 s) lands while the second waits (3 s - 6 s) and moves the model.
     h = await poolHarness({ env: { FAKE_ACP_MODELS: "config", FAKE_ACP_SET_DELAY_MS: "4500" }, modelSetBoundMs: 3_000 });

@@ -109,6 +109,14 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  *                         (after logging the request), so a test can act while a change is in flight.
  * - FAKE_ACP_SET_DELAY_COUNT=<n>  (025) only the first n sets of this process are held; later ones answer
  *                         at once (unset: every one is held).
+ * - prompt keyword `ask:elicit` (#17): asks "Which colour do you prefer?" as a form elicitation (red / blue)
+ *                         when the client advertised `elicitation.form` at initialize, and says back
+ *                         `elicit:<action>`; otherwise says `elicit:unsupported`.
+ * - FAKE_ACP_SET_SNAPSHOT_EARLY=1  (#24) a `session/set_config_option` applies the change and takes the
+ *                         options it answers with on arrival, before FAKE_ACP_SET_DELAY_MS: a held answer
+ *                         then misses what a later set changed meanwhile (an out-of-order snapshot).
+ * - FAKE_ACP_EXIT_AFTER_SET=1  (#23) accept the first set, answer it, then exit with code 3 right away:
+ *                         an agent that switched and went away before the client reported the switch.
  * - FAKE_ACP_REQUEST_LOG=<path>  (025 T802) append one JSON line per request (and `session/cancel`) in
  *                         the order received: `{ method, params }`, params a summary - `sessionId`,
  *                         and `modeId` / `configId` + `value` / `modelId` / `text` where the request has
@@ -379,6 +387,11 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     setsDelayed += 1;
     await sleep(ms);
   };
+  /** FAKE_ACP_EXIT_AFTER_SET: the process ends just after the accepted set's answer is written. */
+  const exitAfterSet = <T>(answer: T): T => {
+    if (env.FAKE_ACP_EXIT_AFTER_SET === "1") setTimeout(() => exit(FAKE_ACP_EXIT_CRASH), 0);
+    return answer;
+  };
   /** `session/set_model` (the older list, Hermes-like). */
   const setModel = (params: Record<string, unknown>) => {
     if (modelShape !== "models" && modelShape !== "refuse") throw acp.RequestError.methodNotFound("session/set_model");
@@ -406,6 +419,8 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
   }
 
   let connection!: acp.AgentSideConnection;
+  /** #17: whether the client said at `initialize` that it shows form elicitations. */
+  let clientTakesForms = false;
 
   const update = (sessionId: string, update: acp.SessionNotification["update"]) =>
     connection.sessionUpdate({ sessionId, update });
@@ -745,6 +760,23 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       } else if (token === "hang") {
         matched = true;
         await unlessCancelled(signal, new Promise<never>(() => {}));
+      } else if (token === "ask:elicit") {
+        // #17: a question as a form, only to a client that said it shows forms; the answer's action is said back.
+        matched = true;
+        if (!clientTakesForms) {
+          await chunk(sessionId, "elicit:unsupported");
+        } else {
+          const answer = await unlessCancelled(
+            signal,
+            connection.createElicitation({
+              sessionId,
+              mode: "form",
+              message: "Which colour do you prefer?",
+              requestedSchema: { type: "object", properties: { colour: { type: "string", enum: ["red", "blue"] } }, required: ["colour"] },
+            }),
+          );
+          await chunk(sessionId, `elicit:${answer.action}`);
+        }
       }
     }
     if (!matched) await chunk(sessionId, `echo:${text}`);
@@ -795,6 +827,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
 
   const agent: acp.Agent = {
     async initialize(params) {
+      clientTakesForms = params.clientCapabilities?.elicitation?.form != null;
       log({ method: "initialize", params: { protocolVersion: params.protocolVersion } });
       logRequest("initialize");
       await hangIfAsked("initialize");
@@ -917,8 +950,10 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       const value = "value" in params ? params.value : undefined;
       logRequest("session/set_config_option", { sessionId: params.sessionId, configId: params.configId, value });
       log({ method: "session/set_config_option", params: { sessionId: params.sessionId, configId: params.configId, value } });
+      const set = () => setConfigOption({ sessionId: params.sessionId, configId: params.configId, value }) as acp.SetSessionConfigOptionResponse;
+      const early = env.FAKE_ACP_SET_SNAPSHOT_EARLY === "1" ? set() : undefined;
       await setDelay();
-      return setConfigOption({ sessionId: params.sessionId, configId: params.configId, value }) as acp.SetSessionConfigOptionResponse;
+      return exitAfterSet(early ?? set());
     },
     /** 025: `session/set_model` (Hermes-like `models`) is not in the SDK's agent interface; it arrives here. */
     async extMethod(method, params) {
@@ -926,7 +961,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       logRequest(method, { sessionId: params.sessionId, modelId: params.modelId });
       log({ method, params: { sessionId: params.sessionId, modelId: params.modelId } });
       await setDelay();
-      return setModel(params);
+      return exitAfterSet(setModel(params));
     },
     cancel(params) {
       logRequest("session/cancel", { sessionId: params.sessionId });

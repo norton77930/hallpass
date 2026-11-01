@@ -4,7 +4,9 @@ Thanks for looking. This page is what you need to build, test and send a change.
 
 ## Build
 
-Windows 11, Node 24, Google Chrome.
+Windows 11, Node 24, Google Chrome. Linux and macOS build and run every browser-less suite too (CI runs
+all three); tests that can only pass on Windows are marked `it.runIf(process.platform === "win32")`, and
+side-panel conversations are Windows-only for now (spec 028).
 
 ```powershell
 npm install

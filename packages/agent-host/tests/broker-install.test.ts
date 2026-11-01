@@ -163,7 +163,7 @@ const FAST_RETRY = { attempts: 3, delayMs: 0 };
 const pinnedManifest = (tree: string) => join(tree, "node_modules", ...ADAPTER.package.split("/"), "package.json");
 
 describe("installAgent with an injected npm (T532, T533, R-314)", () => {
-  it("runs npm ci in .install-<pid>-<random> on the shipped manifest and lock, then points the version at it", async () => {
+  it.runIf(process.platform === "win32")("runs npm ci in .install-<pid>-<random> on the shipped manifest and lock, then points the version at it", async () => {
     const { ports: p, calls } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
       return {};
@@ -186,7 +186,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(phases).toEqual(["preparing", "downloading", "finishing"]);
   });
 
-  it("021 R-362: a tree npm is still writing is not installed for launch; it is once the pointer names it", async () => {
+  it.runIf(process.platform === "win32")("021 R-362: a tree npm is still writing is not installed for launch; it is once the pointer names it", async () => {
     let midway: boolean | undefined;
     const { ports: p } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
@@ -200,7 +200,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await installedAdapterDirectory(data, AGENT, (path) => readFile(path, "utf8"))).toBe(treeDir());
   });
 
-  it("021 R-362: the folder npm ci ran in is the install - the tree is never renamed", async () => {
+  it.runIf(process.platform === "win32")("021 R-362: the folder npm ci ran in is the install - the tree is never renamed", async () => {
     const { ports: p, calls } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
       await writeFile(join(cwd, "written-by-npm.txt"), "x");
@@ -212,7 +212,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await exists(join(calls[0]!.cwd!, "written-by-npm.txt"))).toBe(true);
   });
 
-  it("uses the npm.cmd next to the running node when there is one", async () => {
+  it.runIf(process.platform === "win32")("uses the npm.cmd next to the running node when there is one", async () => {
     const nodeDir = join(root, "nodejs");
     await mkdir(nodeDir);
     await writeFile(join(nodeDir, "npm.cmd"), "");
@@ -227,7 +227,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(calls[0]!.file).toBe(join(nodeDir, "npm.cmd"));
   });
 
-  it("leaves no folder when npm exits non-zero, and reports npm's stderr tail redacted", async () => {
+  it.runIf(process.platform === "win32")("leaves no folder when npm exits non-zero, and reports npm's stderr tail redacted", async () => {
     const stderr = [
       "npm error code E500",
       "npm error fetch https://bob:hunter2@registry.example/pkg.tgz failed",
@@ -249,7 +249,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await list(join(data, "agents", AGENT))).toEqual([]);
   });
 
-  it("leaves no folder when the lockfile integrity does not match (npm's EINTEGRITY exit)", async () => {
+  it.runIf(process.platform === "win32")("leaves no folder when the lockfile integrity does not match (npm's EINTEGRITY exit)", async () => {
     const { ports: p } = ports(() => ({
       code: 1,
       stderr: "npm error code EINTEGRITY\nnpm error sha512-AAAA... integrity checksum failed when using sha512",
@@ -260,7 +260,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await list(join(data, "agents", AGENT))).toEqual([]);
   });
 
-  it("leaves no folder when npm cannot be started or runs out of time", async () => {
+  it.runIf(process.platform === "win32")("leaves no folder when npm cannot be started or runs out of time", async () => {
     const cannotStart = ports(() => {
       throw new Error("spawn npm.cmd ENOENT");
     });
@@ -295,7 +295,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await list(join(data, "agents", AGENT))).toEqual([]);
   });
 
-  it("does nothing when the pinned adapter is already installed", async () => {
+  it.runIf(process.platform === "win32")("does nothing when the pinned adapter is already installed", async () => {
     const { ports: first } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
       return {};
@@ -306,7 +306,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("021 R-362: keeps an install made by 0.15.0 (<version> folder, no pointer) without npm, for launch too", async () => {
+  it.runIf(process.platform === "win32")("021 R-362: keeps an install made by 0.15.0 (<version> folder, no pointer) without npm, for launch too", async () => {
     await writeAdapterTree(installedDir());
     const { ports: p, calls } = ports(() => ({}));
     expect(await installAgent(AGENT, p)).toEqual({ ok: true, directory: installedDir() });
@@ -315,7 +315,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await list(join(data, "agents", AGENT))).toEqual([ADAPTER.version]);
   });
 
-  it("replaces a half-written 0.15.0 adapter folder that is not a valid install", async () => {
+  it.runIf(process.platform === "win32")("replaces a half-written 0.15.0 adapter folder that is not a valid install", async () => {
     await mkdir(join(installedDir(), "node_modules"), { recursive: true });
     await writeFile(join(installedDir(), "stale.txt"), "x");
     const { ports: p } = ports(async (cwd) => {
@@ -326,7 +326,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await exists(installedDir())).toBe(false);
   });
 
-  it("021 R-362: replaces a pointer whose tree was damaged since, with the new tree", async () => {
+  it.runIf(process.platform === "win32")("021 R-362: replaces a pointer whose tree was damaged since, with the new tree", async () => {
     const damaged = treeDir(AGENT, "old000");
     await mkdir(join(damaged, "node_modules"), { recursive: true });
     await writeFile(installPointerPath(data, AGENT), JSON.stringify({ folder: `.install-${process.pid}-old000` }));
@@ -340,7 +340,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
   });
 
-  it("T572: another broker's install in progress is left alone, and the first to finish is the one install", async () => {
+  it.runIf(process.platform === "win32")("T572: another broker's install in progress is left alone, and the first to finish is the one install", async () => {
     // Another browser's broker is downloading into its own tree right now.
     const other = treeDir(AGENT, "aaa111", 4_000_201);
     await mkdir(join(other, "node_modules"), { recursive: true });
@@ -361,7 +361,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await readPointer()).toEqual({ folder: ".install-4000201-aaa111" });
   });
 
-  it("T572: two installs at once each write their own tree and end with one install both answer with", async () => {
+  it.runIf(process.platform === "win32")("T572: two installs at once each write their own tree and end with one install both answer with", async () => {
     let release!: () => void;
     const bothRunning = new Promise<void>((resolve) => (release = resolve));
     let running = 0;
@@ -384,7 +384,7 @@ describe("installAgent with an injected npm (T532, T533, R-314)", () => {
     expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
   });
 
-  it("installs the Codex adapter the same way", async () => {
+  it.runIf(process.platform === "win32")("installs the Codex adapter the same way", async () => {
     const codex = AGENT_ADAPTERS.codex;
     const { ports: p, calls } = ports(async (cwd) => {
       const dir = join(cwd, "node_modules", ...codex.package.split("/"));
@@ -409,7 +409,7 @@ describe("installAgent when the file system will not let a file be read (021 R-3
     return {};
   };
 
-  it("does not download because the pointer is held open: it fails, saying so, and leaves the install as it is", async () => {
+  it.runIf(process.platform === "win32")("does not download because the pointer is held open: it fails, saying so, and leaves the install as it is", async () => {
     await pointAtInstalled();
     const pointer = installPointerPath(data, AGENT);
     const { ports: p, calls } = ports(npmWrites, { readText: lockedReads((path) => path === pointer), readRetry: FAST_RETRY });
@@ -423,7 +423,7 @@ describe("installAgent when the file system will not let a file be read (021 R-3
     expect((await list(join(data, "agents", AGENT))).sort()).toEqual([`.install-${process.pid}-old000`, pointerName()].sort());
   });
 
-  it("reads the pointer again when the hold is brief, and then needs no download", async () => {
+  it.runIf(process.platform === "win32")("reads the pointer again when the hold is brief, and then needs no download", async () => {
     await pointAtInstalled();
     const pointer = installPointerPath(data, AGENT);
     let held = 2;
@@ -435,7 +435,8 @@ describe("installAgent when the file system will not let a file be read (021 R-3
     expect(calls).toHaveLength(0);
   });
 
-  it.each([
+  // 028 D-028-3: a file held open blocks a rename on Windows only.
+  (process.platform === "win32" ? it : it.skip).each([
     ["the tree the pointer names", async () => (await pointAtInstalled(), installedTree())],
     ["a 0.15.0 <version> folder", async () => (await writeAdapterTree(installedDir()), installedDir())],
   ])("does not download because the pinned package.json in %s is held open, nor remove it", async (_, install) => {
@@ -451,7 +452,7 @@ describe("installAgent when the file system will not let a file be read (021 R-3
     expect(await exists(pinnedManifest(installed))).toBe(true);
   });
 
-  it("never replaces a pointer another install created because it cannot read it (the pointAt EEXIST path)", async () => {
+  it.runIf(process.platform === "win32")("never replaces a pointer another install created because it cannot read it (the pointAt EEXIST path)", async () => {
     const other = treeDir(AGENT, "aaa111", 4_000_201);
     const pointer = installPointerPath(data, AGENT);
     let npmDone = false;
@@ -484,7 +485,7 @@ describe("installAgent per agent (021 T646, R-345, R-346)", () => {
     await writeFile(join(dir, "package.json"), JSON.stringify({ name: DSH.package, version: DSH.version, bin: { dsh: "lib/bin.js" } }));
   };
 
-  it("bounds an adapter's npm ci at 10 minutes", async () => {
+  it.runIf(process.platform === "win32")("bounds an adapter's npm ci at 10 minutes", async () => {
     const { ports: p, calls } = ports(async (cwd) => {
       await writeAdapterTree(cwd);
       return {};
@@ -493,7 +494,7 @@ describe("installAgent per agent (021 T646, R-345, R-346)", () => {
     expect(calls[0]!.timeoutMs).toBe(10 * 60 * 1000);
   });
 
-  it("fetches DeepSeek from its shipped manifest and lock with its optional platform bindings kept, bounded at 30 minutes", async () => {
+  it.runIf(process.platform === "win32")("fetches DeepSeek from its shipped manifest and lock with its optional platform bindings kept, bounded at 30 minutes", async () => {
     const { ports: p, calls } = ports(async (cwd) => {
       await writeDshTree(cwd);
       return {};
@@ -533,7 +534,7 @@ describe("shippedManifestsDirectory (S9: the package's flat host/ and the dev di
 });
 
 describe("cleanStaging (T532: at broker start)", () => {
-  it("removes leftover .staging-* folders and nothing else", async () => {
+  it.runIf(process.platform === "win32")("removes leftover .staging-* folders and nothing else", async () => {
     await mkdir(join(data, "agents", AGENT, ".staging-dead", "node_modules"), { recursive: true });
     await mkdir(join(data, "agents", AGENT, ".staging-beef"), { recursive: true });
     await mkdir(join(data, "agents", AGENT, ADAPTER.version, "node_modules"), { recursive: true });
@@ -555,7 +556,7 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect(await exists(join(data, "scratch", ".staging-user-folder"))).toBe(true);
   });
 
-  it("T572: leaves a download another live broker is still running, and removes a dead broker's", async () => {
+  it.runIf(process.platform === "win32")("T572: leaves a download another live broker is still running, and removes a dead broker's", async () => {
     const otherBroker = 4_000_101;
     const deadBroker = 4_000_102;
     const self = 4_000_103;
@@ -573,7 +574,7 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect(await list(join(data, "agents", AGENT))).toEqual([`.staging-${otherBroker}-aaa`]);
   });
 
-  it("021 R-362: removes a crashed install's tree and pointer temp, never the tree a pointer names nor a live broker's", async () => {
+  it.runIf(process.platform === "win32")("021 R-362: removes a crashed install's tree and pointer temp, never the tree a pointer names nor a live broker's", async () => {
     const liveBroker = 4_000_301;
     const deadBroker = 4_000_302;
     const crashed = treeDir(AGENT, "dead01", deadBroker);
@@ -593,7 +594,7 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect(await isAdapterInstalled(AGENT, realAgentPorts())).toBe(true);
   });
 
-  it("021 R-362: after a crash mid-install, the next start cleans it and the install runs again", async () => {
+  it.runIf(process.platform === "win32")("021 R-362: after a crash mid-install, the next start cleans it and the install runs again", async () => {
     const crashed = treeDir(AGENT, "dead02", 4_000_402);
     await mkdir(join(crashed, "node_modules", "half"), { recursive: true });
     await writeAdapterTree(crashed); // npm had already put the pinned package.json down
@@ -609,7 +610,7 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect((await list(join(data, "agents", AGENT))).sort()).toEqual([`.install-${process.pid}-abc123`, pointerName()].sort());
   });
 
-  it("021 R-362 (L1): keeps a tree whose installer named it and exited between the pointer read and the pid check", async () => {
+  it.runIf(process.platform === "win32")("021 R-362 (L1): keeps a tree whose installer named it and exited between the pointer read and the pid check", async () => {
     const installer = 4_000_501;
     const tree = treeDir(AGENT, "race01", installer);
     await writeAdapterTree(tree);
@@ -648,7 +649,8 @@ describe("cleanStaging (T532: at broker start)", () => {
     expect(await exists(crashed)).toBe(true);
   });
 
-  it.each([
+  // 028 D-028-3: what names a tree is Windows' path syntax.
+  (process.platform === "win32" ? it : it.skip).each([
     ["an absolute path", (tree: string) => JSON.stringify({ folder: tree })],
     ["a separator", (tree: string) => JSON.stringify({ folder: `.\\${basename(tree)}` })],
     ["a forward slash", (tree: string) => JSON.stringify({ folder: `./${basename(tree)}` })],
@@ -733,7 +735,7 @@ describe("installAgent with the real npm against a loopback tarball (T532)", () 
       runCommand(file, args, { ...options, env: { ...process.env, npm_config_fetch_retries: "0" } }),
   });
 
-  it("installs a package whose tarball matches the lockfile integrity", async () => {
+  it.runIf(process.platform === "win32")("installs a package whose tarball matches the lockfile integrity", async () => {
     const phases: InstallPhase[] = [];
     const result = await installAgent(AGENT, real(await project(false)), (progress) => phases.push(progress.phase));
     const directory = join(data, "agents", AGENT, (await readPointer()).folder);
@@ -743,7 +745,7 @@ describe("installAgent with the real npm against a loopback tarball (T532)", () 
     expect(phases).toEqual(["preparing", "downloading", "finishing"]);
   }, 90_000);
 
-  it("leaves no folder, staging included, when the lockfile integrity is tampered", async () => {
+  it.runIf(process.platform === "win32")("leaves no folder, staging included, when the lockfile integrity is tampered", async () => {
     const result = await installAgent(AGENT, real(await project(true)));
     expect(result.ok).toBe(false);
     if (result.ok) return;

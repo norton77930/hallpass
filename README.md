@@ -15,10 +15,12 @@ your logins. Every site the agent touches, and every action that changes a page,
 decision you make in the side panel: allow once, allow this site from now on, or refuse. You can
 stop the agent at any moment and take your tabs back.
 
-> **Platform**: Windows 11. The installer registers the host for Google Chrome, Chromium,
-> Microsoft Edge and Brave. Google Chrome is the browser the acceptance suite runs on; Edge was
-> live-verified on 2026-10-03 and Brave is registered but not live-verified — see
-> [issue #2](../../issues/2). macOS and Linux are not supported yet — see [issue #1](../../issues/1).
+> **Platform**: Windows 11, Linux and macOS. The installer registers the host for Google Chrome,
+> Chromium, Microsoft Edge and Brave. Google Chrome on Windows is the browser the acceptance suite runs
+> on; Edge was live-verified on 2026-10-03 and Brave is registered but not live-verified — see
+> [issue #2](../../issues/2). On Linux and macOS your coding agents use the browser through Hallpass as
+> on Windows; **side-panel conversations are Windows-only for now**. Linux was verified with Chromium;
+> macOS follows the browsers' documented folders and has not been verified on a Mac yet.
 > **Licence**: Apache-2.0.
 
 ![A coding agent searches DuckDuckGo in the user's Chrome: before it types and before it presses Enter, the side panel asks the user and the agent waits for Allow once. The page half is Hallpass's own recording, with the action label, the step counter and the watermark](docs/media/demo.gif)
@@ -87,6 +89,13 @@ talks to the extension.
    For Claude Desktop, Codex CLI, Cursor and CodeBuddy the zip's `README.md` shows where each keeps
    its MCP configuration and what to paste.
 
+**Linux and macOS**: unzip somewhere you will not move, start your browser once (so its profile
+folder exists), then run `sh ./install.sh` (no sudo). It writes the host into
+`~/.local/share/hallpass/` (Linux, or `$XDG_DATA_HOME`) or `~/Library/Application Support/hallpass/`
+(macOS), and a host manifest into each installed browser's own `NativeMessagingHosts` folder. Steps 3
+and 4 are the same; the installer prints the path to give your client. `sh ./uninstall.sh` removes
+it (`--purge` also removes your upload-folder list).
+
 **From source** instead of the zip:
 
 ```powershell
@@ -95,7 +104,7 @@ cd hallpass
 npm install
 npx tsc -b
 npm run build                 # apps\extension\dist\agent
-npm run agent-host:install    # registers the host pointing at this checkout
+npm run agent-host:install    # registers the host pointing at this checkout (any platform)
 claude mcp add hallpass --scope user -- node "<checkout>\packages\agent-host\dist\mcp-server.js"
 ```
 
@@ -144,12 +153,21 @@ the agent picker, or from *Extension options* at `chrome://extensions`. It has f
 - **Agents**: one card per side-panel agent with its state (ready, ready with warnings, needs a
   download, downloading, not installed), version and checks; the download it needs, with progress and
   Cancel; **Test**, one short model call that says whether the agent starts, answers and gets the
-  browser tools; an **Enabled** switch and **Make default** for what the side panel offers.
+  browser tools; an **Enabled** switch and **Make default** for what the side panel offers. Below
+  the cards, **Skill for your coding agents** installs a short guide (`skills/hallpass/SKILL.md`) into
+  Claude Code's and the shared agents' skill folders in your profile, so an outside agent knows how
+  pairing and consent cards work and does not retry what you declined. It is written only when you
+  press Install, never into a project, and the uninstall removes it unless you changed it.
 - **Sites & permissions**: the paired agents with Unpair, every site's mode and diagnostics grant with
   Revoke (and Undo), and the upload folders. A session card's *Manage this site's permissions ↗* opens
   this section at its site.
 - **Browser tools**: which agents can use Hallpass's browser tools, and the switch that lets side-panel
-  agents use them.
+  agents use them. Below it, **extra MCP servers for side-panel conversations**: servers you add here
+  (a command, its arguments, the names of the environment variables it needs, and which of Claude Code,
+  Codex and Hermes get it) are handed to side-panel conversations besides the browser tools, without
+  touching the agents' own settings. **Check** starts one once and lists its tools. Variable values are
+  read from your environment and never stored or shown. The program runs with your rights: add only
+  what you trust.
 - **Connection & diagnostics**: whether the helper is connected, the versions, this browser's name, and
   an agent's last lines of output when you ask, with secrets removed.
 

@@ -64,7 +64,8 @@ export const AGENT_MANIFEST_FILES = ["package.json", "package-lock.json"] as con
 const AGENT_MANIFEST_DIRECTORIES = ["claude-code", "codex", "deepseek"] as const;
 
 /** What the zip's root holds, exactly (US1.1; the contract test pins it). */
-export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "README.md", "VERSION"] as const;
+// 028 (issue #1): install.sh / uninstall.sh beside the PowerShell pair, for macOS and Linux.
+export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md", "VERSION"] as const;
 
 export const PACKAGE_NAME = "hallpass";
 
@@ -206,7 +207,7 @@ export async function buildPackage(): Promise<string> {
   rmSync(stageDir, { recursive: true, force: true });
   mkdirSync(stageDir, { recursive: true });
   cpSync(extensionDistDir, resolve(stageDir, "extension"), { recursive: true });
-  for (const asset of ["install.ps1", "uninstall.ps1", "README.md"]) {
+  for (const asset of ["install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md"]) {
     cpSync(resolve(packageAssetsDir, asset), resolve(stageDir, asset));
   }
   writeFileSync(resolve(stageDir, "VERSION"), `${version}\n`, "utf8");
