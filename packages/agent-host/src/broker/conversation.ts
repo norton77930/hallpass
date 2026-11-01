@@ -508,6 +508,8 @@ export type ConversationDeps = {
   spawnAgent?: (spec: AdapterLaunchSpec, cwd: string) => ChildProcess;
   /** S6 (T552, R-321/R-322): the browser connection handed to each agent run. None: no `mcpServers`. */
   browser?: ConversationBrowserAccess;
+  /** 027 R-419: the owner's extra MCP servers ticked for an agent, read once per run. None: no extras. */
+  extraServers?: (agent: ConversationAgent) => Promise<acp.McpServer[]>;
   log?: (code: string, detail?: string) => void;
   /** 023 R-369: what the key-name check reads; the machine's own by default. */
   userEnvironment?: UserEnvironmentPorts;
@@ -615,6 +617,8 @@ export class Conversation {
   private inertToken: string | undefined;
   /** R-322: this run's entry name, decided before `session/new` and kept for a mode reload. */
   private serverName: PanelServerName = PANEL_SERVER_NAME;
+  /** 027 R-419: this run's extra MCP servers, read when it started; every session request of the run carries them. */
+  private extraServersValue: acp.McpServer[] = [];
   /** R-322: this run began with `session/new` and has not had its first message yet (RENAME_FIRST). */
   private renamePending = false;
   /** The broker's own `/rename` is in flight: what the agent says to it is not the owner's to see. */
@@ -810,6 +814,15 @@ export class Conversation {
     const naming: Promise<PanelServerName> = (this.deps.browser?.serverName(this.agent) ?? Promise.resolve(PANEL_SERVER_NAME)).catch(
       (): PanelServerName => PANEL_SERVER_NAME,
     );
+    // 027 R-419: the extra servers, read once for this run while the agent initialises; an agent that
+    // takes no MCP servers (DeepSeek) gets none, and a list that cannot be read gives none.
+    const extras: Promise<acp.McpServer[]> =
+      this.deps.extraServers === undefined || !AGENT_ADAPTERS[this.agent].takesBrowserTools
+        ? Promise.resolve([])
+        : this.deps.extraServers(this.agent).catch((): acp.McpServer[] => {
+            this.deps.log?.("conversation.extra-servers-unreadable", this.conversationId);
+            return [];
+          });
 
     let child: ChildProcess;
     try {
@@ -862,6 +875,7 @@ export class Conversation {
       const promptCapabilities = init.agentCapabilities?.promptCapabilities;
       this.acceptsValue = { image: promptCapabilities?.image === true, context: promptCapabilities?.embeddedContext === true };
       this.serverName = await naming;
+      this.extraServersValue = await extras;
       const mcpServers = this.mcpServers();
       let modes: acp.SessionModeState | null | undefined;
       if (request.resume !== undefined && init.agentCapabilities?.loadSession !== true && init.agentCapabilities?.sessionCapabilities?.resume != null) {
@@ -1050,6 +1064,9 @@ export class Conversation {
           ),
         );
         await settle();
+        // #23: the agent answered, then its exit was reported while the answer settled - no line
+        // after that notice; the change ends as one the exit cut short.
+        if (this.connection !== connection) throw new AgentExited(null);
         this.followModelAnswer(answer, part, value);
         this.modelSetFollowed[part] = Math.max(this.modelSetFollowed[part], serial);
       } catch (error) {
@@ -1111,8 +1128,31 @@ export class Conversation {
     if (this.connection !== connection || !this.live || this.modelStateValue === undefined) return;
     if (serial <= this.modelSetFollowed[part]) return;
     this.modelSetFollowed[part] = serial;
-    this.followModelAnswer(answer, part, value);
+    this.followLatePart(answer, part, value);
     this.deps.onModelChange?.(this);
+  }
+
+  /**
+   * #24: a late answer's options may predate a change of the other part the agent accepted while it
+   * was held, so only the asked part is taken from it. A model part brings that model's offer; the
+   * effort followed meanwhile stays unless that model does not offer it (D-025-12: it moved).
+   */
+  private followLatePart(answer: unknown, part: "model" | "effort", value: string): void {
+    const state = this.modelStateValue;
+    if (state === undefined) return;
+    const reported = state.source === "config" ? modelStateOf(readModelOffer(answer) ?? NO_MODELS, currentOf(answer)) : undefined;
+    if (reported === undefined || reported.source !== "config") {
+      this.modelStateValue = { ...state, current: { ...state.current, [part]: value } };
+      return;
+    }
+    if (part === "effort") {
+      const effort = reported.current.effort ?? value;
+      this.modelStateValue = { ...state, current: { ...state.current, effort } };
+      return;
+    }
+    const kept = state.current.effort;
+    const effort = kept !== undefined && reported.efforts.some((entry) => entry.value === kept) ? kept : reported.current.effort;
+    this.modelStateValue = { ...reported, current: { model: reported.current.model, ...(effort === undefined ? {} : { effort }) } };
   }
 
   /**
@@ -1420,11 +1460,12 @@ export class Conversation {
     return withoutEnvironmentValues(text, this.runEnv());
   }
 
-  /** R-322: this run's `hallpass` entry, or nothing without a browser connection. */
+  /** R-322: this run's `hallpass` entry, or nothing without a browser connection; then (027 R-419) the run's extras. */
   private mcpServers(): acp.McpServer[] {
     const browser = this.deps.browser;
     const token = this.browserToken ?? this.inertToken;
-    return browser === undefined || token === undefined ? [] : browser.servers(this.conversationId, token, this.serverName);
+    const own = browser === undefined || token === undefined ? [] : browser.servers(this.conversationId, token, this.serverName);
+    return [...own, ...this.extraServersValue];
   }
 
   /** The run's token, handed to the worker again (a new relay's worker holds none); a revoked run has none. */
@@ -2362,6 +2403,8 @@ export type ConversationPoolOptions = {
   spawnAgent?: (spec: AdapterLaunchSpec, cwd: string) => ChildProcess;
   /** S6 (T552): each agent run's browser token and `hallpass` entry (`browser-token.ts`). */
   browser?: ConversationBrowserAccess;
+  /** 027 R-419: the owner's extra MCP servers for an agent's run (`panel-mcp-servers.ts`). */
+  extraServers?: (agent: ConversationAgent) => Promise<acp.McpServer[]>;
   folderExists?: (path: string) => Promise<boolean>;
   newConversationId?: () => string;
   log?: (code: string, detail?: string) => void;
@@ -2950,6 +2993,7 @@ export class ConversationPool {
       ...(this.options.modelSetBoundMs === undefined ? {} : { modelSetBoundMs: this.options.modelSetBoundMs }),
       ...(this.options.spawnAgent === undefined ? {} : { spawnAgent: this.options.spawnAgent }),
       ...(this.options.browser === undefined ? {} : { browser: this.options.browser }),
+      ...(this.options.extraServers === undefined ? {} : { extraServers: this.options.extraServers }),
       ...(this.options.log === undefined ? {} : { log: this.options.log }),
       ...(this.options.userEnvironment === undefined ? {} : { userEnvironment: this.options.userEnvironment }),
     });

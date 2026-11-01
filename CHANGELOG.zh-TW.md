@@ -3,6 +3,17 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.18.0 — 2026-11-01
+
+- **Linux 與 macOS**(#1):`install.sh` / `uninstall.sh` 為目前使用者安裝 host(不需要 sudo),位置是 `~/.local/share/hallpass` 或 `~/Library/Application Support/hallpass`,並在每個已安裝瀏覽器(Chrome、Chromium、Edge、Brave)的 native messaging 資料夾放入 host manifest。程式代理可以和 Windows 一樣透過 Hallpass 使用瀏覽器；側欄對話目前只支援 Windows,側欄和設定頁會說明。Linux 已用 Chromium 驗證;macOS 尚未在 Mac 上驗證。CI 改為在 Windows、Linux、macOS 上都跑。
+
+- **給程式代理的技能**(#16):設定頁的 Agent 區可以把一份簡短說明安裝到你個人資料夾裡 Claude Code 和共用 agent 的技能資料夾，告訴外部 agent 瀏覽器工具怎麼搭配、配對和同意卡要等你回應，以及被拒絕或沒回應的卡片就是你的答案，不要重試。只有按下才安裝，不會寫進任何專案；會顯示已是最新、有更新或已被你修改；你改過的版本要確認後才會取代。解除安裝時會一併移除(你改過的除外)。內容也在 repo 的 `skills/hallpass/SKILL.md`。
+- **側邊欄對話的額外 MCP server**(#21):設定頁的瀏覽器工具區可以加入要交給側邊欄對話的 server：指令、參數、需要的變數名稱，以及要給 Claude Code、Codex、Hermes 中的哪幾個。不會改動 agent 自己的設定，終端機的使用不受影響。**檢查** 會啟動 server 一次並列出它的工具。變數的值從你的環境讀取，不會儲存、顯示或寫進紀錄。DeepSeek 不接受 MCP server。
+- **電腦忙碌時**(#25):5 秒內沒回應 `--version` 的程式，背景重試的時限從 15 秒改為 30 秒；再逾時的話，卡片會說明電腦可能正忙，請稍後按「重新檢查」。
+- **切換模型**(#23、#24):agent 切換完立刻結束時，切換紀錄不會再出現在結束通知之後；逾時後晚到的回覆，不會再把你期間改過的推理強度改回去。
+- **維護者**:`npm run publish:snapshot -- <公開 repo 的 clone>` 產生公開版的 commit 和 tag。
+- 主機和擴充功能要一起升級：重新安裝主機並重新載入擴充功能。
+
 ## 0.17.0 — 2026-10-26
 
 - **選擇模型和推理強度**：側欄輸入框在模式 chip 後面多了模型 chip，點開列出 agent 提供的模型(預設的在最前面),agent 有提供時也列出推理強度。Claude Code、Codex、Hermes、DeepSeek 都可用，內容以各 agent 回報的為準;agent 沒回報模型時不顯示 chip。

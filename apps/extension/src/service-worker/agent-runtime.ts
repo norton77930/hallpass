@@ -756,7 +756,17 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   const panelConsent = createPanelConsentStore();
   /** 024 R-380: the owner's enabled agents and default; this worker is the record's only writer. */
   const agentChoices = createAgentChoicesStore({ reportDiagnostic: reportTestDiagnostic });
+  /** 028 FR-437: the browser's own operating system, asked once; side-panel conversations are Windows-only for now. */
+  let platformOs: string | undefined;
+  // Optional chaining: a runtime under test has no `chrome.runtime`, and is treated as Windows.
+  void Promise.resolve(globalThis.chrome?.runtime?.getPlatformInfo?.())
+    .then((info) => {
+      platformOs = info?.os;
+      if (platformOs !== undefined && platformOs !== "win") notify();
+    })
+    .catch(() => undefined);
   const conversations = createConversationRelay({
+    platformUnsupported: () => platformOs !== undefined && platformOs !== "win",
     deliver: (frame) => options.onConversationFrame?.(frame),
     reportDiagnostic: reportTestDiagnostic,
     // T547: commands out on the native link, everything the broker says out to every panel.

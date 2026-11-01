@@ -24,7 +24,7 @@ import {
   removeBridgeRecord,
   type FrameChannel,
 } from "./bridge-link.js";
-import { createBrokerSupervisor, launchBroker, type BrokerSupervisor } from "./broker-launch.js";
+import { brokerSupported, createBrokerSupervisor, launchBroker, type BrokerSupervisor } from "./broker-launch.js";
 import { browsersDirectory, hostDataDirectory } from "./host-paths.js";
 import { createRelayMux, type RelayMux } from "./relay-mux.js";
 import {
@@ -400,6 +400,11 @@ async function main(): Promise<void> {
   const prepareBroker = async (identity: BrowserIdentity): Promise<void> => {
     if (identity.legacy || identity.browserRunId === undefined) {
       log("relay.broker.skipped", identity.legacy ? "legacy" : "no-run");
+      return;
+    }
+    // 028 FR-437: side-panel conversations are Windows-only for now; the agent link does not need a broker.
+    if (!brokerSupported()) {
+      log("relay.broker.skipped", "platform");
       return;
     }
     const key = `${identity.browserId}/${identity.browserRunId}`;

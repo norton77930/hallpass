@@ -5,6 +5,35 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.18.0 — 2026-11-01
+
+- **Linux and macOS** (#1). `install.sh` / `uninstall.sh` install the host for this user (no sudo) into
+  `~/.local/share/hallpass` or `~/Library/Application Support/hallpass`, with a host manifest in each
+  installed browser's native-messaging folder (Chrome, Chromium, Edge, Brave). Your coding agents use the
+  browser through Hallpass as on Windows; side-panel conversations are Windows-only for now, and the side
+  panel and settings page say so. Linux verified with Chromium; macOS not yet verified on a Mac. CI now
+  runs on Windows, Linux and macOS.
+
+- **A skill for your coding agents** (#16). The settings page's Agents section can install a short guide
+  into Claude Code's skills folder and the shared agents' skills folder in your profile. It tells an outside
+  agent how the browser tools fit together, that pairing and consent cards wait for you, and that a
+  declined or unanswered card is your answer, not something to retry. Installed only on your click, never
+  into a project; shown as up to date, update available or changed by you; a copy you changed is replaced
+  only after you confirm. The uninstall removes it unless you changed it. The text is also in the
+  repository at `skills/hallpass/SKILL.md`.
+- **Extra MCP servers for side-panel conversations** (#21). The settings page's Browser tools section has a
+  list of servers to hand side-panel conversations besides the browser tools: a command, its arguments, the
+  names of the variables it needs, and which of Claude Code, Codex and Hermes get it. The agents' own
+  settings are not changed, so terminal use is unaffected. **Check** starts a server once and lists its
+  tools. Values are read from your environment and never stored, shown or logged. DeepSeek takes no MCP
+  servers.
+- **Busy machine** (#25). A program's `--version` that missed the 5 s check is asked again for up to 30 s
+  (was 15 s); if that times out too, its card says the computer may be busy and to press Check again.
+- **Model changes** (#23, #24). An agent that switched and then exited no longer shows the switch after its
+  exit notice; a late answer to a timed-out change no longer undoes an effort you changed meanwhile.
+- **Maintainers**: `npm run publish:snapshot -- <public checkout>` makes the public release commit and tag.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.17.0 — 2026-10-26
 
 **Pick the model and reasoning effort for a side-panel conversation.**

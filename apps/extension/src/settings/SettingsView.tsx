@@ -105,7 +105,13 @@ export function SettingsView(props: SettingsViewProps): ReactElement {
         return false;
       }
       if (!result.ok) {
-        notify(t("settings.error.generic"));
+        // 026 FR-420: a skill that could not be written says why (the helper said the profile as %USERPROFILE%).
+        const reason = result.error?.code === "skill-write-failed" ? result.error.detail : undefined;
+        // 027 R-418: the helper's own reason for an extra server it would not keep (duplicate, list full or unreadable).
+        const refused = result.error?.code === "mcp-server-refused" ? result.error.detail : undefined;
+        notify(
+          refused !== undefined ? refused : reason === undefined ? t("settings.error.generic") : t("settings.skill.writeFailed", { reason }),
+        );
         return false;
       }
       if (command.type === "ui.settings.choices-set" && result.defaultMovedTo !== undefined) {

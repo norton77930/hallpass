@@ -470,6 +470,53 @@ describe("024 T748 settings projection and commands", () => {
     expect(ofType(panel, "conversation-diagnostics")).toEqual([]);
   });
 
+  it("026: the overview's skill folders reach the page, and install-skill is forwarded to the broker", async () => {
+    const built = setup();
+    await linkReady(built.nativePort);
+    built.nativePort.emit({ type: "hello", sessionId: BROKER, agentId: "hallpass-broker", displayName: "Hallpass conversations", role: "broker" });
+    const skills = [
+      { location: "claude-code", state: "not-installed", folder: "%USERPROFILE%\.claude\skills\hallpass" },
+      { location: "agents", state: "changed", folder: "%USERPROFILE%\.agents\skills\hallpass" },
+    ];
+    built.nativePort.emit({ type: "conversation-overview", sessionId: BROKER, conversations: [], agents: [], folders: [], skills });
+    const page = fakePort();
+    built.settings.accept(page);
+    await vi.waitFor(() => expect(lastState(page)?.skills).toEqual(skills));
+    expect(settingsMessageSchema.safeParse({ type: "worker.settings.state", payload: lastState(page) }).success).toBe(true);
+
+    const command = { type: "ui.conversation.install-skill", payload: { location: "agents", replaceChanged: true } };
+    page.emit({ ...command, commandId: "k-1" });
+    await vi.waitFor(() => expect(built.nativePort.sent).toContainEqual({ type: "conversation-command", sessionId: BROKER, commandId: "k-1", command }));
+    built.nativePort.emit({ type: "conversation-result", sessionId: BROKER, commandId: "k-1", ok: false, error: { code: "skill-write-failed", detail: "EACCES" } });
+    await vi.waitFor(() =>
+      expect(ofType(page, "worker.settings.result")).toContainEqual({ type: "worker.settings.result", payload: { commandId: "k-1", ok: false, error: { code: "skill-write-failed", detail: "EACCES" } } }),
+    );
+  });
+
+  it("027: the overview's extra MCP servers reach the page, and its three commands are forwarded to the broker", async () => {
+    const built = setup();
+    await linkReady(built.nativePort);
+    built.nativePort.emit({ type: "hello", sessionId: BROKER, agentId: "hallpass-broker", displayName: "Hallpass conversations", role: "broker" });
+    const mcpServers = {
+      servers: [{ name: "github", command: "npx", args: [], variables: [{ name: "GITHUB_TOKEN", set: true }], agents: ["claude-code"] }],
+    };
+    built.nativePort.emit({ type: "conversation-overview", sessionId: BROKER, conversations: [], agents: [], folders: [], mcpServers });
+    const page = fakePort();
+    built.settings.accept(page);
+    await vi.waitFor(() => expect(lastState(page)?.mcpServers).toEqual(mcpServers));
+    expect(settingsMessageSchema.safeParse({ type: "worker.settings.state", payload: lastState(page) }).success).toBe(true);
+
+    const commands = [
+      { type: "ui.conversation.mcp-server-save", payload: { server: { name: "db", command: "node", args: ["db.js"], variables: [], agents: ["hermes"] } } },
+      { type: "ui.conversation.mcp-server-remove", payload: { name: "db" } },
+      { type: "ui.conversation.mcp-server-check", payload: { name: "github" } },
+    ];
+    for (const [index, command] of commands.entries()) page.emit({ ...command, commandId: `x-${index}` });
+    for (const [index, command] of commands.entries()) {
+      await vi.waitFor(() => expect(built.nativePort.sent).toContainEqual({ type: "conversation-command", sessionId: BROKER, commandId: `x-${index}`, command }));
+    }
+  });
+
   it("the side-panel-agent switch from the page records the owner's answer the way the panel's does", async () => {
     const built = setup();
     await brokerUp(built.nativePort);

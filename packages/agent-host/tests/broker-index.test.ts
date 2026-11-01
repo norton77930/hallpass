@@ -141,7 +141,7 @@ describe("T559 conversations.json", () => {
 });
 
 describe("T559 the index under the pool", () => {
-  it("marks an entry resumable: false once the agent refused to load it", async () => {
+  it.runIf(process.platform === "win32")("marks an entry resumable: false once the agent refused to load it", async () => {
     const index = fileConversationIndex({ path });
     const gone = { ...entry(1, new Date().toISOString()), agentSessionId: "fake-claude-unknown" };
     await index.put(gone);
@@ -157,7 +157,7 @@ describe("T559 the index under the pool", () => {
     }
   });
 
-  it("remove deletes only that entry: the other entries and the scratch folder stay", async () => {
+  it.runIf(process.platform === "win32")("remove deletes only that entry: the other entries and the scratch folder stay", async () => {
     const index = fileConversationIndex({ path });
     const h = await poolHarness({ dir, index });
     try {

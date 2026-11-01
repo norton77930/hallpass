@@ -4,6 +4,7 @@ import { AGENT_ORDER, toolsStatus } from "../agent-model.js";
 import { TOOLS_STATUS_VIEW } from "../agents/AgentCard.js";
 import { useSettings } from "../context.js";
 import { Avatar, Mark, Switch } from "../parts.js";
+import { McpServersBlock } from "./McpServersBlock.js";
 
 const NOTE_KEYS: Record<ConversationAgent, (entry: ConversationAgentAvailability) => string> = {
   "claude-code": () => "settings.tools.note.claude",
@@ -85,6 +86,8 @@ export function BrowserToolsSection(): ReactElement {
         </table>
       )}
       <p className="meta">{t("settings.tools.readOnly")}</p>
+      {/* 027: only while a helper of this release reports the list. */}
+      {!helperProblem && state.mcpServers !== undefined ? <McpServersBlock list={state.mcpServers} /> : null}
     </div>
   );
 }

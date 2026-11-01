@@ -7,9 +7,16 @@ on:
 
 jobs:
   test:
-    name: typecheck, unit, contract (Windows)
-    runs-on: windows-latest
+    name: typecheck, unit, contract (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # 028 D-028-2: macOS is not verified on a Mac yet; its job reports without failing the run until it
+    # has passed once. Tests that can only pass on Windows are marked and skipped elsewhere (D-028-3).
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

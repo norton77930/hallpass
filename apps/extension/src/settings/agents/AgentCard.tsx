@@ -1,5 +1,5 @@
 import { forwardRef, useId, type ReactElement, type Ref } from "react";
-import type { ConversationAgent, ConversationAgentAvailability } from "@hallpass/contracts";
+import { AGENT_VERSION_RETRY_BOUND_MS, type ConversationAgent, type ConversationAgentAvailability } from "@hallpass/contracts";
 import {
   AGENT_DOWNLOAD_MINUTES,
   DOWNLOAD_SIZE,
@@ -203,7 +203,10 @@ function Notes(props: {
     }
   }
   if (kind === "notInstalled" && props.enabled) {
-    if (entry.availability === "version-problem" && entry.versionTimedOut === true) {
+    if (entry.availability === "version-problem" && entry.versionTimedOut === true && entry.versionRetried === true) {
+      // #25: the background retry timed out as well - say why it may be, and what to do.
+      infos.push(t("settings.warning.versionBusy", { agent: name, seconds: AGENT_VERSION_RETRY_BOUND_MS / 1000 }));
+    } else if (entry.availability === "version-problem" && entry.versionTimedOut === true) {
       // 024 R-374: a slow `--version` is not one that printed no version; the broker retries it.
       infos.push(t("settings.warning.versionTimedOut", { agent: name }));
     } else if (entry.availability === "version-problem") {

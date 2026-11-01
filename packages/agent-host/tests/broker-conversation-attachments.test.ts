@@ -229,7 +229,7 @@ describe("022 T616 what the agent accepts (R-336, R-344)", () => {
 });
 
 describe("022 T616 the prompt and the owner's bubble (FR-333, R-343)", () => {
-  it("text, then each picture, then the tab as context, then one line per file", async () => {
+  it.runIf(process.platform === "win32")("text, then each picture, then the tab as context, then one line per file", async () => {
     const { h, fake, id } = await setup({ promptCapabilities: BOTH });
     for (const piece of [file("f1", "data.csv", "a,b"), image("i1"), tab("t1"), image("i2")]) {
       expect(await h.pool.attach(id, piece)).toEqual({ ok: true });
@@ -342,7 +342,7 @@ describe("022 T616 refusals", () => {
     expect(again.ok ? "ok" : again.error.code).toBe("attachment-unknown");
   });
 
-  it("the picture refusal comes before any file is placed, a tab beside it included (023: the tab alone is no refusal)", async () => {
+  it.runIf(process.platform === "win32")("the picture refusal comes before any file is placed, a tab beside it included (023: the tab alone is no refusal)", async () => {
     const { h, fake, id } = await setup({ promptCapabilities: { image: false, embeddedContext: false } });
     expect(await h.pool.attach(id, tab("t1"))).toEqual({ ok: true });
     expect(await h.pool.attach(id, file("f1", "a.txt", "x"))).toEqual({ ok: true });
@@ -370,7 +370,7 @@ describe("022 T616 refusals", () => {
 describe("022 T616 staged data goes with the conversation (R-340)", () => {
   const parts = async (h: Harness, id: string) => readdir(join(h.dir, "data", "scratch", id, ATTACHMENTS_FOLDER)).catch(() => [] as string[]);
 
-  it("on remove", async () => {
+  it.runIf(process.platform === "win32")("on remove", async () => {
     const { h, id } = await setup({ promptCapabilities: BOTH });
     expect(await h.pool.attach(id, file("f1", "a.txt", "abc", false))).toEqual({ ok: true });
     expect(await parts(h, id)).toEqual([".f1.part"]);
@@ -416,7 +416,7 @@ describe("022 T618 review fixes in the pool and the handler", () => {
   const parts = async (h: Harness, id: string) => readdir(join(h.dir, "data", "scratch", id, ATTACHMENTS_FOLDER)).catch(() => [] as string[]);
   const codeOf = (outcome: { ok: boolean; error?: { code: string } }) => (outcome.ok ? "ok" : outcome.error!.code);
 
-  it("shutdown resolves only once the part files are gone", async () => {
+  it.runIf(process.platform === "win32")("shutdown resolves only once the part files are gone", async () => {
     const { h, id } = await setup({ promptCapabilities: BOTH });
     expect(await h.pool.attach(id, file("f1", "a.txt", "abc", false))).toEqual({ ok: true });
     expect(await parts(h, id)).toEqual([".f1.part"]);
@@ -435,7 +435,7 @@ describe("022 T618 review fixes in the pool and the handler", () => {
     await waitFor(() => h.pool.state(id) === "stopped", "the idle stop");
   });
 
-  it("a new start evicts another idle conversation, not one a piece just reached", async () => {
+  it.runIf(process.platform === "win32")("a new start evicts another idle conversation, not one a piece just reached", async () => {
     const { h, id: receiving } = await setup({ promptCapabilities: BOTH }, { cap: 2 });
     expect(await h.pool.attach(receiving, file("f1", "a.txt", "abc", false))).toEqual({ ok: true });
     h.clock.advance(1_000);
@@ -448,7 +448,7 @@ describe("022 T618 review fixes in the pool and the handler", () => {
     expect(await parts(h, receiving)).toEqual([".f1.part"]);
   });
 
-  it("with no other to evict, a new start is refused too-many-running while a piece is on its way", async () => {
+  it.runIf(process.platform === "win32")("with no other to evict, a new start is refused too-many-running while a piece is on its way", async () => {
     const { h, id } = await setup({ promptCapabilities: BOTH }, { cap: 1 });
     expect(await h.pool.attach(id, file("f1", "a.txt", "abc", false))).toEqual({ ok: true });
     expect(codeOf(await h.pool.start("claude-code", { kind: "scratch" }))).toBe("too-many-running");
@@ -532,7 +532,7 @@ describe("023 T712 the tab as a file for an agent without page context", () => {
     tab: { url: "https://example.test/a", title, cut: false },
   });
 
-  it("is written as <title>.txt with title, address, blank line and text, and named like a file", async () => {
+  it.runIf(process.platform === "win32")("is written as <title>.txt with title, address, blank line and text, and named like a file", async () => {
     const { h, fake, id } = await setup({ promptCapabilities: NO_CONTEXT });
     expect(await h.pool.attach(id, tab("t1"))).toEqual({ ok: true });
     expect(await h.pool.attach(id, file("f1", "data.csv", "a,b"))).toEqual({ ok: true });
@@ -553,7 +553,7 @@ describe("023 T712 the tab as a file for an agent without page context", () => {
     expect((await readdir(folder)).sort()).toEqual(["A page.txt", "data.csv"]);
   });
 
-  it("is numbered past a name already taken, and its title goes through the sanitiser", async () => {
+  it.runIf(process.platform === "win32")("is numbered past a name already taken, and its title goes through the sanitiser", async () => {
     const { h, fake, id } = await setup({ promptCapabilities: NO_CONTEXT });
     expect(await h.pool.attach(id, titled("t1", "Docs / intro: what?"))).toEqual({ ok: true });
     expect(await sendAndWait(h, id, "", ["t1"])).toEqual({ ok: true });

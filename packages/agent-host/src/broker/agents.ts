@@ -3,6 +3,7 @@ import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises
 import { win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  AGENT_VERSION_RETRY_BOUND_MS,
   CONVERSATION_AGENTS,
   type ConversationAccepts,
   type ConversationAgent,
@@ -572,6 +573,8 @@ export async function agentAvailability(agent: ConversationAgent, ports: AgentPo
 
 /** 024 R-374: how long one external command of the settings page's readiness check may take. */
 export const READINESS_EXEC_BOUND_MS = 5_000;
+/** #25: the background retry of a `--version` that missed READINESS_EXEC_BOUND_MS (the contract's bound). */
+export const VERSION_RETRY_BOUND_MS = AGENT_VERSION_RETRY_BOUND_MS;
 /** A command that ignores its bound (its kill did not end it) still costs no more than this. */
 const READINESS_GUARD_MS = 500;
 
@@ -592,7 +595,8 @@ export type ReadinessAttempt = { boundMs: number; signal: AbortSignal };
 export type ReadinessStatus = AgentStatus & {
   /**
    * 024 R-374: the program was found, but its `--version` did not answer within the bound - worth
-   * one retry at the launch bound in the background (a slow `hermes --version` takes 6-11 s, T794).
+   * one retry in the background at VERSION_RETRY_BOUND_MS (a slow `hermes --version` takes 6-11 s,
+   * T794; a busy machine's, more than 15 s - #25).
    */
   versionTimedOut?: true;
 };
@@ -690,7 +694,7 @@ async function hermesSetupSteps(
  * in time is Not installed ("did not answer"); a program at a path Hallpass will not hand to cmd.exe is
  * Not installed with that reason, never with the path. Run per agent in parallel by the caller, so one
  * hung program costs only its own row. A found program whose `--version` timed out says so
- * (`versionTimedOut`): the caller retries it once at the launch bound, in the background (`boundMs`).
+ * (`versionTimedOut`): the caller retries it once at VERSION_RETRY_BOUND_MS, in the background (`boundMs`).
  */
 export async function checkAgentReadiness(agent: ConversationAgent, ports: AgentPorts, options: ReadinessOptions = {}): Promise<ReadinessStatus> {
   const description = describeAgent(agent);

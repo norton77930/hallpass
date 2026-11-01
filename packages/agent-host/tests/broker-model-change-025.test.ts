@@ -1,9 +1,12 @@
+import type { ChildProcess } from "node:child_process";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Every test here starts real fake-agent processes: seconds alone, far longer under the full parallel run.
 vi.setConfig({ testTimeout: 60_000 });
 import { conversationEventSchema, conversationResultFrameSchema, type ConversationAgent, type ConversationModelChoice } from "@hallpass/contracts";
 import { createCommandHandler } from "../src/broker/commands.js";
+import type { AdapterLaunchSpec } from "../src/broker/agents.js";
+import { CONVERSATION_IDLE_MS, spawnAgentProcess } from "../src/broker/conversation.js";
 import type { FolderActions } from "../src/broker/folders.js";
 import { poolHarness, waitFor, type FakeLogLine } from "./conversation-harness.js";
 
@@ -252,5 +255,88 @@ describe("T811 set-model between turns", () => {
     await h.pool.shutdown();
     expect(await h.pool.setModel(id, { model: "model-beta" })).toMatchObject({ ok: false, error: { code: "agent-exited" } });
     expect((await h.index.get(id))?.model).toEqual({ model: "model-beta", effort: "default" });
+  });
+});
+
+/**
+ * #23 (0.17.0 follow-up): while a change is queued behind the one in flight nothing else changes the
+ * run - a mode change and Hermes' restart are refused `busy`, the idle stop waits - and a switch the
+ * agent answered just before it went away never reports after the agent's exit.
+ */
+describe("#23 the model change queue", () => {
+  it("a mode change, a Hermes restart and the idle stop wait while a change is in flight and one queued", async () => {
+    // The jumps past the idle limit must not end the sets on their own bound.
+    h = await poolHarness({ env: { FAKE_ACP_MODELS: "models", FAKE_ACP_SET_DELAY_MS: "1500" }, modelSetBoundMs: 10 * CONVERSATION_IDLE_MS });
+    const id = await startWith(h, "hermes");
+    const pending = Promise.all([h.pool.setModel(id, { model: "acme:model-two" }), h.pool.setModel(id, { model: "zenith:model-three" })]);
+    await waitFor(async () => sets(await h!.requests()).length === 1, "the first set in flight");
+
+    // One in flight, one queued.
+    expect(await h.pool.setMode(id, "agent-review")).toMatchObject({ ok: false, error: { code: "busy" } });
+    h.clock.advance(CONVERSATION_IDLE_MS);
+    expect(h.pool.state(id)).toBe("idle");
+    expect(h.pool.agentPid(id)).toBeDefined();
+
+    // The queued one is in flight now: still nothing else.
+    await waitFor(async () => sets(await h!.requests()).length === 2, "the queued set in flight");
+    expect(await h.pool.setMode(id, "agent-review")).toMatchObject({ ok: false, error: { code: "busy" } });
+    h.clock.advance(CONVERSATION_IDLE_MS);
+    expect(h.pool.state(id)).toBe("idle");
+
+    expect(await pending).toEqual([{ ok: true }, { ok: true }]);
+    // Nothing restarted meanwhile: one run, no second session opening.
+    expect((await h.requests()).filter((line) => line.method === "session/load")).toEqual([]);
+    expect(await current(h, id)).toEqual({ model: "zenith:model-three" });
+
+    // The queue is empty: the idle countdown runs again.
+    h.clock.advance(CONVERSATION_IDLE_MS);
+    await waitFor(() => h!.pool.state(id) === "stopped", "the idle stop after the queue");
+  });
+
+  it("an agent that answers a change and exits at once: no model line after its agent-exited notice", async () => {
+    // The agent's answer and its exit are held, then handed on in the order that loses the race:
+    // the answer, and the exit one immediate later - before the conversation reports the switch.
+    let holding = false;
+    let exitHeld = false;
+    const held: Array<() => void> = [];
+    const spawnAgent = (spec: AdapterLaunchSpec, cwd: string): ChildProcess => {
+      const child = spawnAgentProcess(spec, cwd);
+      const hold = (target: NodeJS.EventEmitter, events: string[]) => {
+        const emit = target.emit.bind(target);
+        target.emit = (event: string | symbol, ...args: unknown[]) => {
+          if (!holding || !events.includes(String(event))) return emit(event, ...args);
+          if (target === child && event === "exit") exitHeld = true;
+          held.push(() => emit(event, ...args));
+          return true;
+        };
+      };
+      hold(child.stdout!, ["data", "end", "close"]);
+      hold(child, ["exit", "close"]);
+      return child;
+    };
+    h = await poolHarness({ env: { FAKE_ACP_MODELS: "config", FAKE_ACP_EXIT_AFTER_SET: "1" }, spawnAgent });
+    const id = await startWith(h, "claude-code");
+    holding = true;
+    const changing = h.pool.setModel(id, { model: "model-beta" });
+    await waitFor(() => exitHeld, "the answer and the exit held");
+    holding = false;
+    const [answer, ...rest] = held.splice(0);
+    answer!();
+    setImmediate(() => {
+      for (const release of rest) release();
+    });
+    const outcome = await changing;
+    await waitFor(() => h!.pool.state(id) === "crashed", "the exit");
+    const order = h.rec
+      .of(id)
+      .map((entry) => entry.event)
+      .filter((event) => event.type === "model" || (event.type === "notice" && event.code === "agent-exited"))
+      .map((event) => event.type);
+    // Reported before the exit, or not at all - and the result says the same.
+    if (outcome.ok) expect(order).toEqual(["model", "notice"]);
+    else {
+      expect(outcome).toMatchObject({ ok: false, error: { code: "agent-exited" } });
+      expect(order).toEqual(["notice"]);
+    }
   });
 });

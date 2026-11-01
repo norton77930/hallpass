@@ -382,6 +382,8 @@ export const messages = {
   // 019 US1, US3, FR-285 - FR-294, FR-299 - FR-301: the Conversation tab.
   "conversation.unavailable.host-outdated":
     "The Hallpass host on this computer is too old for conversations. Install the current release, then reopen the side panel.",
+  "conversation.unavailable.platform-unsupported":
+    "Side-panel conversations are available on Windows only for now. Your coding agents can still use this browser through Hallpass.",
   "conversation.unavailable.broker-unavailable":
     "Conversations are not available right now: Hallpass cannot reach its helper on this computer. Check the connection in the settings page, under Connection & diagnostics.",
   "conversation.agent.claude-code": "Claude Code",
@@ -712,6 +714,64 @@ export const messages = {
   "settings.helper.missingBody":
     "Agent checks, downloads, tests and upload folders need the helper, so they cannot be shown here yet. Reopen the browser; if this stays, run the Hallpass installer again, then press Retry.",
   "settings.helper.retry": "Retry",
+  "settings.mcp.title": "Extra MCP servers for side-panel conversations",
+  "settings.mcp.intro":
+    "Handed to side-panel conversations only, besides Hallpass's browser tools. The agents' own settings are not changed, so using them in a terminal is not affected. A change reaches conversations started or continued afterwards.",
+  "settings.mcp.warning": "A program you add runs on this computer with your rights each time a side-panel conversation starts. Add only programs you trust.",
+  "settings.mcp.empty": "No extra servers yet.",
+  "settings.mcp.unreadable":
+    "The list of extra servers could not be read (panel-mcp-servers.json in Hallpass's data folder). Conversations start without extra servers until it is fixed or removed.",
+  "settings.mcp.deepseek": "DeepSeek takes no MCP servers, so it gets none.",
+  "settings.mcp.add": "Add server",
+  "settings.mcp.full": "At most {max} servers.",
+  "settings.mcp.formTitle": "Server",
+  "settings.mcp.field.name": "Name",
+  "settings.mcp.field.command": "Command",
+  "settings.mcp.field.args": "Arguments",
+  "settings.mcp.field.variables": "Environment variables",
+  "settings.mcp.field.agents": "For",
+  "settings.mcp.argsHint": "One argument per line.",
+  "settings.mcp.variablesHint": "Names only, separated by commas. Values are read from your Windows environment variables; Hallpass never stores or shows them.",
+  "settings.mcp.save": "Save",
+  "settings.mcp.cancel": "Cancel",
+  "settings.mcp.error.name": "Use 1-40 letters, digits, - or _ in the name.",
+  "settings.mcp.error.reserved": "Names starting with hallpass are Hallpass's own.",
+  "settings.mcp.error.duplicate": "There is already a server with this name.",
+  "settings.mcp.error.command": "Enter the command that starts the server.",
+  "settings.mcp.error.args": "At most 30 arguments.",
+  "settings.mcp.error.variables": "Variable names use letters, digits and _, and do not start with a digit (at most 10).",
+  "settings.mcp.error.agents": "Tick at least one agent.",
+  "settings.mcp.check": "Check",
+  "settings.mcp.checking": "Checking…",
+  "settings.mcp.works": "Works: {tools} ({count} tools)",
+  "settings.mcp.failed": "Did not start: {reason}",
+  "settings.mcp.variableSet": "{name} set",
+  "settings.mcp.variableUnset": "{name} not set",
+  "settings.mcp.codexSkipped": "Not handed to Codex: your Codex settings already have a server of this name that it cannot replace.",
+  "settings.mcp.edit": "Edit",
+  "settings.mcp.remove": "Remove",
+  "settings.mcp.keep": "Keep",
+  "settings.mcp.removeConfirm": "Remove {name}? Conversations started or continued afterwards will not get it.",
+  "settings.skill.title": "Skill for your coding agents",
+  "settings.skill.intro":
+    "A short guide for Claude Code, Codex and other agents you connect: how the browser tools fit together and that a declined or unanswered card is your answer, so they wait for you instead of retrying. Installed only when you press Install; nothing is written to any project.",
+  "settings.skill.location.claude-code": "Claude Code",
+  "settings.skill.location.agents": "Codex and other agents",
+  "settings.skill.state.not-installed": "Not installed",
+  "settings.skill.state.up-to-date": "Up to date",
+  "settings.skill.state.update-available": "Update available",
+  "settings.skill.state.changed": "Changed by you",
+  "settings.skill.state.unreadable": "Cannot read",
+  "settings.skill.install": "Install",
+  "settings.skill.update": "Update",
+  "settings.skill.replace": "Replace",
+  "settings.skill.keep": "Keep",
+  "settings.skill.replaceConfirm": "This copy was changed since Hallpass installed it. Replace it with Hallpass's version? Your changes are lost.",
+  "settings.skill.installed": "Skill installed for {location}.",
+  "settings.skill.writeFailed": "The skill could not be written: {reason}",
+  "settings.helper.windowsOnlyTitle": "Side-panel agents are Windows-only for now",
+  "settings.helper.windowsOnlyBody":
+    "On this computer Hallpass serves your coding agents (Claude Code, Codex and others in a terminal); side-panel conversations, their agents and the skill installer come later.",
   "settings.helper.needsUpdate":
     "The helper is older than this extension. Run the Hallpass installer again to update it.",
   // Section introductions (D-024-2..5, D-024-17).
@@ -783,6 +843,8 @@ export const messages = {
     "{agent} was found, but it did not report a version number.",
   "settings.warning.versionTimedOut":
     "{agent} was found, but it did not answer --version in time. Hallpass asked it once more in the background; if this stays, press Check again.",
+  "settings.warning.versionBusy":
+    "{agent} was found, but it did not answer --version within {seconds} s, even when asked again. The computer may be busy; press Check again in a moment.",
   "settings.warning.mcpMissing":
     "Browser tools not attached: the optional MCP component is missing.",
   "settings.warning.keyVariable":

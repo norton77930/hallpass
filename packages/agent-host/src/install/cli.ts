@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { removeInstalledSkills } from "../agent-skill.js";
 import { hostDataDirectory, hostManifestPath, launcherPath } from "../host-paths.js";
 import { uploadConfigPath, UPLOAD_CONFIG_TEMPLATE } from "../upload-policy.js";
-import { createLauncherScript, createNativeHostManifest, resolveRelayEntryPath } from "./manifest.js";
+import { createLauncherScript, createNativeHostManifest, createPosixLauncherScript, resolveRelayEntryPath } from "./manifest.js";
+import { nativeMessagingFolders, registerPosix, unregisterPosix, type PosixPlatform } from "./posix.js";
 import { registerAll, removeLegacyRegistrations, unregisterAll } from "./registration.js";
 import { nativeMessagingKey, NATIVE_MESSAGING_ROOTS, registryQueryArguments, runReg } from "./windows.js";
 
@@ -17,7 +19,13 @@ import { nativeMessagingKey, NATIVE_MESSAGING_ROOTS, registryQueryArguments, run
  * registration is to run it again.
  */
 
+/** 028: macOS and Linux register through per-browser folders (`posix.ts`); everything else is Windows. */
+const posixPlatform = (): PosixPlatform | undefined =>
+  process.platform === "darwin" || process.platform === "linux" ? process.platform : undefined;
+
 async function install(): Promise<number> {
+  const posixHost = posixPlatform();
+  if (posixHost !== undefined) return installPosix(posixHost);
   const dataDir = hostDataDirectory();
   const manifestPath = hostManifestPath();
   const launcher = launcherPath();
@@ -68,20 +76,65 @@ async function install(): Promise<number> {
   return outcomes.some(({ outcome }) => outcome === "failed") ? 1 : 0;
 }
 
+/**
+ * 028 (FR-433..FR-435): the same two files in the platform's data folder - the launcher a shell script,
+ * made executable - the upload configuration created once, and the manifest copied into each installed
+ * browser's native-messaging folder. No legacy registration exists outside Windows.
+ */
+async function installPosix(platform: PosixPlatform): Promise<number> {
+  const dataDir = hostDataDirectory();
+  const manifestPath = hostManifestPath();
+  const launcher = launcherPath();
+  const relayEntry = resolveRelayEntryPath(import.meta.url, existsSync);
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(launcher, createPosixLauncherScript(relayEntry, process.execPath), "utf8");
+  await chmod(launcher, 0o755);
+  const manifestJson = `${JSON.stringify(createNativeHostManifest(launcher), null, 2)}\n`;
+  await writeFile(manifestPath, manifestJson, "utf8");
+  const configPath = uploadConfigPath();
+  if (!existsSync(configPath)) await writeFile(configPath, `${UPLOAD_CONFIG_TEMPLATE}\n`, "utf8");
+
+  const outcomes = await registerPosix(nativeMessagingFolders(platform, process.env), manifestJson);
+  process.stdout.write(`agent-host installed\n  launcher: ${launcher}\n  manifest: ${manifestPath}\n`);
+  for (const { browser, folder, outcome } of outcomes) {
+    if (outcome === "written") process.stdout.write(`  native messaging: <${browser}> ${folder}\n`);
+    if (outcome === "skipped") process.stdout.write(`  skipped (not installed): <${browser}>\n`);
+  }
+  for (const { browser, folder, outcome, reason } of outcomes) {
+    if (outcome === "failed") process.stderr.write(`agent-host: failed to register <${browser}> ${folder}\n${reason ?? ""}\n`);
+  }
+  if (!outcomes.some(({ outcome }) => outcome === "written")) {
+    process.stderr.write("agent-host: no supported browser found (Chrome, Chromium, Edge, Brave); start one once, then install again.\n");
+    return 1;
+  }
+  return outcomes.some(({ outcome }) => outcome === "failed") ? 1 : 0;
+}
+
 async function uninstall(): Promise<number> {
+  const posixHost = posixPlatform();
   const manifestPath = hostManifestPath();
   const launcher = launcherPath();
 
   // A key that was never there is not a failure: uninstall's job is that it is gone afterwards.
-  const outcomes = await unregisterAll(runReg);
+  const outcomes =
+    posixHost === undefined
+      ? (await unregisterAll(runReg)).map(({ browser, key, outcome }) => ({ browser, where: key, removed: outcome === "removed" }))
+      : (await unregisterPosix(nativeMessagingFolders(posixHost, process.env))).map(({ browser, folder, outcome }) => ({
+          browser,
+          where: folder,
+          removed: outcome === "removed",
+        }));
   await rm(manifestPath, { force: true });
   await rm(launcher, { force: true });
 
   process.stdout.write(`agent-host uninstalled\n  removed: ${launcher}\n  removed: ${manifestPath}\n`);
-  for (const { browser, key, outcome } of outcomes) {
-    const label = outcome === "removed" ? "removed:" : "absent: ";
-    process.stdout.write(`  ${label} <${browser}> ${key}\n`);
+  for (const { browser, where, removed } of outcomes) {
+    process.stdout.write(`  ${removed ? "removed:" : "absent: "} <${browser}> ${where}\n`);
   }
+  // 026 R-416 (FR-421): the skill Hallpass installed goes; a copy the owner changed stays, named.
+  const skills = await removeInstalledSkills().catch(() => ({ removed: [], kept: [] }));
+  for (const folder of skills.removed) process.stdout.write(`  removed: Hallpass skill ${folder}\n`);
+  for (const folder of skills.kept) process.stdout.write(`  kept (changed by you): Hallpass skill ${folder}\n`);
   return 0;
 }
 
@@ -91,6 +144,14 @@ async function status(): Promise<number> {
   process.stdout.write(`agent-host status\n`);
   process.stdout.write(`  launcher: ${existsSync(launcher) ? "present" : "missing"} ${launcher}\n`);
   process.stdout.write(`  manifest: ${existsSync(manifestPath) ? "present" : "missing"} ${manifestPath}\n`);
+  const posixHost = posixPlatform();
+  if (posixHost !== undefined) {
+    for (const { browser, folder } of nativeMessagingFolders(posixHost, process.env)) {
+      const file = `${folder}/com.hallpass.host.json`;
+      process.stdout.write(`  native messaging: ${existsSync(file) ? "present" : "missing"} <${browser}> ${file}\n`);
+    }
+    return 0;
+  }
   for (const { browser, root } of NATIVE_MESSAGING_ROOTS) {
     const key = nativeMessagingKey(root);
     const result = await runReg(registryQueryArguments(key));

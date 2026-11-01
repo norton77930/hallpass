@@ -148,7 +148,7 @@ describe("022 T614 staging and the final name", () => {
     expect(await listSub()).toEqual(["data.csv"]);
   });
 
-  it("never replaces an existing file: the next copy is ' (2)', then ' (3)', and the old one is unchanged", async () => {
+  it.runIf(process.platform === "win32")("never replaces an existing file: the next copy is ' (2)', then ' (3)', and the old one is unchanged", async () => {
     await mkdir(await sub(), { recursive: true });
     await writeFile(join(await sub(), "data.csv"), "old");
     await stageFile("f1", "data.csv", Buffer.from("new one"));

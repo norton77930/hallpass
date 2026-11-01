@@ -5,7 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Hallpass: a Manifest V3 Chrome extension plus a local stdio MCP server that lets coding agents drive
-the user's own Chrome under per-site, per-action consent given in the side panel. Windows 11 only,
+the user's own Chrome under per-site, per-action consent given in the side panel. Windows 11 (Linux and
+macOS for the outside-agent bridge since spec 028; side-panel conversations are Windows-only - mark a
+test that can only pass on Windows with `it.runIf(process.platform === "win32")`),
 Node >= 24, npm workspaces, TypeScript, React (side panel), Vite (extension bundles). The README
 has the user-facing tool list and consent model; `CONTRIBUTING.md` has the build and test detail.
 

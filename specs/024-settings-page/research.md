@@ -70,6 +70,13 @@ plan.md; the plan proceeds on the recommended answer and changes if the owner pi
   sets it on the held answer when the readiness result timed out, and a retry that answers replaces the
   entry without it. The card shows `settings.warning.versionTimedOut` for it. The retry's signal now also
   reaches the `HKCU\Environment` names query and the test machine's exec, so an aborted retry ends at once.
+- **Amendment (2026-10-28, #25)**: on a busy machine `hermes --version` outlived the 15 s retry, and the
+  card kept saying it was being asked again. The retry is now bounded at `AGENT_VERSION_RETRY_BOUND_MS`
+  (30 s, in packages/contracts so the page can name it). A retry that times out too replaces the held
+  answer with its own reason ("within 30 s") and the new optional `versionRetried` (host and extension
+  upgrade together, as for `versionTimedOut`); the card then shows `settings.warning.versionBusy`: the
+  computer may be busy, press Check again in a moment. Nothing retries after that on its own; Check again
+  starts a new check (5 s, then the one retry).
 - **State mapping** (D-024-14): `ready` without warnings → Ready; `ready` with notes (`git-missing`,
   `pre-release`) or Hermes setup steps not done → Ready with warnings; `needs-install` → Needs a download;
   `installing` → Downloading; `missing` or `version-problem` → Not installed, with the reason line

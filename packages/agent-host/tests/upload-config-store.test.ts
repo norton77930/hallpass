@@ -222,7 +222,7 @@ describe("T370 upload config store", () => {
     expect([...temps].every((name) => /^config\.json\.\d+\.\d+\.tmp$/u.test(name)), temps.toString()).toBe(true);
   });
 
-  it("leaves the file whole when the write cannot be made", async () => {
+  it.runIf(process.platform === "win32")("leaves the file whole when the write cannot be made", async () => {
     await writeConfig(JSON.stringify({ uploadRoots: [docs] }));
     // A handle Windows will not let anything be renamed over: the rename fails with the file the
     // reader is using still whole, which is the property the temp-file-and-rename exists for. (It

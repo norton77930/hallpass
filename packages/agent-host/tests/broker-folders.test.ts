@@ -121,7 +121,7 @@ describe("T578 a trailing separator", () => {
     expect((await folders.list()).map((folder) => folder.path)).toEqual(["C:\\"]);
   });
 
-  it("a typed path with a trailing separator is added without it", async () => {
+  it.runIf(process.platform === "win32")("a typed path with a trailing separator is added without it", async () => {
     const real = join(dir, "typed");
     await mkdir(real);
     const { folderActions, folders } = actions();
@@ -131,7 +131,7 @@ describe("T578 a trailing separator", () => {
 });
 
 describe("T561 scratch folders", () => {
-  it("live under scratch\\<conversationId>, are made on demand and are never deleted", async () => {
+  it.runIf(process.platform === "win32")("live under scratch\\<conversationId>, are made on demand and are never deleted", async () => {
     const id = "conv-0000000000000001";
     expect(scratchFolderPath(data, id)).toBe(join(data, "scratch", id));
     expect(await ensureScratchFolder(data, id)).toBe(join(data, "scratch", id));
@@ -161,7 +161,7 @@ describe("T561 a missing folder", () => {
     expect(launched).toEqual([]);
   });
 
-  it("open-folder starts explorer.exe with the path as its single argument, no shell", async () => {
+  it.runIf(process.platform === "win32")("open-folder starts explorer.exe with the path as its single argument, no shell", async () => {
     const path = join(dir, "a folder & more");
     await mkdir(path);
     const { folderActions, launched } = actions();
@@ -192,7 +192,7 @@ describe("T561 the folder dialog", () => {
     expect(await folders.list()).toEqual([]);
   });
 
-  it("a chosen path (any script) is added to the list", async () => {
+  it.runIf(process.platform === "win32")("a chosen path (any script) is added to the list", async () => {
     const chosen = join(dir, "專案 demo");
     await mkdir(chosen);
     const { folderActions, folders } = actions({ run: dialog(`PATH:${encoded(chosen)}\r\n`).run });
@@ -200,7 +200,7 @@ describe("T561 the folder dialog", () => {
     expect(await folders.list()).toEqual([{ path: chosen, addedAt: AT }]);
   });
 
-  it("is one at a time: a second request while it is open joins the first", async () => {
+  it.runIf(process.platform === "win32")("is one at a time: a second request while it is open joins the first", async () => {
     const chosen = join(dir, "shared");
     await mkdir(chosen);
     const fake = dialog(`PATH:${encoded(chosen)}`);
@@ -222,7 +222,7 @@ describe("T561 the folder dialog", () => {
     expect(await folders.list()).toEqual([]);
   });
 
-  it("Constrained Language Mode is detected and answered with the path-entry fallback, which checks the path", async () => {
+  it.runIf(process.platform === "win32")("Constrained Language Mode is detected and answered with the path-entry fallback, which checks the path", async () => {
     const { folderActions, folders } = actions({ run: dialog("MODE:ConstrainedLanguage\r\n", 3).run });
     expect(await folderActions.addFromDialog()).toMatchObject({ kind: "path-entry", detail: expect.stringMatching(/Constrained/u) });
     expect(await folders.list()).toEqual([]);

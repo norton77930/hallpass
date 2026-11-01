@@ -499,3 +499,6 @@ side-panel-agent switch; with no session it shows the empty line and the setting
   entry carries `versionTimedOut` while its answer is the timed-out one, and the card says the program did
   not answer `--version` in time and is asked once more, instead of "did not report a version number". The
   retry's abort also ends Hermes' user-environment query. See R-374's second amendment.
+- **2026-10-28 — busy machine** (#25): the background retry of a timed-out `--version` is bounded at 30 s
+  instead of the launch bound; when it times out too, the entry carries `versionRetried` and the card says
+  the computer may be busy and to press Check again in a moment. See R-374's third amendment.

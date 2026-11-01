@@ -332,6 +332,13 @@ export const agentTestResultSchema = z.strictObject({
 });
 export type AgentTestResult = z.infer<typeof agentTestResultSchema>;
 
+/**
+ * #25 (024 R-374): the bound of the one background retry of a found program's `--version` that
+ * missed the readiness check's bound - longer than a launch's 15 s, which a busy machine's
+ * `hermes --version` outlived. The settings page names it when the retry timed out too.
+ */
+export const AGENT_VERSION_RETRY_BOUND_MS = 30_000;
+
 export const conversationAgentAvailabilitySchema = z.strictObject({
   agent: conversationAgentSchema,
   availability: z.enum(CONVERSATION_AVAILABILITIES),
@@ -352,6 +359,11 @@ export const conversationAgentAvailabilitySchema = z.strictObject({
    * extension before 0.16.1 refuses it (strict schema), so host and extension upgrade together.
    */
   versionTimedOut: z.boolean().optional(),
+  /**
+   * #25: the background retry, at AGENT_VERSION_RETRY_BOUND_MS, timed out as well - the computer may
+   * be busy; the page says to check again in a moment. Present only with `versionTimedOut`.
+   */
+  versionRetried: z.boolean().optional(),
   /** 024 frames.md: Hermes only - each setup step and whether the check found it. */
   setupSteps: z
     .array(z.strictObject({ step: z.enum(CONVERSATION_SETUP_STEPS), found: z.boolean() }))
@@ -419,6 +431,11 @@ export const CONVERSATION_ERROR_CODES = [
   // 025 R-402: `set-model` with a value the conversation's live offer does not list / one the agent refused.
   "model-unknown",
   "model-refused",
+  // 026 R-415: the Hallpass skill there was changed (confirm to replace) / could not be written.
+  "skill-changed",
+  "skill-write-failed",
+  // 027 R-418: an extra MCP server not saved (duplicate name, list full, list unreadable); detail says which.
+  "mcp-server-refused",
 ] as const;
 export const conversationErrorSchema = z.strictObject({
   code: z.enum(CONVERSATION_ERROR_CODES),
@@ -826,6 +843,91 @@ export const conversationInstallCancelCommandSchema = z.strictObject({
   type: z.literal("ui.conversation.install-cancel"),
   payload: z.strictObject({ agent: conversationAgentSchema }),
 });
+/** 026 R-411: the two user-level folders the Hallpass skill goes into (D-026-1), in the order shown. */
+export const AGENT_SKILL_LOCATIONS = ["claude-code", "agents"] as const;
+export type AgentSkillLocation = (typeof AGENT_SKILL_LOCATIONS)[number];
+/** 026 R-414: a folder's copy, by its fingerprint against every text a release shipped. */
+export const AGENT_SKILL_STATES = ["not-installed", "up-to-date", "update-available", "changed", "unreadable"] as const;
+
+/** 026 data-model: one folder's state; the folder with the profile said as `%USERPROFILE%`. */
+export const agentSkillStateSchema = z.strictObject({
+  location: z.enum(AGENT_SKILL_LOCATIONS),
+  state: z.enum(AGENT_SKILL_STATES),
+  folder: z.string().min(1).max(400),
+  /** Why the copy could not be read; `unreadable` only. */
+  detail: z.string().min(1).max(600).optional(),
+});
+export type AgentSkillState = z.infer<typeof agentSkillStateSchema>;
+
+/** 026 R-415: install or update the skill in one folder; `replaceChanged` replaces a changed copy. */
+export const conversationInstallSkillCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.install-skill"),
+  payload: z.strictObject({ location: z.enum(AGENT_SKILL_LOCATIONS), replaceChanged: z.literal(true).optional() }),
+});
+
+/** 027 D-027-1: the agents an extra MCP server can be handed to - those that take MCP servers (023 R-365). */
+export const PANEL_MCP_AGENTS = ["claude-code", "codex", "hermes"] as const;
+/** 027 R-418: at most this many extra servers. */
+export const PANEL_MCP_SERVERS_MAX = 10;
+const PANEL_MCP_TOOLS_SHOWN = 50;
+
+/** 027 R-418 (FR-425, FR-431): one extra MCP server for side-panel conversations - names of variables, never values. */
+export const panelMcpServerSchema = z.strictObject({
+  name: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,40}$/u)
+    // Hallpass's own entry is `hallpass`, or `hallpass_panel` beside an owner's Codex `hallpass` (019 R-322).
+    .refine((name) => !name.toLowerCase().startsWith("hallpass"), { message: "a name starting with hallpass is Hallpass's own" }),
+  command: z.string().min(1).max(400),
+  args: z.array(z.string().max(400)).max(30),
+  variables: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,99}$/u)).max(10),
+  agents: z.array(z.enum(PANEL_MCP_AGENTS)).min(1).max(PANEL_MCP_AGENTS.length),
+});
+export type PanelMcpServer = z.infer<typeof panelMcpServerSchema>;
+
+/** 027 R-421: the last Check of a server. */
+const panelMcpCheckSchema = z.discriminatedUnion("outcome", [
+  z.strictObject({
+    outcome: z.literal("works"),
+    tools: z.array(z.string().min(1).max(128)).max(PANEL_MCP_TOOLS_SHOWN),
+    toolCount: z.number().int().nonnegative(),
+    at: isoTimeSchema,
+  }),
+  z.strictObject({ outcome: z.literal("failed"), detail: z.string().min(1).max(300), at: isoTimeSchema }),
+]);
+
+/** 027 R-422: what the page sees of a server - each variable set or not, never its value. */
+export const panelMcpServerViewSchema = panelMcpServerSchema.extend({
+  variables: z.array(z.strictObject({ name: z.string().min(1).max(100), set: z.boolean() })).max(10),
+  check: panelMcpCheckSchema.optional(),
+  checking: z.literal(true).optional(),
+  /** R-420: the owner's Codex has an entry of this name a session entry cannot be merged over. */
+  codexSkipped: z.literal(true).optional(),
+});
+export type PanelMcpServerView = z.infer<typeof panelMcpServerViewSchema>;
+
+/** 027: the list as the overview carries it; `unreadable` when the file could not be read (R-417). */
+export const panelMcpServerListSchema = z.strictObject({
+  servers: z.array(panelMcpServerViewSchema).max(PANEL_MCP_SERVERS_MAX),
+  unreadable: z.literal(true).optional(),
+});
+export type PanelMcpServerList = z.infer<typeof panelMcpServerListSchema>;
+
+/** 027: add a server, or replace `previousName` (an edit, which may rename it). */
+export const conversationMcpServerSaveCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.mcp-server-save"),
+  payload: z.strictObject({ server: panelMcpServerSchema, previousName: z.string().min(1).max(40).optional() }),
+});
+export const conversationMcpServerRemoveCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.mcp-server-remove"),
+  payload: z.strictObject({ name: z.string().min(1).max(40) }),
+});
+/** 027 D-027-2: start the server once and list its tools; ok at once, the result arrives in the overview. */
+export const conversationMcpServerCheckCommandSchema = z.strictObject({
+  type: z.literal("ui.conversation.mcp-server-check"),
+  payload: z.strictObject({ name: z.string().min(1).max(40) }),
+});
+
 /** R-379: one test prompt outside the pool; ok at start, the result arrives in the overview. */
 export const conversationTestCommandSchema = z.strictObject({
   type: z.literal("ui.conversation.test"),
@@ -857,6 +959,12 @@ export const conversationCommandSchema = z.discriminatedUnion("type", [
   conversationCheckAgentsCommandSchema,
   conversationInstallCancelCommandSchema,
   conversationTestCommandSchema,
+  // 026: from the settings page only.
+  conversationInstallSkillCommandSchema,
+  // 027: from the settings page only.
+  conversationMcpServerSaveCommandSchema,
+  conversationMcpServerRemoveCommandSchema,
+  conversationMcpServerCheckCommandSchema,
 ]);
 export type ConversationCommand = z.infer<typeof conversationCommandSchema>;
 
@@ -992,6 +1100,10 @@ export const conversationOverviewFrameSchema = z.strictObject({
    */
   consent: z.enum(CONVERSATION_CONSENT_STATES).optional(),
   notice: z.enum(CONVERSATION_LIST_NOTICES).optional(),
+  /** 026: the Hallpass skill's state in each folder; absent from a host before 026. */
+  skills: z.array(agentSkillStateSchema).max(AGENT_SKILL_LOCATIONS.length).optional(),
+  /** 027: the extra MCP servers for side-panel conversations; absent from a host before 027. */
+  mcpServers: panelMcpServerListSchema.optional(),
 });
 
 /**
@@ -1081,7 +1193,8 @@ export const conversationDiagnosticsFrameSchema = z
 /* ------------------------------------------------------------------------------------------- */
 
 /** Why the Conversation tab has nothing to offer: the host is too old, or its broker is not there. */
-export const CONVERSATION_UNAVAILABLE_REASONS = ["host-outdated", "broker-unavailable"] as const;
+/** 028 (D-028-1): `platform-unsupported` - side-panel conversations are Windows-only for now. */
+export const CONVERSATION_UNAVAILABLE_REASONS = ["host-outdated", "broker-unavailable", "platform-unsupported"] as const;
 
 /**
  * 024 R-380 (data-model "AgentChoices"): which agents the owner switched on, and the default the
@@ -1121,6 +1234,10 @@ export const conversationPanelStateSchema = z.strictObject({
   epoch: z.string().min(1).max(128).optional(),
   /** 024 frames.md: the owner's enabled agents and default, for the picker (R-380). */
   choices: agentChoicesSchema.optional(),
+  /** 026: the overview's skill states, which the settings projection takes (the panel shows none). */
+  skills: z.array(agentSkillStateSchema).max(AGENT_SKILL_LOCATIONS.length).optional(),
+  /** 027: the overview's extra MCP servers, which the settings projection takes (the panel shows none). */
+  mcpServers: panelMcpServerListSchema.optional(),
 });
 export type ConversationPanelState = z.infer<typeof conversationPanelStateSchema>;
 

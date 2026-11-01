@@ -16,6 +16,8 @@ coverage/
 !packages/test-kit/src/**
 tests/acceptance/probe-004/reports/*
 !tests/acceptance/probe-004/reports/.gitkeep
+tests/acceptance/probe-017/reports/*
+!tests/acceptance/probe-017/reports/.gitkeep
 test-results/
 playwright-report/
 blob-report/

@@ -12,6 +12,7 @@ import {
 import {
   LAUNCH_EXEC_BOUND_MS,
   READINESS_EXEC_BOUND_MS,
+  VERSION_RETRY_BOUND_MS,
   checkAgentReadiness,
   defaultAgentPorts,
   type AgentPorts,
@@ -145,7 +146,7 @@ async function fourAgents() {
 }
 
 describe("024 T754 the local readiness check", () => {
-  it("bounds each command at 5 s: a hung --version costs only its own agent, and nothing calls a model", async () => {
+  it.runIf(process.platform === "win32")("bounds each command at 5 s: a hung --version costs only its own agent, and nothing calls a model", async () => {
     const { check, execs } = await fourAgents();
     const started = Date.now();
     const results = await Promise.all(CONVERSATION_AGENTS.map(check));
@@ -177,7 +178,7 @@ describe("024 T754 the local readiness check", () => {
     expect(await exists(promptCount)).toBe(false);
   }, 20_000);
 
-  it("counts a .cmd shim as found and says why a path Hallpass refuses to run is not installed", async () => {
+  it.runIf(process.platform === "win32")("counts a .cmd shim as found and says why a path Hallpass refuses to run is not installed", async () => {
     const safe = await shim(join(dir, "bin", "codex.cmd"), "codex-cli 0.163.0");
     const found = await checkAgentReadiness("codex", machine({ "codex.cmd": [safe] }).ports);
     expect(found.availability).toMatchObject({ availability: "needs-install", version: "0.163.0" });
@@ -538,7 +539,7 @@ describe("024 R-374 a found program whose --version is slower than the readiness
       await waitFor(() => hermes() !== undefined, "the check's overview");
       expect(hermes()).toMatchObject({ availability: "version-problem", detail: TIMED_OUT_5S });
       await waitFor(() => versions.length === 1, "the retry under way");
-      expect(versions[0]?.timeoutMs).toBe(LAUNCH_EXEC_BOUND_MS);
+      expect(versions[0]?.timeoutMs).toBe(VERSION_RETRY_BOUND_MS);
 
       versions[0]?.answer("0.22.2");
       await waitFor(() => hermes()?.availability === "ready", "the retry's overview");
@@ -547,6 +548,37 @@ describe("024 R-374 a found program whose --version is slower than the readiness
       // Once: nothing started a second retry.
       await sleep(50);
       expect(versions).toHaveLength(1);
+    } finally {
+      handler.stopChecks();
+      await pool.shutdown();
+    }
+  });
+
+  it("#25 the background retry is bounded at 30 s, twice the launch bound (a busy machine's hermes --version outlives 15 s)", () => {
+    expect(VERSION_RETRY_BOUND_MS).toBe(30_000);
+    expect(VERSION_RETRY_BOUND_MS).toBeGreaterThan(LAUNCH_EXEC_BOUND_MS);
+  });
+
+  it("#25 a retry that times out too says so: versionRetried, the 30 s detail, and no further retry until Check again", async () => {
+    const { versions, check } = slowHermes(40_000);
+    const { handler, run, hermes, pool } = retryHandler(check);
+    try {
+      await run({ type: "ui.conversation.check-agents", payload: {} });
+      await waitFor(() => hermes()?.versionRetried === true, "the retry's timed-out overview");
+      expect(hermes()).toMatchObject({
+        availability: "version-problem",
+        detail: "Hermes was found, but did not answer `--version` within 30 s.",
+        versionTimedOut: true,
+        versionRetried: true,
+      });
+      expect(conversationAgentAvailabilitySchema.safeParse(hermes()).success).toBe(true);
+      // Nothing more on its own: neither the first bound nor the retry's reached the program's answer.
+      await sleep(50);
+      expect(versions).toHaveLength(0);
+
+      // Check again starts over: the first answer again, without the retried mark until its own retry ends.
+      await run({ type: "ui.conversation.check-agents", payload: {} });
+      await waitFor(() => hermes()?.versionRetried === true, "the second check's retry");
     } finally {
       handler.stopChecks();
       await pool.shutdown();
@@ -631,7 +663,7 @@ describe("024 R-374 a found program whose --version is slower than the readiness
     expect(() => process.kill(pid, 0)).toThrow();
   }, 30_000);
 
-  it("a retry that also times out leaves Not installed with the timed-out reason", async () => {
+  it("a retry that also times out leaves Not installed, with the retry's timed-out reason (#25)", async () => {
     const { check } = slowHermes(60_000);
     const { handler, run, hermes, pool } = retryHandler(check);
     try {
@@ -639,7 +671,12 @@ describe("024 R-374 a found program whose --version is slower than the readiness
       await waitFor(() => hermes() !== undefined, "the check's overview");
       await sleep(100);
       await handler.sendOverview();
-      expect(hermes()).toMatchObject({ availability: "version-problem", detail: TIMED_OUT_5S });
+      expect(hermes()).toMatchObject({
+        availability: "version-problem",
+        detail: "Hermes was found, but did not answer `--version` within 30 s.",
+        versionTimedOut: true,
+        versionRetried: true,
+      });
     } finally {
       handler.stopChecks();
       await pool.shutdown();

@@ -170,6 +170,10 @@ export function createSettingsPort(input: SettingsPortInput): SettingsPort {
       agents: conversation.agents,
       ...(conversation.available ? {} : { agentsUnavailable: conversation.reason ?? "broker-unavailable" }),
       choices: conversation.choices ?? (await input.runtime.agentChoices.read()),
+      // 026: the Hallpass skill's folders, while a broker of this release is attached.
+      ...(conversation.available && conversation.skills !== undefined ? { skills: conversation.skills } : {}),
+      // 027: the extra MCP servers for side-panel conversations.
+      ...(conversation.available && conversation.mcpServers !== undefined ? { mcpServers: conversation.mcpServers } : {}),
     };
   }
 
@@ -240,6 +244,10 @@ export function createSettingsPort(input: SettingsPortInput): SettingsPort {
       case "ui.conversation.install":
       case "ui.conversation.install-cancel":
       case "ui.conversation.test":
+      case "ui.conversation.install-skill":
+      case "ui.conversation.mcp-server-save":
+      case "ui.conversation.mcp-server-remove":
+      case "ui.conversation.mcp-server-check":
       case "ui.conversation.diagnostics":
       case "ui.conversation.consent": {
         // Forwarded on this relay run's broker; its answers come back to this page alone.

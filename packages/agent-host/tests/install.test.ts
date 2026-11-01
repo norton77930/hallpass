@@ -98,13 +98,13 @@ describe("native host manifest", () => {
 describe("relay entry resolution", () => {
   const moduleUrl = "file:///C:/pkg/host/install.js";
 
-  it("prefers native-host.js beside the installer, which is the packaged layout (007/T201)", () => {
+  it.runIf(process.platform === "win32")("prefers native-host.js beside the installer, which is the packaged layout (007/T201)", () => {
     const exists = (path: string) => path === "C:\\pkg\\host\\native-host.js";
 
     expect(resolveRelayEntryPath(moduleUrl, exists)).toBe("C:\\pkg\\host\\native-host.js");
   });
 
-  it("falls back to the parent directory, which is the repo's dist/install layout", () => {
+  it.runIf(process.platform === "win32")("falls back to the parent directory, which is the repo's dist/install layout", () => {
     expect(resolveRelayEntryPath(moduleUrl, () => false)).toBe("C:\\pkg\\native-host.js");
   });
 });
@@ -193,7 +193,7 @@ describe("registration outcomes (010/FR-139, FR-140)", () => {
     ]);
   });
 
-  it("removeLegacyRegistrations visits every root in the table and removes only an earlier version's entry", async () => {
+  it.runIf(process.platform === "win32")("removeLegacyRegistrations visits every root in the table and removes only an earlier version's entry", async () => {
     const legacyManifestPath = "C:\\old\\com.previous.host.json";
     const listed: string[] = [];
     const deleted: string[] = [];
@@ -265,15 +265,28 @@ describe("earlier version's registration (009/FR-126)", () => {
 
 describe("host paths", () => {
   it("keeps every host file in one per-user directory under LOCALAPPDATA", () => {
-    expect(hostDataDirectory(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass");
-    expect(hostManifestPath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\com.hallpass.host.json");
-    expect(launcherPath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\native-host.cmd");
-    expect(bridgeFilePath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\bridge.json");
-    expect(agentIdFilePath(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\agent-id");
+    expect(hostDataDirectory(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass");
+    expect(hostManifestPath(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\com.hallpass.host.json");
+    expect(launcherPath(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\native-host.cmd");
+    expect(bridgeFilePath(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\bridge.json");
+    expect(agentIdFilePath(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\agent-id");
   });
 
   it("keeps the per-browser records and the remembered choices in their own folders (018 R-266, R-271)", () => {
-    expect(browsersDirectory(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\browsers");
-    expect(browserChoicesDirectory(env)).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\choices");
+    expect(browsersDirectory(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\browsers");
+    expect(browserChoicesDirectory(env, "win32")).toBe("C:\\Users\\owner\\AppData\\Local\\hallpass\\choices");
+  });
+
+  it("028 FR-433: macOS keeps them in Application Support, Linux in the XDG data folder; a shell launcher there", () => {
+    expect(hostDataDirectory({ HOME: "/Users/owner" }, "darwin")).toBe("/Users/owner/Library/Application Support/hallpass");
+    expect(launcherPath({ HOME: "/Users/owner" }, "darwin")).toBe("/Users/owner/Library/Application Support/hallpass/native-host.sh");
+    expect(hostDataDirectory({ HOME: "/home/owner" }, "linux")).toBe("/home/owner/.local/share/hallpass");
+    expect(hostDataDirectory({ HOME: "/home/owner", XDG_DATA_HOME: "/data" }, "linux")).toBe("/data/hallpass");
+    expect(bridgeFilePath({ HOME: "/home/owner" }, "linux")).toBe("/home/owner/.local/share/hallpass/bridge.json");
+  });
+
+  it("028 FR-433: a set LOCALAPPDATA names the parent on every platform (isolated test and gate runs)", () => {
+    expect(hostDataDirectory({ LOCALAPPDATA: "/tmp/run-1", HOME: "/home/owner" }, "linux")).toBe("/tmp/run-1/hallpass");
+    expect(hostDataDirectory({ LOCALAPPDATA: "/tmp/run-1", HOME: "/Users/owner" }, "darwin")).toBe("/tmp/run-1/hallpass");
   });
 });

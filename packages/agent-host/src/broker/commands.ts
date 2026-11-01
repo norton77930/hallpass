@@ -8,6 +8,11 @@ import {
   CONVERSATION_MAX_ENTRIES,
   conversationCommandFrameSchema,
   type AgentInstallState,
+  type AgentSkillLocation,
+  type AgentSkillState,
+  type PanelMcpServer,
+  type PanelMcpServerList,
+  type PanelMcpServerView,
   type ConversationAgent,
   type ConversationAgentAvailability,
   type ConversationError,
@@ -23,7 +28,7 @@ import { isWindowsDeviceName } from "../host-paths.js";
 import {
   AGENT_ADAPTERS,
   AGENT_DESCRIPTIONS,
-  LAUNCH_EXEC_BOUND_MS,
+  VERSION_RETRY_BOUND_MS,
   TESTED_AGENT_VERSIONS,
   adapterLaunchSpec,
   agentAvailability,
@@ -257,12 +262,43 @@ export type CommandHandlerOptions = {
   /** 024 R-387: the user's profile folder, said as `%USERPROFILE%` in diagnostics by agent (default: this process's). */
   userProfile?: string;
   /**
+   * 026: the Hallpass skill's two folders (`agent-skill.ts`) - read for every overview, written on the
+   * settings page's install-skill. Absent: the overview has no `skills` and the command is refused.
+   */
+  skills?: AgentSkillPort;
+  /**
+   * 027: the owner's extra MCP servers for side-panel conversations (`panel-mcp-servers.ts`) - read for
+   * every overview, changed and checked from the settings page. Absent: no `mcpServers`, commands refused.
+   */
+  mcpServers?: PanelMcpPort;
+  /**
    * T563: what the list could not keep (`index-store.ts`), read for every overview. A code only, so
    * neither the broker's text nor the kept file's name reaches the panel.
    */
   listNotice?: () => ConversationListNotice | undefined;
   log?: (code: string, detail?: string) => void;
 };
+
+/** 026: `readSkillStates` and `installSkill` of `agent-skill.ts`, with the broker's environment. */
+export type AgentSkillPort = {
+  read: () => Promise<AgentSkillState[]>;
+  install: (
+    location: AgentSkillLocation,
+    replaceChanged?: true,
+  ) => Promise<{ ok: true; written: boolean } | { ok: false; code: "skill-changed" | "skill-write-failed"; detail: string }>;
+};
+
+/** 027: the list file, the broker's environment (set / not set only) and the Check. */
+export type PanelMcpPort = {
+  env: Readonly<Record<string, string | undefined>>;
+  read: () => Promise<{ servers: PanelMcpServer[]; unreadable?: true }>;
+  save: (server: PanelMcpServer, previousName?: string) => Promise<PanelMcpPortOutcome>;
+  remove: (name: string) => Promise<PanelMcpPortOutcome>;
+  check: (server: PanelMcpServer) => Promise<{ outcome: "works"; tools: string[]; toolCount: number } | { outcome: "failed"; detail: string }>;
+  /** R-420: the names Codex is not handed. */
+  codexSkipped: (servers: readonly PanelMcpServer[]) => Promise<ReadonlySet<string>>;
+};
+type PanelMcpPortOutcome = { ok: true } | { ok: false; code: "mcp-server-refused" | "not-found"; detail: string };
 
 /** 024 R-374: one agent's readiness, and whether its found program's `--version` timed out. */
 export type ReadinessResult = { availability: ConversationAgentAvailability; versionTimedOut?: boolean };
@@ -400,21 +436,30 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
 
   /**
    * 024 R-374: a found program whose `--version` did not answer within 5 s (a slow `hermes --version`
-   * takes 6-11 s, T794) is checked once more, in the background, at the launch bound. The first check's
-   * answer - Not installed, with the timed-out reason - is already in the overview; this one replaces it
-   * only while its check is still the agent's newest, and only with an answer: timed out again, or still
-   * no version, the first answer stands. A newer check or `stopChecks` aborts it, which ends its tree.
+   * takes 6-11 s, T794) is checked once more, in the background, at VERSION_RETRY_BOUND_MS (#25: 30 s;
+   * a busy machine's outlived the launch bound). The first check's answer - Not installed, with the
+   * timed-out reason - is already in the overview; this one replaces it only while its check is still
+   * the agent's newest: with an answer, or (#25) timed out again, marked `versionRetried` with the
+   * retry's bound in its reason, so the page says the computer may be busy and to check again. Still no
+   * version, the first answer stands. Nothing retries after it: Check again starts a new check. A newer
+   * check or `stopChecks` aborts it, which ends its tree.
    */
   const retryVersion = (agent: ConversationAgent, generation: number): void => {
     if (checksStopped) return;
     const controller = new AbortController();
     retries.set(agent, controller);
     const current = () => !controller.signal.aborted && startedChecks.get(agent) === generation && heldChecks.get(agent) === generation;
-    void check(agent, { boundMs: LAUNCH_EXEC_BOUND_MS, signal: controller.signal })
+    void check(agent, { boundMs: VERSION_RETRY_BOUND_MS, signal: controller.signal })
       .then(
         (result) => {
           const next = result.availability;
-          if (!current() || result.versionTimedOut === true || (next.availability === "version-problem" && next.version === undefined)) return;
+          if (!current()) return;
+          if (result.versionTimedOut === true) {
+            hold(agent, generation, { ...next, versionTimedOut: true, versionRetried: true });
+            scheduleOverview();
+            return;
+          }
+          if (next.availability === "version-problem" && next.version === undefined) return;
           hold(agent, generation, next);
           scheduleOverview();
         },
@@ -478,6 +523,8 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
         ...(models === undefined ? {} : { models: { offer: models.offer, ...(models.choice === undefined ? {} : { choice: models.choice }) } }),
       };
     });
+    const skills = await readSkills();
+    const mcpServers = await readMcpServers();
     options.send({
       type: "conversation-overview",
       sessionId,
@@ -487,7 +534,72 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
       // T547: the consent record, so a worker that restarted shows the owner's answer.
       consent: await consent.read(),
       ...(notice === undefined ? {} : { notice }),
+      ...(skills === undefined ? {} : { skills }),
+      ...(mcpServers === undefined ? {} : { mcpServers }),
     });
+  };
+
+  /** 026 R-414: what the page may see of a skill folder or its reason - the profile said as `%USERPROFILE%`. */
+  const shownPath = (text: string): string => withoutUserProfile(text, options.userProfile ?? process.env.USERPROFILE);
+
+  /** 026: both folders' states for the overview; a read that fails leaves them out of this one. */
+  const readSkills = async (): Promise<AgentSkillState[] | undefined> => {
+    if (options.skills === undefined) return undefined;
+    try {
+      return (await options.skills.read()).map((entry) => ({
+        ...entry,
+        folder: shownPath(entry.folder),
+        ...(entry.detail === undefined ? {} : { detail: shownPath(entry.detail) }),
+      }));
+    } catch {
+      log("broker.skills-read-failed");
+      return undefined;
+    }
+  };
+
+  /** 027 R-421: each server's last Check, by its name in lower case, and the checks running now. */
+  const mcpChecks = new Map<string, NonNullable<PanelMcpServerView["check"]>>();
+  const mcpChecking = new Set<string>();
+  const mcpKey = (name: string): string => name.toLowerCase();
+
+  /** 027 R-422: the list as the page sees it - each variable set or not, never its value. */
+  const readMcpServers = async (): Promise<PanelMcpServerList | undefined> => {
+    const port = options.mcpServers;
+    if (port === undefined) return undefined;
+    try {
+      const list = await port.read();
+      const skipped = await port.codexSkipped(list.servers).catch(() => new Set<string>());
+      const servers = list.servers.map((server): PanelMcpServerView => {
+        const check = mcpChecks.get(mcpKey(server.name));
+        return {
+          ...server,
+          variables: server.variables.map((name) => ({ name, set: port.env[name] !== undefined && port.env[name] !== "" })),
+          ...(check === undefined ? {} : { check }),
+          ...(mcpChecking.has(mcpKey(server.name)) ? { checking: true as const } : {}),
+          ...(skipped.has(server.name) && server.agents.includes("codex") ? { codexSkipped: true as const } : {}),
+        };
+      });
+      return { servers, ...(list.unreadable === true ? { unreadable: true as const } : {}) };
+    } catch {
+      log("broker.mcp-servers-read-failed");
+      return undefined;
+    }
+  };
+
+  /** 027 R-421: one Check in the background; the overview says `checking`, then the result. */
+  const startMcpCheck = (server: PanelMcpServer): void => {
+    const port = options.mcpServers!;
+    const key = mcpKey(server.name);
+    mcpChecking.add(key);
+    mcpChecks.delete(key);
+    void port
+      .check(server)
+      .catch((error: unknown) => ({ outcome: "failed" as const, detail: (error instanceof Error ? error.message : "The check failed.").slice(0, 300) }))
+      .then((result) => {
+        mcpChecking.delete(key);
+        mcpChecks.set(key, { ...result, at: new Date().toISOString() });
+        scheduleOverview();
+      });
   };
 
   const scheduleOverview = (): void => {
@@ -775,6 +887,38 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
         // until SHARED_STATE_WATCH_IDLE_MS passes with no check-agents and nothing running here (R-375).
         startWatching();
         await refreshAgents(command.payload.agent);
+        return { outcome: { ok: true }, after: scheduleOverview };
+      }
+      case "ui.conversation.install-skill": {
+        // 026 R-415 (D-026-2): only on the owner's click on the settings page; a changed copy only with replaceChanged.
+        if (options.skills === undefined) return { outcome: failure("broker-unavailable", "Hallpass cannot install its skill here.") };
+        const installed = await options.skills.install(command.payload.location, command.payload.replaceChanged);
+        if (!installed.ok) return { outcome: failure(installed.code, shownPath(installed.detail)) };
+        return { outcome: { ok: true }, after: scheduleOverview };
+      }
+      case "ui.conversation.mcp-server-save": {
+        // 027 R-418: the settings page's add or edit; a changed server's old Check no longer says anything.
+        if (options.mcpServers === undefined) return { outcome: failure("broker-unavailable", "Hallpass cannot keep extra servers here.") };
+        const { server, previousName } = command.payload;
+        const saved = await options.mcpServers.save(server, previousName);
+        if (!saved.ok) return { outcome: failure(saved.code, saved.detail) };
+        for (const name of [server.name, ...(previousName === undefined ? [] : [previousName])]) mcpChecks.delete(mcpKey(name));
+        return { outcome: { ok: true }, after: scheduleOverview };
+      }
+      case "ui.conversation.mcp-server-remove": {
+        if (options.mcpServers === undefined) return { outcome: failure("broker-unavailable", "Hallpass cannot keep extra servers here.") };
+        const removed = await options.mcpServers.remove(command.payload.name);
+        if (!removed.ok) return { outcome: failure(removed.code, removed.detail) };
+        mcpChecks.delete(mcpKey(command.payload.name));
+        return { outcome: { ok: true }, after: scheduleOverview };
+      }
+      case "ui.conversation.mcp-server-check": {
+        // 027 D-027-2: ok at once; `checking` and then the result reach the page in the overview.
+        if (options.mcpServers === undefined) return { outcome: failure("broker-unavailable", "Hallpass cannot check extra servers here.") };
+        const list = await options.mcpServers.read();
+        const server = list.servers.find((entry) => mcpKey(entry.name) === mcpKey(command.payload.name));
+        if (server === undefined) return { outcome: failure("not-found", `There is no extra server named ${command.payload.name}.`) };
+        if (!mcpChecking.has(mcpKey(server.name))) startMcpCheck(server);
         return { outcome: { ok: true }, after: scheduleOverview };
       }
       case "ui.conversation.install-cancel": {

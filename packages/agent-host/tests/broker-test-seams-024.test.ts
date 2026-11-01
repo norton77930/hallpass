@@ -135,7 +135,7 @@ describe("the test machine (HALLPASS_BROKER_TEST_MACHINE) under the real readine
     }
   });
 
-  it("four agents in four states: ready, needs the helper, ready with Hermes' component missing, not downloaded", async () => {
+  it.runIf(process.platform === "win32")("four agents in four states: ready, needs the helper, ready with Hermes' component missing, not downloaded", async () => {
     await installPinned("claude-code");
     const machine: TestMachine = {
       gitBash: true,
@@ -181,7 +181,7 @@ describe("the test machine (HALLPASS_BROKER_TEST_MACHINE) under the real readine
     expect(status).toMatchObject({ availability: "needs-install", version: "0.170.1" });
   });
 
-  it(
+  it.runIf(process.platform === "win32")(
     "one hung --version (the fake agent's FAKE_ACP_VERSION_HANG) holds only its own row, ended at the 5 s bound",
     async () => {
       await installPinned("claude-code");
@@ -230,7 +230,7 @@ describe("the test machine (HALLPASS_BROKER_TEST_MACHINE) under the real readine
     expect(result).toMatchObject({ code: null, timedOut: false });
   });
 
-  it("names a program path inside the data folder that cmd.exe could take, never the owner's profile", () => {
+  it.runIf(process.platform === "win32")("names a program path inside the data folder that cmd.exe could take, never the owner's profile", () => {
     for (const agent of ["claude-code", "codex", "hermes"] as const) {
       const path = testMachineCliPath(data, agent);
       expect(path.startsWith(`${data}${win32.sep}`)).toBe(true);
@@ -270,7 +270,7 @@ describe("the test install (HALLPASS_BROKER_TEST_INSTALL) in place of npm ci", (
   const fakeInstall = (seconds: string) =>
     testInstallRun({ command: process.execPath, args: ["--experimental-strip-types", "--no-warnings", INSTALL_SCRIPT, "--lockfile", seconds] });
 
-  it(
+  it.runIf(process.platform === "win32")(
     "grows the tree from the lockfile over time; the install verifies it and names it as installed",
     async () => {
       await writeManifests();
@@ -292,7 +292,7 @@ describe("the test install (HALLPASS_BROKER_TEST_INSTALL) in place of npm ci", (
     20_000,
   );
 
-  it(
+  it.runIf(process.platform === "win32")(
     "cancel ends the fake's process and removes its folder, as with npm",
     async () => {
       await writeManifests();

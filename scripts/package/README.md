@@ -12,7 +12,7 @@ MCP client ──stdio──▶ host\mcp-server.js ──loopback──▶ relay
 
 ## 1. 前置
 
-- Windows 11。
+- Windows 11(Linux、macOS 也可以：用 `sh ./install.sh` / `sh ./uninstall.sh`;側欄對話目前只支援 Windows)。
 - **Node.js 24 以上**(`node -v` 要看到 `v24.x`;https://nodejs.org/)。`install.ps1` 會檢查,太舊會停下來。
 - **Chrome**(正式版 152 驗收過;Chromium、Edge、Brave 有註冊但未實機驗證)。想把 agent 的登入狀態和日常瀏覽分開,才用專用
   profile:`chrome.exe --user-data-dir=D:\chrome-agent-profile`。

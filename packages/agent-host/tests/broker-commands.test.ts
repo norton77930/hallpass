@@ -429,7 +429,7 @@ describe("T540 commands on one conversation", () => {
 describe("T540/T562 folders", () => {
   const addFolder: ConversationCommand = { type: "ui.conversation.add-folder", payload: {} };
 
-  it("add-folder: the dialog's folder joins the list and the overview; cancel changes nothing", async () => {
+  it.runIf(process.platform === "win32")("add-folder: the dialog's folder joins the list and the overview; cancel changes nothing", async () => {
     const chosen = join(dir, "project");
     await mkdir(chosen);
     const picked = await setup({ dialog: { code: 0, stdout: `PATH:${Buffer.from(chosen, "utf8").toString("base64")}` } });
@@ -455,7 +455,7 @@ describe("T540/T562 folders", () => {
     expect(await failed.run(addFolder)).toMatchObject(refusal("broker-unavailable"));
   });
 
-  it("T563 add-folder { path }: a typed folder is checked like a chosen one, and no dialog opens", async () => {
+  it.runIf(process.platform === "win32")("T563 add-folder { path }: a typed folder is checked like a chosen one, and no dialog opens", async () => {
     const typed = join(dir, "typed-project");
     await mkdir(typed);
     // A dialog that would answer something else: the typed path must not open it.
@@ -484,7 +484,7 @@ describe("T540/T562 folders", () => {
     expect(await folders.list()).toEqual([]);
   });
 
-  it("open-folder: unknown conversation, a missing folder, and Explorer on the folder", async () => {
+  it.runIf(process.platform === "win32")("open-folder: unknown conversation, a missing folder, and Explorer on the folder", async () => {
     expect(await (await setup()).run({ type: "ui.conversation.open-folder", payload: { conversationId: ID } })).toMatchObject(
       refusal("not-found"),
     );

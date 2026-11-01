@@ -1,5 +1,6 @@
 docs/reference-*.md export-ignore
 tests/acceptance/probe-004/reports/** export-ignore
+tests/acceptance/probe-017/reports/** export-ignore
 .claude/scheduled_tasks.lock export-ignore
 .claude/settings*.json export-ignore
 .claude/worktrees/** export-ignore
