@@ -82,7 +82,8 @@ posixOnly("028 install.sh and uninstall.sh under a POSIX shell", () => {
   });
 
   it("uninstall.sh runs the uninstaller; --purge also removes the data folder", () => {
-    const data = join(home, ".local", "share", "hallpass");
+    // The data folder as uninstall.sh and host-paths.ts place it (the env sets no XDG_DATA_HOME).
+    const data = process.platform === "darwin" ? join(home, "Library", "Application Support", "hallpass") : join(home, ".local", "share", "hallpass");
     mkdirSync(data, { recursive: true });
     writeFileSync(join(data, "config.json"), "{}");
     expect(run("uninstall.sh").status).toBe(0);

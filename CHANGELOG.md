@@ -5,6 +5,10 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.18.2 — 2026-11-02
+
+- **Maintainers**: `publish:snapshot` sets file modes through the index only, so a CRLF file stays LF in the public tree on Linux and macOS too (0.18.1 could re-read it from disk there). Contract tests for file modes and `uninstall.sh --purge` now pass on Linux and macOS. No behaviour change for users.
+
 ## 0.18.1 — 2026-11-01
 
 - **Linux and macOS from a clone**: `install.sh` and `uninstall.sh` are executable in the public repository again (the 0.18.0 snapshot dropped the bit; the zip was not affected, since it runs them with `sh`).
