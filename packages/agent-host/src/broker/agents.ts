@@ -18,6 +18,7 @@ import { CODEX_SHIM_COMMAND, CODEX_SHIM_ENV, codexAdapterModesAsMeasured } from 
 import { redact, withoutEnvironmentValues } from "./redact.js";
 import { runCommand } from "./run-command.js";
 import { dotEnvNames, hermesHome, hermesKeyEnvName, userEnvironmentNames, type UserEnvironmentPorts } from "./user-environment.js";
+import { joinUnder, pathFor } from "./data-path.js";
 
 /**
  * Finding the owner's coding agent and what speaks ACP to it (019/T530, T531, T534; R-314, R-315,
@@ -286,7 +287,7 @@ export function defaultAgentPorts(codexShimEntry: string, env: NodeJS.ProcessEnv
         ),
       readText: (path) => readFile(path, "utf8"),
       writeText: async (path, text) => {
-        await mkdir(win32.dirname(path), { recursive: true });
+        await mkdir(pathFor(path).dirname(path), { recursive: true });
         const temp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
         try {
           await writeFile(temp, text, "utf8");
@@ -320,7 +321,7 @@ function requirePackage(agent: ConversationAgent): { package: string; version: s
  * throws for it.
  */
 export function adapterDirectory(dataDir: string, agent: ConversationAgent): string {
-  return win32.join(dataDir, "agents", agent, requirePackage(agent).version);
+  return joinUnder(dataDir, "agents", agent, requirePackage(agent).version);
 }
 
 /** The folder an install's `npm ci` runs in, and stays in: `agents\<agent>\.install-<broker pid>-<random>`. */
@@ -332,7 +333,7 @@ const INSTALL_TREE_NAME = /^\.install-\d+-[0-9a-z]+$/u;
  * Created whole, and only once the tree it names was verified, so a tree it names is complete.
  */
 export function installPointerPath(dataDir: string, agent: ConversationAgent): string {
-  return win32.join(dataDir, "agents", agent, `${requirePackage(agent).version}.installed.json`);
+  return joinUnder(dataDir, "agents", agent, `${requirePackage(agent).version}.installed.json`);
 }
 
 /** The tree folder a pointer names, or undefined: a bare `.install-*` name, so nothing outside the agent folder. */
@@ -395,11 +396,11 @@ export async function installedAdapterDirectory(
 ): Promise<string> {
   const text = await readInstallFile(readText, installPointerPath(dataDir, agent), retry);
   const folder = text === undefined ? undefined : parseInstallPointer(text);
-  return folder === undefined ? adapterDirectory(dataDir, agent) : win32.join(dataDir, "agents", agent, folder);
+  return folder === undefined ? adapterDirectory(dataDir, agent) : joinUnder(dataDir, "agents", agent, folder);
 }
 
 const adapterPackageDirectory = async (agent: ConversationAgent, ports: AgentPorts) =>
-  win32.join(
+  joinUnder(
     await installedAdapterDirectory(ports.dataDir, agent, (path) => ports.fs.readText(path)),
     "node_modules",
     ...requirePackage(agent).package.split("/"),
@@ -491,7 +492,7 @@ async function readAdapterManifest(
   if (packagePin(agent) === undefined) return undefined;
   try {
     const packageDir = await adapterPackageDirectory(agent, ports);
-    const manifest: unknown = JSON.parse(await ports.fs.readText(win32.join(packageDir, "package.json")));
+    const manifest: unknown = JSON.parse(await ports.fs.readText(joinUnder(packageDir, "package.json")));
     return manifest && typeof manifest === "object" ? { packageDir, manifest: manifest as Record<string, unknown> } : undefined;
   } catch (error) {
     if (error instanceof UnreadableInstallFileError) throw error;
@@ -744,7 +745,7 @@ export async function checkAgentReadiness(agent: ConversationAgent, ports: Agent
 
 /** `<data>\agents\codex\app-server-shim.cmd` - what `CODEX_PATH` names (codex-strict.ts). */
 export function codexShimCommandPath(dataDir: string): string {
-  return win32.join(dataDir, "agents", "codex", "app-server-shim.cmd");
+  return joinUnder(dataDir, "agents", "codex", "app-server-shim.cmd");
 }
 
 /**
@@ -840,8 +841,8 @@ export async function adapterLaunchSpec(
   const chosen = entries.find(([name]) => name === unscoped) ?? entries[0];
   const bin = typeof chosen?.[1] === "string" && chosen[1] ? chosen[1] : undefined;
   if (!bin) throw new Error("the adapter's package.json has no bin entry");
-  const entry = win32.resolve(packageDir, bin);
-  if (!entry.toLowerCase().startsWith(`${packageDir.toLowerCase()}${win32.sep}`)) {
+  const entry = pathFor(packageDir).resolve(packageDir, bin);
+  if (!entry.toLowerCase().startsWith(`${packageDir.toLowerCase()}${pathFor(packageDir).sep}`)) {
     throw new Error("the adapter's bin entry points outside the adapter folder");
   }
   if (description.kind === "fetched") {

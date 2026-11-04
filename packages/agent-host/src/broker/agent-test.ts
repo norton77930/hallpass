@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
-import { win32 } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { AgentTestResult, ConversationAgent, ConversationError, ConversationEventPayload } from "@hallpass/contracts";
 import type { AdapterLaunchSpec } from "./agents.js";
@@ -9,6 +8,7 @@ import { Conversation, systemClock, type Clock, type LaunchResolution } from "./
 import { killTreeAsync } from "./run-command.js";
 import { writeLastTest } from "./shared-agent-state.js";
 import type { UserEnvironmentPorts } from "./user-environment.js";
+import { joinUnder } from "./data-path.js";
 
 /**
  * 024 R-379 (D-024-10, FR-381): the settings page's Test of an agent - one short prompt to a copy of
@@ -82,7 +82,7 @@ export function createAgentTestRunner(options: AgentTestRunnerOptions): AgentTes
 
   const runOnce = async (agent: ConversationAgent): Promise<AgentTestResult> => {
     const id = (options.newId ?? (() => randomBytes(8).toString("hex")))();
-    const folder = win32.join(options.dataDir, "agent-tests", id);
+    const folder = joinUnder(options.dataDir, "agent-tests", id);
     const deadline = clock.now() + bound;
     const browserTools = options.browserTools(agent).catch((): AgentTestResult["browserTools"] => "missing-component");
     let start: AgentTestResult["start"] = "ok";

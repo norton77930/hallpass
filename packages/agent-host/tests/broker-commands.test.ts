@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, win32 } from "node:path";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   conversationOverviewFrameSchema,
@@ -64,11 +64,11 @@ function machinePorts(machine: Machine): AgentPorts {
     dataDir: data,
     env: {},
     nodePath: process.execPath,
-    codexShimEntry: win32.join(data, "codex-app-server-shim.js"),
+    codexShimEntry: join(data, "codex-app-server-shim.js"),
     fs: {
       exists: async (path) => machine.cli === true && path === CLI,
       readText: async (path) => {
-        if (machine.adapter && path.endsWith(win32.join("claude-agent-acp", "package.json"))) return adapterManifest("claude-code");
+        if (machine.adapter && path.endsWith(join("claude-agent-acp", "package.json"))) return adapterManifest("claude-code");
         throw new Error("ENOENT");
       },
       writeText: async () => {
@@ -681,8 +681,9 @@ describe("T547 the gaps S4 left for the panel", () => {
  * each mode's launch settings (Hermes' managed layer, DeepSeek's environment) still apply.
  */
 describe("021 createAgentLauncher: a launch for a panel mode (T645)", () => {
-  const DSH = () => win32.join(data, "agents", "deepseek", "0.2.1-rc.2", "node_modules", "@deepseek-ai", "dsh", "package.json");
-  const managed = (mode: string) => win32.join(data, "agents", "hermes", "managed", mode);
+  // #29: `data` is a real folder of this computer, so its paths are this computer's (win32 on Windows).
+  const DSH = () => join(data, "agents", "deepseek", "0.2.1-rc.2", "node_modules", "@deepseek-ai", "dsh", "package.json");
+  const managed = (mode: string) => join(data, "agents", "hermes", "managed", mode);
 
   function launcherPorts(files: Record<string, string> = {}): AgentPorts & { writes: string[] } {
     const content = { ...files };
@@ -692,7 +693,7 @@ describe("021 createAgentLauncher: a launch for a panel mode (T645)", () => {
       dataDir: data,
       env: {},
       nodePath: process.execPath,
-      codexShimEntry: win32.join(data, "codex-app-server-shim.js"),
+      codexShimEntry: join(data, "codex-app-server-shim.js"),
       fs: {
         exists: async (path) => path in content,
         readText: async (path) => {
@@ -747,7 +748,7 @@ describe("021 createAgentLauncher: a launch for a panel mode (T645)", () => {
       spec: { ...testAgent, env: { FAKE_ACP_LOG: "log", HERMES_MANAGED_DIR: managed("agent-review") } },
       versions: { agent: "hermes", tested: "0.22.2", found: "0.0.0-test" },
     });
-    expect(p.writes).toEqual([win32.join(managed("agent-review"), "config.yaml")]);
+    expect(p.writes).toEqual([join(managed("agent-review"), "config.yaml")]);
     expect(await launcher.resolveLaunch("deepseek")).toMatchObject({
       ok: true,
       spec: { env: { FAKE_ACP_LOG: "log", DSH_PERMISSION_MODE: "read-only", DSH_TELEMETRY_MODE: "DISABLED" } },
