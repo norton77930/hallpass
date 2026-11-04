@@ -23,6 +23,6 @@
     "@hallpass/domain": "0.0.0",
     "@modelcontextprotocol/sdk": "1.32.0",
     "koffi": "3.3.3",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   }
 }
