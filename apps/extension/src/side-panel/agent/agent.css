@@ -1277,7 +1277,8 @@
   padding: 0;
   border: 0;
 }
-.agent-question-field legend {
+.agent-question-field legend,
+.agent-question-field > label:first-child {
   padding: 0;
   font-weight: 600;
 }
@@ -1307,6 +1308,21 @@
 }
 .agent-question-hint {
   flex-basis: 100%;
+}
+/* An option's own description lines up with its words, not with the field. */
+.agent-question-option .agent-question-hint {
+  padding-inline-start: 1.6em;
+}
+/* A tall question scrolls inside its card; Send and Skip stay in view at its foot. */
+.agent-conversation-question > .agent-prompt-actions {
+  position: sticky;
+  bottom: calc(-1 * var(--sp-3));
+  margin-bottom: calc(-1 * var(--sp-3));
+  padding: var(--sp-2) 0 var(--sp-3);
+  background: inherit;
+}
+.agent-question-goes-to {
+  margin-top: var(--sp-3);
 }
 .agent-question-message {
   white-space: pre-wrap;
