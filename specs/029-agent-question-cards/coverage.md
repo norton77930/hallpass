@@ -17,6 +17,7 @@ Measured 2026-11-04 in a Linux cloud session (Node 24.22.1); Windows-only checks
 | FR-448, SC-201 (Hermes, DeepSeek unchanged) | `broker-questions-029` "T880" (2); the existing 021 suites pass unchanged |
 | Fake agent `ask:form:*` | `tests/harness/fake-acp-agent.test.ts` "029" (8) |
 | zh-TW | panel "speaks zh-TW"; every string in both locales (type-checked parity) |
+| R-438 (the adapters' hints: chip, words, preview, answer box joined to its question) | `questions-029` "R-438" (4); `broker-questions-029` "R-438" (2, over the fake agent's `ask:form:claude` / `ask:form:codex`); contracts "R-438"; panel "R-438" (2) |
 | Layout | rendered screenshot at side-panel width, light and dark: Send / Skip stay in view in a tall card |
 
 Runs (T883, the CI order): typecheck 0 errors; `npm test` 3691 passed, 99 skipped (Windows-only on Linux);

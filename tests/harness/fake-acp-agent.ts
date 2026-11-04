@@ -125,6 +125,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  *                         fields. `empty`: a fieldless MCP approval, sent as `session/request_permission`
  *                         (as Codex does), says `permission:<outcome>`. `outside`: ends the turn, then
  *                         asks 100 ms later and logs `{ event: "outside-elicit", action }` (FAKE_ACP_LOG).
+ *                         `claude` / `codex` (029 R-438): two questions shaped as Claude Code's question
+ *                         tool and as Codex's user-input request are sent - their tags, option preview,
+ *                         and each question's own free-text field with its marker.
  * - FAKE_ACP_SET_SNAPSHOT_EARLY=1  (#24) a `session/set_config_option` applies the change and takes the
  *                         options it answers with on arrival, before FAKE_ACP_SET_DELAY_MS: a held answer
  *                         then misses what a later set changed meanwhile (an out-of-order snapshot).
@@ -542,6 +545,62 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
         properties: Object.fromEntries(Array.from({ length: 21 }, (_unused, index) => [`q${index + 1}`, { type: "string", title: `Question ${index + 1}` }])),
       } as acp.ElicitationSchema,
     },
+    claude: {
+      message: "Please answer the following questions.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          question_0: {
+            type: "string",
+            title: "Auth",
+            description: "Which sign-in should the app use?",
+            oneOf: [
+              { const: "OAuth", title: "OAuth", description: "Sign in through the browser", _meta: { "_claude/askUserQuestionOption": { preview: "await signIn({ provider })" } } },
+              { const: "API key", title: "API key", description: "A key in the settings" },
+            ],
+          },
+          question_0_custom: {
+            type: "string",
+            title: "Other",
+            description: "Type your own answer, or add a note to the option you chose above (optional).",
+            _meta: { _askUserQuestionCustomAnswer: { questionId: "question_0", isCustomAnswer: true } },
+          },
+          question_1: {
+            type: "array",
+            title: "Features",
+            description: "Which features should the first release have?",
+            items: { anyOf: [{ const: "Search", title: "Search" }, { const: "Export", title: "Export", description: "CSV and PDF" }] },
+          },
+          question_1_custom: {
+            type: "string",
+            title: "Other",
+            description: "Type your own answer to add to your selection above (optional).",
+            _meta: { _askUserQuestionCustomAnswer: { questionId: "question_1", isCustomAnswer: true } },
+          },
+        },
+      } as acp.ElicitationSchema,
+    },
+    codex: {
+      message: "Codex needs your input to continue.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          scope: {
+            type: "string",
+            title: "Which scope should the new token have?",
+            description: "Token scope",
+            oneOf: [
+              { const: "repo", title: "repo", description: "Read and write code" },
+              { const: "read:org", title: "read:org" },
+              { const: "None of the above", title: "None of the above", description: "Provide a different answer in the note field." },
+            ],
+            _meta: { codex: { isOther: true, isSecret: false } },
+          },
+          scope_note: { type: "string", title: "Additional answer or note", _meta: { codex: { questionId: "scope", role: "user_note", isSecret: false } } },
+        },
+        required: ["scope"],
+      } as acp.ElicitationSchema,
+    },
     outside: {
       message: "Asked after the turn",
       requestedSchema: { type: "object", properties: { answer: { type: "string" } } } as acp.ElicitationSchema,
@@ -836,7 +895,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       const drift = /^drift:(.+)$/.exec(token);
       const mcp = /^mcp:([a-z_]+)(?::(.+))?$/.exec(token);
       const selfModel = /^self-model:(.+)$/.exec(token);
-      const form = /^ask:form:(kinds|secret|tool|withdraw|big|empty|outside)$/.exec(token);
+      const form = /^ask:form:(kinds|secret|tool|withdraw|big|empty|outside|claude|codex)$/.exec(token);
       if (chunks) {
         matched = true;
         for (let index = 1; index <= Number(chunks[1]); index++) {

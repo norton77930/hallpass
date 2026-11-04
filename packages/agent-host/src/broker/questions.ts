@@ -30,9 +30,16 @@ export type MappedQuestion = {
 };
 
 const LABEL_MAX = 200;
+/** A field's label is the question's words (R-438), longer than an option's label. */
+const FIELD_LABEL_MAX = 1000;
 const DESCRIPTION_MAX = 1000;
 const OPTION_VALUE_MAX = 1000;
 const PATTERN_MAX = 400;
+const PREVIEW_MAX = 4000;
+/** R-438: where Claude Code's adapter puts an option's preview. */
+const OPTION_PREVIEW_META = "_claude/askUserQuestionOption";
+/** R-438: the marker the adapters' question bridges put on a question's own free-text answer field. */
+const CUSTOM_ANSWER_META = "_askUserQuestionCustomAnswer";
 
 type Schema = Record<string, unknown>;
 
@@ -60,7 +67,14 @@ function titledOptions(list: unknown): Option[] | undefined {
     if (!isRecord(entry) || typeof entry.const !== "string") return undefined;
     const value = bounded(entry.const, OPTION_VALUE_MAX)!;
     const description = bounded(text(entry.description), DESCRIPTION_MAX);
-    options.push({ value, label: bounded(text(entry.title), LABEL_MAX) ?? value, ...(description ? { description } : {}) });
+    const meta = isRecord(entry._meta) && isRecord(entry._meta[OPTION_PREVIEW_META]) ? entry._meta[OPTION_PREVIEW_META] : undefined;
+    const preview = bounded(text(meta?.preview), PREVIEW_MAX);
+    options.push({
+      value,
+      label: bounded(text(entry.title), LABEL_MAX) ?? value,
+      ...(description ? { description } : {}),
+      ...(preview ? { preview } : {}),
+    });
   }
   return options;
 }
@@ -90,7 +104,7 @@ function fieldOf(key: string, property: unknown, required: boolean): QuestionFie
   const description = bounded(text(schema.description), DESCRIPTION_MAX);
   const base = {
     key: bounded(key, LABEL_MAX)!,
-    label: bounded(text(schema.title), LABEL_MAX) ?? key,
+    label: bounded(text(schema.title), FIELD_LABEL_MAX) ?? key,
     ...(description ? { description } : {}),
     required,
   };
@@ -188,10 +202,54 @@ export function questionFromRequest(request: FormRequest): MappedQuestion {
     if (error instanceof OverBound) return skipOnly;
     throw error;
   }
+  fields = withDisplayHints(fields, properties);
   const showable = fields.some((field) => field.kind !== "unsupported");
   const blocked = fields.some((field) => field.kind === "unsupported" && field.required);
   if (!showable || blocked) return { message, fields, skipOnly: true, ...wait };
   return { message, fields, ...wait };
+}
+
+/**
+ * R-438: what the adapters say about how a question is meant to be shown. A free-text field marked as
+ * a question's own "other" answer or note joins that choice field (`otherFor`). Claude Code's question
+ * tool titles each question with its short tag and puts its words in the description; Codex puts the
+ * words in the title and the tag in the description. Either way the tag becomes the `chip` and the
+ * words the label. Nothing is inferred from the text itself.
+ */
+function withDisplayHints(fields: QuestionField[], properties: Schema): QuestionField[] {
+  const metaOf = (key: string): Schema | undefined => {
+    const property = properties[key];
+    return isRecord(property) && isRecord(property._meta) ? property._meta : undefined;
+  };
+  const choice = new Set(fields.filter((field) => field.kind === "choice" || field.kind === "choices").map((field) => field.key));
+  const tagged = new Set<string>();
+  const joined = fields.map((field): QuestionField => {
+    if (field.kind !== "text") return field;
+    const meta = metaOf(field.key);
+    const shared = isRecord(meta?.[CUSTOM_ANSWER_META]) ? text((meta[CUSTOM_ANSWER_META] as Schema).questionId) : undefined;
+    const codex = isRecord(meta?.codex) && meta.codex.role === "user_note" ? text(meta.codex.questionId) : undefined;
+    const target = shared ?? codex;
+    if (target === undefined || !choice.has(target)) return field;
+    if (shared !== undefined) tagged.add(target);
+    return { ...field, otherFor: target };
+  });
+  return joined.map((field): QuestionField => {
+    if (field.kind === "unsupported" || field.otherFor !== undefined) return field;
+    const property = properties[field.key];
+    const title = isRecord(property) ? text(property.title) : undefined;
+    if (tagged.has(field.key) && title !== undefined) {
+      // Claude Code: the title is the tag; the words are the description, or the message for one question.
+      const { description, ...rest } = field;
+      return { ...rest, chip: title.slice(0, LABEL_MAX), label: description ?? title };
+    }
+    const meta = metaOf(field.key);
+    if (isRecord(meta?.codex) && field.description !== undefined) {
+      // Codex: the title is the words; the description is the tag.
+      const { description, ...rest } = field;
+      return { ...rest, chip: description.slice(0, LABEL_MAX) };
+    }
+    return field;
+  });
 }
 
 // --- the reply (R-434) ---

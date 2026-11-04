@@ -244,3 +244,4 @@ text in the reply, and the owner answers with the next message.
 | 2026-11-04 | D-029-1 (forms only, no links) decided | Owner ("同意") |
 | 2026-11-04 | Planning: FR-443 and User Story 3 say what the card can know (neither adapter names an asking server, R-430); a question outside a turn is cancelled (R-431); FR-449 secret fields | Main session, plan |
 | 2026-11-04 | Implemented T864-T883 (Linux cloud session); T884 (probe:017 and the quickstart on Windows) owed | Main session |
+| 2026-11-04 | Owner review of the card: drawn as the adapters mean it (R-438) - the tag as a chip over the question's words, options as rows with description and preview, each question's own answer box inside it | Owner, main session |

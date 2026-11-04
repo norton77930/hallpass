@@ -258,3 +258,33 @@ describe("029 T880 Hermes and DeepSeek are unchanged (FR-448)", () => {
     });
   }
 });
+
+describe("029 R-438 the adapters' display hints reach the card", () => {
+  it("Claude Code's question tool: tags as chips, words as labels, the preview, each Other box joined to its question", async () => {
+    h = await poolHarness();
+    const id = await h.start();
+    const from = await sendOnly(h, id, "ask:form:claude");
+    const question = await questionFor(h, id, from);
+    expect(question.fields.map((field) => [field.key, field.chip, field.otherFor])).toEqual([
+      ["question_0", "Auth", undefined],
+      ["question_0_custom", undefined, "question_0"],
+      ["question_1", "Features", undefined],
+      ["question_1_custom", undefined, "question_1"],
+    ]);
+    expect(question.fields[0]?.label).toBe("Which sign-in should the app use?");
+    expect(question.fields[0]?.options?.[0]?.preview).toBe("await signIn({ provider })");
+    const values = { question_0: "OAuth", question_0_custom: "with SSO", question_1: ["Export"] };
+    expect((await h.pool.questionReply(id, question.requestId, { action: "accept", values })).ok).toBe(true);
+    await untilTurnEnds(h, id, from);
+    expect(agentText(h, id, from)).toContain(`content:${JSON.stringify(values)}`);
+  });
+
+  it("Codex's user-input request: the words as the label, the tag as the chip, the note joined to its question", async () => {
+    h = await poolHarness();
+    const id = await h.start("codex");
+    const from = await sendOnly(h, id, "ask:form:codex");
+    const question = await questionFor(h, id, from);
+    expect(question.fields[0]).toMatchObject({ key: "scope", label: "Which scope should the new token have?", chip: "Token scope", required: true });
+    expect(question.fields[1]).toMatchObject({ key: "scope_note", otherFor: "scope" });
+  });
+});
