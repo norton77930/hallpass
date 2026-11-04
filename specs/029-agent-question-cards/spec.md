@@ -6,9 +6,8 @@
 
 **Created**: 2026-11-04
 
-**Status**: Draft. D-029-2 and D-029-3 put to the owner on 2026-11-04 and accepted as recommended;
-D-029-1 awaits the owner's confirmation of the recommendation. The rest are the main session's defaults,
-listed under Assumptions.
+**Status**: Draft. D-029-1..3 put to the owner on 2026-11-04 and accepted as recommended; the rest are
+the main session's defaults, listed under Assumptions.
 
 **Input**: Issue #17, a follow-up from the 024 settings-page discussion: when a side-panel agent wants to
 ask the owner a question (choices, a clarification), the answer should come from a card in the side
@@ -42,7 +41,7 @@ observable protocol behaviour only):
 
 **Decisions (D-029-n)**:
 
-- **D-029-1 — forms only, no links** (recommended, awaiting confirmation): Hallpass says it can show
+- **D-029-1 — forms only, no links** (confirmed): Hallpass says it can show
   forms, not links. An agent or server that wants the owner to open a link is told the client cannot, as
   today. Every link question the tested adapters ask is a sign-in: an MCP server's sign-in (both), and
   Codex's account sign-in by device code. In Hallpass the agents are signed in from their own terminal,
@@ -234,3 +233,4 @@ text in the reply, and the owner answers with the next message.
 | --- | --- | --- |
 | 2026-11-04 | Created from issue #17; D-029-1..3 open for the owner | Issue #17, main session |
 | 2026-11-04 | D-029-2 (server questions shown, labelled) and D-029-3 (fallback-model card) decided; D-029-1's link uses recorded | Owner, main session |
+| 2026-11-04 | D-029-1 (forms only, no links) decided | Owner ("同意") |
