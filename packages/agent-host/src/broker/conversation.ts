@@ -872,9 +872,13 @@ export class Conversation {
     }
     const connection = acp
       .client({ name: "hallpass" })
+      // The SDK walks each incoming message through these handlers in order, one await per handler,
+      // and handles messages side by side. An update must not fall behind the request the agent sent
+      // after it (DeepSeek asks with the id alone and its card needs the announced action, R-353), so
+      // the update's handler comes first: an earlier update never needs more steps than a later request.
+      .onNotification("session/update", ({ params }) => this.onUpdate(params))
       .onRequest("session/request_permission", ({ params }) => this.onPermission(params))
       .onRequest("elicitation/create", ({ params, signal }) => this.onQuestion(params, signal))
-      .onNotification("session/update", ({ params }) => this.onUpdate(params))
       .connect(
         acp.ndJsonStream(
           Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
