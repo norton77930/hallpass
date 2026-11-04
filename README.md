@@ -217,6 +217,14 @@ external agent stays above both tabs.
   too; commands your own Codex rules allow still run without asking, and the panel says so. A card left
   unanswered keeps the agent waiting; it never expires into an approval. "Allow for this conversation"
   covers that kind of action in that conversation only.
+- **Questions as cards.** When Claude Code or Codex asks you something with choices or a few fields,
+  the question appears as a card above the box. Pick or type your answer and press **Send**, or press
+  **Skip** to tell the agent you chose not to answer; **Stop** ends the turn without answering. The
+  card says which agent asks and, when the question belongs to one of its tool calls, which. Your
+  answer goes to the agent and its model provider like a message, and may go on to that tool. A field
+  that asks for a secret hides what you type, and the conversation shows only that it was answered.
+  Hallpass shows forms only; it never opens a link an agent asks you to visit. Hermes and DeepSeek ask
+  in their replies, as before.
 - **Model and reasoning effort.** The model chip after the mode chip lists the models the agent itself
   offers (its default first) and, where it has them, its reasoning-effort levels. Pick before the first
   message or between turns; a change adds one line to the conversation. Hallpass remembers each agent's
