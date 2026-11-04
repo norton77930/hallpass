@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, stat } from "node:fs/promises";
-import { join, win32 } from "node:path";
+import { join } from "node:path";
 import { z } from "zod";
 import { CONVERSATION_MAX_FOLDERS, conversationFolderEntrySchema, type ConversationError, type ConversationFolderEntry } from "@hallpass/contracts";
 import { writeHostFileAtomically } from "../bridge-link.js";
@@ -8,6 +8,7 @@ import type { FolderList } from "./conversation-index.js";
 import { readHostJsonFile } from "./index-store.js";
 import { redact } from "./redact.js";
 import { runCommand, type RunResult } from "./run-command.js";
+import { joinUnder } from "./data-path.js";
 
 /**
  * The owner's folders and the conversations' scratch folders (019 T562; R-319, R-320, FR-303,
@@ -37,7 +38,7 @@ export function folderListPath(dataDir: string): string {
 
 /** D-019-8: one scratch folder per conversation, derived from its id (which is safe as a name). */
 export function scratchFolderPath(dataDir: string, conversationId: string): string {
-  return win32.join(dataDir, "scratch", conversationId);
+  return joinUnder(dataDir, "scratch", conversationId);
 }
 
 /** Makes the conversation's scratch folder if it is not there; `undefined` when it cannot be made. */

@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { link, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   CONVERSATION_AGENTS,
@@ -12,6 +11,7 @@ import {
   type ConversationInstallState,
 } from "@hallpass/contracts";
 import { isProcessAlive, writeHostFileAtomically } from "../bridge-link.js";
+import { joinUnder } from "./data-path.js";
 
 /**
  * 024 R-375 (D-024-16, FR-396; data-model "Per computer"): what every browser's broker on this
@@ -46,12 +46,12 @@ export const INSTALL_LOCK_FILE = "install.lock";
 /** How often a watching broker reads the files again (R-375: at most a second). */
 export const SHARED_STATE_POLL_MS = 1_000;
 
-export const agentStateDirectory = (dataDir: string, agent: ConversationAgent): string => win32.join(dataDir, "agents", agent);
+export const agentStateDirectory = (dataDir: string, agent: ConversationAgent): string => joinUnder(dataDir, "agents", agent);
 export const installStatePath = (dataDir: string, agent: ConversationAgent): string =>
-  win32.join(agentStateDirectory(dataDir, agent), INSTALL_STATE_FILE);
-export const lastTestPath = (dataDir: string, agent: ConversationAgent): string => win32.join(agentStateDirectory(dataDir, agent), LAST_TEST_FILE);
+  joinUnder(agentStateDirectory(dataDir, agent), INSTALL_STATE_FILE);
+export const lastTestPath = (dataDir: string, agent: ConversationAgent): string => joinUnder(agentStateDirectory(dataDir, agent), LAST_TEST_FILE);
 export const installLockPath = (dataDir: string, agent: ConversationAgent): string =>
-  win32.join(agentStateDirectory(dataDir, agent), INSTALL_LOCK_FILE);
+  joinUnder(agentStateDirectory(dataDir, agent), INSTALL_LOCK_FILE);
 
 /** The phases of a download still under way; any other is its end. */
 const RUNNING_PHASES: ReadonlySet<AgentInstallState["phase"]> = new Set(["preparing", "downloading", "finishing"]);
