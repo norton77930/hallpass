@@ -21,6 +21,7 @@ import {
 import { redactedTail } from "./redact.js";
 import { markInterruptedInstalls } from "./shared-agent-state.js";
 import type { runCommand } from "./run-command.js";
+import { joinUnder, pathFor } from "./data-path.js";
 
 /**
  * The first-use install of the pinned ACP adapter (019/T532, T533; R-314), on the owner's consent -
@@ -161,7 +162,7 @@ export function createInstallEstimator(expected: number): { sample(installed: nu
 
 /** How many of the expected package folders hold their `package.json` now. */
 async function countInstalled(tree: string, entries: readonly string[]): Promise<number> {
-  const present = await Promise.all(entries.map((key) => isFile(win32.join(tree, ...key.split("/"), "package.json"))));
+  const present = await Promise.all(entries.map((key) => isFile(joinUnder(tree, ...key.split("/"), "package.json"))));
   return present.filter(Boolean).length;
 }
 
@@ -178,7 +179,7 @@ function estimateWhileRunning(
   let entries: string[] | undefined;
   const tick = async (): Promise<void> => {
     try {
-      entries ??= expectedPackageEntries(await readFile(win32.join(tree, "package-lock.json"), "utf8"), kind);
+      entries ??= expectedPackageEntries(await readFile(joinUnder(tree, "package-lock.json"), "utf8"), kind);
       estimator ??= createInstallEstimator(entries.length);
       const installed = await countInstalled(tree, entries);
       if (!stopped) onEstimate(estimator.sample(installed, Date.now()));
@@ -243,7 +244,7 @@ const removeTree = (path: string) => rm(path, { recursive: true, force: true, ma
 async function pinnedAdapterPresent(agent: ConversationAgent, tree: string, read: Read, retry: ReadRetry): Promise<boolean> {
   const adapter = packagePin(agent);
   if (adapter === undefined) return false;
-  const text = await readInstallFile(read, win32.join(tree, "node_modules", ...adapter.package.split("/"), "package.json"), retry);
+  const text = await readInstallFile(read, joinUnder(tree, "node_modules", ...adapter.package.split("/"), "package.json"), retry);
   if (text === undefined) return false;
   try {
     return (JSON.parse(text) as { version?: unknown } | null)?.version === adapter.version;
@@ -273,11 +274,11 @@ export async function installAgent(
   if (description.kind === "installed") return failure(`${description.label} is installed with its own installer; Hallpass downloads nothing for it.`);
   const pin = { package: description.package, version: description.version };
   onProgress?.({ phase: "preparing" });
-  const agentDir = win32.join(ports.dataDir, "agents", agent);
+  const agentDir = joinUnder(ports.dataDir, "agents", agent);
   const legacyDir = adapterDirectory(ports.dataDir, agent);
   // T572: named with this broker's pid, so another browser's broker starting meanwhile leaves it alone.
   const suffix = (ports.randomSuffix ?? (() => randomBytes(6).toString("hex")))();
-  const tree = win32.join(agentDir, `${INSTALL_TREE_PREFIX}${process.pid}-${suffix}`);
+  const tree = joinUnder(agentDir, `${INSTALL_TREE_PREFIX}${process.pid}-${suffix}`);
   const read = ports.readText ?? readText;
   const retry = ports.readRetry ?? READ_RETRY;
   let keepTree = false;
@@ -302,7 +303,7 @@ export async function installAgent(
     await mkdir(tree);
     for (const name of ["package.json", "package-lock.json"]) {
       try {
-        await copyFile(win32.join(ports.manifestsDir, agent, name), win32.join(tree, name));
+        await copyFile(joinUnder(ports.manifestsDir, agent, name), joinUnder(tree, name));
       } catch {
         return failure(`The pinned ${name} for ${description.label} is missing from this Hallpass install.`);
       }
@@ -375,7 +376,7 @@ async function pointAt(
   retry: ReadRetry,
 ): Promise<string> {
   const pointer = installPointerPath(dataDir, agent);
-  await writeFile(temp, `${JSON.stringify({ folder: win32.basename(tree) })}\n`, { flag: "wx" });
+  await writeFile(temp, `${JSON.stringify({ folder: pathFor(tree).basename(tree) })}\n`, { flag: "wx" });
   try {
     try {
       await link(temp, pointer);
@@ -422,7 +423,7 @@ async function namedTrees(agentDir: string, read: Read, retry: ReadRetry): Promi
     const named = new Set<string>();
     for (const entry of await readdir(agentDir, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(POINTER_SUFFIX)) continue;
-      const text = await readInstallFile(read, win32.join(agentDir, entry.name), retry);
+      const text = await readInstallFile(read, joinUnder(agentDir, entry.name), retry);
       const folder = text === undefined ? undefined : parseInstallPointer(text);
       if (folder !== undefined) named.add(folder.toLowerCase());
     }
@@ -459,7 +460,7 @@ export async function cleanStaging(
   const retry = options.readRetry ?? READ_RETRY;
   const removed: string[] = [];
   for (const agent of CONVERSATION_AGENTS) {
-    const agentDir = win32.join(dataDir, "agents", agent);
+    const agentDir = joinUnder(dataDir, "agents", agent);
     let entries;
     try {
       entries = await readdir(agentDir, { withFileTypes: true });
@@ -478,7 +479,7 @@ export async function cleanStaging(
       }
       const namedNow = await namedTrees(agentDir, read, retry);
       if (namedNow === undefined || namedNow.has(entry.name.toLowerCase())) continue;
-      const path = win32.join(agentDir, entry.name);
+      const path = joinUnder(agentDir, entry.name);
       try {
         await removeTree(path);
         removed.push(path);

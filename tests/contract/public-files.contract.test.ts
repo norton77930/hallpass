@@ -25,17 +25,18 @@ import { repoRoot } from "../../scripts/package.js";
 
 const part = (...pieces: string[]): string => pieces.join("");
 
-const CITATION = new RegExp(
-  [
-    part("evidence ", "§"),
-    part("reference-", "behaviour-evidence"),
-    part("reference-", "functional-teardown"),
-    part("reference-", "extension-analysis"),
-    part("reference-", "feature-matrix"),
-    part("reference-", "parity-delta"),
-    part("reference-", "codex-ux-analysis"),
-  ].join("|"),
-);
+/** Literal strings: each is also a fixed-string `git grep` pattern, so none may hold a regex metacharacter. */
+const CITATION_PARTS = [
+  part("evidence ", "§"),
+  part("reference-", "behaviour-evidence"),
+  part("reference-", "functional-teardown"),
+  part("reference-", "extension-analysis"),
+  part("reference-", "feature-matrix"),
+  part("reference-", "parity-delta"),
+  part("reference-", "codex-ux-analysis"),
+];
+
+const CITATION = new RegExp(CITATION_PARTS.join("|"));
 
 /** Files that spell the pattern on purpose: this test, the check that owns the private set, its list. */
 const CITATION_EXEMPT = new Set([
@@ -220,6 +221,25 @@ describe("T257 CI runs on Windows with no browser, no secret and no paid call", 
   });
 });
 
+/**
+ * The tracked files (paths relative to the repository root, as `git ls-files` prints them) whose
+ * working-tree text holds any of `patterns` as a fixed string. Binary files are skipped.
+ */
+function gitGrepFiles(patterns: readonly string[]): string[] {
+  const args = ["-c", "core.quotePath=false", "grep", "-l", "-I", "-F", "--full-name"];
+  for (const pattern of patterns) args.push("-e", pattern);
+  try {
+    return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" })
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch (error) {
+    // git grep exits 1 when nothing matches; anything else is a real failure.
+    if ((error as { status?: number }).status === 1) return [];
+    throw error;
+  }
+}
+
 describe("T257 nothing public cites a private evidence document", () => {
   it("has no citation left in any file the snapshot carries", () => {
     const tracked = execFileSync("git", ["ls-files"], { cwd: repoRoot, encoding: "utf8" })
@@ -228,8 +248,14 @@ describe("T257 nothing public cites a private evidence document", () => {
       .filter(Boolean);
     expect(tracked.length).toBeGreaterThan(0);
 
+    // #28: reading every tracked file from Node took 17-27 s on a slow Windows machine (200 ms on
+    // CI) and ran into the 15 s test timeout. One `git grep` names the tracked files that hold any
+    // part; only those are read and checked line by line below, with the same filters as before.
+    const candidates = new Set(gitGrepFiles(CITATION_PARTS));
+
     const hits: string[] = [];
     for (const path of tracked) {
+      if (!candidates.has(path)) continue;
       if (isForbiddenPath(path) || CITATION_EXEMPT.has(path)) continue;
       if (!TEXT_EXTENSIONS.has(path.slice(path.lastIndexOf(".") + 1))) continue;
       const file = resolve(repoRoot, path);
