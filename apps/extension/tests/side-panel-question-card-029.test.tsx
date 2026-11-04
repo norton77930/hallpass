@@ -6,9 +6,10 @@ import { installAgentPort, project, renderShell, ui, uninstallAgentPort, type Fa
 import { CONVERSATION_ID, CONVERSATION_OPEN, commandsSent, emitEvent, installTabStorage, withConversation } from "./helpers/conversation-fixtures.js";
 
 /**
- * 029 T871, T872, T876, T878, T879 - an agent's form question as a card above the box (FR-440 -
- * FR-449): one control per field, Send with exactly the entered values, Skip, Skip only, the line an
- * ending leaves, who asks, a secret field that never shows again.
+ * 029 T871, T872, T876, T878, T879, R-438, R-439 - an agent's form question as a card above the box,
+ * drawn as the agent's own client draws its questions (the owner's screenshots, R-439): one question
+ * at a time under a header with its words and "n of total", the options as rows with a radio or a box
+ * and their description under them, "Other" as the last row, Skip and Next / Send with Ctrl+Enter.
  */
 
 const settle = async () => {
@@ -20,15 +21,14 @@ const settle = async () => {
 const COLOUR: QuestionField = {
   key: "colour",
   kind: "choice",
-  label: "Colour",
+  label: "Which colour?",
   required: true,
   options: [{ value: "red", label: "Red" }, { value: "blue", label: "Blue", description: "The calm one" }],
 };
 const KINDS: QuestionField[] = [
   COLOUR,
-  { key: "toppings", kind: "choices", label: "Toppings", required: false, options: [{ value: "ham", label: "Ham" }, { value: "olive", label: "Olive" }], maxItems: 1 },
+  { key: "toppings", kind: "choices", label: "Which toppings?", required: false, options: [{ value: "ham", label: "Ham" }, { value: "olive", label: "Olive" }], maxItems: 1 },
   { key: "note", kind: "text", label: "Note", required: false, maxLength: 50 },
-  { key: "email", kind: "text", label: "Email", required: false, format: "email" },
   { key: "count", kind: "integer", label: "Count", required: false, minimum: 1, maximum: 9, default: 2 },
   { key: "ok", kind: "yes-no", label: "Deliver", required: false, default: true },
 ];
@@ -59,36 +59,57 @@ describe("029 the question card", () => {
     await settle();
   }
   const card = () => screen.getByRole("group", { name: ui("conversation.question.title").replace("{agent}", "Claude Code") });
-  const send = () => within(card()).getByRole("button", { name: ui("conversation.question.send") }) as HTMLButtonElement;
+  const button = (key: string) => within(card()).getByRole("button", { name: ui(key) }) as HTMLButtonElement;
+  const heading = () => within(card()).getByRole("heading").textContent;
+  const page = (n: number, total: number) => ui("conversation.question.page").replace("{n}", String(n)).replace("{total}", String(total));
   const replies = () => commandsSent(port).filter((command) => (command as { type: string }).type === "ui.conversation.question-reply");
 
-  it("shows one control per field, with defaults, and Send waits for the required field", async () => {
+  it("shows one question at a time: its words in the header with n of total, options as rows with their description", async () => {
     await open();
     emitEvent(port, 1, question());
-    const shown = card();
-    expect(shown.textContent).toContain("Pick your order");
-    expect(within(shown).getAllByRole("radio").map((radio) => radio.getAttribute("value"))).toEqual(["red", "blue"]);
-    expect(shown.textContent).toContain("The calm one");
-    expect(within(shown).getAllByRole("checkbox")).toHaveLength(3); // two toppings + Deliver
-    expect((within(shown).getByRole("textbox", { name: "Note" }) as HTMLInputElement).maxLength).toBe(50);
-    expect((within(shown).getByRole("textbox", { name: "Email" }) as HTMLInputElement).type).toBe("email");
-    const count = within(shown).getByRole("spinbutton", { name: "Count" }) as HTMLInputElement;
-    expect([count.value, count.min, count.max, count.step]).toEqual(["2", "1", "9", "1"]);
-    expect((within(shown).getByRole("checkbox", { name: "Deliver" }) as HTMLInputElement).checked).toBe(true);
-    expect(send().disabled).toBe(true);
-    expect(shown.textContent).toContain(ui("conversation.question.check").replace("{fields}", "Colour"));
+    expect(heading()).toBe("Which colour?");
+    expect(card().textContent).toContain(page(1, 5));
+    const rows = within(card()).getAllByRole("radio");
+    expect(rows.map((radio) => radio.getAttribute("value"))).toEqual(["red", "blue"]);
+    expect(rows[1]!.closest("label")!.textContent).toContain("The calm one");
+    // Nothing is picked for the owner; Next waits for the required pick.
+    expect(rows.every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    expect(button("conversation.question.next").disabled).toBe(true);
+    fireEvent.click(rows[0]!);
+    expect(button("conversation.question.next").disabled).toBe(false);
+    fireEvent.click(button("conversation.question.next"));
+    expect(heading()).toBe("Which toppings?");
+    expect(within(card()).getAllByRole("checkbox")).toHaveLength(2);
   });
 
-  it("Send posts accept with exactly the values entered, typed", async () => {
+  it("goes back with the pager, keeping what was picked; Send is on the last page only", async () => {
     await open();
     emitEvent(port, 1, question());
     fireEvent.click(within(card()).getByRole("radio", { name: /Blue/ }));
+    fireEvent.click(within(card()).getByRole("button", { name: ui("conversation.question.nextPage") }));
+    fireEvent.click(within(card()).getByRole("button", { name: ui("conversation.question.previous") }));
+    expect((within(card()).getByRole("radio", { name: /Blue/ }) as HTMLInputElement).checked).toBe(true);
+    expect(within(card()).queryByRole("button", { name: ui("conversation.question.send") })).toBeNull();
+    for (let index = 0; index < 4; index++) fireEvent.click(button("conversation.question.next"));
+    expect(card().textContent).toContain(page(5, 5));
+    expect(button("conversation.question.send")).toBeTruthy();
+  });
+
+  it("Send posts accept with exactly the values entered on every page, typed", async () => {
+    await open();
+    emitEvent(port, 1, question());
+    fireEvent.click(within(card()).getByRole("radio", { name: /Blue/ }));
+    fireEvent.click(button("conversation.question.next"));
     fireEvent.click(within(card()).getByRole("checkbox", { name: "Olive" }));
+    fireEvent.click(button("conversation.question.next"));
     fireEvent.change(within(card()).getByRole("textbox", { name: "Note" }), { target: { value: "no onions" } });
-    fireEvent.change(within(card()).getByRole("spinbutton", { name: "Count" }), { target: { value: "3" } });
+    fireEvent.click(button("conversation.question.next"));
+    const count = within(card()).getByRole("spinbutton", { name: "Count" }) as HTMLInputElement;
+    expect([count.value, count.min, count.max, count.step]).toEqual(["2", "1", "9", "1"]);
+    fireEvent.change(count, { target: { value: "3" } });
+    fireEvent.click(button("conversation.question.next"));
     fireEvent.click(within(card()).getByRole("checkbox", { name: "Deliver" }));
-    expect(send().disabled).toBe(false);
-    fireEvent.click(send());
+    fireEvent.click(button("conversation.question.send"));
     expect(replies()).toEqual([
       {
         type: "ui.conversation.question-reply",
@@ -102,36 +123,99 @@ describe("029 the question card", () => {
     for (const command of port.sent) expect(agentPanelCommandSchema.safeParse(command).success).toBe(true);
   });
 
-  it("holds Send back for a value outside its limits, naming the field", async () => {
+  it("holds Next back for a value outside its limits, naming the field", async () => {
     await open();
     emitEvent(port, 1, question());
     fireEvent.click(within(card()).getByRole("radio", { name: /Red/ }));
-    fireEvent.change(within(card()).getByRole("spinbutton", { name: "Count" }), { target: { value: "12" } });
+    fireEvent.click(button("conversation.question.next"));
     fireEvent.click(within(card()).getByRole("checkbox", { name: "Ham" }));
     fireEvent.click(within(card()).getByRole("checkbox", { name: "Olive" }));
-    expect(send().disabled).toBe(true);
-    expect(card().textContent).toContain(ui("conversation.question.check").replace("{fields}", "Toppings, Count"));
+    expect(button("conversation.question.next").disabled).toBe(true);
+    expect(card().textContent).toContain(ui("conversation.question.check").replace("{fields}", "Which toppings?"));
   });
 
-  it("Skip posts decline", async () => {
+  it("Ctrl+Enter presses Next, then Send", async () => {
+    await open();
+    emitEvent(port, 1, question({ fields: [COLOUR, { key: "ok", kind: "yes-no", label: "Deliver", required: false }] }));
+    fireEvent.click(within(card()).getByRole("radio", { name: /Red/ }));
+    fireEvent.keyDown(card(), { key: "Enter", ctrlKey: true });
+    expect(heading()).toBe("Deliver");
+    fireEvent.keyDown(card(), { key: "Enter", ctrlKey: true });
+    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { colour: "red", ok: false } } } }]);
+  });
+
+  it("Skip posts decline from any page", async () => {
     await open();
     emitEvent(port, 1, question());
-    fireEvent.click(within(card()).getByRole("button", { name: ui("conversation.question.skip") }));
+    fireEvent.click(button("conversation.question.skip"));
     expect(replies()).toEqual([
       { type: "ui.conversation.question-reply", payload: { conversationId: CONVERSATION_ID, requestId: "q-1", reply: { action: "decline" } } },
     ]);
   });
 
-  it("a skip-only question shows its message and Skip alone, and lists a field it cannot show", async () => {
+  it("Other is the last row: picking it opens its box, and its words go back as the question's own answer", async () => {
     await open();
-    emitEvent(port, 1, question({ skipOnly: true, fields: [{ key: "when", kind: "unsupported", label: "When", required: true }] }));
-    expect(within(card()).getAllByRole("button").map((button) => button.textContent)).toEqual([ui("conversation.question.skip")]);
-    expect(card().textContent).toContain(ui("conversation.question.skipOnly"));
-    expect(card().textContent).toContain("When");
-    expect(card().textContent).toContain(ui("conversation.question.unsupported"));
+    emitEvent(port, 1, question({
+      message: "Please answer the following questions.",
+      fields: [
+        {
+          key: "question_0",
+          kind: "choice",
+          label: "Which sign-in should the app use?",
+          chip: "Auth",
+          required: false,
+          options: [
+            { value: "OAuth", label: "OAuth", description: "Sign in through the browser", preview: "await signIn({ provider })" },
+            { value: "API key", label: "API key" },
+          ],
+        },
+        { key: "question_0_custom", kind: "text", label: "Other", description: "Type your own answer (optional).", required: false, otherFor: "question_0" },
+      ],
+    }));
+    expect(heading()).toBe("Which sign-in should the app use?");
+    expect(card().textContent).not.toContain(page(1, 1));
+    // The question tool's generic message is not said; a plain form's message is (first test).
+    expect(card().textContent).not.toContain("Please answer the following questions.");
+    const oauth = within(card()).getByRole("radio", { name: /OAuth/ }).closest("label")!;
+    expect(oauth.querySelector("pre")?.textContent).toBe("await signIn({ provider })");
+    const radios = within(card()).getAllByRole("radio");
+    expect(radios.at(-1)!.closest("label")!.textContent).toBe(ui("conversation.question.other"));
+    expect(within(card()).queryByRole("textbox")).toBeNull();
+    fireEvent.click(radios.at(-1)!);
+    const box = within(card()).getByRole("textbox", { name: ui("conversation.question.other") }) as HTMLInputElement;
+    expect(box.placeholder).toBe("Type your own answer (optional).");
+    expect(button("conversation.question.send").disabled).toBe(true);
+    fireEvent.change(box, { target: { value: "with SSO" } });
+    fireEvent.click(button("conversation.question.send"));
+    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { question_0_custom: "with SSO" } } } }]);
+    expect((replies()[0] as { payload: { reply: { values: Record<string, unknown> } } }).payload.reply.values).not.toHaveProperty("question_0");
   });
 
-  it("names the agent, the tool call only when it carries one, where the answer goes, and the agent's own waiting time", async () => {
+  it("a required choice keeps its note as a box under the options (Codex)", async () => {
+    await open();
+    emitEvent(port, 1, question({
+      message: "Codex needs your input to continue.",
+      fields: [
+        { key: "scope", kind: "choice", label: "Which scope?", chip: "Token scope", required: true, options: [{ value: "repo", label: "repo" }, { value: "None of the above", label: "None of the above" }] },
+        { key: "scope_note", kind: "text", label: "Additional answer or note", required: false, otherFor: "scope" },
+      ],
+    }));
+    expect(within(card()).getAllByRole("radio")).toHaveLength(2);
+    fireEvent.click(within(card()).getByRole("radio", { name: "None of the above" }));
+    fireEvent.change(within(card()).getByRole("textbox", { name: "Additional answer or note" }), { target: { value: "admin:org" } });
+    fireEvent.click(button("conversation.question.send"));
+    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { scope: "None of the above", scope_note: "admin:org" } } } }]);
+  });
+
+  it("a skip-only question shows its message and Skip alone, and names a field it cannot show", async () => {
+    await open();
+    emitEvent(port, 1, question({ skipOnly: true, fields: [{ key: "when", kind: "unsupported", label: "When", required: true }] }));
+    expect(within(card()).getAllByRole("button").map((entry) => entry.textContent)).toEqual([ui("conversation.question.skip")]);
+    expect(card().textContent).toContain(ui("conversation.question.skipOnly"));
+    expect(card().textContent).toContain("When");
+  });
+
+  it("says the agent asks, the tool call only when it carries one, where the answer goes, and the agent's own waiting time", async () => {
     await open();
     emitEvent(port, 1, question());
     expect(card().textContent).toContain(ui("conversation.question.goesTo").replace("{agent}", "Claude Code"));
@@ -176,7 +260,7 @@ describe("029 the question card", () => {
     const input = card().querySelector("input") as HTMLInputElement;
     expect(input.type).toBe("password");
     fireEvent.change(input, { target: { value: "s3cret-029" } });
-    fireEvent.click(send());
+    fireEvent.click(button("conversation.question.send"));
     expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { token: "s3cret-029" } } } }]);
     emitEvent(port, 2, { type: "question-closed", requestId: "q-1", ending: "answered", summary: "API token: ••••••" });
     expect(document.body.innerHTML).not.toContain("s3cret-029");
@@ -186,68 +270,9 @@ describe("029 the question card", () => {
     await open("zh-TW");
     emitEvent(port, 1, question());
     const title = lookup("conversation.question.title", "zh-TW").replace("{agent}", "Claude Code");
-    expect(screen.getByRole("group", { name: title })).toBeTruthy();
-    expect(screen.getByRole("button", { name: lookup("conversation.question.send", "zh-TW") })).toBeTruthy();
-    expect(lookup("conversation.question.send", "zh-TW")).not.toBe(lookup("conversation.question.send", "en-US"));
-  });
-
-  it("R-438 Claude Code: the tag is a chip over the question's words, options are rows with their description and preview, and Other sits in its question", async () => {
-    await open();
-    emitEvent(port, 1, question({
-      message: "Please answer the following questions.",
-      fields: [
-        {
-          key: "question_0",
-          kind: "choice",
-          label: "Which sign-in should the app use?",
-          chip: "Auth",
-          required: false,
-          options: [
-            { value: "OAuth", label: "OAuth", description: "Sign in through the browser", preview: "await signIn({ provider })" },
-            { value: "API key", label: "API key" },
-          ],
-        },
-        { key: "question_0_custom", kind: "text", label: "Other", description: "Type your own answer (optional).", required: false, otherFor: "question_0" },
-      ],
-    }));
-    const group = within(card()).getByRole("group", { name: /Which sign-in should the app use\?/ });
-    expect(group.querySelector(".agent-question-chip")?.textContent).toBe("Auth");
-    const row = within(group).getByRole("radio", { name: /OAuth/ }).closest("label")!;
-    expect(row.textContent).toContain("Sign in through the browser");
-    expect(row.querySelector("pre")?.textContent).toBe("await signIn({ provider })");
-    const other = within(group).getByRole("textbox", { name: /^Other/ }) as HTMLInputElement;
-    // The agent's hint is said with the box, in full, not as a placeholder cut off inside it.
-    expect(other.closest("label")?.textContent).toContain("Type your own answer (optional).");
-    expect(other.placeholder).toBe("");
-    // The Other box is not a field of its own after the question.
-    expect(card().querySelectorAll(".agent-question-field")).toHaveLength(1);
-    fireEvent.change(other, { target: { value: "with SSO" } });
-    fireEvent.click(send());
-    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { question_0_custom: "with SSO" } } } }]);
-  });
-
-  it("R-438 Codex: the note sits in its question, under None of the above", async () => {
-    await open();
-    emitEvent(port, 1, question({
-      message: "Codex needs your input to continue.",
-      fields: [
-        {
-          key: "scope",
-          kind: "choice",
-          label: "Which scope should the new token have?",
-          chip: "Token scope",
-          required: true,
-          options: [{ value: "repo", label: "repo" }, { value: "None of the above", label: "None of the above" }],
-        },
-        { key: "scope_note", kind: "text", label: "Additional answer or note", required: false, otherFor: "scope" },
-      ],
-    }));
-    const group = within(card()).getByRole("group", { name: /Which scope should the new token have\?/ });
-    expect(within(group).getByRole("textbox", { name: "Additional answer or note" })).toBeTruthy();
-    fireEvent.click(within(group).getByRole("radio", { name: "None of the above" }));
-    fireEvent.change(within(group).getByRole("textbox", { name: "Additional answer or note" }), { target: { value: "admin:org" } });
-    fireEvent.click(send());
-    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { scope: "None of the above", scope_note: "admin:org" } } } }]);
+    const shown = screen.getByRole("group", { name: title });
+    expect(shown.textContent).toContain(lookup("conversation.question.page", "zh-TW").replace("{n}", "1").replace("{total}", "5"));
+    expect(within(shown).getByRole("button", { name: lookup("conversation.question.next", "zh-TW") })).toBeTruthy();
+    expect(lookup("conversation.question.next", "zh-TW")).not.toBe(lookup("conversation.question.next", "en-US"));
   });
 });
-

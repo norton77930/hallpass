@@ -1267,67 +1267,124 @@
   font-size: var(--fs-1);
 }
 
-/* 029: a question card's fields - one control per field, the hint and the check in the quieter tones. */
-.agent-question-field {
+/*
+ * 029 R-439: a question card drawn as the agent's own client draws its questions (the owner's
+ * screenshots): a grey header with the question's words and "n of total", the options as full-width
+ * rows split by hairlines with the control on the left and the description under the words, the
+ * small print about who asks, then Skip and a dark Next / Send. The header and the buttons stay put;
+ * only the question scrolls when it is tall.
+ */
+.agent-conversation-permission.agent-conversation-question {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  border-color: var(--line);
+  background: var(--bg);
+}
+.agent-question-head {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--surface-2);
+}
+.agent-conversation-question .agent-question-head h3 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--fs-3);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.agent-question-pager {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+}
+.agent-question-pager button {
+  min-width: 0;
+  padding: 0 var(--sp-1);
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-3);
+}
+.agent-question-pager button:disabled {
+  color: var(--text-3);
+}
+.agent-question-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.agent-question-message,
+.agent-question-body > .agent-question-row-hint,
+.agent-question-body > p,
+.agent-question-input {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3) 0;
+}
+.agent-question-message {
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.agent-question-input input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin-top: var(--sp-2);
+}
+.agent-question-rows {
+  display: flex;
+  flex-direction: column;
+}
+.agent-shell .agent-question-row {
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  cursor: pointer;
+}
+.agent-question-row + .agent-question-row,
+.agent-question-rows > .agent-question-row-hint + .agent-question-row {
+  border-top: 1px solid var(--line);
+}
+.agent-question-row input[type="radio"],
+.agent-question-row input[type="checkbox"] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+.agent-question-row:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.agent-question-row-text {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
   min-width: 0;
-  margin: var(--sp-2) 0 0;
-  padding: 0;
-  border: 0;
-}
-.agent-question-field legend,
-.agent-question-field > label:first-child {
-  padding: 0;
-  font-weight: 600;
-}
-.agent-question-field input[type="text"],
-.agent-question-field input[type="email"],
-.agent-question-field input[type="url"],
-.agent-question-field input[type="password"],
-.agent-question-field input[type="number"],
-.agent-question-field input[type="date"],
-.agent-question-field input[type="datetime-local"] {
-  min-width: 0;
-  max-width: 100%;
-}
-.agent-question-option {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--sp-1);
   overflow-wrap: anywhere;
 }
-/*
- * R-438: a choice question's options are rows to pick, as the agents' own clients draw them - each in
- * a hairline box, the picked one in the accent's soft fill; its description and preview under its words.
- */
-.agent-question-field:has(> .agent-question-option) {
-  gap: var(--sp-1);
+.agent-question-row-label {
+  font-size: var(--fs-3);
 }
-fieldset.agent-question-field > .agent-question-option {
-  padding: var(--sp-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-2);
-  background: var(--bg);
-  cursor: pointer;
-}
-fieldset.agent-question-field > .agent-question-option:has(input:checked) {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-}
-fieldset.agent-question-field > .agent-question-option:has(input:focus-visible) {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
-}
-.agent-question-option-label {
-  font-weight: 600;
+.agent-question-row-hint {
+  color: var(--text-2);
+  font-size: var(--fs-2);
 }
 .agent-question-preview {
-  flex-basis: 100%;
   max-height: 8lh;
-  margin: var(--sp-1) 0 0 1.6em;
+  margin: var(--sp-1) 0 0;
   padding: var(--sp-1) var(--sp-2);
   overflow: auto;
   border-radius: var(--r-1);
@@ -1335,75 +1392,69 @@ fieldset.agent-question-field > .agent-question-option:has(input:focus-visible) 
   font-size: var(--fs-1);
   white-space: pre-wrap;
 }
-/* A question's own answer box or note, inside the question after its options. */
-.agent-shell .agent-question-other {
-  display: flex;
+.agent-shell .agent-question-other-box {
+  box-sizing: border-box;
+  width: calc(100% - 2 * var(--sp-3));
+  margin: 0 var(--sp-3) var(--sp-2);
+}
+.agent-shell .agent-question-note {
   flex-direction: column;
   align-items: stretch;
   gap: var(--sp-1);
-  margin-top: var(--sp-1);
+  padding: var(--sp-3);
+  border-top: 1px solid var(--line);
   color: var(--text-2);
-  font-size: var(--fs-1);
-  text-align: start;
+  font-size: var(--fs-2);
 }
-.agent-shell .agent-question-other input {
+.agent-question-note input {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  font-size: var(--fs-2);
 }
-.agent-question-field legend {
+.agent-question-about {
+  flex: none;
+  padding: var(--sp-2) var(--sp-3) 0;
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+.agent-conversation-question .agent-question-about > p {
+  margin: 0 0 var(--sp-1);
+}
+.agent-conversation-question .agent-question-about > .agent-question-check {
+  color: var(--warn);
+}
+.agent-question-actions {
   display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  margin-bottom: var(--sp-1);
+  flex: none;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
 }
-.agent-question-chip {
-  align-self: flex-start;
-  padding: 0 var(--sp-2);
+.agent-question-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  border: 0;
   border-radius: var(--r-2);
   background: var(--surface-2);
-  color: var(--text-2);
+  color: var(--text);
+}
+.agent-question-actions button.agent-primary {
+  background: var(--text);
+  color: var(--bg);
+}
+.agent-question-actions button.agent-primary:disabled {
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+.agent-question-actions kbd {
+  padding: 0 var(--sp-1);
+  border: 1px solid currentColor;
+  border-radius: var(--r-1);
+  font: inherit;
   font-size: var(--fs-1);
-  font-weight: 600;
-}
-.agent-question-words {
-  font-size: var(--fs-3);
-}
-.agent-question-hint,
-.agent-question-required,
-.agent-question-during,
-.agent-question-goes-to {
-  color: var(--text-2);
-  font-size: var(--fs-1);
-}
-.agent-question-hint {
-  flex-basis: 100%;
-}
-/* An option's own description lines up with its words, not with the field. */
-.agent-question-option .agent-question-hint {
-  padding-inline-start: 1.6em;
-}
-/* A tall question scrolls inside its card; Send and Skip stay in view at its foot. */
-.agent-conversation-question > .agent-prompt-actions {
-  position: sticky;
-  bottom: calc(-1 * var(--sp-3));
-  margin-bottom: calc(-1 * var(--sp-3));
-  padding: var(--sp-2) 0 var(--sp-3);
-  background: inherit;
-}
-.agent-conversation-question > .agent-question-goes-to {
-  margin-top: var(--sp-3);
-}
-.agent-question-required {
-  white-space: nowrap;
-}
-.agent-question-message {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.agent-question-check {
-  color: var(--warn);
+  opacity: 0.8;
 }
 
 /* T605: one rounded card holds the box and, under it, the chips with Send or Stop at the end. */
