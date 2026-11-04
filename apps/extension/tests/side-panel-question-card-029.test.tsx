@@ -190,4 +190,64 @@ describe("029 the question card", () => {
     expect(screen.getByRole("button", { name: lookup("conversation.question.send", "zh-TW") })).toBeTruthy();
     expect(lookup("conversation.question.send", "zh-TW")).not.toBe(lookup("conversation.question.send", "en-US"));
   });
+
+  it("R-438 Claude Code: the tag is a chip over the question's words, options are rows with their description and preview, and Other sits in its question", async () => {
+    await open();
+    emitEvent(port, 1, question({
+      message: "Please answer the following questions.",
+      fields: [
+        {
+          key: "question_0",
+          kind: "choice",
+          label: "Which sign-in should the app use?",
+          chip: "Auth",
+          required: false,
+          options: [
+            { value: "OAuth", label: "OAuth", description: "Sign in through the browser", preview: "await signIn({ provider })" },
+            { value: "API key", label: "API key" },
+          ],
+        },
+        { key: "question_0_custom", kind: "text", label: "Other", description: "Type your own answer (optional).", required: false, otherFor: "question_0" },
+      ],
+    }));
+    const group = within(card()).getByRole("group", { name: /Which sign-in should the app use\?/ });
+    expect(group.querySelector(".agent-question-chip")?.textContent).toBe("Auth");
+    const row = within(group).getByRole("radio", { name: /OAuth/ }).closest("label")!;
+    expect(row.textContent).toContain("Sign in through the browser");
+    expect(row.querySelector("pre")?.textContent).toBe("await signIn({ provider })");
+    const other = within(group).getByRole("textbox", { name: /^Other/ }) as HTMLInputElement;
+    // The agent's hint is said with the box, in full, not as a placeholder cut off inside it.
+    expect(other.closest("label")?.textContent).toContain("Type your own answer (optional).");
+    expect(other.placeholder).toBe("");
+    // The Other box is not a field of its own after the question.
+    expect(card().querySelectorAll(".agent-question-field")).toHaveLength(1);
+    fireEvent.change(other, { target: { value: "with SSO" } });
+    fireEvent.click(send());
+    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { question_0_custom: "with SSO" } } } }]);
+  });
+
+  it("R-438 Codex: the note sits in its question, under None of the above", async () => {
+    await open();
+    emitEvent(port, 1, question({
+      message: "Codex needs your input to continue.",
+      fields: [
+        {
+          key: "scope",
+          kind: "choice",
+          label: "Which scope should the new token have?",
+          chip: "Token scope",
+          required: true,
+          options: [{ value: "repo", label: "repo" }, { value: "None of the above", label: "None of the above" }],
+        },
+        { key: "scope_note", kind: "text", label: "Additional answer or note", required: false, otherFor: "scope" },
+      ],
+    }));
+    const group = within(card()).getByRole("group", { name: /Which scope should the new token have\?/ });
+    expect(within(group).getByRole("textbox", { name: "Additional answer or note" })).toBeTruthy();
+    fireEvent.click(within(group).getByRole("radio", { name: "None of the above" }));
+    fireEvent.change(within(group).getByRole("textbox", { name: "Additional answer or note" }), { target: { value: "admin:org" } });
+    fireEvent.click(send());
+    expect(replies()).toMatchObject([{ payload: { reply: { action: "accept", values: { scope: "None of the above", scope_note: "admin:org" } } } }]);
+  });
 });
+

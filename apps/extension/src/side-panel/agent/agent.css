@@ -1299,6 +1299,77 @@
   gap: var(--sp-1);
   overflow-wrap: anywhere;
 }
+/*
+ * R-438: a choice question's options are rows to pick, as the agents' own clients draw them - each in
+ * a hairline box, the picked one in the accent's soft fill; its description and preview under its words.
+ */
+.agent-question-field:has(> .agent-question-option) {
+  gap: var(--sp-1);
+}
+fieldset.agent-question-field > .agent-question-option {
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--bg);
+  cursor: pointer;
+}
+fieldset.agent-question-field > .agent-question-option:has(input:checked) {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+fieldset.agent-question-field > .agent-question-option:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.agent-question-option-label {
+  font-weight: 600;
+}
+.agent-question-preview {
+  flex-basis: 100%;
+  max-height: 8lh;
+  margin: var(--sp-1) 0 0 1.6em;
+  padding: var(--sp-1) var(--sp-2);
+  overflow: auto;
+  border-radius: var(--r-1);
+  background: var(--code);
+  font-size: var(--fs-1);
+  white-space: pre-wrap;
+}
+/* A question's own answer box or note, inside the question after its options. */
+.agent-shell .agent-question-other {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  text-align: start;
+}
+.agent-shell .agent-question-other input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  font-size: var(--fs-2);
+}
+.agent-question-field legend {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-1);
+}
+.agent-question-chip {
+  align-self: flex-start;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-2);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+  font-weight: 600;
+}
+.agent-question-words {
+  font-size: var(--fs-3);
+}
 .agent-question-hint,
 .agent-question-required,
 .agent-question-during,
@@ -1321,8 +1392,11 @@
   padding: var(--sp-2) 0 var(--sp-3);
   background: inherit;
 }
-.agent-question-goes-to {
+.agent-conversation-question > .agent-question-goes-to {
   margin-top: var(--sp-3);
+}
+.agent-question-required {
+  white-space: nowrap;
 }
 .agent-question-message {
   white-space: pre-wrap;

@@ -73,7 +73,8 @@ describe("029 questionFromRequest (R-432)", () => {
     expect(big).toMatchObject({ skipOnly: true, fields: [] });
     const options = Array.from({ length: QUESTION_MAX_OPTIONS + 1 }, (_unused, index) => `${index}`);
     expect(questionFromRequest(form({ a: { type: "string", enum: options } })).skipOnly).toBe(true);
-    expect(questionFromRequest(form({ a: { type: "string", title: "x".repeat(201) } })).skipOnly).toBe(true);
+    expect(questionFromRequest(form({ a: { type: "string", title: "x".repeat(1001) } })).skipOnly).toBe(true);
+    expect(questionFromRequest(form({ a: { type: "string", title: "x".repeat(1000) } })).skipOnly).toBeUndefined();
     const long = questionFromRequest({ ...form({ a: { type: "string" } }), message: "m".repeat(5000) });
     expect(long.skipOnly).toBe(true);
     expect(long.message).toHaveLength(4000);
@@ -165,5 +166,96 @@ describe("029 summarize (R-436)", () => {
     const summary = summarize(fields, { a: "x".repeat(1000), token: "s3cret-value" });
     expect(summary.length).toBeLessThanOrEqual(QUESTION_SUMMARY_MAX_CHARS);
     expect(summary).not.toContain("s3cret");
+  });
+});
+
+/**
+ * R-438: the hints the tested adapters put beside a question. Claude Code's question tool: each
+ * question's short tag as the field title and its words as the description (a single question's
+ * words are the message), an option preview under `_meta["_claude/askUserQuestionOption"]`, and a
+ * free-text field per question marked `_meta._askUserQuestionCustomAnswer.questionId`. Codex's
+ * user-input request: the words as the title and the tag as the description, under `_meta.codex`,
+ * and a note field marked `_meta.codex.role: "user_note"` with its `questionId`.
+ */
+describe("029 the adapters' display hints (R-438)", () => {
+  it("Claude Code: the tag becomes the chip, the words the label, the preview stays with its option, the Other box joins its question", () => {
+    const question = questionFromRequest(
+      form({
+        question_0: {
+          type: "string",
+          title: "Auth",
+          description: "Which auth method should we use?",
+          oneOf: [
+            { const: "OAuth", title: "OAuth", description: "Sign in with a browser", _meta: { "_claude/askUserQuestionOption": { preview: "login()" } } },
+            { const: "API key", title: "API key" },
+          ],
+        },
+        question_0_custom: {
+          type: "string",
+          title: "Other",
+          description: "Type your own answer, or add a note to the option you chose above (optional).",
+          _meta: { _askUserQuestionCustomAnswer: { questionId: "question_0", isCustomAnswer: true } },
+        },
+        question_1: { type: "array", title: "Features", description: "Which features?", items: { anyOf: [{ const: "Search", title: "Search" }] } },
+        question_1_custom: { type: "string", title: "Other", _meta: { _askUserQuestionCustomAnswer: { questionId: "question_1", isCustomAnswer: true } } },
+      }),
+    );
+    const [auth, authOther, features, featuresOther] = question.fields;
+    expect(auth).toMatchObject({ kind: "choice", chip: "Auth", label: "Which auth method should we use?" });
+    expect(auth?.description).toBeUndefined();
+    expect(auth?.options?.[0]).toEqual({ value: "OAuth", label: "OAuth", description: "Sign in with a browser", preview: "login()" });
+    expect(authOther).toMatchObject({ kind: "text", label: "Other", otherFor: "question_0" });
+    expect(authOther?.description).toMatch(/^Type your own answer/u);
+    expect(features).toMatchObject({ kind: "choices", chip: "Features", label: "Which features?" });
+    expect(featuresOther).toMatchObject({ otherFor: "question_1" });
+  });
+
+  it("Claude Code, one question: the tag is the chip and the label; the words stay in the message", () => {
+    const question = questionFromRequest(
+      form({
+        question_0: { type: "string", title: "Auth", oneOf: [{ const: "OAuth", title: "OAuth" }] },
+        question_0_custom: { type: "string", title: "Other", _meta: { _askUserQuestionCustomAnswer: { questionId: "question_0" } } },
+      }),
+    );
+    expect(question.fields[0]).toMatchObject({ chip: "Auth", label: "Auth" });
+  });
+
+  it("Codex: the words are the label, the tag the chip, and the note joins its question", () => {
+    const question = questionFromRequest(
+      form(
+        {
+          scope: {
+            type: "string",
+            title: "Which scope should the token have?",
+            description: "Scope",
+            oneOf: [
+              { const: "repo", title: "repo" },
+              { const: "None of the above", title: "None of the above", description: "Provide a different answer in the note field." },
+            ],
+            _meta: { codex: { isOther: true, isSecret: false } },
+          },
+          scope_note: { type: "string", title: "Additional answer or note", _meta: { codex: { questionId: "scope", role: "user_note", isSecret: false } } },
+          name: { type: "string", title: "What should it be called?", description: "Name", _meta: { codex: { isOther: false, isSecret: false } } },
+        },
+        { required: ["scope", "name"] },
+      ),
+    );
+    const [scope, note, name] = question.fields;
+    expect(scope).toMatchObject({ kind: "choice", label: "Which scope should the token have?", chip: "Scope", required: true });
+    expect(scope?.description).toBeUndefined();
+    expect(note).toMatchObject({ kind: "text", otherFor: "scope", required: false });
+    expect(name).toMatchObject({ kind: "text", label: "What should it be called?", chip: "Name" });
+  });
+
+  it("a marker naming no choice field of the form joins nothing", () => {
+    const question = questionFromRequest(
+      form({
+        a: { type: "string", title: "A" },
+        a_custom: { type: "string", _meta: { _askUserQuestionCustomAnswer: { questionId: "a" } } },
+        b_custom: { type: "string", _meta: { _askUserQuestionCustomAnswer: { questionId: "missing" } } },
+      }),
+    );
+    expect(question.fields.map((field) => field.otherFor)).toEqual([undefined, undefined, undefined]);
+    expect(question.fields[0]?.chip).toBeUndefined();
   });
 });

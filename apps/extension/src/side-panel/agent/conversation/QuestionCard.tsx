@@ -131,11 +131,15 @@ const INPUT_TYPES: Record<NonNullable<QuestionField["format"]>, string> = {
   "date-time": "datetime-local",
 };
 
+/** R-438: a question's own free-text answer or note, drawn inside that question after its options. */
+type Companion = { field: QuestionField; value: string; onChange: (value: string) => void };
+
 function FieldControl(props: {
   field: QuestionField;
   value: Draft[string] | undefined;
   onChange: (value: Draft[string]) => void;
   t: (key: string) => string;
+  companions?: readonly Companion[];
 }): ReactElement {
   const { field, t } = props;
   const id = useId();
@@ -149,8 +153,12 @@ function FieldControl(props: {
       return (
         <fieldset className="agent-question-field">
           <legend>
-            {field.label}
-            {required}
+            {/* R-438: the agent's short tag for the question, then its words (one question: the tag alone). */}
+            {field.chip === undefined ? null : <span className="agent-question-chip">{field.chip}</span>}
+            <span className="agent-question-words">
+              {field.chip !== undefined && field.label === field.chip ? null : field.label}
+              {required}
+            </span>
           </legend>
           {hint}
           {(field.options ?? []).map((option) => (
@@ -170,8 +178,24 @@ function FieldControl(props: {
                   }
                 }}
               />
-              {option.label}
+              <span className="agent-question-option-label">{option.label}</span>
               {option.description === undefined ? null : <span className="agent-question-hint">{option.description}</span>}
+              {/* The agent's preview of the option (a snippet, a mock-up), as inert text. */}
+              {option.preview === undefined ? null : <pre className="agent-question-preview">{option.preview}</pre>}
+            </label>
+          ))}
+          {(props.companions ?? []).map((companion) => (
+            <label key={companion.field.key} className="agent-question-other">
+              <span>{companion.field.label}</span>
+              {/* The agent's hint can be a sentence: said under the label, not cut off in the box. */}
+              {companion.field.description === undefined ? null : <span className="agent-question-hint">{companion.field.description}</span>}
+              <input
+                type={companion.field.secret ? "password" : "text"}
+                value={companion.value}
+                autoComplete={companion.field.secret ? "off" : undefined}
+                {...(companion.field.maxLength !== undefined ? { maxLength: companion.field.maxLength } : {})}
+                onChange={(event) => companion.onChange(event.target.value)}
+              />
             </label>
           ))}
         </fieldset>
@@ -239,6 +263,8 @@ export function QuestionCard(props: {
   const long = question.message.length > MESSAGE_SHOWN_CHARS && !showAll;
   const message = long ? `${question.message.slice(0, MESSAGE_SHOWN_CHARS)}…` : question.message;
   const agent = () => props.agentName;
+  /** The choice fields an answer box joins (R-438); a box naming anything else is drawn on its own. */
+  const joined = new Set(question.fields.filter((field) => field.kind === "choice" || field.kind === "choices").map((field) => field.key));
   return (
     <section role="group" aria-labelledby={titleId} className="agent-conversation-permission agent-conversation-question">
       <h3 id={titleId}>{t("conversation.question.title").replace("{agent}", agent)}</h3>
@@ -253,17 +279,28 @@ export function QuestionCard(props: {
         </button>
       ) : null}
       {skipOnly ? <p>{t("conversation.question.skipOnly")}</p> : null}
-      {question.fields.map((field) =>
-        skipOnly && field.kind !== "unsupported" ? null : (
+      {question.fields.map((field) => {
+        if (skipOnly && field.kind !== "unsupported") return null;
+        // R-438: a question's own answer box is drawn inside that question, not as a field of its own.
+        if (field.otherFor !== undefined && joined.has(field.otherFor)) return null;
+        const companions = question.fields
+          .filter((other) => other.otherFor === field.key && joined.has(field.key))
+          .map((other) => ({
+            field: other,
+            value: (draft[other.key] as string | undefined) ?? "",
+            onChange: (value: string) => setDraft((current) => ({ ...current, [other.key]: value })),
+          }));
+        return (
           <FieldControl
             key={field.key}
             field={field}
             value={draft[field.key]}
             t={t}
+            companions={companions}
             onChange={(value) => setDraft((current) => ({ ...current, [field.key]: value }))}
           />
-        ),
-      )}
+        );
+      })}
       <p className="agent-question-goes-to">{t("conversation.question.goesTo").replace("{agent}", agent)}</p>
       <p>
         {question.waitsMs === undefined

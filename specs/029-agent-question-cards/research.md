@@ -144,3 +144,23 @@ sets no expiry (FR-294 applies alike).
 - **R-435**: a closing connection aborts every open request's signal too; only the agent's own
   `$/cancel_request` (-32800) is a withdrawal, so an exit still ends the card `agent-exited`.
 
+## R-438 — Showing a question the way the agent means it (owner review, 2026-11-04)
+
+**Finding**: the tested adapters say more than the form's types. Claude Code's question tool titles each
+question with its short tag and puts its words in the description (one question: its words are the
+message); each option may carry a preview under `_meta["_claude/askUserQuestionOption"]`; and each
+question has its own free-text answer field, marked `_meta._askUserQuestionCustomAnswer.questionId` (a
+marker the adapter names as meant for any client and any bridge). Codex's user-input request puts the
+words in the title and the tag in the description, under `_meta.codex`, offers "None of the above", and
+adds a note field marked `_meta.codex.role: "user_note"` with its `questionId`. The first card drew all
+of these as plain separate fields: the tag as the heading, the words as a grey hint, each Other box as a
+field of its own.
+
+**Decision**: the broker maps the hints (`chip` for the tag, the words as the label, `preview` on an
+option, `otherFor` on a free-text field that belongs to a choice field of the same form) and nothing is
+inferred from text. The card draws the tag as a small chip over the question's words, the options as rows
+to pick (the picked one in the accent's soft fill) with their description and preview under them, and a
+question's own answer box or note inside that question after its options, with the agent's hint said in
+full above it. A field's label may now be 1000 characters (it holds the question's words); an option's
+stays 200, a preview 4000.
+

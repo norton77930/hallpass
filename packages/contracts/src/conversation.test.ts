@@ -817,3 +817,21 @@ describe("029 agent questions as side-panel cards (contracts/frames.md, data-mod
     expect(CONVERSATION_ERROR_CODES).toContain("question-invalid");
   });
 });
+
+describe("029 question display hints (R-438)", () => {
+  const base = { type: "question", requestId: "q-1", message: "Pick" };
+  it("takes a field's chip, a free-text field's otherFor, and an option's preview, bounded", () => {
+    const fields = [
+      { key: "q0", kind: "choice", label: "Which auth method?", chip: "Auth", required: false, options: [{ value: "oauth", label: "OAuth", preview: "const a = 1;" }] },
+      { key: "q0_custom", kind: "text", label: "Other", required: false, otherFor: "q0" },
+    ];
+    expect(conversationEventSchema.safeParse({ ...base, fields }).success).toBe(true);
+    for (const bad of [
+      [{ ...fields[0], chip: "c".repeat(201) }],
+      [{ ...fields[0], options: [{ value: "x", label: "x", preview: "p".repeat(4001) }] }],
+      [{ ...fields[1], otherFor: "" }],
+    ]) {
+      expect(conversationEventSchema.safeParse({ ...base, fields: bad }).success).toBe(false);
+    }
+  });
+});

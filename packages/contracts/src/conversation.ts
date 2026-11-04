@@ -582,6 +582,8 @@ const questionOptionSchema = z.strictObject({
   value: z.string().max(1000),
   label: z.string().max(200),
   description: z.string().max(1000).optional(),
+  /** R-438: what the agent shows beside the option (a snippet, a mock-up), as inert text. */
+  preview: z.string().max(4000).optional(),
 });
 
 /** A field's value: text, a number, yes / no, or the chosen values of several choices. */
@@ -596,9 +598,14 @@ export type QuestionValue = z.infer<typeof questionValueSchema>;
 export const questionFieldSchema = z.strictObject({
   key: z.string().min(1).max(200),
   kind: z.enum(QUESTION_FIELD_KINDS),
-  label: z.string().max(200),
+  /** The question's words (R-438), which can be a sentence or two. */
+  label: z.string().max(1000),
+  /** R-438: the question's short heading (the agent's own tag for it), shown above its words. */
+  chip: z.string().max(200).optional(),
   description: z.string().max(1000).optional(),
   required: z.boolean(),
+  /** R-438: this free-text field is the "other" answer or note of the choice field with this key. */
+  otherFor: z.string().min(1).max(200).optional(),
   options: z.array(questionOptionSchema).max(QUESTION_MAX_OPTIONS).optional(),
   minItems: z.number().int().nonnegative().optional(),
   maxItems: z.number().int().nonnegative().optional(),
