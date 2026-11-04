@@ -119,10 +119,13 @@ than the agent; constitution VI asks that what leaves where is clear to the owne
 
 **Acceptance Scenarios**:
 
-1. **Given** a question from the agent, **Then** the card names the agent (Claude Code, Codex).
-2. **Given** a question that comes from a tool call (D-029-2), **Then** the card names the server and the
-   tool, and says the answer goes to that server through the agent.
-3. **Given** any question, **Then** the card says the answer is sent to the agent, and from there to its
+1. **Given** any question, **Then** the card names the agent that sent it (Claude Code, Codex).
+2. **Given** a question tied to a tool call the agent announced in this turn (D-029-2, R-430), **Then** the
+   card also names that tool call as the agent announced it (for an MCP server's tool, its server and
+   tool name), and says the answer may go on to that tool.
+3. **Given** a question tied to no tool call, **Then** the card says only that the agent asks: it never
+   claims who inside the agent asks, since neither tested adapter says whether an MCP server asked (R-430).
+4. **Given** any question, **Then** the card says the answer is sent to the agent, and from there to its
    model provider like any message.
 
 ---
@@ -147,8 +150,10 @@ text in the reply, and the owner answers with the next message.
   owner presses it.
 - A very long message, many options or many fields: the card scrolls inside itself; the text is clipped
   at a bound with a way to see all of it; no option is dropped.
-- A question arriving outside a running turn (for example while a model change is under way): it is shown
-  like one inside a turn; the conversation shows it is waiting for the owner.
+- A question arriving outside a running turn, for another session, or tied to a request rather than a
+  session: it is answered cancelled without a card, as a permission request outside a turn is (R-431).
+- A question asking for a secret (Codex marks such a question): the field hides what is typed, and the
+  answered line does not show it (FR-449).
 - A permission card and a question card at once: both are shown, each answered on its own.
 - A link question (D-029-1, forms only): the agent is told the client cannot open links, as today; no
   card is shown.
@@ -172,8 +177,9 @@ text in the reply, and the owner answers with the next message.
 - **FR-442**: While a question card waits, the conversation MUST show that it is waiting for the owner,
   and the idle stop MUST NOT run, as for a permission card (FR-294, FR-297). Hallpass MUST NOT set an
   expiry of its own; a question's own waiting time is the agent's.
-- **FR-443**: The card MUST say who asks: the agent, or (D-029-2) the MCP server and tool the question
-  comes from, and that the answer goes to the agent and its model provider.
+- **FR-443**: The card MUST name the agent that asks and, when the question is tied to a tool call the
+  agent announced in this turn (D-029-2), that tool call as announced; it MUST NOT name a source the
+  question does not carry (R-430). It MUST say that the answer goes to the agent and its model provider.
 - **FR-444**: An answered or skipped card MUST be replaced in the conversation by one line saying what the
   owner answered or that they skipped; the values MUST NOT be written to Hallpass's logs or diagnostics.
 - **FR-445**: Every open side-panel document MUST show the card; the first answer MUST be the one sent
@@ -183,6 +189,8 @@ text in the reply, and the owner answers with the next message.
   model MUST be shown as a card like any other; Skip MUST keep the refusal.
 - **FR-448**: Agents that cannot ask with a card (Hermes, DeepSeek at their tested versions) MUST behave
   exactly as before this feature.
+- **FR-449**: A field the question marks as secret MUST hide what is typed, and its value MUST NOT appear in
+  the answered line or anywhere in the panel after Send.
 
 ### Key Entities
 
@@ -234,3 +242,4 @@ text in the reply, and the owner answers with the next message.
 | 2026-11-04 | Created from issue #17; D-029-1..3 open for the owner | Issue #17, main session |
 | 2026-11-04 | D-029-2 (server questions shown, labelled) and D-029-3 (fallback-model card) decided; D-029-1's link uses recorded | Owner, main session |
 | 2026-11-04 | D-029-1 (forms only, no links) decided | Owner ("同意") |
+| 2026-11-04 | Planning: FR-443 and User Story 3 say what the card can know (neither adapter names an asking server, R-430); a question outside a turn is cancelled (R-431); FR-449 secret fields | Main session, plan |
