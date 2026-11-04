@@ -26,6 +26,9 @@ type Running = {
   permissions: acp.RequestPermissionRequest[];
   exited: Promise<number | null>;
   answer: { current: Answer };
+  /** 029 T864: the form questions received, and how the next one is answered. */
+  elicitations: acp.CreateElicitationRequest[];
+  elicit: { current: (request: acp.CreateElicitationRequest) => acp.CreateElicitationResponse | Promise<acp.CreateElicitationResponse> };
 };
 
 let dir: string;
@@ -59,6 +62,8 @@ function start(env: Record<string, string> = {}): Running {
   const updates: Running["updates"] = [];
   const permissions: Running["permissions"] = [];
   const answer = { current: selectKind("allow_once") };
+  const elicitations: Running["elicitations"] = [];
+  const elicit: Running["elicit"] = { current: () => ({ action: "decline" }) };
   const stream = acp.ndJsonStream(
     Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
     Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
@@ -72,17 +77,24 @@ function start(env: Record<string, string> = {}): Running {
       sessionUpdate: (notification) => {
         updates.push(notification.update);
       },
+      createElicitation: (request) => {
+        elicitations.push(request);
+        return elicit.current(request);
+      },
     }),
     stream,
   );
   const exited = new Promise<number | null>((done) => child.once("exit", (code) => done(code)));
-  const entry = { child, connection, updates, permissions, exited, answer };
+  const entry = { child, connection, updates, permissions, exited, answer, elicitations, elicit };
   running.push(entry);
   return entry;
 }
 
 const init = (agent: Running) =>
   agent.connection.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+/** 029: a client that says it shows form questions (and not links). */
+const initForms = (agent: Running) =>
+  agent.connection.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: { elicitation: { form: {} } } });
 const newSession = (agent: Running) => agent.connection.newSession({ cwd: dir, mcpServers: [] });
 const say = (agent: Running, sessionId: string, text: string) =>
   agent.connection.prompt({ sessionId, prompt: [{ type: "text", text }] });
@@ -576,5 +588,84 @@ describe("fake lockfile install (024 T791, HALLPASS_BROKER_TEST_INSTALL)", () =>
     expect(await new Promise((done) => child.once("exit", done))).toBe(0);
     expect(existsSync(join(dir, "node_modules", "dep", "package.json"))).toBe(true);
     expect(existsSync(join(dir, FAKE_INSTALL_DONE_MARKER))).toBe(true);
+  });
+});
+
+describe("fake ACP agent form questions (029 T864)", () => {
+  const ready = async (env: Record<string, string> = {}, forms = true) => {
+    const agent = start(env);
+    await (forms ? initForms(agent) : init(agent));
+    const { sessionId } = await newSession(agent);
+    return { agent, sessionId };
+  };
+
+  it("ask:form:kinds sends one field of each kind, colour required, and says back an accepted content", async () => {
+    const { agent, sessionId } = await ready();
+    agent.elicit.current = () => ({ action: "accept", content: { colour: "blue", count: 3 } });
+    await say(agent, sessionId, "ask:form:kinds");
+    const request = agent.elicitations[0] as acp.CreateElicitationRequest & { requestedSchema: acp.ElicitationSchema };
+    expect(request).toMatchObject({ sessionId, mode: "form", message: "Pick your order" });
+    expect(Object.keys(request.requestedSchema.properties ?? {})).toEqual(["colour", "size", "toppings", "note", "email", "count", "price", "ok"]);
+    expect(request.requestedSchema.required).toEqual(["colour"]);
+    expect("toolCallId" in request).toBe(false);
+    expect(chunkText(agent.updates)).toEqual(["elicit:accept", `content:${JSON.stringify({ colour: "blue", count: 3 })}`]);
+  });
+
+  it("ask:form:* says elicit:unsupported to a client that did not advertise forms", async () => {
+    const { agent, sessionId } = await ready({}, false);
+    await say(agent, sessionId, "ask:form:kinds");
+    expect(agent.elicitations).toEqual([]);
+    expect(chunkText(agent.updates)).toEqual(["elicit:unsupported"]);
+  });
+
+  it("ask:form:secret marks its field with _meta.codex.isSecret", async () => {
+    const { agent, sessionId } = await ready();
+    await say(agent, sessionId, "ask:form:secret");
+    const request = agent.elicitations[0] as { requestedSchema: { properties: Record<string, { _meta?: unknown }> } };
+    expect(request.requestedSchema.properties.token?._meta).toEqual({ codex: { isSecret: true } });
+    expect(chunkText(agent.updates)).toEqual(["elicit:decline"]);
+  });
+
+  it("ask:form:tool announces its tool call first and ties the question to it", async () => {
+    const { agent, sessionId } = await ready();
+    await say(agent, sessionId, "ask:form:tool");
+    const call = agent.updates.find((update) => update.sessionUpdate === "tool_call") as { toolCallId: string; title: string };
+    expect(call.title).toBe("mcp__github__create_issue");
+    expect(agent.elicitations[0]).toMatchObject({ toolCallId: call.toolCallId });
+  });
+
+  it("ask:form:withdraw cancels its own request and says elicit:withdrawn", async () => {
+    const { agent, sessionId } = await ready({ FAKE_ACP_WITHDRAW_MS: "50" });
+    agent.elicit.current = () => new Promise((done) => setTimeout(() => done({ action: "cancel" }), 2_000));
+    await say(agent, sessionId, "ask:form:withdraw");
+    expect(chunkText(agent.updates)).toEqual(["elicit:withdrawn"]);
+  });
+
+  it("ask:form:big sends 21 fields", async () => {
+    const { agent, sessionId } = await ready();
+    await say(agent, sessionId, "ask:form:big");
+    const request = agent.elicitations[0] as { requestedSchema: acp.ElicitationSchema };
+    expect(Object.keys(request.requestedSchema.properties ?? {})).toHaveLength(21);
+  });
+
+  it("ask:form:empty asks with a permission request, not a form, even to a client that shows forms", async () => {
+    const { agent, sessionId } = await ready();
+    await say(agent, sessionId, "ask:form:empty");
+    expect(agent.elicitations).toEqual([]);
+    expect(agent.permissions).toHaveLength(1);
+    expect(chunkText(agent.updates)).toEqual(["permission:selected"]);
+  });
+
+  it("ask:form:outside ends the turn, then asks and logs the action", async () => {
+    const log = join(dir, "fake.log");
+    const { agent, sessionId } = await ready({ FAKE_ACP_LOG: log });
+    agent.elicit.current = () => ({ action: "cancel" });
+    const result = await say(agent, sessionId, "ask:form:outside");
+    expect(result.stopReason).toBe("end_turn");
+    expect(agent.elicitations).toEqual([]);
+    const deadline = Date.now() + 5_000;
+    while (!logLines(log).some((line) => line.event === "outside-elicit") && Date.now() < deadline) await new Promise((done) => setTimeout(done, 25));
+    expect(agent.elicitations).toHaveLength(1);
+    expect(logLines(log).find((line) => line.event === "outside-elicit")).toMatchObject({ action: "cancel" });
   });
 });

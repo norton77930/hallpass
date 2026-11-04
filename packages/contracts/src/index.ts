@@ -337,6 +337,18 @@ export {
   conversationErrorSchema,
   conversationToolKindSchema,
   conversationEventSchema,
+  // 029: agent questions as side-panel cards.
+  QUESTION_MESSAGE_MAX_CHARS,
+  QUESTION_MAX_FIELDS,
+  QUESTION_MAX_OPTIONS,
+  QUESTION_SUMMARY_MAX_CHARS,
+  QUESTION_VALUE_MAX_CHARS,
+  QUESTION_FIELD_KINDS,
+  QUESTION_TEXT_FORMATS,
+  QUESTION_ENDINGS,
+  questionValueSchema,
+  questionFieldSchema,
+  questionReplySchema,
   conversationLogEntrySchema,
   conversationEventPayloadSchema,
   conversationCommandSchema,
@@ -393,6 +405,9 @@ export {
   conversationModelStateSchema,
 } from "./conversation.js";
 export type {
+  QuestionValue,
+  QuestionField,
+  QuestionReply,
   ConversationAgent,
   ConversationMode,
   ConversationFolder,

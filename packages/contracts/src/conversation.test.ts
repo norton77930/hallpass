@@ -746,3 +746,74 @@ describe("027 extra MCP servers for side-panel conversations (contracts/frames.m
     expect(CONVERSATION_ERROR_CODES).toContain("mcp-server-refused");
   });
 });
+
+describe("029 agent questions as side-panel cards (contracts/frames.md, data-model)", () => {
+  const field = { key: "colour", kind: "choice", label: "Colour", required: true, options: [{ value: "red", label: "Red" }] };
+  const question = { type: "question", requestId: "q-1", message: "Pick your order", fields: [field] };
+  const reply = (value: unknown) => ({
+    type: "ui.conversation.question-reply",
+    payload: { conversationId: "conv-0123456789abcdef", requestId: "q-1", reply: value },
+  });
+
+  it("takes a question event with each field kind, its limits, a tool call, skip-only and the agent's waiting time", () => {
+    const fields = [
+      field,
+      { key: "toppings", kind: "choices", label: "Toppings", required: false, options: [{ value: "ham", label: "Ham", description: "d" }], minItems: 1, maxItems: 2, default: ["ham"] },
+      { key: "note", kind: "text", label: "Note", required: false, format: "email", minLength: 1, maxLength: 50, pattern: "^.+$", default: "x" },
+      { key: "count", kind: "integer", label: "Count", required: false, minimum: 1, maximum: 9, default: 2 },
+      { key: "price", kind: "number", label: "Price", required: false },
+      { key: "ok", kind: "yes-no", label: "Deliver", required: false, default: true },
+      { key: "token", kind: "text", label: "API token", required: true, secret: true },
+      { key: "later", kind: "unsupported", label: "Later", required: false },
+    ];
+    const event = { ...question, fields, toolCallId: "call-1", toolTitle: "mcp__github__create_issue", skipOnly: true, waitsMs: 60_000 };
+    expect(conversationEventSchema.parse(event)).toEqual(event);
+  });
+
+  it("refuses a question over its bounds, an unknown field kind or an undeclared field", () => {
+    const tooMany = Array.from({ length: contracts.QUESTION_MAX_FIELDS + 1 }, (_unused, index) => ({ ...field, key: `f${index}` }));
+    const options = Array.from({ length: contracts.QUESTION_MAX_OPTIONS + 1 }, (_unused, index) => ({ value: `${index}`, label: `${index}` }));
+    for (const bad of [
+      { ...question, message: "x".repeat(contracts.QUESTION_MESSAGE_MAX_CHARS + 1) },
+      { ...question, fields: tooMany },
+      { ...question, fields: [{ ...field, options }] },
+      { ...question, fields: [{ ...field, kind: "date" }] },
+      { ...question, fields: [{ ...field, secret: false }] },
+      { ...question, url: "https://example.test" },
+    ]) {
+      expect(conversationEventSchema.safeParse(bad).success, JSON.stringify(bad).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it("takes question-closed with each ending; a summary only with answered, at most 400 characters", () => {
+    for (const ending of contracts.QUESTION_ENDINGS) {
+      expect(conversationEventSchema.safeParse({ type: "question-closed", requestId: "q-1", ending }).success).toBe(true);
+    }
+    expect(conversationEventSchema.safeParse({ type: "question-closed", requestId: "q-1", ending: "answered", summary: "Colour: Red" }).success).toBe(true);
+    expect(conversationEventSchema.safeParse({ type: "question-closed", requestId: "q-1", ending: "skipped", summary: "Colour: Red" }).success).toBe(false);
+    expect(
+      conversationEventSchema.safeParse({ type: "question-closed", requestId: "q-1", ending: "answered", summary: "x".repeat(contracts.QUESTION_SUMMARY_MAX_CHARS + 1) }).success,
+    ).toBe(false);
+  });
+
+  it("takes question-reply accept (typed values) and decline in the broker and panel unions; never cancel", () => {
+    const accept = reply({ action: "accept", values: { colour: "red", toppings: ["ham"], count: 2, ok: true } });
+    const decline = reply({ action: "decline" });
+    for (const command of [accept, decline]) {
+      expect(conversationCommandSchema.parse(command)).toEqual(command);
+      expect(conversationPanelCommandSchema.parse({ ...command, commandId: "cmd-1" })).toEqual({ ...command, commandId: "cmd-1" });
+    }
+    for (const bad of [
+      reply({ action: "cancel" }),
+      reply({ action: "accept", values: { colour: { nested: true } } }),
+      reply({ action: "accept", values: Object.fromEntries(Array.from({ length: contracts.QUESTION_MAX_FIELDS + 1 }, (_unused, index) => [`f${index}`, "x"])) }),
+      reply({ action: "decline", values: {} }),
+    ]) {
+      expect(conversationCommandSchema.safeParse(bad).success, JSON.stringify(bad).slice(0, 120)).toBe(false);
+    }
+  });
+
+  it("adds the question-invalid error code", () => {
+    expect(CONVERSATION_ERROR_CODES).toContain("question-invalid");
+  });
+});

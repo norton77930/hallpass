@@ -212,6 +212,7 @@ export type ConversationPoolPort = Pick<
   | "send"
   | "stop"
   | "answer"
+  | "questionReply"
   | "setMode"
   | "setModel"
   | "open"
@@ -840,6 +841,9 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
         return { outcome: await pool.stop(command.payload.conversationId) };
       case "ui.conversation.answer":
         return { outcome: await pool.answer(command.payload.conversationId, command.payload.requestId, command.payload.answer) };
+      case "ui.conversation.question-reply":
+        // 029 R-434: a question card's Send or Skip.
+        return { outcome: await pool.questionReply(command.payload.conversationId, command.payload.requestId, command.payload.reply) };
       case "ui.conversation.set-mode":
         // 021 R-351: a launch-time mode change starts a new agent run, so it needs the consent as a start does.
         return { outcome: await pool.setMode(command.payload.conversationId, command.payload.mode, consentGate) };
