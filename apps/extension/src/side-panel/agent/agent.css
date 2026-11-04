@@ -1267,6 +1267,55 @@
   font-size: var(--fs-1);
 }
 
+/* 029: a question card's fields - one control per field, the hint and the check in the quieter tones. */
+.agent-question-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  border: 0;
+}
+.agent-question-field legend {
+  padding: 0;
+  font-weight: 600;
+}
+.agent-question-field input[type="text"],
+.agent-question-field input[type="email"],
+.agent-question-field input[type="url"],
+.agent-question-field input[type="password"],
+.agent-question-field input[type="number"],
+.agent-question-field input[type="date"],
+.agent-question-field input[type="datetime-local"] {
+  min-width: 0;
+  max-width: 100%;
+}
+.agent-question-option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1);
+  overflow-wrap: anywhere;
+}
+.agent-question-hint,
+.agent-question-required,
+.agent-question-during,
+.agent-question-goes-to {
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+.agent-question-hint {
+  flex-basis: 100%;
+}
+.agent-question-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.agent-question-check {
+  color: var(--warn);
+}
+
 /* T605: one rounded card holds the box and, under it, the chips with Send or Stop at the end. */
 .agent-conversation-composer {
   display: flex;
