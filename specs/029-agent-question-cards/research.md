@@ -164,3 +164,20 @@ question's own answer box or note inside that question after its options, with t
 full above it. A field's label may now be 1000 characters (it holds the question's words); an option's
 stays 200, a preview 4000.
 
+## R-439 — The card as the agent's own client draws a question (owner's screenshots, 2026-11-04)
+
+**Finding**: the R-438 card was drawn from the adapters' code, not from how a question looks to the
+owner. The owner showed three screenshots of a question asked by the agent's own question tool in the
+Claude app: one question at a time; a grey header with the question's words and "1 of 3" with arrows;
+the options as full-width rows split by hairlines, a radio (one choice) or a box (several) on the left,
+the words and a grey description under them; "Other" as the last row; Skip, and a dark Next (Submit on
+the last question) with Ctrl+Enter. The short tag is not shown, nor the options numbered.
+
+**Decision**: the card is drawn that way. A question's own answer box (R-438 `otherFor`) is the
+"Other" row when the question may be left unpicked, and opens a box when picked; on a question that
+must be picked (Codex) it stays a note under the options. Nothing is picked for the owner; Next waits
+for the page's required answer, Send for every page's; a value outside its limits is named. The message
+of an agent's question tool (its fields carry tags) is generic and not shown; another form's message
+is. Hallpass's own lines - who asks, where the answer goes, the agent's waiting time (FR-443) - are the
+small print above the buttons.
+
