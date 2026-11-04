@@ -1,5 +1,5 @@
-import { win32 } from "node:path";
 import { CONVERSATION_MODES, type ConversationAgent, type ConversationMode } from "@hallpass/contracts";
+import { joinUnder } from "./data-path.js";
 
 /**
  * 021 launch-time modes (R-347, R-349, R-350, R-351): what Hallpass sets when it starts an agent whose
@@ -57,7 +57,7 @@ export type LaunchSettings = {
 
 /** `<data>\agents\hermes\managed\<mode>`: the folder `HERMES_MANAGED_DIR` names. */
 export function hermesManagedDirectory(dataDir: string, mode: ConversationMode): string {
-  return win32.join(dataDir, "agents", "hermes", "managed", mode);
+  return joinUnder(dataDir, "agents", "hermes", "managed", mode);
 }
 
 /** The managed layer's fixed content for a mode. */
@@ -74,7 +74,7 @@ export function launchSettings(agent: ConversationAgent, mode: ConversationMode,
       return {
         env: { [HERMES_MANAGED_ENV]: directory },
         agentMode: HERMES_AGENT_MODES[mode],
-        files: [{ path: win32.join(directory, "config.yaml"), text: hermesManagedConfig(mode) }],
+        files: [{ path: joinUnder(directory, "config.yaml"), text: hermesManagedConfig(mode) }],
       };
     }
     case "deepseek":
