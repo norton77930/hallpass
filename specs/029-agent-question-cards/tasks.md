@@ -8,7 +8,7 @@ optional" default). IDs continue from 028 (T863). `[P]`: a different file with n
 
 ## Phase 1: Setup
 
-- [ ] T864 [P] Extend the fake agent in `tests/harness/fake-acp-agent.ts` with prompt keywords, each asking
+- [x] T864 [P] Extend the fake agent in `tests/harness/fake-acp-agent.ts` with prompt keywords, each asking
       one form question only when the client advertised `elicitation.form` (else `elicit:unsupported`, as
       `ask:elicit` does), and saying back `elicit:<action>` plus the accepted `content` as JSON:
       - `ask:form:kinds`: one field of each kind of R-432, one required;
@@ -26,7 +26,7 @@ optional" default). IDs continue from 028 (T863). `[P]`: a different file with n
 
 ## Phase 2: Foundational (blocks every story)
 
-- [ ] T865 Test first in `packages/contracts/src/conversation.test.ts` ("029"):
+- [x] T865 Test first in `packages/contracts/src/conversation.test.ts` ("029"):
       - `question` and `question-closed` events with every bound of data-model, including the ≤ 20 fields,
         ≤ 100 options and summary ≤ 400 limits;
       - `ui.conversation.question-reply` in both command unions;
@@ -35,7 +35,7 @@ optional" default). IDs continue from 028 (T863). `[P]`: a different file with n
 
       Then the schemas in `packages/contracts/src/conversation.ts` and their exports in
       `packages/contracts/src/index.ts`. FR-440, FR-441, R-434.
-- [ ] T866 Test first in `packages/agent-host/tests/questions-029.test.ts`, then implement the field mapping
+- [x] T866 Test first in `packages/agent-host/tests/questions-029.test.ts`, then implement the field mapping
       in `packages/agent-host/src/broker/questions.ts`. The function `questionFromRequest(request)` maps a
       form schema to the event's fields per R-432:
       - choice from `oneOf` and from `enum`; choices from `items.anyOf` / `items.enum` with min / max items;
@@ -49,7 +49,7 @@ optional" default). IDs continue from 028 (T863). `[P]`: a different file with n
       - `waitsMs` from `_meta.codex.autoResolutionMs`.
 
       The function is pure, with no ACP connection.
-- [ ] T867 Test first (same test file), then implement in `packages/agent-host/src/broker/questions.ts`:
+- [x] T867 Test first (same test file), then implement in `packages/agent-host/src/broker/questions.ts`:
       - `checkReply(fields, values)` per R-434: unknown key, wrong type, value not offered, out of limits,
         pattern mismatch, a missing required field, a fraction for an integer, and unsupported fields left
         out;
@@ -63,18 +63,18 @@ with exactly the entered values.
 **Independent test**: over the fake agent, `ask:form:kinds` raises a `question` event. A `question-reply`
 accept with one value per field makes the agent say back exactly those values. SC-196, SC-197, SC-200.
 
-- [ ] T868 [US1] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, then implement in
+- [x] T868 [US1] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, then implement in
       `packages/agent-host/src/broker/conversation.ts`:
       - `initialize` carries `clientCapabilities.elicitation = { form: {} }` and no `url` (FR-439, R-429);
         the fake's `ask:elicit` now gets a form instead of `elicit:unsupported`;
       - `ask:form:empty` still raises a `permission` card, unchanged (R-429).
-- [ ] T869 [US1] Test first (same file), then implement in `packages/agent-host/src/broker/conversation.ts`
+- [x] T869 [US1] Test first (same file), then implement in `packages/agent-host/src/broker/conversation.ts`
       an `onRequest("elicitation/create")` handler:
       - a `form` request for this session in a live turn becomes a held question (`q-<n>`), enqueued as
         `question` using `questionFromRequest`; the state goes to `waiting-for-owner`;
       - anything else of R-431 is answered `cancel` with no event: outside a turn (`ask:form:outside`),
         another session, request-scoped, url mode.
-- [ ] T870 [US1] Test first (same file), then implement the reply path:
+- [x] T870 [US1] Test first (same file), then implement the reply path:
       - `ConversationPool.questionReply(conversationId, requestId, reply)` in
         `packages/agent-host/src/broker/conversation.ts`, with its case in
         `packages/agent-host/src/broker/commands.ts`;
@@ -82,7 +82,7 @@ accept with one value per field makes the agent say back exactly those values. S
       - a valid accept answers the agent `{ action: "accept", content }` and enqueues `question-closed`
         `answered` with its summary; the fake agent says back exactly the values (SC-197);
       - a second reply, as from another panel document, answers `not-found` (FR-445).
-- [ ] T871 [P] [US1] Test first in `apps/extension/tests/side-panel-question-card-029.test.tsx`, then
+- [x] T871 [P] [US1] Test first in `apps/extension/tests/side-panel-question-card-029.test.tsx`, then
       implement `apps/extension/src/side-panel/agent/conversation/QuestionCard.tsx`:
       - one control per field kind (radio list, checkboxes with min / max, text line with its format, number,
         checkbox);
@@ -90,14 +90,14 @@ accept with one value per field makes the agent say back exactly those values. S
       - an `unsupported` field listed as "can't be answered here";
       - the message and long text clipped with "show all" (R-432);
       - Send posts `question-reply` accept with the typed values (numbers as numbers, choices as values).
-- [ ] T872 [US1] Test first (same test file, plus the existing `conversation-log` tests), then implement:
+- [x] T872 [US1] Test first (same test file, plus the existing `conversation-log` tests), then implement:
       - `apps/extension/src/side-panel/agent/conversation/conversation-log.ts` keeps open questions and puts
         each `question-closed` into the timeline as an answered line with its summary;
       - `MessageList.tsx` draws open questions with `QuestionCard`;
       - `ConversationTab.tsx` sends the reply command and shows a `question-invalid` refusal on the card;
       - two documents fed the same events show the same card and close it on the same `question-closed`
         (FR-445).
-- [ ] T873 [P] [US1] Add every new string to `apps/extension/src/locales/en-US.ts`,
+- [x] T873 [P] [US1] Add every new string to `apps/extension/src/locales/en-US.ts`,
       `apps/extension/src/locales/zh-TW.ts` and `catalog.ts` (card title, waiting, Send, Skip, missing field,
       can't be answered here, show all, each ending's line). The existing locale-parity test must pass.
 
@@ -107,7 +107,7 @@ accept with one value per field makes the agent say back exactly those values. S
 owner. **Independent test**: over the fake agent, Skip makes it say `elicit:decline`; Stop and exit make it
 `cancel`; a withdrawn request closes the card. SC-198.
 
-- [ ] T874 [US2] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, then implement in
+- [x] T874 [US2] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, then implement in
       `packages/agent-host/src/broker/conversation.ts` every ending of R-435:
       - a `decline` reply gives `skipped`;
       - Stop, the turn's end and a mode drift give `cancel` and `cancelled`;
@@ -115,12 +115,12 @@ owner. **Independent test**: over the fake agent, Skip makes it say `elicit:decl
       - `ask:form:withdraw` (request signal aborted) gives `withdrawn`, with no reply sent.
 
       In every case the held question is removed, and nothing is sent as `accept` (FR-441).
-- [ ] T875 [US2] Test first (same file), then implement R-437 in
+- [x] T875 [US2] Test first (same file), then implement R-437 in
       `packages/agent-host/src/broker/conversation.ts`: every check that reads `this.cards.size` also counts
       held questions. That covers the idle stop, a mode change, a restart and a model change refused
       `busy`, and the `waiting-for-owner` state going back to `running` only when neither waits. No
       expiry (FR-442).
-- [ ] T876 [P] [US2] Test first in `apps/extension/tests/side-panel-question-card-029.test.tsx`, then
+- [x] T876 [P] [US2] Test first in `apps/extension/tests/side-panel-question-card-029.test.tsx`, then
       implement in `QuestionCard.tsx` and `conversation-log.ts`:
       - Skip posts `{ action: "decline" }`;
       - each ending's line (skipped, cancelled, withdrawn, agent-exited);
@@ -133,19 +133,19 @@ owner. **Independent test**: over the fake agent, Skip makes it say `elicit:decl
 **Independent test**: `ask:form:tool` raises a `question` with `toolCallId` and the announced `toolTitle`;
 `ask:form:kinds` has neither; the card's text says the answer goes to the agent and may go on to the tool.
 
-- [ ] T877 [US3] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, then implement in
+- [x] T877 [US3] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, then implement in
       `conversation.ts`:
       - a question's `toolCallId` is kept only when the turn announced that call, and `toolTitle` is taken
         from the announcement;
       - an unknown id is dropped, never shown;
       - nothing is guessed from the message (FR-443).
-- [ ] T878 [P] [US3] Test first in `apps/extension/tests/side-panel-question-card-029.test.tsx`, then
+- [x] T878 [P] [US3] Test first in `apps/extension/tests/side-panel-question-card-029.test.tsx`, then
       implement in `QuestionCard.tsx`:
       - the title is "{agent} asks";
       - "During: {toolTitle}" appears only when present;
       - the fixed line says the answer goes to the agent and its model provider and may go on to that tool
         (FR-443).
-- [ ] T879 [US3] Test first (both test files), then implement the secret field (FR-449, R-433):
+- [x] T879 [US3] Test first (both test files), then implement the secret field (FR-449, R-433):
       - `ask:form:secret`'s field is a hidden-text input;
       - its value reaches the fake agent;
       - the answered line says hidden;
@@ -156,7 +156,7 @@ owner. **Independent test**: over the fake agent, Skip makes it say `elicit:decl
 **Goal**: Hermes and DeepSeek are unchanged (FR-448). **Independent test**: their existing launch and
 conversation tests pass with no change to their expectations. SC-201.
 
-- [ ] T880 [US4] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, with the fake agent
+- [x] T880 [US4] Test first in `packages/agent-host/tests/broker-questions-029.test.ts`, with the fake agent
       launched as Hermes and as DeepSeek:
       - a run with no elicitation is unchanged;
       - their `initialize` carries the same capability, which is harmless when unused.
@@ -165,14 +165,14 @@ conversation tests pass with no change to their expectations. SC-201.
 
 ## Phase 7: Polish and cross-cutting
 
-- [ ] T881 [P] SC-199. Test in `packages/agent-host/tests/broker-questions-029.test.ts`: after a run that
+- [x] T881 [P] SC-199. Test in `packages/agent-host/tests/broker-questions-029.test.ts`: after a run that
       answers `ask:form:kinds` and `ask:form:secret` with known test values, no value appears in the
       broker's log lines, the diagnostics lines, or any file under the test's data folder. The secret is
       also absent from every frame.
-- [ ] T882 [P] Add the user-facing entry to `CHANGELOG.md` (questions as cards, Claude Code's question tool
+- [x] T882 [P] Add the user-facing entry to `CHANGELOG.md` (questions as cards, Claude Code's question tool
       back, Codex no longer answered blank) and the README's side-panel section; add `coverage.md` mapping
       each FR and SC to its tests (as in 027).
-- [ ] T883 Run the gates: `npm run typecheck`, `npm test`, `npm run build:extension`, `npm run test:contract`
+- [x] T883 Run the gates: `npm run typecheck`, `npm test`, `npm run build:extension`, `npm run test:contract`
       and `npm run snapshot:check`. Record the counts in `specs/029-agent-question-cards/coverage.md`.
 - [ ] T884 Windows (owner's machine):
       - `npm run build` and `npm run probe:017`; record the result for R-428 in `research.md`, and amend

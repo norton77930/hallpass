@@ -28,6 +28,8 @@ import {
   type ConversationModelWant,
   type ConversationState,
   type ConversationView,
+  type QuestionField,
+  type QuestionReply,
 } from "@hallpass/contracts";
 import { isProcessAlive } from "../bridge-link.js";
 import {
@@ -46,6 +48,7 @@ import { currentOf, readModelOffer, requestsFor, resolveTarget } from "./model-o
 import { memoryModelStore, type AgentModels, type ModelStore } from "./model-store.js";
 import { ensureScratchFolder, isDirectory, scratchFolderPath } from "./folders.js";
 import { redact, withoutEnvironmentValues, withoutUserProfile } from "./redact.js";
+import { checkReply, questionFromRequest, summarize } from "./questions.js";
 import { killTree } from "./run-command.js";
 import { defaultUserEnvironmentPorts, keyNameOnlyInUserSettings, type UserEnvironmentPorts } from "./user-environment.js";
 
@@ -480,6 +483,19 @@ type Card = {
   resolve: (response: acp.RequestPermissionResponse) => void;
 };
 
+/** 029 R-435: a form question waiting for the owner, beside the permission cards. */
+type HeldQuestion = {
+  requestId: string;
+  fields: QuestionField[];
+  resolve: (response: acp.CreateElicitationResponse) => void;
+  /** Stops listening for the agent's own withdrawal (its `$/cancel_request`). */
+  release: () => void;
+};
+type QuestionEnding = "answered" | "skipped" | "cancelled" | "withdrawn" | "agent-exited";
+
+/** What an owner's reply to a question did (`Conversation.questionReply`). */
+export type QuestionReplyResult = { kind: "answered" } | { kind: "not-open" } | { kind: "invalid"; reason: string };
+
 /** R-353: what the agent announced about an action (`tool_call` / `tool_call_update`) during this turn. */
 type Announced = { title?: string; kind?: ToolKind; detail?: string };
 
@@ -629,6 +645,8 @@ export class Conversation {
   private closing: { target: "stopped" | "gone" | "starting" } | undefined;
   private turn: Turn | undefined;
   private readonly cards = new Map<string, Card>();
+  /** 029: form questions waiting for the owner; they hold the conversation as cards do (R-437). */
+  private readonly questions = new Map<string, HeldQuestion>();
   private cardCounter = 0;
   /** R-317: "for this conversation" rules, memory only and not resumed. */
   private readonly rules = new Set<string>();
@@ -747,9 +765,14 @@ export class Conversation {
     return this.child !== undefined;
   }
 
+  /** 029 R-437: permission cards and form questions waiting for the owner. */
+  private get ownerWaits(): number {
+    return this.cards.size + this.questions.size;
+  }
+
   /** Idle for the cap: no turn and no card (data-model: only `idle` counts). */
   get evictable(): boolean {
-    return this.stateValue === "idle" && this.turn === undefined && this.cards.size === 0 && !this.reloading && !this.switching;
+    return this.stateValue === "idle" && this.turn === undefined && this.ownerWaits === 0 && !this.reloading && !this.switching;
   }
 
   /** 025 R-406: the running agent's models and current values, once it reported them. */
@@ -849,8 +872,13 @@ export class Conversation {
     }
     const connection = acp
       .client({ name: "hallpass" })
-      .onRequest("session/request_permission", ({ params }) => this.onPermission(params))
+      // The SDK walks each incoming message through these handlers in order, one await per handler,
+      // and handles messages side by side. An update must not fall behind the request the agent sent
+      // after it (DeepSeek asks with the id alone and its card needs the announced action, R-353), so
+      // the update's handler comes first: an earlier update never needs more steps than a later request.
       .onNotification("session/update", ({ params }) => this.onUpdate(params))
+      .onRequest("session/request_permission", ({ params }) => this.onPermission(params))
+      .onRequest("elicitation/create", ({ params, signal }) => this.onQuestion(params, signal))
       .connect(
         acp.ndJsonStream(
           Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
@@ -867,7 +895,8 @@ export class Conversation {
       const init = await this.request(() =>
         connection.agent.request("initialize", {
           protocolVersion: acp.PROTOCOL_VERSION,
-          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+          // 029 R-429 (D-029-1): form questions, never links.
+          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, elicitation: { form: {} } },
           clientInfo: { name: "hallpass", version: "0.0.0" },
         }),
       );
@@ -1247,7 +1276,7 @@ export class Conversation {
     if (this.connection === undefined || this.connection.signal.aborted || this.sessionId === undefined || !this.live || !this.watchingMode) {
       return failure("agent-exited", "The agent is not running; the model applies when the conversation continues.");
     }
-    if (this.stateValue !== "idle" || this.turn !== undefined || this.cards.size > 0 || this.modeReset !== undefined) {
+    if (this.stateValue !== "idle" || this.turn !== undefined || this.ownerWaits > 0 || this.modeReset !== undefined) {
       return failure("busy", "The agent is still answering; stop it or wait for the end of its turn, then change the model.");
     }
     const state = this.modelStateValue;
@@ -1685,7 +1714,7 @@ export class Conversation {
     if (this.connection === undefined || this.sessionId === undefined || !this.live || !this.watchingMode) {
       return failure("agent-exited", "The agent is not running; it starts in strict mode when the conversation continues.");
     }
-    if (this.stateValue !== "idle" || this.turn !== undefined || this.cards.size > 0 || this.modeReset !== undefined) {
+    if (this.stateValue !== "idle" || this.turn !== undefined || this.ownerWaits > 0 || this.modeReset !== undefined) {
       return failure("busy", "The agent is still answering; stop it or wait for the end of its turn, then switch the mode.");
     }
     return { ok: true };
@@ -1777,7 +1806,7 @@ export class Conversation {
    * strict (FR-289).
    */
   private async reload(connection: acp.ClientConnection, sessionId: string, mode: ConversationMode): Promise<CommandOutcome> {
-    if (this.stateValue !== "idle" || this.turn !== undefined || this.cards.size > 0 || this.modeReset !== undefined) {
+    if (this.stateValue !== "idle" || this.turn !== undefined || this.ownerWaits > 0 || this.modeReset !== undefined) {
       return failure("busy", "The agent is still answering; stop it or wait for the end of its turn, then switch the mode.");
     }
     const targetId = agentModeId(this.agent, mode);
@@ -2038,7 +2067,79 @@ export class Conversation {
     if (!this.cards.delete(card.requestId)) return;
     this.enqueue({ type: "permission-closed", requestId: card.requestId, answer: closure });
     card.resolve(response);
-    if (this.cards.size === 0 && this.stateValue === "waiting-for-owner") this.setState("running");
+    if (this.ownerWaits === 0 && this.stateValue === "waiting-for-owner") this.setState("running");
+  }
+
+  /**
+   * 029 R-431: a form question for this session during a live turn becomes a card; anything else
+   * (outside a turn, another session, request-scoped, a link) is answered `cancel` and never shown.
+   */
+  private onQuestion(params: acp.CreateElicitationRequest, signal: AbortSignal): Promise<acp.CreateElicitationResponse> {
+    const cancel: acp.CreateElicitationResponse = { action: "cancel" };
+    if (this.turn === undefined || this.turn.cancelled) return Promise.resolve(cancel);
+    if (params.mode !== "form") return Promise.resolve(cancel);
+    const scope = params as { sessionId?: unknown };
+    if (typeof scope.sessionId !== "string" || scope.sessionId !== this.sessionId) return Promise.resolve(cancel);
+    const form = params as Extract<acp.CreateElicitationRequest, { mode: "form" }>;
+    const mapped = questionFromRequest(form);
+    // R-430: the tool call it names, only when this turn announced it; never a guess.
+    const callId = typeof (form as { toolCallId?: unknown }).toolCallId === "string" ? (form as { toolCallId: string }).toolCallId : undefined;
+    const announced = callId === undefined ? undefined : this.announced.get(callId);
+    const toolTitle = announced?.title?.trim() ? shown(announced.title, 200) : undefined;
+    const requestId = `q-${++this.cardCounter}`;
+    return new Promise((resolve) => {
+      // Only the agent's own `$/cancel_request` (-32800) is a withdrawal; a closing connection aborts
+      // every request too, and that ending is the exit's (`agent-exited`, from onExit).
+      const onWithdrawn = () => {
+        const reason: unknown = signal.reason;
+        if (!(reason instanceof acp.RequestError) || reason.code !== -32800) return;
+        const held = this.questions.get(requestId);
+        if (held !== undefined) this.closeQuestion(held, "withdrawn", cancel);
+      };
+      signal.addEventListener("abort", onWithdrawn, { once: true });
+      this.questions.set(requestId, {
+        requestId,
+        fields: mapped.fields,
+        resolve,
+        release: () => signal.removeEventListener("abort", onWithdrawn),
+      });
+      this.enqueue({
+        type: "question",
+        requestId,
+        message: redact(mapped.message),
+        ...(announced !== undefined && callId !== undefined ? { toolCallId: clip(callId, 128) } : {}),
+        ...(toolTitle !== undefined ? { toolTitle } : {}),
+        fields: mapped.fields,
+        ...(mapped.skipOnly ? { skipOnly: true as const } : {}),
+        ...(mapped.waitsMs !== undefined ? { waitsMs: mapped.waitsMs } : {}),
+      });
+      this.setState("waiting-for-owner");
+    });
+  }
+
+  private closeQuestion(question: HeldQuestion, ending: QuestionEnding, response: acp.CreateElicitationResponse, summary?: string): void {
+    if (!this.questions.delete(question.requestId)) return;
+    question.release();
+    this.enqueue({ type: "question-closed", requestId: question.requestId, ending, ...(summary !== undefined ? { summary } : {}) });
+    question.resolve(response);
+    if (this.ownerWaits === 0 && this.stateValue === "waiting-for-owner") this.setState("running");
+  }
+
+  /**
+   * 029 R-434: the owner's Send or Skip. Send is checked against the fields shown; a reply that does
+   * not fit leaves the card open. A card already closed (answered in another panel document) is not open.
+   */
+  questionReply(requestId: string, reply: QuestionReply): QuestionReplyResult {
+    const question = this.questions.get(requestId);
+    if (question === undefined) return { kind: "not-open" };
+    if (reply.action === "decline") {
+      this.closeQuestion(question, "skipped", { action: "decline" });
+      return { kind: "answered" };
+    }
+    const checked = checkReply(question.fields, reply.values);
+    if (!checked.ok) return { kind: "invalid", reason: checked.reason };
+    this.closeQuestion(question, "answered", { action: "accept", content: checked.content }, summarize(question.fields, checked.content));
+    return { kind: "answered" };
   }
 
   /** R-316: the agent changed its own mode. Cancel what is pending, put the owner's mode back, say so. */
@@ -2079,6 +2180,7 @@ export class Conversation {
     turn.cancelled = true;
     // ACP: a client that cancels answers its open permission requests `cancelled`.
     for (const card of [...this.cards.values()]) this.closeCard(card, "cancelled", { outcome: { outcome: "cancelled" } });
+    for (const question of [...this.questions.values()]) this.closeQuestion(question, "cancelled", { action: "cancel" });
     const connection = this.connection;
     if (connection !== undefined && this.sessionId !== undefined) {
       connection.agent.notify("session/cancel", { sessionId: this.sessionId }).catch(() => undefined);
@@ -2093,6 +2195,7 @@ export class Conversation {
       this.enqueue({ type: "notice", code: "turn-stopped", text: "Stopped. Nothing more from that turn will run." });
     }
     for (const card of [...this.cards.values()]) this.closeCard(card, "cancelled", { outcome: { outcome: "cancelled" } });
+    for (const question of [...this.questions.values()]) this.closeQuestion(question, "cancelled", { action: "cancel" });
     this.touch();
     if (this.live && (this.stateValue === "running" || this.stateValue === "waiting-for-owner")) {
       this.setState("idle");
@@ -2119,6 +2222,7 @@ export class Conversation {
     this.turn = undefined;
     this.announced.clear();
     for (const card of [...this.cards.values()]) this.closeCard(card, "agent-exited", { outcome: { outcome: "cancelled" } });
+    for (const question of [...this.questions.values()]) this.closeQuestion(question, "agent-exited", { action: "cancel" });
     const closing = this.closing;
     this.closing = undefined;
     if (closing !== undefined) {
@@ -2713,6 +2817,19 @@ export class ConversationPool {
       // R-353: the panel offered only Reject; an allow here is a command the card never offered.
       return failure("invalid-command", "Hallpass cannot tell what this action is, so it can only be rejected.");
     }
+    return { ok: true };
+  }
+
+  /** 029 R-434: a question card's Send or Skip; the first reply wins, a later one is `not-found`. */
+  async questionReply(conversationId: string, requestId: string, reply: QuestionReply): Promise<CommandOutcome> {
+    const conversation = this.conversations.get(conversationId);
+    if (conversation === undefined && !(await this.known(conversationId))) return unknown();
+    if (conversation === undefined || !conversation.live) {
+      return failure("agent-exited", "The agent that asked is no longer running.");
+    }
+    const result = conversation.questionReply(requestId, reply);
+    if (result.kind === "not-open") return failure("not-found", "This question is no longer waiting for an answer.");
+    if (result.kind === "invalid") return failure("question-invalid", result.reason);
     return { ok: true };
   }
 

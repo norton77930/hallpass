@@ -20,10 +20,12 @@ All in memory (R-436): the broker's held question and outbox, the panel document
 | --- | --- |
 | `key` | string 1..200, the form's property name |
 | `kind` | `"choice"` \| `"choices"` \| `"text"` \| `"number"` \| `"integer"` \| `"yes-no"` \| `"unsupported"` |
-| `label` | string ≤ 200 (`title`, else `key`) |
+| `label` | string ≤ 1000: the question's words (`title`, else `key`; R-438 for the adapters' hints) |
+| `chip` | string ≤ 200, optional: the question's short tag (R-438) |
+| `otherFor` | string, optional: this free-text field is the answer box or note of that choice field (R-438) |
 | `description` | string ≤ 1000, optional |
 | `required` | boolean |
-| `options` | `{ value: string ≤ 1000, label ≤ 200, description? ≤ 1000 }[]` ≤ 100 (choice, choices) |
+| `options` | `{ value: string ≤ 1000, label ≤ 200, description? ≤ 1000, preview? ≤ 4000 }[]` ≤ 100 (choice, choices) |
 | `minItems` / `maxItems` | integer, optional (choices) |
 | `format` | `"email"` \| `"uri"` \| `"date"` \| `"date-time"`, optional (text) |
 | `minLength` / `maxLength` / `pattern` | optional (text; `pattern` ≤ 400) |

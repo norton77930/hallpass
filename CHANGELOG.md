@@ -5,6 +5,20 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## Unreleased
+
+- **Agent questions as cards** (#17). When a side-panel Claude Code or Codex asks you something with
+  choices or fields, the question is a card above the box: Send your answer, Skip it, or Stop the
+  turn. Nothing is answered unless you press Send. Claude Code's own question tool, off in the side
+  panel until now, works again. Codex is no longer told you gave no answer to a question you never saw.
+  The card names the agent and, when the question belongs to a tool call, that call. A secret field
+  hides what you type and is never shown again. Hallpass shows form questions only, never links.
+  Hermes and DeepSeek are unchanged.
+- **Linux and macOS** (#29). Running the tests no longer leaves files named `\tmp\hallpass-…` in the
+  checkout: the host builds its data-folder paths in the host's own form.
+- **Maintainers** (#28). The contract check for private citations finds its candidates with one
+  `git grep`, instead of reading every tracked file (17–27 s on a slow Windows machine).
+
 ## 0.18.2 — 2026-11-02
 
 - **Maintainers**: `publish:snapshot` sets file modes through the index only, so a CRLF file stays LF in the public tree on Linux and macOS too (0.18.1 could re-read it from disk there). Contract tests for file modes and `uninstall.sh --purge` now pass on Linux and macOS. No behaviour change for users.
