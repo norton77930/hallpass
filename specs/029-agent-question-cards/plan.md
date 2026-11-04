@@ -55,19 +55,12 @@ apps/extension/src/locales/{en-US,zh-TW}.ts, catalog.ts
 
 ## Slices
 
-1. **S1 contracts** (T864): events, command, bounds; schema tests.
-2. **S2 pure module** (T865-T866): `questions.ts`. Covers schema to fields for each kind, the over-bound /
-   unsupported field / skip-only rules, reply validation, and the summary with secrets hidden. Test-first.
-3. **S3 broker** (T867-T870):
-   - advertise forms;
-   - `onElicitation` with the R-431 filter;
-   - held questions counted as waiting (R-437);
-   - every ending in R-435;
-   - `question-reply` with first answer wins.
+Tasks in [tasks.md](tasks.md), by user story:
 
-   Tests go over the fake agent, including that a fieldless MCP form still comes as a permission request.
-4. **S4 panel** (T871-T873): the card, the answered line, and two documents. Tests come first.
-5. **S5 docs and Windows run** (T874-T875):
-   - README and CHANGELOG;
-   - `probe:017` and the quickstart on Windows, then record R-428;
-   - the spec's change log.
+1. **Setup**: the fake agent's keywords (T864).
+2. **Foundational**: the contracts (T865) and the pure module `questions.ts` (T866-T867).
+3. **US1**: the broker (T868-T870), the card (T871-T872) and the strings (T873).
+4. **US2**: every ending (T874), waiting (T875) and Skip in the card (T876).
+5. **US3**: the tool call (T877-T878) and secret fields (T879).
+6. **US4**: no change for Hermes and DeepSeek (T880).
+7. **Polish**: no value in logs (T881), docs and coverage (T882), the gates (T883) and the Windows run (T884).
