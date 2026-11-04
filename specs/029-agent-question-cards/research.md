@@ -133,3 +133,14 @@ broker does not replay cards.
 **Decision**: questions are held beside permission cards; every check that today reads "a card waits"
 (the idle stop, mode change, restart, model change, the `waiting-for-owner` state) counts both. Hallpass
 sets no expiry (FR-294 applies alike).
+
+## Amendments (implementation, 2026-11-04)
+
+- **R-436**: the answered line is built once by the broker and shown as is in either language, so it
+  uses language-neutral marks: ✓ / ✗ for yes / no and •••••• for a secret.
+- **R-434**: a `question-invalid` refusal is shown as the conversation's refusal notice (as every other
+  command refusal is), with the card left open. The card itself keeps Send unavailable while a value is
+  missing or outside its limits, so the broker's check refuses only what the panel could not know.
+- **R-435**: a closing connection aborts every open request's signal too; only the agent's own
+  `$/cancel_request` (-32800) is a withdrawal, so an exit still ends the card `agent-exited`.
+

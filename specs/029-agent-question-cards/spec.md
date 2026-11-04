@@ -243,3 +243,4 @@ text in the reply, and the owner answers with the next message.
 | 2026-11-04 | D-029-2 (server questions shown, labelled) and D-029-3 (fallback-model card) decided; D-029-1's link uses recorded | Owner, main session |
 | 2026-11-04 | D-029-1 (forms only, no links) decided | Owner ("同意") |
 | 2026-11-04 | Planning: FR-443 and User Story 3 say what the card can know (neither adapter names an asking server, R-430); a question outside a turn is cancelled (R-431); FR-449 secret fields | Main session, plan |
+| 2026-11-04 | Implemented T864-T883 (Linux cloud session); T884 (probe:017 and the quickstart on Windows) owed | Main session |
