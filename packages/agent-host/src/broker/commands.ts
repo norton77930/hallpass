@@ -594,7 +594,7 @@ export function createCommandHandler(options: CommandHandlerOptions): CommandHan
     mcpChecks.delete(key);
     void port
       .check(server)
-      .catch((error: unknown) => ({ outcome: "failed" as const, detail: (error instanceof Error ? error.message : "The check failed.").slice(0, 300) }))
+      .catch((error: unknown) => ({ outcome: "failed" as const, detail: redact(error instanceof Error ? error.message : "The check failed.").slice(0, 300) }))
       .then((result) => {
         mcpChecking.delete(key);
         mcpChecks.set(key, { ...result, at: new Date().toISOString() });
