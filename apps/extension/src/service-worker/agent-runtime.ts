@@ -22,7 +22,7 @@ import { setAttention } from "../chrome-adapters/action-badge.js";
 import { downloadFile, watchDownloadChanged, watchDownloadCreated } from "../chrome-adapters/downloads.js";
 import { createOffscreenAdapter } from "../chrome-adapters/offscreen.js";
 import { injectAgentContent } from "../chrome-adapters/scripting.js";
-import { getTabSnapshot, queryTabSnapshots, watchTabUpdates } from "../chrome-adapters/tabs.js";
+import { getTabLoadState, getTabSnapshot, queryTabSnapshots, watchTabUpdates } from "../chrome-adapters/tabs.js";
 import { getWindowFacts, setWindowState } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
 import {
@@ -33,7 +33,7 @@ import {
   type AgentPortLike,
 } from "./agent-bridge.js";
 import { createAgentTabManager, type AgentTab, type AgentTabManager } from "./agent-tab-manager.js";
-import { createDownloadObserver } from "./download-observer.js";
+import { createDownloadObserver, downloadSourceOrigin, type DownloadHolder } from "./download-observer.js";
 import { createGroupPresenter } from "./group-presenter.js";
 import {
   createPairingController,
@@ -693,7 +693,20 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   const downloads = createDownloadObserver({
     onCreated: watchDownloadCreated,
     onChanged: watchDownloadChanged,
-    holders: () => tabs.sessionsHoldingAnyTab(),
+    // #36: each holder with the origins its tabs are on or are moving to, read at the moment of creation.
+    holders: async (): Promise<DownloadHolder[]> => {
+      const bySession = new Map<string, Set<string>>();
+      for (const lease of await tabs.leases()) {
+        const origins = bySession.get(lease.sessionId) ?? new Set<string>();
+        bySession.set(lease.sessionId, origins);
+        const address = await getTabLoadState(lease.tabId);
+        for (const origin of [downloadSourceOrigin(address?.url), downloadSourceOrigin(address?.pendingUrl)]) {
+          if (origin !== undefined) origins.add(origin);
+        }
+      }
+      return [...bySession].map(([sessionId, origins]) => ({ sessionId, origins: [...origins] }));
+    },
+    ...(typeof chrome !== "undefined" && chrome.runtime?.id ? { ownOrigin: `chrome-extension://${chrome.runtime.id}` } : {}),
     reportDiagnostic: reportTestDiagnostic,
   });
   /**
@@ -1152,7 +1165,10 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
     onTabReleased: releaseTabState,
     // A navigation to a url the browser downloads ends on the record that appears for it (005/US2).
-    downloads: { list: (session) => downloads.list(session) },
+    downloads: {
+      list: (session) => downloads.list(session),
+      expect: (session, origin, untilMs) => downloads.expect(session, origin, untilMs),
+    },
     // 008/FR-115: a page with unsaved work is not left unless the owner said so. The policy is
     // armed per call by the dialogs module, and `force` is decided by the site's own mode.
     dialogs: { beginUnload: (tabId, policy) => dialogs.beginUnload(tabId, policy) },

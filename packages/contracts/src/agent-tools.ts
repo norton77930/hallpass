@@ -1301,7 +1301,8 @@ export type AgentBatchResult = z.infer<typeof agentBatchResultSchema>;
  * Download reporting (005/T180, US2, FR-077..FR-080).
  *
  * A record carries what the *browser's* download record carries and nothing from any page: the
- * browser's id, the path it saved to, the source url, the state in our four words, when it started
+ * browser's id, the file's name (not the path it saved to, which names the owner's profile folder;
+ * #36), the source url, the state in our four words, when it started
  * and ended, the bytes, whether the browser flagged it, and which sessions it was attributed to.
  * The extension only observes these (FR-076); nothing here can name an action on one.
  */
@@ -1328,7 +1329,7 @@ export const AGENT_DOWNLOADS_KEPT = 20;
 
 const agentDownloadIdSchema = z.number().int().nonnegative();
 
-/** The saved path exactly as the browser reports it; empty until the browser has decided it. */
+/** The file's name, without the folder the browser saved it in (#36); empty until the browser has decided it. */
 const agentDownloadFilenameSchema = z.string().max(4096);
 
 const agentDownloadUrlSchema = z.string().max(2048);

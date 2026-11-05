@@ -176,9 +176,13 @@ session started afterwards lists nothing.
 - **FR-076 (PR-020 — MUST)**: The local-agent build MUST observe the browser's downloads and MUST NOT
   start, open, show, accept-danger, pause, resume, cancel, remove or erase any of them.
 - **FR-077 (PR-020 — MUST)**: A download MUST be attributed to a session when it is created while that
-  session holds at least one tab. It is attributed to every such session; when more than one, each
-  answer carries `attribution: "shared"`, otherwise `"session"`. A download created while no session
-  holds a tab is attributed to none and never reported.
+  session holds at least one tab **and** the download's referrer origin or source url origin is an
+  origin one of that session's tabs is on or is moving to (`pendingUrl`), or one the session's own
+  `navigate` named for the length of that call (amended 2026-11-05, #36). It is attributed to every
+  such session; when more than one, each answer carries `attribution: "shared"`, otherwise `"session"`.
+  A download that matches no session is the owner's: it is attributed to none and never reported,
+  whatever tabs sessions hold elsewhere. A file the extension itself writes (a recording export) names
+  no page and is attributed to every session holding a tab, as before.
 - **FR-078 (PR-020 — MUST)**: `wait` MUST accept `condition: "download-complete"` (no `ref`). It ends
   when the newest attributed download reaches a terminal state and answers `{outcome:"condition-met",
   waitedMs, download:{id, filename, url, state}}` with state `complete | failed | canceled`; it fails with
@@ -189,8 +193,8 @@ session started afterwards lists nothing.
   waiting for a commit that never comes.
 - **FR-079 (PR-020 — MUST)**: A new read tool `downloads_context` MUST list the session's attributed
   downloads, newest first, at most 20, each `{id, filename, url, state, startedAt, bytesReceived,
-  totalBytes, danger, attribution}`. `filename` is the browser's saved path exactly as the browser reports
-  it (it is the point of the tool). It needs no held tab.
+  totalBytes, danger, attribution}`. `filename` is the file's name as the browser saved it, without the
+  folder (amended 2026-11-05, #36: the path named the owner's profile folder). It needs no held tab.
 - **FR-080 (MUST)**: A session's download records are held in the worker's session storage with the
   session and discarded when the session ends (FR-058). They contain nothing from any page: only what
   the browser's download record carries.
@@ -239,6 +243,7 @@ session started afterwards lists nothing.
 
 | Date | Change | Origin |
 | --- | --- | --- |
+| 2026-11-05 | FR-077: attribution needs an origin match (referrer or source url against the session's tab addresses, or the origin its `navigate` named) besides the time rule; the owner's own download on an unrelated site reached every agent holding any tab. FR-079: `filename` is the file's name, not the saved path. The extension's own recording export keeps the time rule | Security review 2026-11-05, #36 |
 | 2026-09-13 | Probe S8 measured two defects on the owner's Chrome: `navigate` to a URL the browser downloads ran to `navigation-timeout` (US2 says navigating to such a URL is a supported way to cause a download), and the scenario asked the sandboxed caller to check the disk. Amendment: FR-078 gains the sentence "A `navigate` whose URL the browser turns into a download answers `ok` with the tab's unchanged URL and `download {id, url, filename, state}` instead of waiting for a commit that never comes"; SC-042's on-disk check is the harness's, not the caller's | Probe run 2026-09-13T12:17:30Z |
 | 2026-09-13 | Review (R1) follow-up recorded, not built: `download-complete` inspects the newest-by-creation record only, so when a page starts A then B and B finishes first, A's later completion is never answered (FR-078 says "newest", so this is by the letter; multi-file exports would want "any un-answered completion"). FR-075 wording corrected from "narrow build's bytes" to "narrow build's manifest" | R1 review, 2026-09-13 |
 | 2026-09-13 | Initial specification; owner decisions D-005-1–3; design-notes §6 | Post-004 gap inventory and reference reading, 2026-09-13 |
