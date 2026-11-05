@@ -45,13 +45,20 @@ type FakeTabs = {
   update(tabId: number, changeInfo: { status?: string; url?: string }): void;
 };
 
-function installChrome(): { fakeDebugger: FakeDebugger; url: { value: string }; tabs: FakeTabs } {
+function installChrome(): {
+  fakeDebugger: FakeDebugger;
+  url: { value: string };
+  /** A navigation the tab has started but not committed, as `chrome.tabs.Tab.pendingUrl` reports it. */
+  pending: { value: string | undefined };
+  tabs: FakeTabs;
+} {
   const local: Record<string, unknown> = {};
   const listeners: Array<(source: { tabId?: number }, method: string, params?: unknown) => void> = [];
   const updateListeners: Array<
     (tabId: number, changeInfo: { status?: string; url?: string }, tab?: { url?: string }) => void
   > = [];
   const url = { value: `${SITE}/form` };
+  const pending: { value: string | undefined } = { value: undefined };
   const fakeDebugger: FakeDebugger = {
     attached: [],
     detached: [],
@@ -83,7 +90,14 @@ function installChrome(): { fakeDebugger: FakeDebugger; url: { value: string }; 
     tabs: {
       async get(tabId: number) {
         if (tabId !== AGENT_TAB) throw new Error("No tab with id");
-        return { id: AGENT_TAB, url: url.value, groupId: 1, windowId: 900, active: false };
+        return {
+          id: AGENT_TAB,
+          url: url.value,
+          ...(pending.value === undefined ? {} : { pendingUrl: pending.value }),
+          groupId: 1,
+          windowId: 900,
+          active: false,
+        };
       },
       onUpdated: {
         addListener(
@@ -122,7 +136,7 @@ function installChrome(): { fakeDebugger: FakeDebugger; url: { value: string }; 
       onDetach: { addListener() {} },
     },
   };
-  return { fakeDebugger, url, tabs };
+  return { fakeDebugger, url, pending, tabs };
 }
 
 function harness(overrides: Partial<Parameters<typeof createAgentDiagnostics>[0]> = {}) {
@@ -360,6 +374,45 @@ describe("T056 agent diagnostics gate", () => {
     prompts.decide(prompts.current()?.promptId ?? "", false);
 
     await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "denied", reason: "owner-denied" });
+    expect(fake.fakeDebugger.commands.some((command) => command.method === "Runtime.evaluate")).toBe(false);
+  });
+
+  /**
+   * Security review 2026-11-05 S1 — the site is read once at the top of the call, and the call then
+   * waits on the owner's card. A page that moves the tab to another site inside that wait would
+   * otherwise have the script run there, under a grant and a mode the owner gave for the site the
+   * card named. The same last-moment check every CDP gesture already makes (`stillOnOrigin`)
+   * applies here: the tab's address is read again right before anything attaches or evaluates.
+   */
+  it("refuses to evaluate when the tab moved to another site while the owner's card stood", async () => {
+    const { runner, siteModes, prompts } = harness();
+    await siteModes.set(SITE, { diagnosticsGranted: true });
+
+    const pending = runner.run(request("evaluate", { expression: "document.title" }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ site: SITE });
+
+    // The page navigates itself away while the owner is reading the card about `SITE`.
+    fake.url.value = `${OTHER_SITE}/landing`;
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+
+    await expect(pending).resolves.toMatchObject({ callId: "call-1", outcome: "stale", reason: "stale-context" });
+    // Nothing attached and nothing ran: the other site has neither a grant nor a mode decision.
+    expect(fake.fakeDebugger.attached).toEqual([]);
+    expect(fake.fakeDebugger.commands.some((command) => command.method === "Runtime.evaluate")).toBe(false);
+    expect(fake.fakeDebugger.commands.some((command) => command.method === "Runtime.enable")).toBe(false);
+    expect(runner.attached()).toEqual([]);
+  });
+
+  it("refuses to evaluate when a navigation to another site is already pending, even under skip-checks", async () => {
+    const { runner, siteModes } = harness();
+    await siteModes.set(SITE, { diagnosticsGranted: true, mode: "skip-checks" });
+    fake.pending.value = `${OTHER_SITE}/landing`;
+
+    const response = await runner.run(request("evaluate", { expression: "document.title" }));
+
+    expect(response).toMatchObject({ callId: "call-1", outcome: "stale", reason: "stale-context" });
+    expect(fake.fakeDebugger.attached).toEqual([]);
     expect(fake.fakeDebugger.commands.some((command) => command.method === "Runtime.evaluate")).toBe(false);
   });
 

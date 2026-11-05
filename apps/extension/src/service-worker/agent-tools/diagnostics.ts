@@ -17,6 +17,7 @@ import type { AgentSessionContexts } from "./context.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import { readTabAddress, siteMovedAnswer, stillOnOrigin, type ReadTabAddress } from "./site-recheck.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 
@@ -65,6 +66,11 @@ export type AgentDiagnosticsDeps = {
    * drive Chrome's event without a browser; the default is the tabs adapter's subscription.
    */
   watchTabs?: (listener: (tabId: number, update: TabUpdate) => void) => () => void;
+  /**
+   * The tab's address, read once more right before a script runs (security review 2026-11-05 S1).
+   * Injected as `effects.ts` injects it; the default is one `chrome.tabs.get`.
+   */
+  tabAddress?: ReadTabAddress;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -171,6 +177,7 @@ function boundedText(value: string, max: number): string {
 
 export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnosticsRunner {
   const tabs = new Map<number, TabDiagnostics>();
+  const readAddress = deps.tabAddress ?? readTabAddress;
   let shared: AgentInputAttachments | undefined;
   let wired = false;
   /** Whether the browser-wide navigation subscription is up; `start` is idempotent (C1). */
@@ -461,6 +468,24 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
         if (asked.rememberMode) {
           await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
         }
+      }
+    }
+
+    if (tool === "evaluate") {
+      /**
+       * The site, asked again at the last moment (security review 2026-11-05 S1).
+       *
+       * `site` was read at the top of this call, and between there and here the call may have
+       * stood on the owner's card for as long as the card's bound. A page that moved the tab to
+       * another site inside that wait - committed, or with the navigation still pending - would
+       * otherwise have its script run under a grant and a mode the owner gave for the site the
+       * card named. The CDP gestures make this same check before their first event
+       * (`stillOnOrigin`, 014 change log 2026-10-11); a script is the one input that had none.
+       * `refresh` then lets go of whatever this tab had attached for the site it left.
+       */
+      if (!(await stillOnOrigin(tabId, site, readAddress))) {
+        await refresh(tabId);
+        return siteMovedAnswer(callId);
       }
     }
 
