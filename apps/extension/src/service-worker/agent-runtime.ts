@@ -2124,6 +2124,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // 017 FR-258: the site plan ends with the session, whatever ended it - and first, so nothing
     // this session still has in flight while the rest is let go is admitted by it.
     await endSitePlans([ending]);
+    // And the batch plans it stated (S6): the batch's own `finally` is not reached by a session that
+    // ended mid-batch, and a plan that outlived its session would be standing consent nobody gave.
+    plans.clearSession(ending);
     // And everything it knew about where its tabs had been, and every pair it was told 繼續 about
     // (014 data-model): 繼續 was an answer about *this* session's work, and the session is over.
     await queueTransition(() => transitionStore.forgetSession(ending)).catch(() => undefined);

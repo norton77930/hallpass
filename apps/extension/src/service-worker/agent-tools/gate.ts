@@ -38,6 +38,12 @@ export type StatedPlanStep = {
 
 export type StatedPlan = {
   planId: string;
+  /**
+   * The session whose batch stated it (security review 2026-11-05 S6). A plan is one session's
+   * consent: the store keys plans by site and two sessions can hold tabs on one site, so without
+   * this a dialog raised in session B's tab was admitted by the plan the owner approved for A.
+   */
+  sessionId: string;
   /** The site the owner approved it for. A plan never carries across sites. */
   site: string;
   steps: readonly StatedPlanStep[];
@@ -144,7 +150,8 @@ export function decideGate(input: GateInput): GateDecision {
   const unplanned: GateDecision = covered ? { decision: "admit" } : { decision: "prompt" };
   if (input.mode === "follow-a-plan") {
     const plan = input.plan;
-    if (!plan || plan.site !== input.site) {
+    // Another session's plan is no plan here (S6), exactly as another site's is.
+    if (!plan || plan.site !== input.site || plan.sessionId !== input.sessionId) {
       return unplanned;
     }
     if (input.tool === DIALOG_TOOL) {
