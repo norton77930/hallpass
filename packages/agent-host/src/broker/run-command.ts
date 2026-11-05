@@ -44,6 +44,12 @@ export type RunOptions = {
   signal?: AbortSignal;
   /** How the tree is ended on abort or timeout (default `killTreeAsync`); tests stand in for taskkill. */
   killTree?: (pid: number | undefined) => Promise<boolean>;
+  /**
+   * How long a killed command's `close` is waited for before the run answers anyway (default
+   * `ABORT_WAIT_MS`; tests shorten it). Review 2026-11-05 C5: the timeout path had no such bound, so a
+   * grandchild still holding the pipes after `taskkill` failed kept the promise open for ever.
+   */
+  killWaitMs?: number;
 };
 
 /** How much of each stream is kept: the end, which is where errors are. */
@@ -159,9 +165,31 @@ export function runCommand(file: string, args: readonly string[], options: RunOp
     const endTree = options.killTree ?? ((pid: number | undefined) => killTreeAsync(pid));
     /** The tree's kill under way: the run answers once it is done, so nothing of the tree is left running. */
     let killing: Promise<boolean> | undefined;
+    const killWaitMs = options.killWaitMs ?? ABORT_WAIT_MS;
+    /**
+     * Once the tree has been asked to go, `close` is waited for only this long (C5): `close` fires when
+     * every inherited pipe is shut, which a grandchild the kill missed can hold open indefinitely.
+     * Answered then with what the run has, `killFailed` when the kill itself reported failure.
+     */
+    const settleAfterKill = (kill: Promise<boolean>, mark: "timedOut" | "aborted"): void => {
+      abortWait = setTimeout(() => {
+        void kill.then((killed) => {
+          if (!settle()) return;
+          resolveRun({
+            code: null,
+            stdout,
+            stderr,
+            timedOut,
+            ...(mark === "aborted" && killed ? { aborted: true as const } : {}),
+            ...(killed ? {} : { killFailed: true as const }),
+          });
+        });
+      }, killWaitMs);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       killing = endTree(child.pid);
+      settleAfterKill(killing, "timedOut");
     }, options.timeoutMs ?? 30_000);
     const settle = (): boolean => {
       if (settled) return false;
@@ -176,12 +204,9 @@ export function runCommand(file: string, args: readonly string[], options: RunOp
       aborted = true;
       const kill = endTree(child.pid);
       killing = kill;
-      abortWait = setTimeout(() => {
-        // Not closed yet: `aborted` only when the kill went through; a failed one may leave it running.
-        void kill.then((killed) => {
-          if (settle()) resolveRun({ code: null, stdout, stderr, timedOut, ...(killed ? { aborted: true as const } : { killFailed: true as const }) });
-        });
-      }, ABORT_WAIT_MS);
+      if (abortWait !== undefined) clearTimeout(abortWait);
+      // Not closed yet: `aborted` only when the kill went through; a failed one may leave it running.
+      settleAfterKill(kill, "aborted");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.setEncoding("utf8");
