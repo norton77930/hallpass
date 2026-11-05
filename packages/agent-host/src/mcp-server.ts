@@ -2400,7 +2400,12 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
             remember.length > 0
               ? await uploadRoots.add(remember.map((file) => file.directory))
               : { written: true, refused: [] };
-          if (!change.written) {
+          /**
+           * Nothing written and nothing refused is a list that already held every directory (security
+           * review 2026-11-05 C1): another session's "always" landed while this card stood. The list
+           * is what the owner was promised, so the upload goes ahead; only a refusal is a failure.
+           */
+          if (!change.written && change.refused.length > 0) {
             /**
              * The owner said yes and the file would not take it (S3 review F2).
              *
