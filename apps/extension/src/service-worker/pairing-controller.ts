@@ -1,4 +1,5 @@
 import { CLOSED_PANEL_TIMEOUT_MS, PROMPT_WAITING_TICK_MS } from "./agent-tools/prompts.js";
+import { shownText } from "./shown-text.js";
 
 /**
  * Which agents the owner has paired, and the one prompt that can change that (003/T014, T015).
@@ -91,7 +92,8 @@ export function reducePairing(state: PairingState, event: PairingEvent): Pairing
       }
       return {
         paired: state.paired,
-        pending: { agentId: event.agentId, displayName: event.displayName, origin: event.origin },
+        // S27: the name is the agent's own words; shown without the characters that would restyle the card.
+        pending: { agentId: event.agentId, displayName: shownText(event.displayName), origin: event.origin },
       };
     }
     case "decide": {

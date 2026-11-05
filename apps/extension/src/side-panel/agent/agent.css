@@ -251,6 +251,8 @@
 
 .agent-prompt {
   border-top: 1px solid var(--accent);
+  /* S27: a page-authored label cannot restyle the sentence around it. */
+  unicode-bidi: isolate;
 }
 
 /* Item 2 (2026-09-24): how many connections wait on the pairing card; empty for one. */
@@ -587,6 +589,10 @@
   padding-left: var(--sp-2);
   border-left: 2px solid var(--line);
   color: var(--text-2);
+  /* S27: a 4000-character dialog message must not push Allow and Refuse below the fold. */
+  max-height: 9rem;
+  overflow-y: auto;
+  unicode-bidi: isolate;
 }
 
 /* A control that must be there but should not compete: text-sized, no fill until hovered. */
