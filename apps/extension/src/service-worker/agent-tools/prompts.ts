@@ -7,6 +7,7 @@ import {
   type SiteMode,
 } from "@hallpass/contracts";
 import { STEP_SEPARATOR } from "./stop.js";
+import { shownOptional, shownText } from "../shown-text.js";
 
 /**
  * The questions the owner is asked about something that has not happened yet (FR-042, FR-043,
@@ -481,7 +482,16 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
         // have timed out at the host, and the agent would have no way to tell.
         return Promise.resolve({ decision: "busy" as const });
       }
-      const full: AgentEffectPrompt = { promptId: newId("prompt"), ...prompt, raisedAt: raisedAt() };
+      // S27: what the page or the agent wrote, with the characters that would restyle the card's own
+      // sentence (bidi overrides, format and control characters) removed before the panel sees it.
+      const full: AgentEffectPrompt = {
+        promptId: newId("prompt"),
+        ...prompt,
+        argsSummary: shownText(prompt.argsSummary),
+        ...(prompt.targetLabel === undefined ? {} : { targetLabel: shownOptional(prompt.targetLabel) ?? "" }),
+        ...(prompt.dialogText === undefined ? {} : { dialogText: shownOptional(prompt.dialogText) ?? "" }),
+        raisedAt: raisedAt(),
+      };
       return new Promise<PromptDecision>((resolve) => {
         arm({ kind: promptKind ?? "ask", callId: hostCallId ?? callId, sessionId }, (timer) => ({
           id: full.promptId,
