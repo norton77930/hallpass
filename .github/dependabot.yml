@@ -1,0 +1,20 @@
+# Issue #38: every dependency is pinned exactly, so nothing moves unless someone moves it. Dependabot
+# proposes the moves, weekly, for the npm workspaces and for the actions the workflows run.
+#
+# Not watched on purpose: packages/agent-host/agents/*/package{,-lock}.json. Those are the pinned
+# adapter manifests the broker installs for the owner on consent (019 R-314); an adapter version is
+# a measured decision (the Codex strict-mode table is checked against it), not a bot's.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
