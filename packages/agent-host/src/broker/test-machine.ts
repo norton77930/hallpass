@@ -136,7 +136,8 @@ export function testMachinePorts(ports: AgentPorts, machine: TestMachine, run: t
     exec: async (file, args, options) => {
       const timeoutMs = options?.timeoutMs ?? LAUNCH_EXEC_BOUND_MS;
       const signal = options?.signal;
-      if (/^where(?:\.exe)?$/iu.test(file)) {
+      // By name or by its System32 path (`windows-programs.ts`, security review 2026-11-05 S7).
+      if (/(?:^|[\\/])where(?:\.exe)?$/iu.test(file)) {
         const name = args[0] ?? "";
         if (name.toLowerCase() === "bash") return machine.gitBash === false ? notFound : { code: 0, stdout: `${gitBash}\r\n`, stderr: "" };
         for (const { agent } of programs.values()) {
