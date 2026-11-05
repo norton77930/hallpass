@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ import {
 } from "@hallpass/contracts";
 import { dialRelay, DIAL_RETRY_MS, type BridgeRecord, type RelayDial } from "./bridge-link.js";
 import { IMPLEMENTED_AGENT_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "./tool-offering.js";
+import { ensurePrivateDirectory, HOST_FILE_MODE } from "./host-files.js";
 import { agentIdFilePath, hostDataDirectory } from "./host-paths.js";
 import { browserSummaries, listConnectedBrowsers, type ConnectedBrowser } from "./browser-directory.js";
 import { readBrowserChoice, writeBrowserChoice } from "./browser-choice-store.js";
@@ -576,8 +577,9 @@ async function readOrCreateAgentId(): Promise<string> {
     // No id yet; fall through and mint one.
   }
   const created = randomBytes(16).toString("hex");
-  await mkdir(hostDataDirectory(), { recursive: true });
-  await writeFile(path, `${created}\n`, "utf8");
+  // Owner-only (security review 2026-11-05 S2): to the worker this id *is* the owner's pairing.
+  await ensurePrivateDirectory(hostDataDirectory());
+  await writeFile(path, `${created}\n`, { encoding: "utf8", mode: HOST_FILE_MODE });
   return created;
 }
 
