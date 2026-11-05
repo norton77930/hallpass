@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { ensurePrivateDirectory, HOST_FILE_MODE } from "../host-files.js";
 import { removeInstalledSkills } from "../agent-skill.js";
 import { hostDataDirectory, hostManifestPath, launcherPath } from "../host-paths.js";
 import { uploadConfigPath, UPLOAD_CONFIG_TEMPLATE } from "../upload-policy.js";
@@ -32,7 +33,7 @@ async function install(): Promise<number> {
   // Resolved from where this module actually is, never from the working directory (`manifest.ts`).
   const relayEntry = resolveRelayEntryPath(import.meta.url, existsSync);
 
-  await mkdir(dataDir, { recursive: true });
+  await ensurePrivateDirectory(dataDir);
   // The node running this installer, by absolute path: the browser's environment may not find one.
   await writeFile(launcher, createLauncherScript(relayEntry, process.execPath), "utf8");
   await writeFile(manifestPath, `${JSON.stringify(createNativeHostManifest(launcher), null, 2)}\n`, "utf8");
@@ -45,7 +46,7 @@ async function install(): Promise<number> {
    */
   const configPath = uploadConfigPath();
   if (!existsSync(configPath)) {
-    await writeFile(configPath, `${UPLOAD_CONFIG_TEMPLATE}\n`, "utf8");
+    await writeFile(configPath, `${UPLOAD_CONFIG_TEMPLATE}\n`, { encoding: "utf8", mode: HOST_FILE_MODE });
   }
 
   const outcomes = await registerAll(runReg, manifestPath);
@@ -86,13 +87,15 @@ async function installPosix(platform: PosixPlatform): Promise<number> {
   const manifestPath = hostManifestPath();
   const launcher = launcherPath();
   const relayEntry = resolveRelayEntryPath(import.meta.url, existsSync);
-  await mkdir(dataDir, { recursive: true });
+  // Owner-only, and an earlier installation's 0755 repaired (security review 2026-11-05 S2): the
+  // relay token and the owner's agent id will live in this directory.
+  await ensurePrivateDirectory(dataDir);
   await writeFile(launcher, createPosixLauncherScript(relayEntry, process.execPath), "utf8");
   await chmod(launcher, 0o755);
   const manifestJson = `${JSON.stringify(createNativeHostManifest(launcher), null, 2)}\n`;
-  await writeFile(manifestPath, manifestJson, "utf8");
+  await writeFile(manifestPath, manifestJson, { encoding: "utf8", mode: HOST_FILE_MODE });
   const configPath = uploadConfigPath();
-  if (!existsSync(configPath)) await writeFile(configPath, `${UPLOAD_CONFIG_TEMPLATE}\n`, "utf8");
+  if (!existsSync(configPath)) await writeFile(configPath, `${UPLOAD_CONFIG_TEMPLATE}\n`, { encoding: "utf8", mode: HOST_FILE_MODE });
 
   const outcomes = await registerPosix(nativeMessagingFolders(platform, process.env), manifestJson);
   process.stdout.write(`agent-host installed\n  launcher: ${launcher}\n  manifest: ${manifestPath}\n`);

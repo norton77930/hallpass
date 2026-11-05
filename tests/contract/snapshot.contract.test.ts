@@ -2,7 +2,18 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FORBIDDEN_PATHS, isForbiddenPath, loadAllowList, repoRoot, runSnapshotCheck } from "../../scripts/snapshot-check.js";
+import {
+  digestOf,
+  FORBIDDEN_DIGESTS,
+  FORBIDDEN_PATHS,
+  isForbiddenPath,
+  loadAllowList,
+  loadPrivatePatterns,
+  PRIVATE_PATTERNS_FILE,
+  repoRoot,
+  runSnapshotCheck,
+  scanArchive,
+} from "../../scripts/snapshot-check.js";
 
 /**
  * 009/T248 — nothing private leaves the repository (FR-128, FR-129, R-148).
@@ -36,6 +47,7 @@ describe("T248 the path rule reads the private set", () => {
     expect(isForbiddenPath(".claude/worktrees/x/package.json")).toBe(true);
     expect(isForbiddenPath(".mcp.json")).toBe(true);
     expect(isForbiddenPath("tests/acceptance/us1-checkpoint.md")).toBe(true);
+    expect(isForbiddenPath(PRIVATE_PATTERNS_FILE)).toBe(true);
   });
 
   it("leaves the published paths alone", () => {
@@ -96,5 +108,62 @@ describe("T248 the attributes file and the script name the same private set", ()
       .filter((path) => path !== ".gitattributes");
 
     expect([...exported].sort()).toEqual([...FORBIDDEN_PATHS].sort());
+  });
+});
+
+/**
+ * Security review 2026-11-05 S9 — the check must not itself publish what it keeps private.
+ *
+ * The script is a mandatory public file. It used to hold every private literal split in halves, which
+ * only stopped it matching itself; a reader joined them. High-entropy literals are now digests, and
+ * names live in an export-ignored file the public snapshot never carries.
+ */
+describe("S9 the public check discloses nothing it guards", () => {
+  const source = readFileSync(resolve(repoRoot, "scripts/snapshot-check.ts"), "utf8");
+
+  it("carries no store id or build hash, whole or in halves", () => {
+    // A store id is 32 letters a-p; a build hash is 40 hex characters. Neither, nor a half of either,
+    // appears as a quoted literal. The digests are 64 hex characters and carry digits, so they do not match.
+    expect(source).not.toMatch(/"[a-p]{16,}"/);
+    expect(source).not.toMatch(/"[0-9a-f]{20,40}"/);
+    for (const { sha256 } of FORBIDDEN_DIGESTS) expect(sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("catches a long run whose digest is listed, in any case", () => {
+    const root = mkdtempSync(join(tmpdir(), "hallpass-digest-"));
+    try {
+      const token = "abcdefghijklmnopabcdefghijklmnop";
+      writeFileSync(join(root, "note.md"), `see chrome-extension://${token.toUpperCase()}/ for the shape\n`, "utf8");
+      writeFileSync(join(root, "clean.md"), "nothing here\n", "utf8");
+      const report = scanArchive(root, [], { patterns: [], digests: [{ label: "fixture id", sha256: digestOf(token) }] });
+      expect(report.patternHits).toEqual([{ path: "note.md", line: 1, label: "fixture id", excerpt: expect.stringContaining("chrome-extension://") }]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the private patterns only from the export-ignored file, and refuses a malformed one", () => {
+    const root = mkdtempSync(join(tmpdir(), "hallpass-private-patterns-"));
+    try {
+      expect(loadPrivatePatterns(root)).toEqual([]);
+      mkdirSync(join(root, "scripts"));
+      writeFileSync(join(root, PRIVATE_PATTERNS_FILE), JSON.stringify({ patterns: [{ label: "account", pattern: "some\\.name", flags: "i" }] }), "utf8");
+      const [loaded] = loadPrivatePatterns(root);
+      expect(loaded?.label).toBe("account");
+      expect(loaded?.pattern.test("C:/Users/SOME.NAME/x")).toBe(true);
+      expect(loaded?.pattern.test("C:/Users/other/x")).toBe(false);
+      writeFileSync(join(root, PRIVATE_PATTERNS_FILE), JSON.stringify({ patterns: [{ label: "" }] }), "utf8");
+      expect(() => loadPrivatePatterns(root)).toThrow(/needs a non-empty/);
+      writeFileSync(join(root, PRIVATE_PATTERNS_FILE), "{}", "utf8");
+      expect(() => loadPrivatePatterns(root)).toThrow(/expected/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("the private file is in the export-ignore set and the run reports how many patterns it loaded", () => {
+    const attributes = readFileSync(resolve(repoRoot, ".gitattributes"), "utf8");
+    expect(attributes).toContain(`${PRIVATE_PATTERNS_FILE} export-ignore`);
+    expect(runSnapshotCheck().privatePatterns).toBe(loadPrivatePatterns(repoRoot).length);
   });
 });

@@ -16,6 +16,7 @@ import { ConversationPool } from "../src/broker/conversation.js";
 import { createFolderActions, type DialogRun } from "../src/broker/folders.js";
 import type { InstallProgress, InstallResult } from "../src/broker/install.js";
 import { fakeAgentSpec, killLoggedPids, makeTempDir, readFakeLog, removeDir, waitFor } from "./conversation-harness.js";
+import { WHERE_EXE, EXPLORER_EXE } from "../src/broker/windows-programs.js";
 
 /**
  * 019/T540 - the broker's command handler: a `conversation-command` frame from the worker becomes a
@@ -76,7 +77,7 @@ function machinePorts(machine: Machine): AgentPorts {
       },
     },
     exec: async (file) => {
-      if (file === "where.exe") return machine.cli ? { code: 0, stdout: `${CLI}\r\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
+      if (file === WHERE_EXE) return machine.cli ? { code: 0, stdout: `${CLI}\r\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
       return { code: 0, stdout: machine.version ?? "", stderr: "" };
     },
   };
@@ -494,7 +495,7 @@ describe("T540/T562 folders", () => {
     await mkdir(join(data, "scratch", ID), { recursive: true });
     const present = await setup({ entries: [entry()] });
     expect(await present.run({ type: "ui.conversation.open-folder", payload: { conversationId: ID } })).toMatchObject({ ok: true });
-    expect(present.launched).toEqual([{ command: "explorer.exe", args: [join(data, "scratch", ID)] }]);
+    expect(present.launched).toEqual([{ command: EXPLORER_EXE, args: [join(data, "scratch", ID)] }]);
   });
 });
 

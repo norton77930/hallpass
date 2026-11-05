@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { agentBrowserIdSchema } from "@hallpass/contracts";
 import { isProcessAlive, writeHostFileAtomically } from "./bridge-link.js";
+import { ensurePrivateDirectory, HOST_FILE_MODE } from "./host-files.js";
 import { brokersDirectory, isWindowsDeviceName, type HostEnvironment } from "./host-paths.js";
 
 /**
@@ -195,8 +196,8 @@ async function createBrokerSidecar(
 ): Promise<boolean> {
   const path = brokerSidecarPath(browserId, env);
   try {
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "wx" });
+    await ensurePrivateDirectory(dirname(path));
+    await writeFile(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", flag: "wx", mode: HOST_FILE_MODE });
     return true;
   } catch (error) {
     if ((error as { code?: string }).code !== "EEXIST") return false;

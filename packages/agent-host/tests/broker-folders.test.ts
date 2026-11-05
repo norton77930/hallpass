@@ -11,6 +11,7 @@ import {
   type DialogRun,
 } from "../src/broker/folders.js";
 import { makeTempDir, poolHarness, removeDir } from "./conversation-harness.js";
+import { EXPLORER_EXE, WINDOWS_POWERSHELL } from "../src/broker/windows-programs.js";
 
 /**
  * 019/T561 - the owner's folders (R-319, R-320, FR-303, D-019-1/8/9): `<data>\folders.json` with at
@@ -166,7 +167,7 @@ describe("T561 a missing folder", () => {
     await mkdir(path);
     const { folderActions, launched } = actions();
     expect(await folderActions.open(path)).toEqual({ ok: true });
-    expect(launched).toEqual([{ command: "explorer.exe", args: [path] }]);
+    expect(launched).toEqual([{ command: EXPLORER_EXE, args: [path] }]);
   });
 });
 
@@ -176,7 +177,7 @@ describe("T561 the folder dialog", () => {
     await actions({ run: fake.run }).folderActions.addFromDialog();
     expect(fake.calls).toHaveLength(1);
     const { command, args } = fake.calls[0]!;
-    expect(command).toBe("powershell.exe");
+    expect(command).toBe(WINDOWS_POWERSHELL);
     expect(args).toEqual(expect.arrayContaining(["-NoProfile", "-STA"]));
     const script = args.at(-1)!;
     expect(script).toMatch(/FolderBrowserDialog/u);
