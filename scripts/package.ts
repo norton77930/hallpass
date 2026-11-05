@@ -65,7 +65,8 @@ const AGENT_MANIFEST_DIRECTORIES = ["claude-code", "codex", "deepseek"] as const
 
 /** What the zip's root holds, exactly (US1.1; the contract test pins it). */
 // 028 (issue #1): install.sh / uninstall.sh beside the PowerShell pair, for macOS and Linux.
-export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md", "VERSION"] as const;
+// Review 2026-11-05 L4: THIRD_PARTY_NOTICES.md rides along, since the bundles carry MIT/ISC code whose notices must accompany copies.
+export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md", "THIRD_PARTY_NOTICES.md", "VERSION"] as const;
 
 export const PACKAGE_NAME = "hallpass";
 
@@ -210,6 +211,8 @@ export async function buildPackage(): Promise<string> {
   for (const asset of ["install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md"]) {
     cpSync(resolve(packageAssetsDir, asset), resolve(stageDir, asset));
   }
+  // L4: the notices for everything the bundles below contain, from the repository root.
+  cpSync(resolve(repoRoot, "THIRD_PARTY_NOTICES.md"), resolve(stageDir, "THIRD_PARTY_NOTICES.md"));
   writeFileSync(resolve(stageDir, "VERSION"), `${version}\n`, "utf8");
 
   step("bundle host");
