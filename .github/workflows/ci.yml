@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Issue #38: CI reads the repository and writes nothing; the release workflow holds the write.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: typecheck, unit, contract (${{ matrix.os }})
