@@ -27,7 +27,8 @@ npm run snapshot:check        # scans the next commit's tree for strings/paths t
 npm run package               # release/hallpass-<version>.zip (extension + Vite-bundled host + install.ps1)
 ```
 
-CI (`.github/workflows/ci.yml`, windows-latest) runs, in order: `npm ci`, typecheck, `npm test`,
+CI (`.github/workflows/ci.yml`, a windows-latest / ubuntu-latest / macos-latest matrix; macOS reports
+without failing the run until it has passed once) runs, in order: `npm ci`, typecheck, `npm test`,
 `npm run build:extension`, `npm run test:contract`, `npm run snapshot:check`.
 
 Single test: `npx vitest run --project unit packages/domain/src/foo.test.ts` (or add `-t "<name>"`).

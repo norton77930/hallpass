@@ -63,7 +63,7 @@ export const FORBIDDEN_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp 
 
 const TEXT_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".mjs", ".cjs", ".json", ".md", ".html", ".css", ".yml", ".yaml", ".txt",
-  ".ps1", ".cmd", ".toml", ".xml", ".svg", "", ".gitattributes", ".gitignore", ".editorconfig",
+  ".ps1", ".psm1", ".cmd", ".sh", ".bash", ".zsh", ".toml", ".xml", ".svg", "", ".gitattributes", ".gitignore", ".editorconfig",
   ".npmrc", ".nvmrc",
 ]);
 
