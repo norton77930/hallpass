@@ -553,3 +553,87 @@ describe("018 T513 follow-up: the card does not wait on storage", () => {
     expect(controller.waitingSessions("agent-1")).toBe(0);
   });
 });
+
+/**
+ * Security review 2026-11-05 S13 - two unpaired agents at once (two editor windows starting
+ * together). A second agent's connection used to replace the card under the owner's eyes: an Accept
+ * pressed at that moment was about an agent they had not read, and the first agent's sessions waited
+ * on a card that was gone until the host's bound. The card now keeps its agent; the second agent
+ * waits its turn and is raised when the first card settles, whichever way it settles.
+ */
+describe("S13 one card at a time, in arrival order", () => {
+  function controllerWith(initial: PairingState = EMPTY_PAIRING_STATE) {
+    let stored = initial;
+    const projections: PairingState[] = [];
+    const controller = createPairingController({
+      read: async () => stored,
+      write: async (state) => {
+        stored = state;
+      },
+      now: () => AT,
+      onChange: (state) => projections.push(state),
+    });
+    return { controller, projections, stored: () => stored };
+  }
+
+  it("the reducer keeps the standing card when another agent connects", () => {
+    const standing = reducePairing(EMPTY_PAIRING_STATE, { type: "connection", ...CLAUDE });
+    expect(reducePairing(standing, { type: "connection", ...OTHER })).toBe(standing);
+  });
+
+  it("raises the second agent's card only once the first is decided, and answers each to its own", async () => {
+    const { controller, projections, stored } = controllerWith();
+
+    const first = controller.decidePairing({ ...CLAUDE, sessionId: "s-a" });
+    const second = controller.decidePairing({ ...OTHER, sessionId: "s-b" });
+    await controller.ready();
+
+    expect((await controller.state()).pending).toEqual(CLAUDE);
+    expect(projections.some((state) => state.pending?.agentId === "agent-2")).toBe(false);
+    expect(controller.waitingSessions("agent-2")).toBe(1);
+
+    await controller.decide("agent-1", true);
+    await expect(first).resolves.toBe("accepted");
+    await controller.ready();
+    // Now, and only now, the owner is asked about the other agent.
+    expect((await controller.state()).pending).toEqual(OTHER);
+
+    await controller.decide("agent-2", false);
+    await expect(second).resolves.toBe("declined");
+    expect(stored().paired.map((agent) => agent.agentId)).toEqual(["agent-1"]);
+  });
+
+  it("raises the held agent after an Ignore of the first, and drops it when its sessions withdrew meanwhile", async () => {
+    const { controller } = controllerWith();
+
+    const first = controller.decidePairing({ ...CLAUDE, sessionId: "s-a" });
+    void controller.decidePairing({ ...OTHER, sessionId: "s-b", requestId: "r-b" });
+    await controller.ready();
+    // The second agent's host gave up (its own bound) while its card had not yet been raised.
+    controller.withdraw("agent-2", "s-b", "r-b");
+
+    await controller.ignore("agent-1");
+    await expect(first).resolves.toBe("declined");
+    await controller.ready();
+    // Nobody is waiting on agent-2 any more, so no card is raised for it.
+    expect((await controller.state()).pending).toBeUndefined();
+
+    // A third agent arriving now, with no card standing, is asked about at once.
+    void controller.decidePairing({ ...OTHER, agentId: "agent-3", sessionId: "s-c" });
+    await controller.ready();
+    expect((await controller.state()).pending?.agentId).toBe("agent-3");
+  });
+
+  it("settles a held agent's sessions as abandoned with everyone else when the link drops", async () => {
+    const { controller } = controllerWith();
+    const first = controller.decidePairing({ ...CLAUDE, sessionId: "s-a" });
+    const second = controller.decidePairing({ ...OTHER, sessionId: "s-b" });
+    await controller.ready();
+
+    await controller.abandonPending();
+
+    await expect(first).resolves.toBe("abandoned");
+    await expect(second).resolves.toBe("abandoned");
+    expect((await controller.state()).pending).toBeUndefined();
+  });
+});

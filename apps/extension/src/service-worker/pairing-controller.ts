@@ -89,6 +89,13 @@ export function reducePairing(state: PairingState, event: PairingEvent): Pairing
         // prompt the first session is holding its first tool call on (T096b).
         return state;
       }
+      if (state.pending !== undefined) {
+        // Another agent, while a card stands (security review 2026-11-05 S13). The card is not
+        // replaced under the owner's eyes: an Accept pressed at that moment would be about an agent
+        // they had not read, and the first agent's sessions would wait on a card that was gone. The
+        // controller holds this connection and raises it when the standing card settles.
+        return state;
+      }
       return {
         paired: state.paired,
         pending: { agentId: event.agentId, displayName: event.displayName, origin: event.origin },
@@ -278,6 +285,12 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
    * because several sessions of one agent connect at once (D-004-2) and every one of them is
    * holding a tool call on the same single answer.
    */
+  /**
+   * Agents whose connection arrived while another agent's card stood (S13), in arrival order and one
+   * entry per agent. Each is raised in turn when the card before it settles - decided, ignored,
+   * withdrawn or abandoned - and skipped if every session that asked has gone by then.
+   */
+  const queued: PendingPairing[] = [];
   let waiting: {
     agentId: string;
     /**
@@ -522,6 +535,39 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     loaded = next;
     syncWaiting(next);
     deps.onChange?.(next);
+    raiseQueued();
+  }
+
+  /**
+   * The next agent whose connection was held behind a card (S13), now that no card stands.
+   *
+   * Scheduled, not applied in place: this runs from inside transitions, and the raise is itself a
+   * transition on the same queue. An agent nobody is waiting on any more is dropped - every session
+   * that asked withdrew, ended or was unpaired meanwhile - and one the record says is paired by now
+   * (an accept written elsewhere) has its sessions answered rather than asked about.
+   */
+  function raiseQueued(): void {
+    if (loaded?.pending !== undefined) return;
+    const next = queued.shift();
+    if (next === undefined) return;
+    const asking = waiting.filter((waiter) => waiter.agentId === next.agentId);
+    if (asking.length === 0) {
+      raiseQueued();
+      return;
+    }
+    void enqueue(() => apply({ type: "connection", ...next }))
+      .then((state) => {
+        if (!state.pending) {
+          settle(next.agentId, "accepted");
+          return;
+        }
+        if (state.pending.agentId !== next.agentId) return;
+        for (const waiter of asking) {
+          if (waiter.sessionId !== undefined) startWaiting(next.agentId, waiter.sessionId, waiter.requestId);
+        }
+        deps.onWaitersChange?.();
+      })
+      .catch(() => undefined);
   }
 
   async function apply(event: PairingEvent): Promise<PairingState> {
@@ -557,6 +603,7 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
     loaded = next;
     syncWaiting(next);
     deps.onChange?.(next);
+    raiseQueued();
     return next;
   }
 
@@ -595,6 +642,7 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
         // owner about an agent that is already paired.
         loaded = { paired: state.paired };
         syncWaiting(loaded);
+        raiseQueued();
       }
       if (!before || !samePaired(before, state.paired)) {
         deps.onChange?.(loaded ?? state);
@@ -611,9 +659,15 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
         if (!state.pending) {
           return "accepted";
         }
-        // Somebody is being asked something they may not be able to see (011 FR-148). Said every
-        // five seconds from here until the card leaves the panel, whichever way it leaves.
-        startWaiting(state.pending.agentId, sessionId, requestId);
+        if (state.pending.agentId === request.agentId) {
+          // Somebody is being asked something they may not be able to see (011 FR-148). Said every
+          // five seconds from here until the card leaves the panel, whichever way it leaves.
+          startWaiting(state.pending.agentId, sessionId, requestId);
+        } else if (!queued.some((entry) => entry.agentId === request.agentId)) {
+          // Another agent's card stands (S13): this one waits its turn, its sessions held below
+          // exactly as a raised card's are; `raiseQueued` starts their clocks when it is raised.
+          queued.push(request);
+        }
         // Held, not refused: the owner is being asked right now, and the host is holding the
         // agent's first tool call on exactly this answer.
         return new Promise<PairingAnswer>((resolve) => {
@@ -665,6 +719,8 @@ export function createPairingController(deps: PairingControllerDeps): PairingCon
       stopWaiting(sessionId);
     },
     async abandonPending() {
+      // The link is gone, and with it every connection held behind the card (S13).
+      queued.splice(0);
       await enqueue(() => apply({ type: "abandon" }));
       // Every waiting session's `decidePairing` promise must settle: an unresolved one would hold
       // its connection handler for the life of the worker. Settled as `abandoned`, not as a refusal:
