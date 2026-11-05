@@ -4,6 +4,7 @@ import {
   type AgentDownloadRecord,
   type AgentWaitDownload,
 } from "@hallpass/contracts";
+import { canonicalOriginFromUrl } from "@hallpass/domain";
 import {
   watchDownloadChanged,
   watchDownloadCreated,
@@ -12,13 +13,25 @@ import {
 } from "../chrome-adapters/downloads.js";
 
 /**
- * The browser's downloads, observed and attributed to sessions (005/T179, R-123, FR-076..FR-080).
+ * The browser's downloads, observed and attributed to sessions (005/T179, R-123, FR-076..FR-080;
+ * amended 2026-11-05, #36).
  *
- * The browser's record carries no tab id, so there is one rule and it is about time: a download
- * created while a session holds at least one tab is that session's. When several hold one it is
- * every one of theirs, and each is told so (`shared`) rather than one being quietly left out; when
- * none does it is the owner's and no ring ever carries it. A change updates every ring that carries
- * the id. Nothing here acts on a download - the adapter cannot even express it.
+ * The browser's record carries no tab id, but it names where the download came from: the page that
+ * started it (`referrer`) and the source (`url`). A download is a session's when it was created while
+ * that session held a tab *and* one of those origins is a site one of its tabs is on or is about to
+ * be on (`pendingUrl`), or one the session announced it was navigating to (`expect`). When several
+ * sessions qualify it is every one of theirs, and each is told so (`shared`) rather than one being
+ * quietly left out; a download that matches no session's tabs is the owner's and no ring ever
+ * carries it - however many tabs an idle agent holds on other sites. Before #36 the rule was time
+ * alone, and an owner's own download on an unrelated site reached every agent that held any tab.
+ * The one exception is a file this extension made itself (a recording export, a blob under the
+ * extension's own origin): it has no page, so it goes to whoever holds a tab, as before.
+ *
+ * The record carries the file's *name*, not the path the browser saved it under: the agent asks
+ * what the page produced, and the path names the owner's profile folder.
+ *
+ * A change updates every ring that carries the id. Nothing here acts on a download - the adapter
+ * cannot even express it.
  *
  * Where it lives (FR-080): `chrome.storage.session`, one key, a ring per session - newest first,
  * bounded - beside the ids the `download-complete` wait has answered (R-124, 015/R-199). Session storage because
@@ -52,12 +65,17 @@ type StorageAreaLike = {
   set(values: Record<string, unknown>): Promise<void>;
 };
 
+/** One session holding tabs, with the origins its tabs are on or are moving to (#36). */
+export type DownloadHolder = { sessionId: string; origins: string[] };
+
 export type DownloadObserverDeps = {
   /** The two subscriptions the adapter offers; injected so a test can raise the events itself. */
   onCreated: typeof watchDownloadCreated;
   onChanged: typeof watchDownloadChanged;
-  /** Who holds at least one tab right now (`AgentTabManager.sessionsHoldingAnyTab`). */
-  holders: () => Promise<string[]>;
+  /** Who holds at least one tab right now, and where those tabs are (`url` and `pendingUrl`). */
+  holders: () => Promise<DownloadHolder[]>;
+  /** This extension's own origin (`chrome-extension://<id>`): a blob under it is a file this extension made. */
+  ownOrigin?: string;
   /** Defaults to `chrome.storage.session`. */
   storage?: StorageAreaLike;
   now?: () => number;
@@ -80,11 +98,33 @@ export type DownloadObserver = {
    * answers nothing a `download-complete` wait would (015/T405, the press path).
    */
   createdSince(sessionId: string, sinceMs: number): Promise<AgentDownloadRecord[]>;
+  /**
+   * The session is navigating a tab to `origin` and the browser may answer with a download (#36):
+   * a download from that origin created before `untilMs` is the session's even if the tab's address
+   * never shows it (the navigation is cancelled the moment it becomes a download).
+   */
+  expect(sessionId: string, origin: string, untilMs: number): void;
   /** The session ended: its ring goes with it and nobody else's (FR-080). */
   discard(sessionId: string): Promise<void>;
   /** Every queued write so far has settled; for tests, which raise events synchronously. */
   settled(): Promise<void>;
 };
+
+/**
+ * The origin a download's url or referrer names, in the form the tab addresses are compared in.
+ * A `blob:` url a page minted carries the page's origin inside it; `data:` and the like name none.
+ */
+export function downloadSourceOrigin(url: string | undefined): string | undefined {
+  if (url === undefined || url === "") return undefined;
+  if (url.startsWith("blob:")) return downloadSourceOrigin(url.slice("blob:".length));
+  return canonicalOriginFromUrl(url);
+}
+
+/** The file's own name, whichever separator the platform used; empty stays empty. */
+export function downloadFileName(path: string): string {
+  const parts = path.split(/[\\/]/u);
+  return parts[parts.length - 1] ?? "";
+}
 
 function sessionArea(): StorageAreaLike | undefined {
   return typeof chrome !== "undefined" ? chrome.storage?.session : undefined;
@@ -113,6 +153,28 @@ function migrate(ring: StoredRing): DownloadRing {
 
 export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObserver {
   const now = deps.now ?? (() => Date.now());
+  /** Navigations announced by `expect`, per session; swept of the expired on every read. */
+  const expected = new Map<string, Array<{ origin: string; untilMs: number }>>();
+
+  function expectedOrigins(sessionId: string): string[] {
+    const live = (expected.get(sessionId) ?? []).filter((entry) => entry.untilMs > now());
+    if (live.length === 0) expected.delete(sessionId);
+    else expected.set(sessionId, live);
+    return live.map((entry) => entry.origin);
+  }
+
+  /** The sessions a created download belongs to (#36). */
+  function attribute(item: DownloadSnapshot, holders: DownloadHolder[]): string[] {
+    if (deps.ownOrigin !== undefined && item.url.startsWith(`blob:${deps.ownOrigin}/`)) {
+      // This extension's own file: no page started it, so the time rule is all there is.
+      return holders.map((holder) => holder.sessionId);
+    }
+    const sources = new Set([downloadSourceOrigin(item.referrer), downloadSourceOrigin(item.url)].filter((origin): origin is string => origin !== undefined));
+    if (sources.size === 0) return [];
+    return holders
+      .filter((holder) => [...holder.origins, ...expectedOrigins(holder.sessionId)].some((origin) => sources.has(origin)))
+      .map((holder) => holder.sessionId);
+  }
 
   /**
    * One writer at a time; the stored chain is the *settled* one, so a write that rejects still
@@ -149,15 +211,18 @@ export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObse
     // behind a creation for a small file, and the change has to find the record the creation wrote.
     const holding = deps.holders();
     await queue(async () => {
-      const holders = await holding;
+      const holders = attribute(item, await holding);
       if (holders.length === 0) return;
       const attribution = holders.length === 1 ? "session" : "shared";
       const found = await read();
       if (!found) return;
       const { area, rings } = found;
+      // The referrer stays with the browser: it is how the download was attributed, not a fact the
+      // agent was promised, and the record's shape is closed.
+      const { referrer: _referrer, ...reported } = item;
       for (const sessionId of holders) {
         const ring = rings[sessionId] ?? { items: [], answered: [] };
-        const record: AgentDownloadRecord = { ...item, attribution };
+        const record: AgentDownloadRecord = { ...reported, filename: downloadFileName(item.filename), attribution };
         rings[sessionId] = {
           ...ring,
           // Newest first, bounded: the twenty-first oldest falls off the end (FR-079).
@@ -178,6 +243,7 @@ export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObse
         const index = ring.items.findIndex((record) => record.id === delta.id);
         if (index < 0) continue;
         const { id: _id, ...fields } = delta;
+        if (fields.filename !== undefined) fields.filename = downloadFileName(fields.filename);
         const items = [...ring.items];
         const merged = { ...items[index]!, ...fields };
         // A terminal delta is not guaranteed to carry the browser's end time (a cancellation often
@@ -247,7 +313,11 @@ export function createDownloadObserver(deps: DownloadObserverDeps): DownloadObse
         return items.filter((record) => Date.parse(record.startedAt) >= sinceMs);
       });
     },
+    expect(sessionId, origin, untilMs) {
+      expected.set(sessionId, [...(expected.get(sessionId) ?? []), { origin, untilMs }]);
+    },
     discard(sessionId) {
+      expected.delete(sessionId);
       return queue(async () => {
         const found = await read();
         if (!found || !(sessionId in found.rings)) return;

@@ -11,7 +11,7 @@ packages. Each is used under its own licence, reproduced in its package director
 | react-dom | 19.2.8 | MIT | extension side panel |
 | react-markdown | 10.1.0 | MIT | extension side panel (agent replies as Markdown) |
 | remark-gfm | 4.0.1 | MIT | extension side panel (tables and lists in agent replies) |
-| zod | 4.4.3 | MIT | extension, MCP server, relay |
+| zod | 4.6.7 | MIT | extension, MCP server, relay |
 | @modelcontextprotocol/sdk | 1.32.0 | MIT | MCP server |
 | gifenc | 1.0.3 | MIT | extension off-screen document (GIF encoding for session recordings) |
 | @agentclientprotocol/sdk | 1.9.0 | Apache-2.0 | side-panel agent broker (client for the owner's coding agent) |

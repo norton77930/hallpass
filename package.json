@@ -54,6 +54,7 @@
   },
   "overrides": {
     "hono": "4.13.11",
-    "ip-address": "10.7.4"
+    "ip-address": "10.7.4",
+    "zod": "4.6.7"
   }
 }
