@@ -110,6 +110,7 @@ import { createAgentWait } from "./agent-tools/wait.js";
 import { createAgentSitePlanRunner, type AgentSitePlanApproval } from "./agent-tools/site-plan.js";
 import { createSitePlanStore, SITE_PLAN_NOT_RECORDED, type SessionSitePlan } from "./site-plan-store.js";
 import { createScreenshotSpaceStore } from "./screenshot-space-store.js";
+import { shownText } from "./shown-text.js";
 
 /**
  * The agent path's composition root (003/T013, T018).
@@ -2288,8 +2289,26 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * has told me".
    */
   let uploadRoots: { roots: string[]; path: string; malformed?: boolean; preserved?: string } | undefined;
-  /** Revokes the relay has not confirmed; re-sent on every fresh link until it does (FR-192). */
+  /**
+   * Revokes the relay has not confirmed; re-sent on every fresh link until it does (FR-192).
+   *
+   * Kept in `chrome.storage.session` as well as here (review 2026-11-05 C7): the owner presses
+   * "forget this directory" while the link is down, the worker is evicted before the next relay
+   * greets, and a set held in memory alone forgot the press - the host kept the directory and the
+   * row came back with nothing said. Session storage dies with the browser, as the press should.
+   */
   const uploadRootsToRemove = new Set<string>();
+  const UPLOAD_REVOKES_KEY = "agentUploadRootRevokes";
+  const revokeArea = (): { get(keys: string[]): Promise<Record<string, unknown>>; set(values: Record<string, unknown>): Promise<void> } | undefined =>
+    typeof chrome !== "undefined" ? chrome.storage?.session : undefined;
+  async function loadPendingRevokes(): Promise<void> {
+    const raw = await revokeArea()?.get([UPLOAD_REVOKES_KEY]).catch(() => undefined);
+    const stored = raw?.[UPLOAD_REVOKES_KEY];
+    if (Array.isArray(stored)) for (const root of stored) if (typeof root === "string") uploadRootsToRemove.add(root);
+  }
+  function savePendingRevokes(): void {
+    void revokeArea()?.set({ [UPLOAD_REVOKES_KEY]: [...uploadRootsToRemove] }).catch(() => undefined);
+  }
   /**
    * The owner's "from now on" answers, and which of them the host's list did not come back with
    * (S3 review F2).
@@ -2520,14 +2539,14 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         known.lastHelloAt = helloAt;
         known.lastActivityAt = helloAt;
         known.agentId = announcement.agentId;
-        known.agentName = announcement.displayName;
+        known.agentName = shownText(announcement.displayName);
         if (kind === undefined) delete known.kind;
         else known.kind = kind;
       } else {
         contextFor(announcement.sessionId);
         sessions.set(announcement.sessionId, {
           agentId: announcement.agentId,
-          agentName: announcement.displayName,
+          agentName: shownText(announcement.displayName),
           lastHelloAt: helloAt,
           lastActivityAt: helloAt,
           ...(kind === undefined ? {} : { kind }),
@@ -2743,8 +2762,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
        * absent, which is exactly what an old host should look like.
        */
       bridge.requestUploadRoots();
-      // And the revokes it never confirmed (FR-192): the press is made again, not forgotten.
-      for (const root of uploadRootsToRemove) bridge.removeUploadRoot(root);
+      // And the revokes it never confirmed (FR-192): the press is made again, not forgotten - read
+      // back from session storage first, for a worker that was not the one that heard the press (C7).
+      void loadPendingRevokes().then(() => {
+        for (const root of uploadRootsToRemove) bridge.removeUploadRoot(root);
+      });
     },
     /**
      * The host is holding a `file_upload` about a file outside the owner's directories (FR-193).
@@ -2765,9 +2787,14 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       uploadRoots = listing;
       // A revoke the relay has now confirmed is no longer pending; one still on the list is, and
       // is asked for again on the next link.
+      let confirmed = false;
       for (const root of [...uploadRootsToRemove]) {
-        if (!listing.roots.includes(root)) uploadRootsToRemove.delete(root);
+        if (!listing.roots.includes(root)) {
+          uploadRootsToRemove.delete(root);
+          confirmed = true;
+        }
       }
+      if (confirmed) savePendingRevokes();
       /**
        * And the other direction (S3 review F2): a "from now on" the list did not come back with.
        *
@@ -3244,6 +3271,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // Remembered before it is sent: a link that drops in this moment is exactly the case the
       // re-send on the next `relay-ack` exists for (FR-192).
       uploadRootsToRemove.add(root);
+      savePendingRevokes();
       bridge.removeUploadRoot(root);
       notify();
       await Promise.resolve();

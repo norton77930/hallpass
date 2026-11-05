@@ -451,6 +451,35 @@ describe("T378 the owner's answer about a directory", () => {
     );
   });
 
+  /**
+   * Review 2026-11-05 C7 - the press survives the worker. The owner forgets a directory while the
+   * link is down; the worker is evicted before the next relay greets; the worker that answers that
+   * relay never heard the press. It used to be lost, and the host kept the directory. The set is in
+   * session storage too, read back before the re-send.
+   */
+  it("re-sends a revoke heard by an earlier worker, from session storage (C7)", async () => {
+    const first = await pairedRuntime();
+    first.port.emit({ type: "relay-started", relayPid: 4242, recordPath: CONFIG });
+    first.port.emit({ type: "upload-roots", roots: [DOCS], path: CONFIG });
+    await vi.waitFor(async () => expect((await first.runtime.projection()).uploadRoots?.roots).toEqual([DOCS]));
+    await first.runtime.clearUploadRoot(DOCS);
+    await vi.waitFor(() => expect(sentOfType(first.port, "upload-roots-remove")).toHaveLength(1));
+
+    // A fresh worker on the same browser (the same `chrome.storage.session`), greeted by the next relay.
+    const port = fakePort();
+    const runtime = composeAgentRuntime({ connectNative: () => port });
+    runtime.start();
+    port.emit({ type: "relay-started", relayPid: 4343, recordPath: CONFIG });
+
+    await vi.waitFor(() => expect(sentOfType(port, "upload-roots-remove")).toEqual([{ type: "upload-roots-remove", root: DOCS }]));
+    // Confirmed by the relay's list, the press is forgotten for good.
+    port.emit({ type: "upload-roots", roots: [], path: CONFIG });
+    await vi.waitFor(async () => expect((await runtime.projection()).uploadRoots).toEqual({ roots: [], path: CONFIG }));
+    port.emit({ type: "relay-started", relayPid: 4444, recordPath: CONFIG });
+    await vi.waitFor(() => expect(sentOfType(port, "upload-roots-list").length).toBeGreaterThanOrEqual(2));
+    expect(sentOfType(port, "upload-roots-remove")).toHaveLength(1);
+  });
+
   it("keeps a revoked row until the relay answers, and asks again on the next link", async () => {
     const { port, runtime } = await pairedRuntime();
     port.emit({ type: "relay-started", relayPid: 4242, recordPath: CONFIG });
