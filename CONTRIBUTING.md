@@ -46,6 +46,16 @@ Two more need a real Chrome and are run locally before a release:
   session (`claude -p`) against public pages and write a timestamped report. They cost API calls;
   run them for a release, not for every change.
 
+### Releasing
+
+A release is a tag. `npm run publish:snapshot` commits the snapshot to the public repository and tags
+it `v<version>`; pushing that tag runs `.github/workflows/release.yml` (issue #38), which on a Windows
+runner runs typecheck and the unit suite, `npm run package`, checks that the tag names the version the
+package carries, attests the zip and publishes a GitHub release with `hallpass-<version>.zip` and its
+`.sha256`. Nothing is uploaded by hand. `scripts/package.ts` refuses to stage a `koffi.node` whose
+digest is not the pinned one (`KOFFI_WIN32_X64_NODE_SHA256`); bumping koffi means re-measuring it
+from the registry tarball the lockfile names.
+
 ### The side-panel conversation: the fake agent
 
 The conversation broker (`packages/agent-host/src/broker.ts`, started by the relay, one per browser

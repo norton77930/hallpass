@@ -1,0 +1,68 @@
+name: Release
+
+# Issue #38: the zip is built here, on a tag, and nowhere else. A `v<version>` tag is what
+# `publish:snapshot` creates for a release; the version it names must be the one the extension and
+# the host carry (`VERSION` in the zip), or the run stops before anything is uploaded. The zip and a
+# checksum file go on the GitHub release, and the zip is attested so a download can be checked
+# against the workflow that produced it (`gh attestation verify hallpass-<version>.zip -R norton77930/hallpass`).
+#
+# Windows only: `npm run package` zips with the system's tar.exe and stages koffi's win32-x64 binary,
+# which npm installs on Windows alone. The native binary's digest is checked against the one pinned
+# in scripts/package.ts before it is copied.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: package and publish
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run package
+      - name: the tag names the version the package carries
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $zip = Get-ChildItem release/hallpass-*.zip | Select-Object -First 1
+          $version = $zip.BaseName.Substring("hallpass-".Length)
+          if ($tag -ne $version) { Write-Error "tag v$tag but the package is $version"; exit 1 }
+          "zip=$($zip.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($zip.Name)" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+        id: package
+      - name: checksum beside the zip
+        shell: pwsh
+        run: Get-Content "release/${{ steps.package.outputs.name }}.sha256"
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: release/${{ steps.package.outputs.name }}
+      - name: publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "release/${{ steps.package.outputs.name }}" `
+            "release/${{ steps.package.outputs.name }}.sha256" `
+            --repo "${{ github.repository }}" `
+            --title "Hallpass ${{ steps.package.outputs.version }}" `
+            --notes "See CHANGELOG.md for ${{ steps.package.outputs.version }}. Verify the download with the .sha256 file beside it, or with: gh attestation verify ${{ steps.package.outputs.name }} -R ${{ github.repository }}" `
+            --verify-tag

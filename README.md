@@ -71,7 +71,10 @@ talks to the extension.
 
 1. Download `hallpass-<version>.zip` from the [latest release](../../releases/latest) and unzip it
    into a folder you will not move later (the path is written into the registry), for example
-   `D:\hallpass\`.
+   `D:\hallpass\`. The release is built by the repository's own workflow from the tagged commit;
+   beside the zip is `hallpass-<version>.zip.sha256`, and `Get-FileHash .\hallpass-<version>.zip`
+   (or `sha256sum -c`) must print the same digest. With the GitHub CLI,
+   `gh attestation verify hallpass-<version>.zip -R norton77930/hallpass` checks the build's provenance.
 2. In that folder, run the installer (no administrator rights needed; it registers the native host
    under `HKCU` and writes to `%LOCALAPPDATA%\hallpass\`):
    ```powershell
