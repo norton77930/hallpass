@@ -588,8 +588,15 @@ describe("017 review: the plan is bound to its agent", () => {
     delete (globalThis as { chrome?: unknown }).chrome;
   });
 
-  it("asks a press when the approved session id is re-announced by another paired agent (M1)", async () => {
-    const { runtime, port, send } = await pairedRuntime();
+  /**
+   * Amended by the security review 2026-11-05 (S15): a greeting that reuses the session id under
+   * another agent now *ends* the session it names - its plan, its leases, its standing - and
+   * registers a fresh one for the agent it names. So the plan is not merely withheld from the other
+   * agent (017 M1), it is gone with the session it was approved for, and the new session holds no
+   * tab to press on: the press is refused outright, and no card is raised for it.
+   */
+  it("ends the approved session when its id is re-announced by another paired agent, plan and tabs with it (M1, S15)", async () => {
+    const { runtime, port, send, answer } = await pairedRuntime();
     expect(await runtime.sitePlans.approve(S1, [A])).toEqual({ ok: true });
 
     // A second agent, paired by the owner, greets under the session id the plan was approved for.
@@ -598,13 +605,13 @@ describe("017 review: the plan is bound to its agent", () => {
     await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
     await runtime.pairing.decide("agent-2", true);
     await vi.waitFor(async () => expect(await runtime.pairing.isPaired("agent-2")).toBe(true));
-    // The plan is still stored, under the agent it was approved for.
-    expect(storedPlans(fake)[S1]).toMatchObject({ origins: [A], agentId: "agent-1" });
+    // The plan ended with the session it was approved for.
+    await vi.waitFor(() => expect(storedPlans(fake)[S1]).toBeUndefined());
 
-    send("click", CLICK);
-    const asked = await card(runtime);
-    expect(asked.tool).toBe("click");
-    expect(asked.site).toBe(A);
+    const callId = send("click", CLICK);
+    const answered = await answer(callId);
+    expect(answered.outcome).not.toBe("ok");
+    expect(runtime.prompts.current()).toBeUndefined();
   });
 
   it("shows no plan, and marks nothing already approved, for a session re-announced by another agent (M1)", async () => {
@@ -616,7 +623,8 @@ describe("017 review: the plan is bound to its agent", () => {
     await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
     await runtime.pairing.decide("agent-2", true);
     await vi.waitFor(async () => expect(await runtime.pairing.isPaired("agent-2")).toBe(true));
-    expect(storedPlans(fake)[S1]).toMatchObject({ origins: [A], agentId: "agent-1" });
+    // S15: the plan went with the session it was approved for.
+    await vi.waitFor(() => expect(storedPlans(fake)[S1]).toBeUndefined());
 
     const sessionCard = (await runtime.projection()).sessions.find((session) => session.sessionId === S1);
     expect(sessionCard).toBeDefined();

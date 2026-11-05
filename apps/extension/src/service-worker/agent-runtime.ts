@@ -2516,10 +2516,36 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           conversations.browserAttached(conversationId, announcement.panelToken!);
         }
       }
+      if (known && known.agentId !== announcement.agentId) {
+        /**
+         * A known session id greeting under another agent (security review 2026-11-05 S15). A
+         * session is one agent's: its leases, its tab group, its standing with the owner. Taking the
+         * new agent id onto the old record would hand all of that to whoever presents the id - which
+         * S2 discloses to other sessions through `holder`. The old session is ended as the relay
+         * would end it, and the greeting then registers a fresh session for the agent it names,
+         * which holds nothing and pairs on its own.
+         */
+        reportTestDiagnostic("agent.session.agent-changed");
+        void releaseSession(announcement.sessionId, "interrupted")
+          .catch(() => reportTestDiagnostic("agent.session.end-failed"))
+          .finally(() => {
+            if (sessions.has(announcement.sessionId)) return;
+            contextFor(announcement.sessionId);
+            sessions.set(announcement.sessionId, {
+              agentId: announcement.agentId,
+              agentName: announcement.displayName,
+              lastHelloAt: helloAt,
+              lastActivityAt: helloAt,
+              ...(kind === undefined ? {} : { kind }),
+            });
+            void tabs.announce(announcement.sessionId, helloAt).catch(() => undefined);
+            notify();
+          });
+        return;
+      }
       if (known) {
         known.lastHelloAt = helloAt;
         known.lastActivityAt = helloAt;
-        known.agentId = announcement.agentId;
         known.agentName = announcement.displayName;
         if (kind === undefined) delete known.kind;
         else known.kind = kind;
