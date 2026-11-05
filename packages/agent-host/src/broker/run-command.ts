@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { win32 } from "node:path";
+import { TASKKILL, taskKillCommand } from "./windows-programs.js";
+
+export { TASKKILL };
 
 /**
  * Run a command to completion and collect what it printed (019/T531, T533: `--version` of the
@@ -57,11 +59,29 @@ const keepTail = (current: string, chunk: string) => {
   return next.length > KEEP_CHARS ? next.slice(next.length - KEEP_CHARS) : next;
 };
 
-/** End a process and everything it started (taskkill /T on Windows). */
-export function killTree(pid: number | undefined): void {
+/** What `killTree` needs of the machine; a test stands in for it. */
+export type KillSyncPorts = {
+  spawnSync: (file: string, args: readonly string[]) => unknown;
+};
+
+const defaultKillSyncPorts: KillSyncPorts = {
+  spawnSync: (file, args) => spawnSync(file, [...args], { stdio: "ignore", windowsHide: true }),
+};
+
+/**
+ * End a process and everything it started (taskkill /T on Windows), synchronously.
+ *
+ * By `taskkill`'s absolute path (security review 2026-11-05 S7): the Codex shim calls this from
+ * inside the conversation's folder, which the owner's agent writes into, and a bare name is looked
+ * for in the working folder first. `killTreeAsync` below is the one the broker prefers; this stays
+ * for the two callers that have no event loop to come back to.
+ */
+export function killTree(pid: number | undefined, ports: KillSyncPorts = defaultKillSyncPorts): void {
   if (!pid) return;
-  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-  else {
+  if (process.platform === "win32") {
+    const { file, args } = taskKillCommand(pid);
+    ports.spawnSync(file, args);
+  } else {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
@@ -69,12 +89,6 @@ export function killTree(pid: number | undefined): void {
     }
   }
 }
-
-/**
- * `taskkill` by its full path: a browser started with a broken PATH starts the broker with it too,
- * and a bare name is looked for in the working folder first (as `USER_ENVIRONMENT_NAMES_QUERY`).
- */
-export const TASKKILL = win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 
 /** What `killTreeAsync` needs of the machine; tests stand in for it. */
 export type KillPorts = {
@@ -113,7 +127,8 @@ export function killTreeAsync(pid: number | undefined, ports: KillPorts = defaul
   return new Promise<boolean>((done) => {
     let killer: ReturnType<KillPorts["spawn"]>;
     try {
-      killer = ports.spawn(TASKKILL, ["/pid", String(pid), "/T", "/F"]);
+      const command = taskKillCommand(pid);
+      killer = ports.spawn(command.file, command.args);
     } catch {
       done(killOne());
       return;

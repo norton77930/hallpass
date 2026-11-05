@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { win32 } from "node:path";
 import { conversationEnvNameSchema } from "@hallpass/contracts";
 import { runCommand } from "./run-command.js";
+import { WINDOWS_POWERSHELL } from "./windows-programs.js";
 
 /**
  * 023 R-369 (D-023-6, FR-369, FR-370): whether the variable Hermes reads its key from was set in the
@@ -36,7 +37,7 @@ export type UserEnvironmentPorts = {
  * working folder first (R-369).
  */
 export const USER_ENVIRONMENT_NAMES_QUERY = {
-  file: win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+  file: WINDOWS_POWERSHELL,
   args: ["-NoProfile", "-NonInteractive", "-Command", "(Get-Item 'HKCU:\\Environment').GetValueNames()"],
 } as const;
 
