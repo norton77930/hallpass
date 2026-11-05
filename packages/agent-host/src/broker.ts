@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, renameSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ import { redact } from "./broker/redact.js";
 import { runCommand } from "./broker/run-command.js";
 import { readTestMachine, testMachinePorts, testMachineReadinessEnv } from "./broker/test-machine.js";
 import { readBrokerTestOverrides, testInstallRun } from "./broker/test-mode.js";
+import { ensurePrivateDirectorySync, HOST_FILE_MODE } from "./host-files.js";
 import { hostDataDirectory, isWindowsDeviceName } from "./host-paths.js";
 
 /**
@@ -94,7 +95,7 @@ const SECRET_READ_BOUND_MS = 10_000;
 function log(code: string, detail?: string): void {
   const line = `${new Date().toISOString()} ${code}${detail === undefined ? "" : ` ${redact(detail)}`}\n`;
   try {
-    appendFileSync(logPath, line);
+    appendFileSync(logPath, line, { mode: HOST_FILE_MODE });
   } catch {
     // A log that cannot be written must not take the broker down with it.
   }
@@ -102,7 +103,7 @@ function log(code: string, detail?: string): void {
 
 function startLog(): void {
   try {
-    mkdirSync(hostDataDirectory(), { recursive: true });
+    ensurePrivateDirectorySync(hostDataDirectory());
     if (statSync(logPath).size > LOG_SIZE_CAP_BYTES) renameSync(logPath, ROTATED_LOG_PATH);
   } catch {
     // No file yet, or it cannot be rotated: the first append creates it.
