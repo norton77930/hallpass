@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redact, redactedTail } from "../src/broker/redact.js";
+import { redact, redactedTail, withSecrets, withoutEnvironmentValues } from "../src/broker/redact.js";
 
 /**
  * 019/R-326 - text the broker shows or logs from an agent's error, an installer's stderr or a log
@@ -63,6 +63,32 @@ describe("redact (R-326)", () => {
     ]) {
       expect(redact(text)).toBe(text);
     }
+  });
+
+  /** Security review 2026-11-05 S22 - the shapes the first version let through. */
+  it("hides a URL password with a slash in it, header values set off by a colon, and an AWS key id (S22)", () => {
+    expect(redact("fetch https://user:ab/cd@example.com/x failed")).toBe("fetch https://[redacted]@example.com/x failed");
+    expect(redact("Cookie: session=abc; theme=dark")).toBe("Cookie: [redacted]");
+    expect(redact("set-cookie: sid=1a2b; Path=/")).toBe("set-cookie: [redacted]");
+    expect(redact("X-Api-Key: short-key-7")).toBe("X-Api-Key: [redacted]");
+    expect(redact("key AKIAIOSFODNN7EXAMPLE used")).toBe("key [redacted] used");
+    // Not a key id: too short, or the wrong prefix.
+    expect(redact("AKIA1234 and BKIAIOSFODNN7EXAMPLE")).toBe("AKIA1234 and BKIAIOSFODNN7EXAMPLE");
+  });
+
+  /** Security review 2026-11-05 S21 - the token and the extra servers' values are scrubbed like the environment. */
+  it("withSecrets adds the browser token and the extra servers' variable values to what is scrubbed (S21)", () => {
+    const env = withSecrets(
+      { PATH: "/usr/bin", GITHUB_TOKEN: "ghp-env-value-1234" },
+      { browserToken: "panel-token-abcdefghijklmnop", servers: [{ env: [{ name: "NOTION_KEY", value: "notion-value-9876" }] }, { env: undefined }] },
+    );
+    const text = withoutEnvironmentValues(
+      "mcp env panel-token-abcdefghijklmnop and notion-value-9876 and ghp-env-value-1234",
+      env,
+    );
+    expect(text).toBe("mcp env %HALLPASS_PANEL_TOKEN% and %NOTION_KEY% and %GITHUB_TOKEN%");
+    // Nothing else of the environment is touched, and no token means no entry.
+    expect(withSecrets({ A: "1" }, {})).toEqual({ A: "1" });
   });
 
   it("is idempotent", () => {
