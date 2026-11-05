@@ -15,8 +15,14 @@ const MARK = "[redacted]";
 
 const TOKEN_CHARS = "A-Za-z0-9._~+/=-";
 
-/** `scheme://user:password@host` - the credentials go, scheme and host stay. */
-const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/]*@/gi;
+/**
+ * `scheme://user:password@host` - the credentials go, scheme and host stay. The password may hold a
+ * `/` (security review 2026-11-05 S22): `u:ab/cd@host` used to pass whole.
+ */
+const URL_CREDENTIALS = /([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s@]*@/gi;
+
+/** `Cookie: a=b`, `Set-Cookie: ...`, `X-Api-Key: ...` - header values set off by a colon, not `=` (S22). */
+const HEADER_VALUE = /\b((?:cookie|set-cookie|x-api-key|api-key|x-auth-token|x-amz-security-token)\s*:\s*)[^\r\n]+/gi;
 
 /** `Authorization: Bearer abc`, `authorization=Basic abc` - the whole value, scheme word included. */
 const AUTHORIZATION = /\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token|digest)\s+)?[^\s"',;]+/gi;
@@ -30,8 +36,8 @@ const KEY_VALUE = /\b([A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key
 /** `"password": "x"` in a JSON dump. */
 const JSON_KEY_VALUE = /("[^"\\]*(?:password|passwd|secret|token|api[_-]?key)[^"\\]*"\s*:\s*")[^"]*(")/gi;
 
-/** Vendor shapes: `sk-...`, `ghp_...`, `github_pat_...`. */
-const VENDOR_KEYS = /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})/g;
+/** Vendor shapes: `sk-...`, `ghp_...`, `github_pat_...`, and an AWS access key id (S22). */
+const VENDOR_KEYS = /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g;
 
 /** A long run of base64 / hex / url-safe characters (32 or more), with its padding. */
 const LONG_RUN = /[A-Za-z0-9+/_-]{32,}={0,2}/g;
@@ -42,6 +48,7 @@ export function redact(text: string): string {
   return text
     .replace(URL_CREDENTIALS, `$1${MARK}@`)
     .replace(AUTHORIZATION, `$1${MARK}`)
+    .replace(HEADER_VALUE, `$1${MARK}`)
     .replace(BEARER, `$1${MARK}`)
     .replace(KEY_VALUE, `$1${MARK}`)
     .replace(JSON_KEY_VALUE, `$1${MARK}$2`)
@@ -71,6 +78,29 @@ export function redactedTail(text: string, maxChars: number): string {
  * keys, and replacing them would mangle ordinary words. It catches what `redact()` cannot know is a
  * secret (a short key with no vendor prefix); callers apply `redact()` after it.
  */
+/**
+ * The values an agent's words must not carry, beyond its process environment (security review
+ * 2026-11-05 S21): the browser token Hallpass handed it inside `session/new` (never in the
+ * environment, so `withoutEnvironmentValues` alone missed it), and the values of the extra MCP
+ * servers' variables. Named so a scrubbed line says what was there.
+ */
+export function withSecrets(
+  env: Readonly<Record<string, string | undefined>>,
+  secrets: { browserToken?: string | undefined; servers?: ReadonlyArray<object> },
+): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = { ...env };
+  if (secrets.browserToken !== undefined) out.HALLPASS_PANEL_TOKEN = secrets.browserToken;
+  for (const server of secrets.servers ?? []) {
+    // A stdio server carries `env: [{ name, value }]`; an http one carries none.
+    const entries = (server as { env?: unknown }).env;
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries as Array<{ name?: unknown; value?: unknown }>) {
+      if (typeof entry.name === "string" && typeof entry.value === "string") out[entry.name] = entry.value;
+    }
+  }
+  return out;
+}
+
 export function withoutEnvironmentValues(text: string, env: Readonly<Record<string, string | undefined>>): string {
   const pairs = Object.entries(env)
     .filter((pair): pair is [string, string] => typeof pair[1] === "string" && pair[1].length >= 8)

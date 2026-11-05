@@ -413,6 +413,31 @@ describe("024 T760 the tree's kill (R-377)", () => {
   }, 15_000);
 });
 
+/**
+ * Review 2026-11-05 C5 - the timeout path settles even when the tree outlives the kill. A grandchild
+ * that inherited the pipes keeps `close` from firing; the abort path had a bound for that and the
+ * timeout path did not, so an install or `--version` whose kill missed a grandchild never answered.
+ */
+describe("C5 a timed-out command answers even when a grandchild keeps the pipes", () => {
+  it("settles with timedOut once the kill has been asked for and the wait has passed", async () => {
+    // The direct child starts a grandchild that holds stdout for a while; the injected kill ends the
+    // direct child only, which is what a failed `taskkill /T` amounts to.
+    const script = "const { spawn } = require('node:child_process'); spawn(process.execPath, ['-e', 'setTimeout(() => {}, 8000)'], { stdio: 'inherit' }); setInterval(() => {}, 1000)";
+    const startedAt = Date.now();
+    const result = await runCommand(process.execPath, ["-e", script], {
+      timeoutMs: 300,
+      killWaitMs: 500,
+      killTree: async (pid) => {
+        if (pid !== undefined) process.kill(pid);
+        return true;
+      },
+    });
+    expect(result).toMatchObject({ code: null, timedOut: true });
+    expect(result).not.toHaveProperty("killFailed");
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  }, 15_000);
+});
+
 describe("024 T762 interrupted (R-378)", () => {
   it.runIf(process.platform === "win32")("a state left running by a dead broker becomes interrupted at start, stays so until the next attempt, and cleanStaging still runs", async () => {
     const gone = await deadPid();

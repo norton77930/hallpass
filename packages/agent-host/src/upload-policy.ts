@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { open, readFile, realpath, stat, type FileHandle } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { AGENT_UPLOAD_MAX_BASE64_CHARS, AGENT_UPLOAD_MAX_FILES } from "@hallpass/contracts";
 import { hostDataDirectory, type HostEnvironment } from "./host-paths.js";
@@ -120,6 +120,11 @@ function within(root: string, target: string): boolean {
     : target.startsWith(prefix);
 }
 
+/** Two spellings of one path are one path on Windows; elsewhere a path is itself and nothing else. */
+function samePath(left: string, right: string): boolean {
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
 /** A small, closed table. An extension nobody listed is bytes, which every browser accepts. */
 const MIME_TYPES: Record<string, string> = {
   ".txt": "text/plain",
@@ -214,7 +219,9 @@ export async function resolveUploadFiles(
      * one path are one path on Windows. A file is never a prefix of another path, so it admits
      * exactly itself.
      */
-    if (!roots.some((root) => within(root, real)) && !allowFiles.some((file) => within(file, real))) {
+    // The owner's one-call yes names files, compared as equals (security review 2026-11-05 S12): a
+    // prefix match admitted a child of a path that had become a directory since the card.
+    if (!roots.some((root) => within(root, real)) && !allowFiles.some((file) => samePath(file, real))) {
       outside.push({ path: real, directory: dirname(real) });
       continue;
     }
@@ -227,15 +234,30 @@ export async function resolveUploadFiles(
     return { ok: false, reason: "upload-not-allowed", code: "outside-roots", outside };
   }
 
-  // Only now, with every path decided, is anything opened.
+  // Only now, with every path decided, is anything opened - and read through the handle that was
+  // checked (S12): the file at the path is stat'd again on the open descriptor, and one that is no
+  // longer the regular file the decision was about, or has grown past the bound, is refused.
   const files: UploadFile[] = [];
+  let carried = 0;
   for (const entry of allowed) {
-    const bytes = await readFile(entry.path);
-    files.push({
-      name: fileNameOf(entry.path),
-      type: mimeTypeOf(entry.path),
-      bytesBase64: bytes.toString("base64"),
-    });
+    let handle: FileHandle | undefined;
+    try {
+      handle = await open(entry.path, "r");
+      const now = await handle.stat();
+      if (!now.isFile()) return { ok: false, reason: "upload-not-allowed", code: "not-a-file" };
+      carried += base64Chars(now.size);
+      if (carried > AGENT_UPLOAD_MAX_BASE64_CHARS) return { ok: false, reason: "upload-not-allowed", code: "too-large" };
+      const bytes = await handle.readFile();
+      files.push({
+        name: fileNameOf(entry.path),
+        type: mimeTypeOf(entry.path),
+        bytesBase64: bytes.toString("base64"),
+      });
+    } catch {
+      return { ok: false, reason: "upload-not-allowed", code: "not-a-file" };
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
   }
   return { ok: true, files };
 }

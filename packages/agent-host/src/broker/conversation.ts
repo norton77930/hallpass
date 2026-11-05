@@ -45,7 +45,7 @@ import { ConversationEventLog, type ConversationPage } from "./event-log.js";
 import { currentOf, readModelOffer, requestsFor, resolveTarget } from "./model-offer.js";
 import { memoryModelStore, type AgentModels, type ModelStore } from "./model-store.js";
 import { ensureScratchFolder, isDirectory, scratchFolderPath } from "./folders.js";
-import { redact, withoutEnvironmentValues, withoutUserProfile } from "./redact.js";
+import { redact, withoutEnvironmentValues, withoutUserProfile, withSecrets } from "./redact.js";
 import { killTree } from "./run-command.js";
 import { defaultUserEnvironmentPorts, keyNameOnlyInUserSettings, type UserEnvironmentPorts } from "./user-environment.js";
 
@@ -785,7 +785,10 @@ export class Conversation {
     // (FR-361), a restart in its launch-time mode, and (D-021-16) a fixed-mode agent resumes in its own.
     const mode = request.mode ?? "strict";
     this.closing = undefined;
-    if (request.restart === undefined) this.rules.clear();
+    // A fresh start forgets the owner's "for this conversation" rules; so does any start into strict
+    // (security review 2026-11-05 S20): strict says edits and commands ask first, and a rule kept
+    // from the review mode would have the next one answered by the broker instead.
+    if (request.restart === undefined || mode === "strict") this.rules.clear();
     this.watchingMode = false;
     this.reloading = false;
     this.cwd = request.cwd;
@@ -1455,9 +1458,16 @@ export class Conversation {
     return { ...process.env, ...this.launchEnv };
   }
 
-  /** SC-161 (T692): the agent's own words with no value of any variable it ran with, on every path that shows them. */
+  /**
+   * SC-161 (T692): the agent's own words with no value of any variable it ran with, on every path
+   * that shows them - nor the browser token or an extra server's values (S21), which travel in the
+   * `session/new` parameters rather than the environment and an agent may echo back in an error.
+   */
   private scrubbed(text: string): string {
-    return withoutEnvironmentValues(text, this.runEnv());
+    return withoutEnvironmentValues(
+      text,
+      withSecrets(this.runEnv(), { browserToken: this.browserToken ?? this.inertToken, servers: this.extraServersValue }),
+    );
   }
 
   /** R-322: this run's `hallpass` entry, or nothing without a browser connection; then (027 R-419) the run's extras. */
@@ -1751,6 +1761,8 @@ export class Conversation {
     const previous = { mode: this.modeValue, id: this.ownerModeId };
     // Owner-caused: set before the request, so the agent's own echo of it is not drift.
     this.modeValue = mode;
+    // S20: strict says edits and commands ask first; a rule from the review mode must not answer them.
+    if (mode === "strict") this.rules.clear();
     this.ownerModeId = targetId;
     try {
       await this.request(() => connection.agent.request("session/set_mode", { sessionId: this.sessionId!, modeId: targetId }));
@@ -1827,6 +1839,8 @@ export class Conversation {
     }
     this.reloading = false;
     this.modeValue = mode;
+    // S20: strict says edits and commands ask first; a rule from the review mode must not answer them.
+    if (mode === "strict") this.rules.clear();
     this.ownerModeId = targetId;
     this.watchingMode = true;
     this.enqueue({ type: "mode", mode, note: RELOAD_NOTE[mode] });
