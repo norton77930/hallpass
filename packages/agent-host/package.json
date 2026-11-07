@@ -18,7 +18,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "1.9.0",
+    "@agentclientprotocol/sdk": "2.4.0",
     "@hallpass/contracts": "0.0.0",
     "@hallpass/domain": "0.0.0",
     "@modelcontextprotocol/sdk": "1.32.0",
