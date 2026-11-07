@@ -51,7 +51,7 @@ jobs:
       - name: checksum beside the zip
         shell: pwsh
         run: Get-Content "release/${{ steps.package.outputs.name }}.sha256"
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: release/${{ steps.package.outputs.name }}
       - name: publish the release
