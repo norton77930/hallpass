@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentDownloadRecord, AgentNativeRequest, AgentNativeResponse, CurrentDialog } from "@hallpass/contracts";
-import { agentEffectObservationSchema } from "@hallpass/contracts";
+import type { AgentDownloadRecord, AgentNativeRequest, AgentNativeResponse, CurrentDialog, SiteMode } from "@hallpass/contracts";
+import { AGENT_CALL_TIMEOUT_MS, agentEffectObservationSchema } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentEffects, createTargetLocator, type TargetRect } from "../src/service-worker/agent-tools/effects.js";
 import type { FrameOffsets } from "../src/service-worker/agent-tools/frames.js";
@@ -53,6 +53,15 @@ function fakeBrowser() {
   const createdSince = vi.fn(async (_sessionId: string, sinceMs: number) =>
     downloads.filter((record) => Date.parse(record.startedAt) >= sinceMs),
   );
+  /** The observer's page-action windows (#36 follow-up), as the runner opens and closes them. */
+  const windows: Array<{ sessionId: string; openedAt: number; untilMs: number; closed: boolean }> = [];
+  const actingOnPage = (sessionId: string, untilMs: number) => {
+    const entry = { sessionId, openedAt: Date.now(), untilMs, closed: false };
+    windows.push(entry);
+    return () => {
+      entry.closed = true;
+    };
+  };
   const attachments = {
     async acquire() {
       return { ok: true as const };
@@ -84,6 +93,10 @@ function fakeBrowser() {
     sent,
     downloads,
     createdSince,
+    windows,
+    actingOnPage,
+    /** Whether a page-action window is open right now. */
+    acting: () => windows.some((entry) => !entry.closed),
     urls,
     listeners,
     emit(tab: CreatedTab) {
@@ -151,18 +164,22 @@ async function harness(
     now?: () => number;
     /** The runner's diagnostic sink (015: execute-uncertain is reported only when a frame went out). */
     reportDiagnostic?: (name: string) => void;
+    /** The site's mode; `skip-checks` unless a test is about the owner's question. */
+    mode?: SiteMode;
   } = {},
 ) {
   const browser = fakeBrowser();
   const siteModes = createSiteModeStore();
-  await siteModes.set(SITE, { mode: "skip-checks" });
+  await siteModes.set(SITE, { mode: options.mode ?? "skip-checks" });
+  // Asked questions expire after 60 ms here, so a test can reach the timed-out ending quickly.
+  const prompts = createAgentPromptController({ timeoutMs: 60 });
   // The locator reports `link` exactly when the claiming frame gave the element the role `link`.
   const rect: TargetRect = { x: 100, y: 40, width: 80, height: 20, ...(options.role === "link" ? { link: true } : {}) };
   const runner = createAgentEffects({
     context: testSessionContexts(),
     siteModes,
     bindings: createAgentPageBindings(),
-    prompts: createAgentPromptController({ timeoutMs: 60 }),
+    prompts,
     tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
     attachments: browser.attachments,
     locate: async () => rect,
@@ -176,14 +193,14 @@ async function harness(
     settleMs: SETTLE_MS,
     watchTabCreated: browser.watchTabCreated,
     tabUrl: async (tabId) => browser.urls.get(tabId),
-    downloads: { createdSince: browser.createdSince },
+    downloads: { createdSince: browser.createdSince, actingOnPage: browser.actingOnPage },
     ...(options.currentDialog === undefined ? {} : { currentDialog: options.currentDialog }),
     ...(options.execute === undefined ? {} : { execute: options.execute }),
     ...(options.onEffect === undefined ? {} : { onEffect: options.onEffect }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.reportDiagnostic === undefined ? {} : { reportDiagnostic: options.reportDiagnostic }),
   });
-  return { runner, browser };
+  return { runner, browser, prompts };
 }
 
 function request(tool: string, args: Record<string, unknown> = { target: { ref: "t_press" } }): AgentNativeRequest {
@@ -445,6 +462,150 @@ describe("T404 press outcomes", () => {
 });
 
 /**
+ * #36 follow-up (FR-077, 2026-11-07) — the window a download that names no origin is attributed in.
+ *
+ * A page's own `data:` file carries no referrer and no origin, so the observer gives it to the
+ * session whose page action was under way as it appeared. The runner says when that is: opened once
+ * the gate has let the call through, before any input leaves, and closed when the call answers - its
+ * settle wait included, since that is where a press reads the downloads it began. A call that never
+ * reaches the page (refused, or one that only looks) opens none.
+ */
+describe("#36 follow-up: a page action holds the download window", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    installChrome();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("a press holds it from before its input to the end of the call, settle wait included, bounded by the call time", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+    let atRelease = false;
+    let atSettle = false;
+    browser.hooks.onRelease = () => void (atRelease = browser.acting());
+    browser.createdSince.mockImplementation(async () => {
+      atSettle = browser.acting();
+      return [];
+    });
+
+    const { response } = await pressed(runner, request("click"));
+
+    expect(response?.outcome).toBe("ok");
+    expect(atRelease).toBe(true);
+    expect(atSettle).toBe(true);
+    expect(browser.windows).toHaveLength(1);
+    expect(browser.windows[0]).toMatchObject({ sessionId: "session-p1", closed: true });
+    expect(browser.windows[0]!.untilMs - browser.windows[0]!.openedAt).toBe(AGENT_CALL_TIMEOUT_MS);
+  });
+
+  it("every tool that puts input into the page holds it while that input is sent", async () => {
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["double_click", { target: { ref: "t_press" } }],
+      ["triple_click", { target: { ref: "t_press" } }],
+      ["right_click", { target: { ref: "t_press" } }],
+      ["drag", { from: { ref: "t_press" }, to: { ref: "t_drop" } }],
+      ["key", { key: "Enter" }],
+      ["type", { text: "a", mode: "insert" }],
+      ["computer", { action: "left_click", x: 400, y: 300 }],
+      ["computer", { action: "key", key: "Enter", x: 400, y: 300 }],
+    ];
+    for (const [tool, args] of calls) {
+      const { runner, browser } = await harness({ role: "button" });
+      const inputWhileActing: boolean[] = [];
+      browser.hooks.hold = (method) => {
+        if (method.startsWith("Input.")) inputWhileActing.push(browser.acting());
+        return undefined;
+      };
+
+      await pressed(runner, request(tool, args));
+
+      const label = `${tool} ${JSON.stringify(args)}`;
+      expect(inputWhileActing.length, label).toBeGreaterThan(0);
+      expect(inputWhileActing.every(Boolean), label).toBe(true);
+      expect(browser.windows.map((entry) => entry.closed), label).toEqual([true]);
+    }
+  });
+
+  it("form_input, which the page runs itself, holds it while the page is asked", async () => {
+    let atExecute = false;
+    const { runner, browser } = await harness({
+      execute: async () => {
+        atExecute = browser.acting();
+        return { ok: true, effect: "value-set", valueMatched: true, documentChanged: false } as PageExecutionOutcome;
+      },
+    });
+
+    await pressed(runner, request("form_input", { ref: "t_email", value: "a@b.c" }));
+
+    expect(atExecute).toBe(true);
+    expect(browser.windows.map((entry) => entry.closed)).toEqual([true]);
+  });
+
+  it("a call that only looks, or never reaches the page, opens none", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+
+    await pressed(runner, request("hover"));
+    await pressed(runner, request("scroll", { direction: "down" }));
+    await pressed(runner, request("computer", { action: "screenshot" }));
+    await pressed(runner, request("computer", { action: "wait", ms: 100 }));
+    await pressed(runner, { ...request("click"), tabId: 99, args: { tabId: 99, target: { ref: "t_press" } } });
+
+    expect(browser.windows).toEqual([]);
+  });
+
+  /**
+   * The privacy ordering: while the owner is still being asked, anything that downloads is the
+   * owner's own doing, so the window opens only once they have said yes - and never for a no.
+   */
+  it("on an ask site, opens none while the owner's question stands, and opens only on their yes", async () => {
+    const { runner, browser, prompts } = await harness({ role: "button", mode: "ask" });
+
+    let response: AgentNativeResponse | undefined;
+    const pending = runner.run(request("click")).then((answer) => (response = answer));
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(prompts.current()).toBeDefined();
+    expect(response).toBeUndefined();
+    expect(browser.windows).toEqual([]);
+
+    expect(prompts.decide(prompts.current()!.promptId, true)).toBe(true);
+    await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    await pending;
+
+    expect(response?.outcome).toBe("ok");
+    expect(browser.windows.map((entry) => entry.closed)).toEqual([true]);
+  });
+
+  it("on an ask site, opens none when the owner says no", async () => {
+    const { runner, browser, prompts } = await harness({ role: "button", mode: "ask" });
+    const call = runner.run(request("click"));
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(prompts.decide(prompts.current()!.promptId, false)).toBe(true);
+
+    expect(await call).toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    expect(browser.windows).toEqual([]);
+  });
+
+  it("on an ask site, opens none when the question times out", async () => {
+    const { runner, browser, prompts } = await harness({ role: "button", mode: "ask" });
+    const call = runner.run(request("click"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(prompts.current()).toBeDefined();
+
+    // Past the harness's 60 ms question bound.
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(await call).toMatchObject({ outcome: "timed-out", reason: "no-answer" });
+    expect(browser.windows).toEqual([]);
+  });
+});
+
+/**
  * 015/T402 — a press the page never answers (FR-206, R-197 rounds 3-5).
  *
  * `Input.dispatchMouseEvent` returns only once the renderer has handled the event, so a page whose
@@ -503,6 +664,23 @@ describe("T402 an input dispatch the page does not answer", () => {
     expect(response).toEqual({ callId: "call-click", ...NOT_RESPONDING });
     // The press window was armed before the input left and is gone with the answer.
     expect(browser.listeners.size).toBe(0);
+  });
+
+  it("a call answered at the deadline leaves its download window closed (#36 follow-up)", async () => {
+    const { runner, browser } = await harness({ role: "button" });
+    let actingAtRelease = false;
+    browser.hooks.hold = (method, params) => {
+      if (method !== "Input.dispatchMouseEvent" || params?.type !== "mouseReleased") return undefined;
+      actingAtRelease = browser.acting();
+      return new Promise(() => {});
+    };
+
+    const { response } = await acrossDeadline(runner, request("click"));
+
+    expect(response).toEqual({ callId: "call-click", ...NOT_RESPONDING });
+    // Open while the input was out, and closed with the answer, though the page never answered it.
+    expect(actingAtRelease).toBe(true);
+    expect(browser.windows.map((entry) => entry.closed)).toEqual([true]);
   });
 
   it("computer left_click answers the same", async () => {

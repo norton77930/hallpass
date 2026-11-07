@@ -1,5 +1,6 @@
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { ensurePrivateDirectory, HOST_FILE_MODE } from "./host-files.js";
 import type { HostEnvironment } from "./host-paths.js";
 import { uploadConfigPath } from "./upload-policy.js";
 
@@ -191,8 +192,12 @@ export function createUploadConfigStore(env: HostEnvironment = process.env): Upl
       }
     }
     try {
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(temporary, `${JSON.stringify({ ...document, uploadRoots: roots }, null, 2)}\n`, "utf8");
+      // Owner-only (security review 2026-11-05 S2): the list says where the owner's files are.
+      await ensurePrivateDirectory(dirname(path));
+      await writeFile(temporary, `${JSON.stringify({ ...document, uploadRoots: roots }, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: HOST_FILE_MODE,
+      });
       await rename(temporary, path);
       return { written: true, ...(preserved === undefined ? {} : { preserved }) };
     } catch {

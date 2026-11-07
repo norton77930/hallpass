@@ -22,7 +22,7 @@ import { setAttention } from "../chrome-adapters/action-badge.js";
 import { downloadFile, watchDownloadChanged, watchDownloadCreated } from "../chrome-adapters/downloads.js";
 import { createOffscreenAdapter } from "../chrome-adapters/offscreen.js";
 import { injectAgentContent } from "../chrome-adapters/scripting.js";
-import { getTabSnapshot, queryTabSnapshots, watchTabUpdates } from "../chrome-adapters/tabs.js";
+import { getTabLoadState, getTabSnapshot, queryTabSnapshots, watchTabUpdates } from "../chrome-adapters/tabs.js";
 import { getWindowFacts, setWindowState } from "../chrome-adapters/windows.js";
 import { reportTestDiagnostic } from "../diagnostics.js";
 import {
@@ -33,7 +33,7 @@ import {
   type AgentPortLike,
 } from "./agent-bridge.js";
 import { createAgentTabManager, type AgentTab, type AgentTabManager } from "./agent-tab-manager.js";
-import { createDownloadObserver } from "./download-observer.js";
+import { createDownloadObserver, downloadSourceOrigin, type DownloadHolder } from "./download-observer.js";
 import { createGroupPresenter } from "./group-presenter.js";
 import {
   createPairingController,
@@ -110,6 +110,7 @@ import { createAgentWait } from "./agent-tools/wait.js";
 import { createAgentSitePlanRunner, type AgentSitePlanApproval } from "./agent-tools/site-plan.js";
 import { createSitePlanStore, SITE_PLAN_NOT_RECORDED, type SessionSitePlan } from "./site-plan-store.js";
 import { createScreenshotSpaceStore } from "./screenshot-space-store.js";
+import { shownText } from "./shown-text.js";
 
 /**
  * The agent path's composition root (003/T013, T018).
@@ -693,7 +694,20 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   const downloads = createDownloadObserver({
     onCreated: watchDownloadCreated,
     onChanged: watchDownloadChanged,
-    holders: () => tabs.sessionsHoldingAnyTab(),
+    // #36: each holder with the origins its tabs are on or are moving to, read at the moment of creation.
+    holders: async (): Promise<DownloadHolder[]> => {
+      const bySession = new Map<string, Set<string>>();
+      for (const lease of await tabs.leases()) {
+        const origins = bySession.get(lease.sessionId) ?? new Set<string>();
+        bySession.set(lease.sessionId, origins);
+        const address = await getTabLoadState(lease.tabId);
+        for (const origin of [downloadSourceOrigin(address?.url), downloadSourceOrigin(address?.pendingUrl)]) {
+          if (origin !== undefined) origins.add(origin);
+        }
+      }
+      return [...bySession].map(([sessionId, origins]) => ({ sessionId, origins: [...origins] }));
+    },
+    ...(typeof chrome !== "undefined" && chrome.runtime?.id ? { ownOrigin: `chrome-extension://${chrome.runtime.id}` } : {}),
     reportDiagnostic: reportTestDiagnostic,
   });
   /**
@@ -1024,6 +1038,14 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * token revoked a moment ago refuses the very next call.
    */
   const panelTokenOf = new Map<string, string>();
+  /**
+   * Sessions being ended because another agent greeted under their id (security review 2026-11-05
+   * S15). The old record stays until `releaseSession` is done with it, and the relay does not wait
+   * for that, so without this a call in the gap would run with the old agent's authority. Kept beside
+   * the record because the session cards spread it. Cleared where the record is deleted and nowhere
+   * else: a release that failed leaves the record standing, and it must stay refused.
+   */
+  const replacedSessions = new Set<string>();
 
   /**
    * 019 R-321, T553: whether a panel session may act - the panel consent is granted, its token is
@@ -1152,7 +1174,10 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
     onTabReleased: releaseTabState,
     // A navigation to a url the browser downloads ends on the record that appears for it (005/US2).
-    downloads: { list: (session) => downloads.list(session) },
+    downloads: {
+      list: (session) => downloads.list(session),
+      expect: (session, origin, untilMs) => downloads.expect(session, origin, untilMs),
+    },
     // 008/FR-115: a page with unsaved work is not left unless the owner said so. The policy is
     // armed per call by the dialogs module, and `force` is decided by the site's own mode.
     dialogs: { beginUnload: (tabId, policy) => dialogs.beginUnload(tabId, policy) },
@@ -1398,7 +1423,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
     // 015/T405, T406 (FR-200): what a press started. Without it a press can report neither the
     // downloads it began nor, honestly, that nothing happened in its window.
-    downloads: { createdSince: (session, sinceMs) => downloads.createdSince(session, sinceMs) },
+    // FR-077, #36 follow-up: and the window in which a file the page made, naming no origin, is
+    // this session's - the length of its own page action.
+    downloads: {
+      createdSince: (session, sinceMs) => downloads.createdSince(session, sinceMs),
+      actingOnPage: (session, untilMs) => downloads.actingOnPage(session, untilMs),
+    },
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -2055,7 +2085,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
      * agent's tab group - which is the ownership check reading the wrong side of the question.
      */
     const session = sessions.get(request.sessionId);
-    if (!session) {
+    if (!session || replacedSessions.has(request.sessionId)) {
       /**
        * A session this worker does not have (006 FR-087, S1 review). The owner's Stop forgets the
        * session while the host behind it is still attached and still paired, so its next call
@@ -2124,6 +2154,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // 017 FR-258: the site plan ends with the session, whatever ended it - and first, so nothing
     // this session still has in flight while the rest is let go is admitted by it.
     await endSitePlans([ending]);
+    // And the batch plans it stated (S6): the batch's own `finally` is not reached by a session that
+    // ended mid-batch, and a plan that outlived its session would be standing consent nobody gave.
+    plans.clearSession(ending);
     // And everything it knew about where its tabs had been, and every pair it was told 繼續 about
     // (014 data-model): 繼續 was an answer about *this* session's work, and the session is over.
     await queueTransition(() => transitionStore.forgetSession(ending)).catch(() => undefined);
@@ -2153,6 +2186,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     }
     await tabs.endSession(ending);
     sessions.delete(ending);
+    replacedSessions.delete(ending);
     // 019 R-321: and the token it greeted with, which only a fresh greeting can present again.
     panelTokenOf.delete(ending);
     /**
@@ -2288,8 +2322,26 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * has told me".
    */
   let uploadRoots: { roots: string[]; path: string; malformed?: boolean; preserved?: string } | undefined;
-  /** Revokes the relay has not confirmed; re-sent on every fresh link until it does (FR-192). */
+  /**
+   * Revokes the relay has not confirmed; re-sent on every fresh link until it does (FR-192).
+   *
+   * Kept in `chrome.storage.session` as well as here (review 2026-11-05 C7): the owner presses
+   * "forget this directory" while the link is down, the worker is evicted before the next relay
+   * greets, and a set held in memory alone forgot the press - the host kept the directory and the
+   * row came back with nothing said. Session storage dies with the browser, as the press should.
+   */
   const uploadRootsToRemove = new Set<string>();
+  const UPLOAD_REVOKES_KEY = "agentUploadRootRevokes";
+  const revokeArea = (): { get(keys: string[]): Promise<Record<string, unknown>>; set(values: Record<string, unknown>): Promise<void> } | undefined =>
+    typeof chrome !== "undefined" ? chrome.storage?.session : undefined;
+  async function loadPendingRevokes(): Promise<void> {
+    const raw = await revokeArea()?.get([UPLOAD_REVOKES_KEY]).catch(() => undefined);
+    const stored = raw?.[UPLOAD_REVOKES_KEY];
+    if (Array.isArray(stored)) for (const root of stored) if (typeof root === "string") uploadRootsToRemove.add(root);
+  }
+  function savePendingRevokes(): void {
+    void revokeArea()?.set({ [UPLOAD_REVOKES_KEY]: [...uploadRootsToRemove] }).catch(() => undefined);
+  }
   /**
    * The owner's "from now on" answers, and which of them the host's list did not come back with
    * (S3 review F2).
@@ -2516,18 +2568,45 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           conversations.browserAttached(conversationId, announcement.panelToken!);
         }
       }
+      if (known && known.agentId !== announcement.agentId) {
+        /**
+         * A known session id greeting under another agent (security review 2026-11-05 S15). A
+         * session is one agent's: its leases, its tab group, its standing with the owner. Taking the
+         * new agent id onto the old record would hand all of that to whoever presents the id - which
+         * S2 discloses to other sessions through `holder`. The old session is ended as the relay
+         * would end it, and the greeting then registers a fresh session for the agent it names,
+         * which holds nothing and pairs on its own.
+         */
+        reportTestDiagnostic("agent.session.agent-changed");
+        replacedSessions.add(announcement.sessionId);
+        void releaseSession(announcement.sessionId, "interrupted")
+          .catch(() => reportTestDiagnostic("agent.session.end-failed"))
+          .finally(() => {
+            if (sessions.has(announcement.sessionId)) return;
+            contextFor(announcement.sessionId);
+            sessions.set(announcement.sessionId, {
+              agentId: announcement.agentId,
+              agentName: shownText(announcement.displayName),
+              lastHelloAt: helloAt,
+              lastActivityAt: helloAt,
+              ...(kind === undefined ? {} : { kind }),
+            });
+            void tabs.announce(announcement.sessionId, helloAt).catch(() => undefined);
+            notify();
+          });
+        return;
+      }
       if (known) {
         known.lastHelloAt = helloAt;
         known.lastActivityAt = helloAt;
-        known.agentId = announcement.agentId;
-        known.agentName = announcement.displayName;
+        known.agentName = shownText(announcement.displayName);
         if (kind === undefined) delete known.kind;
         else known.kind = kind;
       } else {
         contextFor(announcement.sessionId);
         sessions.set(announcement.sessionId, {
           agentId: announcement.agentId,
-          agentName: announcement.displayName,
+          agentName: shownText(announcement.displayName),
           lastHelloAt: helloAt,
           lastActivityAt: helloAt,
           ...(kind === undefined ? {} : { kind }),
@@ -2743,8 +2822,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
        * absent, which is exactly what an old host should look like.
        */
       bridge.requestUploadRoots();
-      // And the revokes it never confirmed (FR-192): the press is made again, not forgotten.
-      for (const root of uploadRootsToRemove) bridge.removeUploadRoot(root);
+      // And the revokes it never confirmed (FR-192): the press is made again, not forgotten - read
+      // back from session storage first, for a worker that was not the one that heard the press (C7).
+      void loadPendingRevokes().then(() => {
+        for (const root of uploadRootsToRemove) bridge.removeUploadRoot(root);
+      });
     },
     /**
      * The host is holding a `file_upload` about a file outside the owner's directories (FR-193).
@@ -2765,9 +2847,14 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       uploadRoots = listing;
       // A revoke the relay has now confirmed is no longer pending; one still on the list is, and
       // is asked for again on the next link.
+      let confirmed = false;
       for (const root of [...uploadRootsToRemove]) {
-        if (!listing.roots.includes(root)) uploadRootsToRemove.delete(root);
+        if (!listing.roots.includes(root)) {
+          uploadRootsToRemove.delete(root);
+          confirmed = true;
+        }
       }
+      if (confirmed) savePendingRevokes();
       /**
        * And the other direction (S3 review F2): a "from now on" the list did not come back with.
        *
@@ -3244,6 +3331,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // Remembered before it is sent: a link that drops in this moment is exactly the case the
       // re-send on the next `relay-ack` exists for (FR-192).
       uploadRootsToRemove.add(root);
+      savePendingRevokes();
       bridge.removeUploadRoot(root);
       notify();
       await Promise.resolve();

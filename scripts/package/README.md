@@ -7,8 +7,10 @@
 MCP client ──stdio──▶ host\mcp-server.js ──loopback──▶ relay(Chrome 自己啟動)──▶ 擴充功能 ──▶ 分頁
 ```
 
-版本見 `VERSION`。安裝包內容:`extension\`(擴充功能)、`host\`(三個 .js,不需要 node_modules)、
-`install.ps1`、`uninstall.ps1`、這份 README。
+版本見 `VERSION`。安裝包內容:`extension\`(擴充功能)、`host\`(五個 .js:`mcp-server.js`、`native-host.js`、
+`install.js`、`broker.js`、`codex-app-server-shim.js`;`node_modules\` 只有 koffi 與它的 win32-x64 原生檔;
+`agents\` 是側欄 agent 連接器的 pinned manifest)、`install.ps1`、`uninstall.ps1`、`install.sh`、`uninstall.sh`、
+`THIRD_PARTY_NOTICES.md`(打包進來的第三方套件授權)、這份 README。
 
 ## 1. 前置
 

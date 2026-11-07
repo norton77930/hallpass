@@ -627,6 +627,8 @@ describe("T018 agent runtime wiring", () => {
     // A scan still pending is "not yet known", not a flag (review 2026-09-13).
     fake.downloadCreated({ id: 2, url: "https://agent.test/report.csv", filename: "", state: "in_progress", danger: "asyncScanning", startTime: "2026-09-13T10:00:05.000Z", bytesReceived: 0, totalBytes: -1, fileSize: -1 });
     fake.downloadChanged({ id: 2, filename: { current: "C:\\dl\\report.csv" }, state: { current: "complete" }, endTime: { current: "2026-09-13T10:00:06.000Z" }, fileSize: { current: 512 } });
+    // #36: the owner's own download from a site the session's tab is not on, while the session holds a tab.
+    fake.downloadCreated({ id: 3, url: "https://owner.test/b.zip", referrer: "https://owner.test/files", filename: "", state: "in_progress", danger: "safe", startTime: "2026-09-13T10:00:07.000Z", bytesReceived: 0, totalBytes: -1, fileSize: -1 });
 
     port.emit({ callId: "call-1", sessionId: "session-h1", tool: "downloads_context", args: {} });
     await vi.waitFor(() => expect(port.sent).toHaveLength(2));
@@ -637,7 +639,8 @@ describe("T018 agent runtime wiring", () => {
         downloads: [
           {
             id: 2,
-            filename: "C:\\dl\\report.csv",
+            // #36: the file's name, not the folder the browser saved it in.
+            filename: "report.csv",
             url: "https://agent.test/report.csv",
             state: "complete",
             startedAt: "2026-09-13T10:00:05.000Z",

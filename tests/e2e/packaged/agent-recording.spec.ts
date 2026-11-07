@@ -7,6 +7,7 @@ import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
+import { isBareFileName, savedDownloadPath } from "../fixtures/saved-download.js";
 
 const locale = localeFromEnv();
 const copy = copyFor(locale);
@@ -234,12 +235,15 @@ test.describe("agent recording", () => {
       const record = listed.downloads.find((entry) => entry.id === exported.downloadId);
       expect(record, `download ${exported.downloadId} is not in the session's list`).toBeTruthy();
       expect(record).toMatchObject({ state: "complete", attribution: "session" });
-      // The saved *name* is the browser's to decide, and since 2cc72f6 the answer reports the one
-      // that exists rather than the one asked for (FR-107). That is only the same string here
-      // because `pairedSession` gave the browser its own download behaviour back: left as
-      // Playwright found it, every download of an attached browser is renamed to a GUID in its
-      // artifacts directory (measured 2026-09-13 in `agent-downloads`, and again 2026-09-19 here).
-      const gif = decodeGif(new Uint8Array(readFileSync(record!.filename)));
+      // The agent is told the file's name and no folder (#36, FR-079); the gate asks the browser
+      // where it put the file. The saved *name* is the browser's to decide, and since 2cc72f6 the
+      // answer reports the one that exists rather than the one asked for (FR-107). That is only the
+      // same string here because `pairedSession` gave the browser its own download behaviour back:
+      // left as Playwright found it, every download of an attached browser is renamed to a GUID in
+      // its artifacts directory (measured 2026-09-13 in `agent-downloads`, and again 2026-09-19 here).
+      expect(record!.filename).toBe(exported.filename);
+      expect(isBareFileName(record!.filename), record!.filename).toBe(true);
+      const gif = decodeGif(new Uint8Array(readFileSync(await savedDownloadPath(extensionContext, extensionId, record!.id))));
 
       // eslint-disable-next-line no-console -- the numbers this gate exists to measure.
       console.log(
@@ -337,7 +341,7 @@ test.describe("agent recording", () => {
       expect(exported.filename).toMatch(/^agent-recording-\d{8}-\d{6}( \(\d+\))?\.gif$/);
       const listed = (await call("downloads_context")) as { downloads: DownloadRecord[] };
       const record = listed.downloads.find((entry) => entry.id === exported.downloadId);
-      expect(decodeGif(new Uint8Array(readFileSync(record!.filename))).frames).toHaveLength(10);
+      expect(decodeGif(new Uint8Array(readFileSync(await savedDownloadPath(extensionContext, extensionId, record!.id)))).frames).toHaveLength(10);
 
       await call("tabs_close", { tabId });
     } finally {
@@ -378,7 +382,7 @@ test.describe("agent recording", () => {
       expect(exported.frames).toBe(200);
       const listed = (await call("downloads_context")) as { downloads: DownloadRecord[] };
       const record = listed.downloads.find((entry) => entry.id === exported.downloadId);
-      expect(decodeGif(new Uint8Array(readFileSync(record!.filename))).frames).toHaveLength(200);
+      expect(decodeGif(new Uint8Array(readFileSync(await savedDownloadPath(extensionContext, extensionId, record!.id)))).frames).toHaveLength(200);
 
       await call("tabs_close", { tabId });
     } finally {

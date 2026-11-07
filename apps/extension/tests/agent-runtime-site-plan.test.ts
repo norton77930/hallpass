@@ -588,8 +588,15 @@ describe("017 review: the plan is bound to its agent", () => {
     delete (globalThis as { chrome?: unknown }).chrome;
   });
 
-  it("asks a press when the approved session id is re-announced by another paired agent (M1)", async () => {
-    const { runtime, port, send } = await pairedRuntime();
+  /**
+   * Amended by the security review 2026-11-05 (S15): a greeting that reuses the session id under
+   * another agent now *ends* the session it names - its plan, its leases, its standing - and
+   * registers a fresh one for the agent it names. So the plan is not merely withheld from the other
+   * agent (017 M1), it is gone with the session it was approved for, and the new session holds no
+   * tab to press on: the press is refused outright, and no card is raised for it.
+   */
+  it("ends the approved session when its id is re-announced by another paired agent, plan and tabs with it (M1, S15)", async () => {
+    const { runtime, port, send, answer } = await pairedRuntime();
     expect(await runtime.sitePlans.approve(S1, [A])).toEqual({ ok: true });
 
     // A second agent, paired by the owner, greets under the session id the plan was approved for.
@@ -598,13 +605,13 @@ describe("017 review: the plan is bound to its agent", () => {
     await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
     await runtime.pairing.decide("agent-2", true);
     await vi.waitFor(async () => expect(await runtime.pairing.isPaired("agent-2")).toBe(true));
-    // The plan is still stored, under the agent it was approved for.
-    expect(storedPlans(fake)[S1]).toMatchObject({ origins: [A], agentId: "agent-1" });
+    // The plan ended with the session it was approved for.
+    await vi.waitFor(() => expect(storedPlans(fake)[S1]).toBeUndefined());
 
-    send("click", CLICK);
-    const asked = await card(runtime);
-    expect(asked.tool).toBe("click");
-    expect(asked.site).toBe(A);
+    const callId = send("click", CLICK);
+    const answered = await answer(callId);
+    expect(answered.outcome).not.toBe("ok");
+    expect(runtime.prompts.current()).toBeUndefined();
   });
 
   it("shows no plan, and marks nothing already approved, for a session re-announced by another agent (M1)", async () => {
@@ -616,7 +623,8 @@ describe("017 review: the plan is bound to its agent", () => {
     await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
     await runtime.pairing.decide("agent-2", true);
     await vi.waitFor(async () => expect(await runtime.pairing.isPaired("agent-2")).toBe(true));
-    expect(storedPlans(fake)[S1]).toMatchObject({ origins: [A], agentId: "agent-1" });
+    // S15: the plan went with the session it was approved for.
+    await vi.waitFor(() => expect(storedPlans(fake)[S1]).toBeUndefined());
 
     const sessionCard = (await runtime.projection()).sessions.find((session) => session.sessionId === S1);
     expect(sessionCard).toBeDefined();
@@ -625,6 +633,52 @@ describe("017 review: the plan is bound to its agent", () => {
     send("propose_sites", { origins: [A, B], purpose: "More" });
     await vi.waitFor(async () => expect((await runtime.projection()).sitePlan).toBeDefined(), { timeout: 3_000 });
     expect((await runtime.projection()).sitePlan?.alreadyApproved ?? []).toEqual([]);
+  });
+
+  it("refuses a call that arrives while the session is ending for another agent's greeting (S15)", async () => {
+    const { runtime, port, answer } = await pairedRuntime();
+    const otherHello = { type: "hello", sessionId: S1, agentId: "agent-2", displayName: "Other agent" };
+
+    port.emit(otherHello);
+    port.emit({ callId: "in-the-gap", sessionId: S1, tool: "tabs_context", args: {} });
+
+    expect(await answer("in-the-gap")).toMatchObject({ outcome: "denied", reason: "session-ended" });
+
+    // That word is the host's cue to greet again and retry: the other agent then has a session of
+    // its own, on its own pairing, with nothing of the old one's.
+    port.emit(otherHello);
+    port.emit({ type: "pair-request", agentId: "agent-2", displayName: "Other agent", origin: "stdio:local", sessionId: S1 });
+    await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
+    await runtime.pairing.decide("agent-2", true);
+    let retries = 0;
+    await vi.waitFor(async () => {
+      retries += 1;
+      port.emit({ callId: `retry-${retries}`, sessionId: S1, tool: "tabs_context", args: {} });
+      expect((await answer(`retry-${retries}`)).outcome).toBe("ok");
+    });
+    expect((await runtime.tabs.context(S1)).tabs).toEqual([]);
+  });
+
+  it("stays refused when the ending failed, until the other agent's next greeting ends it (S15)", async () => {
+    const { runtime, port, answer } = await pairedRuntime();
+    const otherHello = { type: "hello", sessionId: S1, agentId: "agent-2", displayName: "Other agent" };
+    const endSession = vi.spyOn(runtime.tabs, "endSession").mockRejectedValueOnce(new Error("write failed"));
+
+    port.emit(otherHello);
+    await vi.waitFor(() => expect(endSession).toHaveBeenCalledOnce());
+    // Past the failed release's own handlers: the old record is still there, and still not usable.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    port.emit({ callId: "after-failure", sessionId: S1, tool: "tabs_context", args: {} });
+    expect(await answer("after-failure")).toMatchObject({ outcome: "denied", reason: "session-ended" });
+
+    port.emit(otherHello);
+    let retries = 0;
+    await vi.waitFor(async () => {
+      retries += 1;
+      port.emit({ callId: `retry-${retries}`, sessionId: S1, tool: "tabs_context", args: {} });
+      // Refused on the other agent's own pairing: the fresh session is the one answering now.
+      expect(await answer(`retry-${retries}`)).toMatchObject({ outcome: "denied", reason: "not-paired" });
+    });
   });
 
   it("takes down a pending proposal of an agent the owner unpairs, granting nothing (m1)", async () => {

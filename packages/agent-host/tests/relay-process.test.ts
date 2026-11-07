@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 import {
   AGENT_LINK_PROTOCOL,
   agentBrowserRecordSchema,
@@ -815,7 +816,7 @@ async function within<Value>(promise: Promise<Value>, ms: number, label: string)
   }
 }
 
-async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = scaledMs(10_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;

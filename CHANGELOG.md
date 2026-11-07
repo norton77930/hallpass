@@ -5,6 +5,39 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.19.0 — 2026-11-07
+
+- **Agent questions as cards** (#17). When a side-panel Claude Code or Codex asks you something with
+  choices or fields, the question is a card above the box: Send your answer, Skip it, or Stop the
+  turn. Nothing is answered unless you press Send. Claude Code's own question tool, off in the side
+  panel until now, works again. Codex is no longer told you gave no answer to a question you never saw.
+  The card names the agent and, when the question belongs to a tool call, that call. A secret field
+  hides what you type and is never shown again. Hallpass shows form questions only, never links.
+  Hermes and DeepSeek are unchanged. Checked with real Claude Code and Hermes sessions; the Codex
+  steps are covered by tests but not yet by a real Codex run.
+- **Downloads** (#36). An agent is told the saved file's name, not a path on your disk. A download
+  belongs to the session acting on the site it came from; a file a page builds itself (a `data:` or
+  `blob:` link with no site) belongs to the session whose page action is running.
+- **Page text** (#37). `get_page_text` leaves out text you cannot see on the page.
+- **Safer sessions and consent**. A stated plan admits only the session that stated it. A session id
+  belongs to one agent: a second agent greeting with it is refused while the first is ending, and an
+  answer never follows the id to another connection. Pairing shows one card at a time. `evaluate`
+  re-checks the tab's site right before it runs. An upload-folder revoke survives a worker restart,
+  and an allowed upload file is read through the handle that was checked.
+- **Side panel**. Text written by a page or an agent is shown without formatting or control
+  characters. The broker redacts header values, passwords in URLs and AWS key ids from what it shows
+  and logs, starts Windows system programs by their full path, and a timed-out command answers even
+  when a grandchild keeps its output open. The host's data folder and files are readable by you only.
+- **Release zip** (#38). Built by a tag-triggered workflow, with a `.sha256` file beside it and build
+  provenance (`gh attestation verify`). The zip lists every shipped package with its licence. zod 4.6.7.
+- **Linux and macOS** (#29). Running the tests no longer leaves files named `\tmp\hallpass-…` in the
+  checkout: the host builds its data-folder paths in the host's own form.
+- **Maintainers** (#28). The contract check for private citations finds its candidates with one
+  `git grep`, instead of reading every tracked file (17–27 s on a slow Windows machine).
+  `HALLPASS_TEST_TIME_SCALE` stretches test timeouts on slow or busy machines, and the jsdom tests
+  load jsdom once per worker (#22).
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.18.2 — 2026-11-02
 
 - **Maintainers**: `publish:snapshot` sets file modes through the index only, so a CRLF file stays LF in the public tree on Linux and macOS too (0.18.1 could re-read it from disk there). Contract tests for file modes and `uninstall.sh --purge` now pass on Linux and macOS. No behaviour change for users.

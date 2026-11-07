@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   AGENT_DOWNLOADS_KEY,
   createDownloadObserver,
+  type DownloadHolder,
   type DownloadObserverDeps,
 } from "../src/service-worker/download-observer.js";
 import type { DownloadDelta, DownloadSnapshot } from "../src/chrome-adapters/downloads.js";
@@ -26,7 +27,7 @@ function harness(overrides: Partial<DownloadObserverDeps> = {}) {
   const store: Record<string, unknown> = {};
   const created: Array<Listener<DownloadSnapshot>> = [];
   const changed: Array<Listener<DownloadDelta>> = [];
-  let holders: string[] = [];
+  let holders: DownloadHolder[] = [];
   let now = 1_000;
   const storage = {
     async get(keys: string[]) {
@@ -42,6 +43,7 @@ function harness(overrides: Partial<DownloadObserverDeps> = {}) {
     onCreated: (listener) => void created.push(listener),
     onChanged: (listener) => void changed.push(listener),
     holders: async () => holders,
+    ownOrigin: "chrome-extension://adgpccmmbgnchnphfaoabfflfcepbopd",
     storage,
     now: () => now,
     ...overrides,
@@ -51,12 +53,15 @@ function harness(overrides: Partial<DownloadObserverDeps> = {}) {
     observer,
     store,
     storage,
-    setHolders: (next: string[]) => void (holders = next),
+    /** A bare session id holds a tab on the default download's own site (`https://example.test`). */
+    setHolders: (next: Array<string | DownloadHolder>) =>
+      void (holders = next.map((entry) => (typeof entry === "string" ? { sessionId: entry, origins: ["https://example.test"] } : entry))),
     tick: (ms: number) => void (now += ms),
     now: () => now,
     async create(item: Partial<DownloadSnapshot> & { id: number }) {
       const snapshot: DownloadSnapshot = {
         url: "https://example.test/report.csv",
+        referrer: "",
         filename: "",
         state: "in_progress",
         startedAt: new Date(now).toISOString(),
@@ -116,6 +121,196 @@ describe("T179 download observer", () => {
     expect(JSON.stringify(h.store)).not.toContain('"id":2');
   });
 
+  /**
+   * Security review 2026-11-05 (#36) - the owner's own downloads are not an agent's business. The
+   * browser's record names no tab, but it names the page that started it (`referrer`) and the
+   * source (`url`), and a session's tabs have addresses: a download is a session's only when one of
+   * those origins is a site one of its tabs is on, or is about to be on (`pendingUrl`, for a
+   * navigation the browser turned into a download). Everything else is the owner's and no ring
+   * carries it, however many tabs an idle agent holds elsewhere.
+   */
+  describe("#36 attribution by origin", () => {
+    it("does not report the owner's download from a site no session's tab is on", async () => {
+      const h = harness();
+      h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+
+      await h.create({ id: 1, url: "https://bank.example/statement.pdf", referrer: "https://bank.example/account" });
+
+      await expect(h.observer.list("session-a")).resolves.toEqual([]);
+      expect(JSON.stringify(h.store)).not.toContain('"id":1');
+    });
+
+    it("reports a download to the session whose tab is on the referring site, and to that one alone", async () => {
+      const h = harness();
+      h.setHolders([
+        { sessionId: "session-a", origins: ["https://shop.example"] },
+        { sessionId: "session-b", origins: ["https://mail.example"] },
+      ]);
+
+      await h.create({ id: 1, url: "https://cdn.example/invoice.pdf", referrer: "https://shop.example/orders" });
+
+      expect((await h.observer.list("session-a")).map((record) => [record.id, record.attribution])).toEqual([[1, "session"]]);
+      await expect(h.observer.list("session-b")).resolves.toEqual([]);
+    });
+
+    it("matches the source url's origin too, including a blob the page minted, and a pending navigation", async () => {
+      const h = harness();
+      h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example", "https://files.example"] }]);
+
+      await h.create({ id: 1, url: "blob:https://shop.example/0f3a-export", referrer: "" });
+      await h.create({ id: 2, url: "https://files.example/report.zip", referrer: "" });
+
+      expect((await h.observer.list("session-a")).map((record) => record.id)).toEqual([2, 1]);
+    });
+
+    it("honours a navigation the session announced, until its bound", async () => {
+      const h = harness();
+      h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+      h.observer.expect("session-a", "https://mirror.example", h.now() + 5_000);
+
+      await h.create({ id: 1, url: "https://mirror.example/a.zip", referrer: "" });
+      h.tick(6_000);
+      await h.create({ id: 2, url: "https://mirror.example/b.zip", referrer: "" });
+
+      expect((await h.observer.list("session-a")).map((record) => record.id)).toEqual([1]);
+    });
+
+    it("decides an announced navigation when the event arrives, not when the write gets its turn", async () => {
+      const h = harness();
+      h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+      h.observer.expect("session-a", "https://mirror.example", h.now() + 5_000);
+
+      // The event is raised inside the bound; the bound passes before the queued write runs.
+      const creating = h.create({ id: 1, url: "https://mirror.example/a.zip", referrer: "" });
+      h.tick(6_000);
+      await creating;
+
+      expect((await h.observer.list("session-a")).map((record) => record.id)).toEqual([1]);
+    });
+
+    /**
+     * #36 follow-up (2026-11-07, measured in Chromium): a page link to a `data:` url, with a
+     * `download` attribute, yields a record with an empty referrer and a url that names no origin.
+     * The origin rule alone gave it to nobody, so the agent that clicked it waited in vain. A file
+     * with no origin is the session's when it appeared while that session's own page action was
+     * under way - and nobody's outside every such window.
+     */
+    describe("a download that names no origin", () => {
+      const DATA = { url: "data:text/csv,a%2Cb", referrer: "" };
+
+      it("is the session's when it appears while that session's own action is under way", async () => {
+        const h = harness();
+        h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+        const close = h.observer.actingOnPage("session-a", h.now() + 30_000);
+
+        await h.create({ id: 1, ...DATA });
+        close();
+
+        expect((await h.observer.list("session-a")).map((record) => [record.id, record.attribution])).toEqual([[1, "session"]]);
+      });
+
+      it("is nobody's outside every window: before one opens and after it closes", async () => {
+        const h = harness();
+        h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+
+        await h.create({ id: 1, ...DATA });
+        const close = h.observer.actingOnPage("session-a", h.now() + 30_000);
+        close();
+        await h.create({ id: 2, ...DATA });
+
+        await expect(h.observer.list("session-a")).resolves.toEqual([]);
+        expect(JSON.stringify(h.store)).not.toContain('"id":');
+      });
+
+      it("is decided at the moment it appears, not when the write gets its turn", async () => {
+        const h = harness();
+        h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+        const close = h.observer.actingOnPage("session-a", h.now() + 30_000);
+
+        // The event is raised inside the window; the call ends before the queued write runs.
+        const creating = h.create({ id: 1, ...DATA });
+        close();
+        await creating;
+
+        expect((await h.observer.list("session-a")).map((record) => record.id)).toEqual([1]);
+      });
+
+      it("expires at its bound even if the call never ends", async () => {
+        const h = harness();
+        h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+        h.observer.actingOnPage("session-a", h.now() + 5_000);
+
+        h.tick(6_000);
+        await h.create({ id: 1, ...DATA });
+
+        await expect(h.observer.list("session-a")).resolves.toEqual([]);
+      });
+
+      it("goes to every session whose window is open, marked shared", async () => {
+        const h = harness();
+        h.setHolders([
+          { sessionId: "session-a", origins: ["https://shop.example"] },
+          { sessionId: "session-b", origins: ["https://mail.example"] },
+          { sessionId: "session-c", origins: ["https://news.example"] },
+        ]);
+        h.observer.actingOnPage("session-a", h.now() + 30_000);
+        h.observer.actingOnPage("session-b", h.now() + 30_000);
+
+        await h.create({ id: 1, ...DATA });
+
+        expect((await h.observer.list("session-a")).map((record) => record.attribution)).toEqual(["shared"]);
+        expect((await h.observer.list("session-b")).map((record) => record.attribution)).toEqual(["shared"]);
+        await expect(h.observer.list("session-c")).resolves.toEqual([]);
+      });
+
+      it("does not widen the origin rule: a download from an unrelated site during the window is not the session's", async () => {
+        const h = harness();
+        h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+        h.observer.actingOnPage("session-a", h.now() + 30_000);
+
+        await h.create({ id: 1, url: "https://bank.example/statement.pdf", referrer: "https://bank.example/account" });
+        await h.create({ id: 2, url: "data:text/csv,x", referrer: "https://bank.example/account" });
+
+        await expect(h.observer.list("session-a")).resolves.toEqual([]);
+      });
+
+      it("takes only a file the page built itself: a `data:` url or an opaque-origin blob, not a local path or another extension's file", async () => {
+        const h = harness();
+        h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+        h.observer.actingOnPage("session-a", h.now() + 30_000);
+
+        await h.create({ id: 1, url: "file:///C:/x.txt", referrer: "" });
+        await h.create({ id: 2, url: "ftp://host/x", referrer: "" });
+        await h.create({ id: 3, url: "blob:chrome-extension://abcdefghijklmnopabcdefghijklmnop/uuid", referrer: "" });
+        await h.create({ id: 4, url: "data:text/plain,x", referrer: "" });
+        await h.create({ id: 5, url: "blob:null/uuid", referrer: "" });
+
+        expect((await h.observer.list("session-a")).map((record) => record.id)).toEqual([5, 4]);
+      });
+    });
+
+    it("still gives the extension's own file - a recording export - to whoever holds a tab", async () => {
+      const h = harness();
+      h.setHolders([{ sessionId: "session-a", origins: ["https://shop.example"] }]);
+
+      await h.create({ id: 1, url: "blob:chrome-extension://adgpccmmbgnchnphfaoabfflfcepbopd/9c1d", referrer: "" });
+
+      expect((await h.observer.list("session-a")).map((record) => record.id)).toEqual([1]);
+    });
+
+    it("carries the file's name, never the saved path", async () => {
+      const h = harness();
+      h.setHolders(["session-a"]);
+
+      await h.create({ id: 1, filename: "C:\\Users\\owner\\Downloads\\report.csv" });
+      await h.change({ id: 1, filename: "/home/owner/Downloads/report (1).csv" });
+
+      const [record] = await h.observer.list("session-a");
+      expect(record?.filename).toBe("report (1).csv");
+      expect(JSON.stringify(h.store)).not.toContain("owner");
+    });
+  });
+
   it("updates the name, state, bytes and end time on every ring that carries the id", async () => {
     const h = harness();
     h.setHolders(["session-a", "session-b"]);
@@ -131,7 +326,7 @@ describe("T179 download observer", () => {
 
     const expected = {
       id: 1,
-      filename: "C:\\Users\\owner\\Downloads\\report.csv",
+      filename: "report.csv",
       state: "complete",
       bytesReceived: 2048,
       totalBytes: 2048,
@@ -232,7 +427,7 @@ describe("T179 download observer", () => {
     h.tick(10);
     await expect(h.observer.takeCompletion("session-a")).resolves.toEqual({
       id: 1,
-      filename: "C:\\dl\\a.zip",
+      filename: "a.zip",
       url: "https://example.test/report.csv",
       state: "complete",
     });
@@ -270,7 +465,7 @@ describe("T179 download observer", () => {
 
       await expect(h.observer.takeCompletion("session-a")).resolves.toEqual({
         id: 2,
-        filename: "C:\\dl\\fast.csv",
+        filename: "fast.csv",
         url: "https://example.test/fast.csv",
         state: "complete",
       });

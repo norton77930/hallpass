@@ -272,6 +272,29 @@ describe("T062 upload policy", () => {
     });
   });
 
+  /**
+   * Security review 2026-11-05 S12 - the owner's one-call yes names files, and a file is compared as
+   * an equal. It used to be compared as a prefix (`within`), which is right for a root and wrong for a
+   * file: a path that had become a directory of the same name since the card admitted every file
+   * under it. And the bytes are read through a handle that is stat'd again after the decision, so a
+   * path that stopped being a regular file between the two is refused rather than read.
+   */
+  it("admits an allowed file as itself only, never as a directory of the same name (S12)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "hallpass-upload-s12-"));
+    try {
+      // The owner answered the card about `shared/report`; by the time the call re-resolves, that
+      // name is a directory, and the agent names a file inside it.
+      const named = join(root, "shared", "report");
+      await mkdir(named, { recursive: true });
+      await writeFile(join(named, "secret.txt"), "not what the owner saw");
+      const result = await resolveUploadFiles([join(named, "secret.txt")], { uploadRoots: [] }, { allowFiles: [named] });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.code).toBe("outside-roots");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("compares the allowed files by real path, and still applies every other rule to them", async () => {
     const config = { uploadRoots: [] as string[] };
     const named = join(outside, "diary.txt");

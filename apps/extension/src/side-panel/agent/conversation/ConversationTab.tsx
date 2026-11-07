@@ -51,6 +51,7 @@ import { ModeMenu } from "./ModeMenu.js";
 import { ModelMenu } from "./ModelMenu.js";
 import { modelChipText, type ModelOfferView } from "./model-words.js";
 import { PermissionCard } from "./PermissionCard.js";
+import { QuestionCard } from "./QuestionCard.js";
 
 type T = (key: string) => string;
 
@@ -1087,7 +1088,8 @@ function OpenConversation(props: {
   const mode = picture.mode ?? view.mode;
   const state = picture.state ?? view.state;
   const busy = BUSY_STATES.has(state);
-  const waiting = picture.permissions.length > 0;
+  // 029 FR-442: a question card holds the box as a permission card does.
+  const waiting = picture.permissions.length > 0 || picture.questions.length > 0;
   // 025 FR-403, FR-398: the running agent's offer and what it reports now, while it runs; a conversation
   // that is not running shows the model it was left on (the entry's), by the names the agent last offered.
   const liveModels = view.models !== undefined && view.models.models.length > 0 ? view.models : undefined;
@@ -1230,17 +1232,30 @@ function OpenConversation(props: {
         // 020 FR-319, SC-144: a waiting card sits directly above the box, which stays in view while
         // the log scrolls; while one waits the box sends nothing and offers Stop only.
         waiting={waiting}
-        above={picture.permissions.map((permission) => (
-          <PermissionCard
-            key={permission.requestId}
-            permission={permission}
-            agentName={props.agentName}
-            t={t}
-            onAnswer={(answer) =>
-              send({ type: "ui.conversation.answer", payload: { conversationId, requestId: permission.requestId, answer } })
-            }
-          />
-        ))}
+        above={[
+          ...picture.permissions.map((permission) => (
+            <PermissionCard
+              key={permission.requestId}
+              permission={permission}
+              agentName={props.agentName}
+              t={t}
+              onAnswer={(answer) =>
+                send({ type: "ui.conversation.answer", payload: { conversationId, requestId: permission.requestId, answer } })
+              }
+            />
+          )),
+          ...picture.questions.map((question) => (
+            <QuestionCard
+              key={question.requestId}
+              question={question}
+              agentName={props.agentName}
+              t={t}
+              onReply={(reply) =>
+                send({ type: "ui.conversation.question-reply", payload: { conversationId, requestId: question.requestId, reply } })
+              }
+            />
+          )),
+        ]}
         onStop={() => send({ type: "ui.conversation.stop", payload: { conversationId } })}
         chips={
           // FR-315: fixed for this conversation; another agent or folder is a new conversation.

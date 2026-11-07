@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 import { dialRelay, encodeFrame, FrameDecoder } from "../src/index.js";
 
 /**
@@ -205,7 +206,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
         return tree !== undefined;
       },
       "the broker and its agent tree",
-      20_000,
+      scaledMs(20_000),
     );
     // The shape under test: the agent really is cmd.exe's child, so the detached grandchild is two
     // hops from the broker - the path Node's own job lets escape.
@@ -262,7 +263,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
       ...(await readLines(join(hostDir(), "relay.log"))),
     ].join("\n");
     expect(logs).not.toMatch(/[A-Za-z0-9_-]{43}/u);
-  }, 30_000);
+  }, scaledMs(30_000));
 
   it("(b) a hard-killed broker takes its whole tree with it within 2 s", async () => {
     startRelay(RUN_1);
@@ -272,7 +273,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
     process.kill(tree.broker);
 
     await waitFor(() => alive(tree).length === 0, `0 pids of the tree (alive: ${alive(tree).join(",")})`, 2_000);
-  }, 40_000);
+  }, scaledMs(40_000));
 
   it("(c) a new relay of the same run adopts the broker and the agent pids stay", async () => {
     const first = startRelay(RUN_1);
@@ -283,13 +284,13 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
     await exitOf(first.child);
     const second = startRelay(RUN_1, { startConversation: false });
 
-    await waitFor(() => brokerGreeted(second.toChrome), "the adopted broker to greet the new relay", 20_000);
+    await waitFor(() => brokerGreeted(second.toChrome), "the adopted broker to greet the new relay", scaledMs(20_000));
     expect(await readSidecar()).toEqual(before);
     expect(alive(tree)).toEqual(treePids(tree));
     // Exactly one agent was ever started: adoption spawned nothing.
     const starts = (await readLines(fakeLogPath())).filter((line) => line.includes('"event":"start"'));
     expect(starts).toHaveLength(1);
-  }, 60_000);
+  }, scaledMs(60_000));
 
   /**
    * T575 (D-019-14): the relay here is this test process's child, so this process stands for the
@@ -310,7 +311,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
     expect(Date.now() - closedAt).toBeGreaterThanOrEqual(34_000);
     // The broker removed its own sidecar on the way out.
     expect(await readSidecar()).toBeUndefined();
-  }, 75_000);
+  }, scaledMs(75_000));
 
   /**
    * T575 (D-019-14, FR-296): a stand-in browser starts the relay the way Chrome does, through
@@ -339,7 +340,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
         // already gone with its pipe
       }
     }
-  }, 60_000);
+  }, scaledMs(60_000));
 
   /**
    * T572 (architecture S2): the relay a new relay of the same run supersedes drains its servers'
@@ -348,7 +349,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
    */
   it("(f) a superseded relay lets its broker go at once, while it still drains a server's call", async () => {
     const first = startRelay(RUN_1, { startConversation: false });
-    await waitFor(() => brokerGreeted(first.toChrome), "the broker to greet the first relay", 20_000);
+    await waitFor(() => brokerGreeted(first.toChrome), "the broker to greet the first relay", scaledMs(20_000));
     const before = await readSidecar();
     // A server's call the worker never answers keeps the first relay draining for its full bound.
     const server = dialRelay({
@@ -366,7 +367,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
 
       const second = startRelay(RUN_1, { startConversation: false });
 
-      await waitFor(() => brokerGreeted(second.toChrome), "the broker to greet the second relay", 20_000);
+      await waitFor(() => brokerGreeted(second.toChrome), "the broker to greet the second relay", scaledMs(20_000));
       expect(firstExited).toBe(false);
       expect((await readLines(join(hostDir(), "broker.log"))).some((line) => line.includes("broker.relay-gone"))).toBe(true);
       // The same broker: adopted, not replaced by a forced spawn.
@@ -374,7 +375,7 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
     } finally {
       await server.stop();
     }
-  }, 60_000);
+  }, scaledMs(60_000));
 
   it("(e) a new relay of another run starts its own broker and the old one shuts down", async () => {
     const first = startRelay(RUN_1);
@@ -390,14 +391,14 @@ describe.runIf(process.platform === "win32")("T522 broker lifetime", () => {
         return sidecar?.browserRunId === RUN_2 && sidecar.pid !== tree.broker;
       },
       "the new run's broker",
-      20_000,
+      scaledMs(20_000),
     );
     await waitFor(() => alive(tree).length === 0, `0 pids of the old tree (alive: ${alive(tree).join(",")})`, 20_000);
     // The old broker left the new broker's sidecar alone.
     const sidecar = await readSidecar();
     expect(sidecar?.browserRunId).toBe(RUN_2);
     expect(isAlive(sidecar!.pid as number)).toBe(true);
-  }, 60_000);
+  }, scaledMs(60_000));
 });
 
 function isAlive(pid: number): boolean {
@@ -437,7 +438,7 @@ function exitOf(child: ChildProcessWithoutNullStreams): Promise<number | null> {
   return new Promise((done) => child.once("exit", (code) => done(code)));
 }
 
-async function waitFor(predicate: () => boolean | Promise<boolean>, label: string, timeoutMs = 10_000): Promise<void> {
+async function waitFor(predicate: () => boolean | Promise<boolean>, label: string, timeoutMs = scaledMs(10_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;

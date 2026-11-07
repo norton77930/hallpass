@@ -33,7 +33,8 @@ export const AGENT_SKILL_TEXT = [
   "1. **Look**: `tabs_context` lists the tabs and who holds each one. Open a tab with `tabs_create`, or ask",
   "   the user before taking one of theirs with `tabs_claim`.",
   "2. **Read before acting**: `read_page` (structure with element refs and field values), `get_page_text`,",
-  "   `find`, `screenshot`. Reading never asks the user.",
+  "   `find`, `screenshot`. Reading never asks the user. `get_page_text` returns what the user could see by",
+  "   scrolling; text the page hides is left out, but same-colour or very small text is still returned.",
   "3. **Act**: `navigate`, `click`, `type`, `key`, `scroll`, `form_input`, `dialog`, and the others. Use the",
   "   refs from your last read; read again after the page changes.",
   "4. **Several steps on one tab**: `browser_batch`. **Several sites in one task**: `propose_sites` first.",
@@ -84,6 +85,8 @@ export const AGENT_SKILL_TEXT = [
 export const SHIPPED_SKILL_HASHES: readonly string[] = [
   // 0.18.0
   "155b758b760ea0bf6360e753090d6b806655dddb47c4d0cd3a20f0e371f37730",
+  // issue #37 (get_page_text leaves out hidden text), next release
+  "566f7d6c6cb885e9358194d0cf9c60ae23eaf4893681af2da115b7c38aa9f6da",
 ];
 
 /** R-414: the text's fingerprint; a copy that went through Git or an editor on Windows is the same text. */

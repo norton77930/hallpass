@@ -110,6 +110,29 @@ describe("T536 the owner's answers", () => {
     expect(sent.map((answer) => answer.optionId)).toEqual(["allow-once", "allow-once"]);
   });
 
+  /**
+   * Security review 2026-11-05 S20 - a rule given in the agent's review mode did not survive the
+   * owner's switch into strict in the notice, but did in the broker: the next command of that kind
+   * was answered by the rule while the conversation said "edits and commands ask you first".
+   */
+  it("a switch into strict forgets the conversation's allow rules, so the next request asks again (S20)", async () => {
+    h = await poolHarness();
+    const id = await h.start();
+    expect((await h.pool.setMode(id, "agent-review")).ok).toBe(true);
+    const first = await sendOnly(h, id, "tool:edit");
+    const requestId = await cardFor(h, id, first);
+    expect((await h.pool.answer(id, requestId, "allow-conversation")).ok).toBe(true);
+    await untilTurnEnds(h, id, first);
+
+    expect((await h.pool.setMode(id, "strict")).ok).toBe(true);
+
+    const again = await sendOnly(h, id, "tool:edit");
+    // A card, not a by-rule answer.
+    await cardFor(h, id, again);
+    const since = h.rec.of(id).map((entry) => entry.event);
+    expect(since.filter((event) => event.type === "tool" && event.byRule === true)).toHaveLength(0);
+  });
+
   it("an `other` rule is keyed by the tool's name, not by the kind", async () => {
     h = await poolHarness();
     const id = await h.start();

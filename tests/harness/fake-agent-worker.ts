@@ -1,3 +1,4 @@
+import { scaledMs } from "../../packages/test-kit/dist/time-scale.js";
 import { randomBytes } from "node:crypto";
 import {
   listenAndPublish,
@@ -228,7 +229,7 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
     send(frame) {
       attached.at(-1)?.send(frame);
     },
-    async waitForControlFrame(type, timeoutMs = 5_000) {
+    async waitForControlFrame(type, timeoutMs = scaledMs(5_000)) {
       await waitFor(() => controlFrames.some((frame) => frame.type === type), timeoutMs, `control frame '${type}'`);
       const found = controlFrames.find((frame) => frame.type === type);
       if (!found) {
@@ -236,7 +237,7 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
       }
       return found;
     },
-    async waitForHello(count = 1, timeoutMs = 5_000) {
+    async waitForHello(count = 1, timeoutMs = scaledMs(5_000)) {
       await waitFor(() => hellos.length >= count, timeoutMs, `greeting ${count}`);
       const found = hellos[count - 1];
       if (!found) {
@@ -244,7 +245,7 @@ export async function startFakeAgentWorker(options: FakeAgentWorkerOptions = {})
       }
       return found;
     },
-    async waitForLinkFrame(type, timeoutMs = 5_000) {
+    async waitForLinkFrame(type, timeoutMs = scaledMs(5_000)) {
       await waitFor(() => linkFrames.some((frame) => frame.type === type), timeoutMs, `link frame '${type}'`);
       const found = linkFrames.find((frame) => frame.type === type);
       if (!found) {

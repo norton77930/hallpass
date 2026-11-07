@@ -1,6 +1,7 @@
 import { execFileSync, execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 
@@ -59,13 +60,28 @@ export const KOFFI_PACKAGE_FILES = [
   "@koromix/koffi-win32-x64/win32_x64/koffi.node",
 ] as const;
 
+/**
+ * SHA-256 of `@koromix/koffi-win32-x64/win32_x64/koffi.node` at the version the lockfile pins (3.3.3),
+ * taken from the registry tarball the lockfile's integrity names (issue #38). The one file in the zip
+ * that is neither built here nor readable, so it is the one that is compared before it is copied: a
+ * `node_modules` that holds anything else is not packaged. Bumping koffi means re-measuring this.
+ */
+export const KOFFI_WIN32_X64_NODE_SHA256 = "f7af4982457657d2e7ad46acb076614ed7122d6efbdbfbc75f21ec12681fa121";
+
+const KOFFI_NODE_FILE = "@koromix/koffi-win32-x64/win32_x64/koffi.node";
+
+export function sha256Of(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
 /** The pinned manifests the broker installs from on the owner's consent (R-314; 021 R-345 adds DeepSeek). */
 export const AGENT_MANIFEST_FILES = ["package.json", "package-lock.json"] as const;
 const AGENT_MANIFEST_DIRECTORIES = ["claude-code", "codex", "deepseek"] as const;
 
 /** What the zip's root holds, exactly (US1.1; the contract test pins it). */
 // 028 (issue #1): install.sh / uninstall.sh beside the PowerShell pair, for macOS and Linux.
-export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md", "VERSION"] as const;
+// Review 2026-11-05 L4: THIRD_PARTY_NOTICES.md rides along, since the bundles carry MIT/ISC code whose notices must accompany copies.
+export const PACKAGE_ROOT_ENTRIES = ["extension/", "host/", "install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md", "THIRD_PARTY_NOTICES.md", "VERSION"] as const;
 
 export const PACKAGE_NAME = "hallpass";
 
@@ -117,7 +133,20 @@ export async function bundleHost(outDir: string): Promise<string[]> {
  * relative to `hostDir`, with forward slashes. A missing source is an error: a package without
  * them would install and then fail at the first conversation.
  */
-export function stageHostRuntime(hostDir: string): string[] {
+export function stageHostRuntime(
+  hostDir: string,
+  options: {
+    /** Where the packages are read from; the checkout's `node_modules` unless a test says otherwise. */
+    nodeModules?: string;
+    /** Where the adapter manifests are read from; `packages/agent-host/agents` unless a test says otherwise. */
+    agents?: string;
+    /** The digest `koffi.node` must have; the pinned one unless a test says otherwise. */
+    koffiNodeSha256?: string;
+  } = {},
+): string[] {
+  const nodeModules = options.nodeModules ?? resolve(repoRoot, "node_modules");
+  const agents = options.agents ?? resolve(repoRoot, "packages/agent-host/agents");
+  const expectedDigest = options.koffiNodeSha256 ?? KOFFI_WIN32_X64_NODE_SHA256;
   const staged: string[] = [];
   const copy = (from: string, to: string, name: string): void => {
     if (!existsSync(from)) {
@@ -127,19 +156,30 @@ export function stageHostRuntime(hostDir: string): string[] {
     cpSync(from, to);
     staged.push(name);
   };
+  // The native binary is compared before anything is copied (#38): a zip is never half-staged
+  // around a file that is not the one the lockfile named.
+  const koffiNode = resolve(nodeModules, KOFFI_NODE_FILE);
+  if (!existsSync(koffiNode)) {
+    throw new Error(`cannot package node_modules/${KOFFI_NODE_FILE}: ${koffiNode} does not exist (run npm ci)`);
+  }
+  const digest = sha256Of(koffiNode);
+  if (digest !== expectedDigest) {
+    throw new Error(`cannot package koffi.node: its digest ${digest} is not the pinned ${expectedDigest}`);
+  }
   for (const file of KOFFI_PACKAGE_FILES) {
-    copy(resolve(repoRoot, "node_modules", file), resolve(hostDir, "node_modules", file), `node_modules/${file}`);
+    copy(resolve(nodeModules, file), resolve(hostDir, "node_modules", file), `node_modules/${file}`);
   }
   for (const agent of AGENT_MANIFEST_DIRECTORIES) {
     for (const file of AGENT_MANIFEST_FILES) {
-      copy(
-        resolve(repoRoot, "packages/agent-host/agents", agent, file),
-        resolve(hostDir, "agents", agent, file),
-        `agents/${agent}/${file}`,
-      );
+      copy(resolve(agents, agent, file), resolve(hostDir, "agents", agent, file), `agents/${agent}/${file}`);
     }
   }
   return staged;
+}
+
+/** One line in `sha256sum` format - digest, two spaces, the zip's base name - for the file beside the zip (#38). */
+export function checksumLine(zipPath: string): string {
+  return `${sha256Of(zipPath)}  ${basename(zipPath)}\n`;
 }
 
 /** The Windows `tar.exe` (bsdtar) writes zip with `-a`; the Git Bash `tar` on PATH is GNU and cannot. */
@@ -210,6 +250,8 @@ export async function buildPackage(): Promise<string> {
   for (const asset of ["install.ps1", "uninstall.ps1", "install.sh", "uninstall.sh", "README.md"]) {
     cpSync(resolve(packageAssetsDir, asset), resolve(stageDir, asset));
   }
+  // L4: the notices for everything the bundles below contain, from the repository root.
+  cpSync(resolve(repoRoot, "THIRD_PARTY_NOTICES.md"), resolve(stageDir, "THIRD_PARTY_NOTICES.md"));
   writeFileSync(resolve(stageDir, "VERSION"), `${version}\n`, "utf8");
 
   step("bundle host");
@@ -234,6 +276,10 @@ export async function buildPackage(): Promise<string> {
   zipDirectory(stageDir, zipPath);
   rmSync(stageDir, { recursive: true, force: true });
   process.stdout.write(`  ${zipPath} (${statSync(zipPath).size} bytes)\n`);
+  // #38: the checksum beside the zip, in the format `sha256sum -c` and `Get-FileHash` readers expect.
+  const sumPath = `${zipPath}.sha256`;
+  writeFileSync(sumPath, checksumLine(zipPath), "utf8");
+  process.stdout.write(`  ${sumPath}\n`);
   return zipPath;
 }
 

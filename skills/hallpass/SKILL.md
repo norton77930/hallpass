@@ -14,7 +14,8 @@ how they fit together.
 1. **Look**: `tabs_context` lists the tabs and who holds each one. Open a tab with `tabs_create`, or ask
    the user before taking one of theirs with `tabs_claim`.
 2. **Read before acting**: `read_page` (structure with element refs and field values), `get_page_text`,
-   `find`, `screenshot`. Reading never asks the user.
+   `find`, `screenshot`. Reading never asks the user. `get_page_text` returns what the user could see by
+   scrolling; text the page hides is left out, but same-colour or very small text is still returned.
 3. **Act**: `navigate`, `click`, `type`, `key`, `scroll`, `form_input`, `dialog`, and the others. Use the
    refs from your last read; read again after the page changes.
 4. **Several steps on one tab**: `browser_batch`. **Several sites in one task**: `propose_sites` first.

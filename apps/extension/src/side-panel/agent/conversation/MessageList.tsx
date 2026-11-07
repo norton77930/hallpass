@@ -128,6 +128,17 @@ export function MessageList(props: {
           if (item.kind === "turn-actions") {
             return <TurnActions key={item.key} group={item} t={t} liveElsewhere />;
           }
+          if (item.kind === "question-ended") {
+            // 029 FR-444: one line per closed question; the summary is the broker's (secrets hidden).
+            const words = t(`conversation.questionEnded.${item.ending}`)
+              .replace("{summary}", () => item.summary ?? "")
+              .replace("{message}", () => item.message);
+            return (
+              <p key={item.key} className="agent-conversation-answer" data-question-ending={item.ending}>
+                {words}
+              </p>
+            );
+          }
           if (item.kind === "answer") {
             // 020 FR-319: one line for a card's answer; the title is the agent's words, inert text.
             return (

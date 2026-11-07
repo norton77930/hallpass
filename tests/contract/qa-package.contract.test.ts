@@ -10,11 +10,13 @@ import { NATIVE_MESSAGING_ROOTS, nativeMessagingKey } from "../../packages/agent
 import {
   bundleHost,
   HOST_ENTRIES,
+  KOFFI_WIN32_X64_NODE_SHA256,
   listZip,
   PACKAGE_NAME,
   PACKAGE_ROOT_ENTRIES,
   readZipEntry,
   repoRoot,
+  sha256Of,
   stageHostRuntime,
 } from "../../scripts/package.js";
 
@@ -141,6 +143,8 @@ describe("QA package host bundle", () => {
       { cwd: outDir, encoding: "utf8" },
     );
     expect(answer).toMatch(/^3\.\d+\.\d+:4$/u);
+    // #38: what was staged is the binary the lockfile named, by digest.
+    expect(sha256Of(resolve(outDir, "node_modules/@koromix/koffi-win32-x64/win32_x64/koffi.node"))).toBe(KOFFI_WIN32_X64_NODE_SHA256);
   });
 
   it("keeps the installer's own-location resolution, so host/install.js finds its sibling relay", async () => {
@@ -206,7 +210,7 @@ describe("QA package 0.2.0 zip (only when a full run has produced one)", () => {
   });
 
   it.skipIf(!built)("stamps one version into the zip name, VERSION and the packed manifest", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.18.2");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.19.0");
     expect(readZipEntry(zipPath, "VERSION").trim()).toBe(AGENT_EXTENSION_VERSION);
     const manifest = JSON.parse(readZipEntry(zipPath, "extension/manifest.json")) as { version?: string };
     expect(manifest.version).toBe(AGENT_EXTENSION_VERSION);

@@ -243,6 +243,79 @@ test.describe("agent reads", () => {
       await client?.close();
     }
   });
+
+  /**
+   * Issue #37 - `get_page_text` is what the owner can see, not what the markup holds.
+   *
+   * The fixture has eight paragraphs, each with one distinctive word. Three are reachable by the owner
+   * (an ordinary one, one past a 3000px spacer that needs a scroll, and one inside a `display:contents`
+   * box, which has no box of its own but whose text is drawn) and five are not (`display:none`,
+   * `visibility:hidden`, `opacity:0`, placed off the left edge, clipped to one pixel). Only a real
+   * layout engine can tell the two groups apart, which is why this is a browser claim.
+   */
+  test("returns the text the owner can reach and leaves out what the page hides", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+
+    const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
+    await ownerPage.goto(`${SITE}/waiting`);
+    await ownerPage.bringToFront();
+    const ownerTabId = await extensionWorker.evaluate(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id === undefined) throw new Error("active-tab-missing");
+      return tab.id;
+    });
+    const panel = await openSidePanel({
+      context: extensionContext,
+      extensionId,
+      fixturePage: ownerPage,
+      tabId: ownerTabId,
+      copy,
+    });
+    await waitForAgentPanel(panel);
+
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const live = client;
+      await panel.clickIfPresent(ui("agent.retry"));
+      await pairWithFirstCall(live, panel, { locale });
+
+      const created = await live.callTool("tabs_create", { url: `${SITE}/hidden-text` });
+      expect(created.isError, created.text).toBe(false);
+      const tabId = (created.json as { tabId: number }).tabId;
+
+      const read = await live.callTool("get_page_text", { tabId });
+      expect(read.isError, read.text).toBe(false);
+      const { text } = read.json as { text: string };
+
+      for (const shown of [
+        "shownwordnormal",
+        "shownwordbelowfold",
+        "shownwordcontents",
+        "shownwordcontentsoverflow",
+      ]) {
+        expect(text, `${shown} is reachable by the owner`).toContain(shown);
+      }
+      for (const hidden of [
+        "hiddenwordnone",
+        "hiddenwordvisibility",
+        "hiddenwordopacity",
+        "hiddenwordoffscreen",
+        "hiddenwordclipped",
+        "hiddenwordcontentsvisibility",
+      ]) {
+        expect(text, `${hidden} is hidden from the owner`).not.toContain(hidden);
+      }
+
+      await live.callTool("tabs_close", { tabId });
+    } finally {
+      await client?.close();
+    }
+  });
 });
 
 /**

@@ -436,6 +436,8 @@ export const CONVERSATION_ERROR_CODES = [
   "skill-write-failed",
   // 027 R-418: an extra MCP server not saved (duplicate name, list full, list unreadable); detail says which.
   "mcp-server-refused",
+  // 029 R-434: a question-reply whose values do not fit the question; the card stays.
+  "question-invalid",
 ] as const;
 export const conversationErrorSchema = z.strictObject({
   code: z.enum(CONVERSATION_ERROR_CODES),
@@ -563,6 +565,75 @@ export const conversationAttachmentSummarySchema = z.strictObject({
 export type ConversationAttachmentSummary = z.infer<typeof conversationAttachmentSummarySchema>;
 
 /**
+ * 029 data-model: an agent's form question (ACP `elicitation/create`, form mode) as the panel draws
+ * it. The broker maps the protocol's schema to these fields (R-432); everything here is bounded.
+ */
+export const QUESTION_MESSAGE_MAX_CHARS = 4000;
+export const QUESTION_MAX_FIELDS = 20;
+export const QUESTION_MAX_OPTIONS = 100;
+export const QUESTION_SUMMARY_MAX_CHARS = 400;
+export const QUESTION_VALUE_MAX_CHARS = 10_000;
+export const QUESTION_FIELD_KINDS = ["choice", "choices", "text", "number", "integer", "yes-no", "unsupported"] as const;
+export const QUESTION_TEXT_FORMATS = ["email", "uri", "date", "date-time"] as const;
+/** R-435: how a question card ended. Only `answered` and `skipped` are the owner's own. */
+export const QUESTION_ENDINGS = ["answered", "skipped", "cancelled", "withdrawn", "agent-exited"] as const;
+
+const questionOptionSchema = z.strictObject({
+  value: z.string().max(1000),
+  label: z.string().max(200),
+  description: z.string().max(1000).optional(),
+  /** R-438: what the agent shows beside the option (a snippet, a mock-up), as inert text. */
+  preview: z.string().max(4000).optional(),
+});
+
+/** A field's value: text, a number, yes / no, or the chosen values of several choices. */
+export const questionValueSchema = z.union([
+  z.string().max(QUESTION_VALUE_MAX_CHARS),
+  z.number().finite(),
+  z.boolean(),
+  z.array(z.string().max(1000)).max(QUESTION_MAX_OPTIONS),
+]);
+export type QuestionValue = z.infer<typeof questionValueSchema>;
+
+export const questionFieldSchema = z.strictObject({
+  key: z.string().min(1).max(200),
+  kind: z.enum(QUESTION_FIELD_KINDS),
+  /** The question's words (R-438), which can be a sentence or two. */
+  label: z.string().max(1000),
+  /** R-438: the question's short heading (the agent's own tag for it), shown above its words. */
+  chip: z.string().max(200).optional(),
+  description: z.string().max(1000).optional(),
+  required: z.boolean(),
+  /** R-438: this free-text field is the "other" answer or note of the choice field with this key. */
+  otherFor: z.string().min(1).max(200).optional(),
+  options: z.array(questionOptionSchema).max(QUESTION_MAX_OPTIONS).optional(),
+  minItems: z.number().int().nonnegative().optional(),
+  maxItems: z.number().int().nonnegative().optional(),
+  format: z.enum(QUESTION_TEXT_FORMATS).optional(),
+  minLength: z.number().int().nonnegative().optional(),
+  maxLength: z.number().int().nonnegative().optional(),
+  pattern: z.string().max(400).optional(),
+  minimum: z.number().finite().optional(),
+  maximum: z.number().finite().optional(),
+  default: questionValueSchema.optional(),
+  /** R-433: the field asks for a secret; the panel hides what is typed and never shows it again. */
+  secret: z.literal(true).optional(),
+});
+export type QuestionField = z.infer<typeof questionFieldSchema>;
+
+/** R-434: the owner's reply. `cancel` is never the owner's: Stop sends it. */
+export const questionReplySchema = z.discriminatedUnion("action", [
+  z.strictObject({
+    action: z.literal("accept"),
+    values: z
+      .record(z.string().min(1).max(200), questionValueSchema)
+      .refine((values) => Object.keys(values).length <= QUESTION_MAX_FIELDS, { message: "too many values" }),
+  }),
+  z.strictObject({ action: z.literal("decline") }),
+]);
+export type QuestionReply = z.infer<typeof questionReplySchema>;
+
+/**
  * One thing that happened in a conversation. `type` names the kind of event; `kind` on a tool or a
  * permission event is the *tool's* kind, which is why the discriminator is not called `kind`.
  */
@@ -611,6 +682,32 @@ export const conversationEventSchema = z.discriminatedUnion("type", [
     requestId: z.string().min(1).max(128),
     answer: z.enum(CONVERSATION_PERMISSION_CLOSURES),
   }),
+  /** 029 R-430..R-433: a form question waiting for the owner. */
+  z.strictObject({
+    type: z.literal("question"),
+    requestId: z.string().min(1).max(128),
+    message: z.string().max(QUESTION_MESSAGE_MAX_CHARS),
+    /** The tool call it is tied to, only when this turn announced it (R-430). */
+    toolCallId: z.string().min(1).max(128).optional(),
+    toolTitle: z.string().max(200).optional(),
+    fields: z.array(questionFieldSchema).max(QUESTION_MAX_FIELDS),
+    /** R-432: shown with its message and Skip only. */
+    skipOnly: z.literal(true).optional(),
+    /** The agent's own waiting time, when it says one (R-429). */
+    waitsMs: z.number().int().positive().optional(),
+  }),
+  /** 029 R-435, R-436: how the card ended; the summary of what was answered, secrets hidden. */
+  z
+    .strictObject({
+      type: z.literal("question-closed"),
+      requestId: z.string().min(1).max(128),
+      ending: z.enum(QUESTION_ENDINGS),
+      summary: z.string().max(QUESTION_SUMMARY_MAX_CHARS).optional(),
+    })
+    .refine((event) => event.summary === undefined || event.ending === "answered", {
+      message: "only an answered question has a summary",
+      path: ["summary"],
+    }),
   z.strictObject({
     type: z.literal("mode"),
     mode: conversationModeSchema,
@@ -784,6 +881,15 @@ const ANSWER = {
     answer: z.enum(CONVERSATION_OWNER_ANSWERS),
   }),
 };
+/** 029 R-434: the owner's Send or Skip on a question card. */
+const QUESTION_REPLY = {
+  type: z.literal("ui.conversation.question-reply"),
+  payload: z.strictObject({
+    conversationId: conversationIdSchema,
+    requestId: z.string().min(1).max(128),
+    reply: questionReplySchema,
+  }),
+};
 /** `strict` | `agent-review` and nothing else: no field names a full-access mode (FR-292, SC-140). */
 const SET_MODE = {
   type: z.literal("ui.conversation.set-mode"),
@@ -943,6 +1049,7 @@ export const conversationCommandSchema = z.discriminatedUnion("type", [
   z.strictObject(SEND),
   z.strictObject(STOP),
   z.strictObject(ANSWER),
+  z.strictObject(QUESTION_REPLY),
   z.strictObject(SET_MODE),
   z.strictObject(SET_MODEL),
   z.strictObject(OPEN),
@@ -991,6 +1098,7 @@ export const conversationPanelCommandSchema = z.discriminatedUnion("type", [
   z.strictObject({ ...SEND, ...COMMAND_ID }),
   z.strictObject({ ...STOP, ...COMMAND_ID }),
   z.strictObject({ ...ANSWER, ...COMMAND_ID }),
+  z.strictObject({ ...QUESTION_REPLY, ...COMMAND_ID }),
   z.strictObject({ ...SET_MODE, ...COMMAND_ID }),
   z.strictObject({ ...SET_MODEL, ...COMMAND_ID }),
   z.strictObject({ ...OPEN, ...COMMAND_ID }),

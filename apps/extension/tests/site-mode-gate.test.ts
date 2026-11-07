@@ -27,6 +27,7 @@ const base = {
 function plan(overrides: Partial<StatedPlan> = {}): StatedPlan {
   return {
     planId: "plan-1",
+    sessionId: "session-1",
     site: "https://fixtures.test:19443",
     steps: [
       { tool: "click", args: { ref: "tgt-1" } },
@@ -123,6 +124,22 @@ describe("T024 per-site gate", () => {
     expect(decideGate({ ...base, mode: "follow-a-plan", tool: "dialog", args: accept })).toEqual({
       decision: "prompt",
     });
+  });
+
+  /**
+   * Security review 2026-11-05 S6 - a plan is one session's consent. The store keys plans by site,
+   * and two sessions can both hold tabs on one site under `follow-a-plan`; a plan the owner approved
+   * for session A must admit nothing for session B, a step or a dialog alike. The effect steps were
+   * protected in practice by the `tabId` in their arguments; the dialog branch had nothing.
+   */
+  it("admits nothing for a session other than the one whose batch stated the plan", () => {
+    const foreign = plan({ sessionId: "session-2" });
+    expect(decideGate({ ...base, mode: "follow-a-plan", tool: "click", plan: foreign })).toEqual({ decision: "prompt" });
+    expect(
+      decideGate({ ...base, mode: "follow-a-plan", tool: "dialog", args: { tabId: 7, action: "accept" }, plan: foreign }),
+    ).toEqual({ decision: "prompt" });
+    // The same plan, asked about by its own session, admits as before.
+    expect(decideGate({ ...base, mode: "follow-a-plan", tool: "click", plan: plan() })).toEqual({ decision: "admit", step: 0 });
   });
 
   it("refuses a call it was never meant to see rather than admitting it", () => {

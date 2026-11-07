@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 import {
   agentControlFrameSchema,
   agentLinkFrameSchema,
@@ -139,7 +140,7 @@ async function startFakeBrowser(options: {
   return browser;
 }
 
-async function waitForCondition(predicate: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+async function waitForCondition(predicate: () => boolean, label: string, timeoutMs = scaledMs(5_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;

@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { win32 } from "node:path";
+import { TASKKILL, taskKillCommand } from "./windows-programs.js";
+
+export { TASKKILL };
 
 /**
  * Run a command to completion and collect what it printed (019/T531, T533: `--version` of the
@@ -44,6 +46,12 @@ export type RunOptions = {
   signal?: AbortSignal;
   /** How the tree is ended on abort or timeout (default `killTreeAsync`); tests stand in for taskkill. */
   killTree?: (pid: number | undefined) => Promise<boolean>;
+  /**
+   * How long a killed command's `close` is waited for before the run answers anyway (default
+   * `ABORT_WAIT_MS`; tests shorten it). Review 2026-11-05 C5: the timeout path had no such bound, so a
+   * grandchild still holding the pipes after `taskkill` failed kept the promise open for ever.
+   */
+  killWaitMs?: number;
 };
 
 /** How much of each stream is kept: the end, which is where errors are. */
@@ -57,11 +65,29 @@ const keepTail = (current: string, chunk: string) => {
   return next.length > KEEP_CHARS ? next.slice(next.length - KEEP_CHARS) : next;
 };
 
-/** End a process and everything it started (taskkill /T on Windows). */
-export function killTree(pid: number | undefined): void {
+/** What `killTree` needs of the machine; a test stands in for it. */
+export type KillSyncPorts = {
+  spawnSync: (file: string, args: readonly string[]) => unknown;
+};
+
+const defaultKillSyncPorts: KillSyncPorts = {
+  spawnSync: (file, args) => spawnSync(file, [...args], { stdio: "ignore", windowsHide: true }),
+};
+
+/**
+ * End a process and everything it started (taskkill /T on Windows), synchronously.
+ *
+ * By `taskkill`'s absolute path (security review 2026-11-05 S7): the Codex shim calls this from
+ * inside the conversation's folder, which the owner's agent writes into, and a bare name is looked
+ * for in the working folder first. `killTreeAsync` below is the one the broker prefers; this stays
+ * for the two callers that have no event loop to come back to.
+ */
+export function killTree(pid: number | undefined, ports: KillSyncPorts = defaultKillSyncPorts): void {
   if (!pid) return;
-  if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-  else {
+  if (process.platform === "win32") {
+    const { file, args } = taskKillCommand(pid);
+    ports.spawnSync(file, args);
+  } else {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
@@ -69,12 +95,6 @@ export function killTree(pid: number | undefined): void {
     }
   }
 }
-
-/**
- * `taskkill` by its full path: a browser started with a broken PATH starts the broker with it too,
- * and a bare name is looked for in the working folder first (as `USER_ENVIRONMENT_NAMES_QUERY`).
- */
-export const TASKKILL = win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 
 /** What `killTreeAsync` needs of the machine; tests stand in for it. */
 export type KillPorts = {
@@ -113,7 +133,8 @@ export function killTreeAsync(pid: number | undefined, ports: KillPorts = defaul
   return new Promise<boolean>((done) => {
     let killer: ReturnType<KillPorts["spawn"]>;
     try {
-      killer = ports.spawn(TASKKILL, ["/pid", String(pid), "/T", "/F"]);
+      const command = taskKillCommand(pid);
+      killer = ports.spawn(command.file, command.args);
     } catch {
       done(killOne());
       return;
@@ -159,9 +180,31 @@ export function runCommand(file: string, args: readonly string[], options: RunOp
     const endTree = options.killTree ?? ((pid: number | undefined) => killTreeAsync(pid));
     /** The tree's kill under way: the run answers once it is done, so nothing of the tree is left running. */
     let killing: Promise<boolean> | undefined;
+    const killWaitMs = options.killWaitMs ?? ABORT_WAIT_MS;
+    /**
+     * Once the tree has been asked to go, `close` is waited for only this long (C5): `close` fires when
+     * every inherited pipe is shut, which a grandchild the kill missed can hold open indefinitely.
+     * Answered then with what the run has, `killFailed` when the kill itself reported failure.
+     */
+    const settleAfterKill = (kill: Promise<boolean>, mark: "timedOut" | "aborted"): void => {
+      abortWait = setTimeout(() => {
+        void kill.then((killed) => {
+          if (!settle()) return;
+          resolveRun({
+            code: null,
+            stdout,
+            stderr,
+            timedOut,
+            ...(mark === "aborted" && killed ? { aborted: true as const } : {}),
+            ...(killed ? {} : { killFailed: true as const }),
+          });
+        });
+      }, killWaitMs);
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       killing = endTree(child.pid);
+      settleAfterKill(killing, "timedOut");
     }, options.timeoutMs ?? 30_000);
     const settle = (): boolean => {
       if (settled) return false;
@@ -176,12 +219,9 @@ export function runCommand(file: string, args: readonly string[], options: RunOp
       aborted = true;
       const kill = endTree(child.pid);
       killing = kill;
-      abortWait = setTimeout(() => {
-        // Not closed yet: `aborted` only when the kill went through; a failed one may leave it running.
-        void kill.then((killed) => {
-          if (settle()) resolveRun({ code: null, stdout, stderr, timedOut, ...(killed ? { aborted: true as const } : { killFailed: true as const }) });
-        });
-      }, ABORT_WAIT_MS);
+      if (abortWait !== undefined) clearTimeout(abortWait);
+      // Not closed yet: `aborted` only when the kill went through; a failed one may leave it running.
+      settleAfterKill(kill, "aborted");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.setEncoding("utf8");

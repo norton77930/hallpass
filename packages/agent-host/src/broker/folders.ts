@@ -8,6 +8,7 @@ import type { FolderList } from "./conversation-index.js";
 import { readHostJsonFile } from "./index-store.js";
 import { redact } from "./redact.js";
 import { runCommand, type RunResult } from "./run-command.js";
+import { EXPLORER_EXE, WINDOWS_POWERSHELL } from "./windows-programs.js";
 import { joinUnder } from "./data-path.js";
 
 /**
@@ -181,7 +182,8 @@ const DIALOG_SCRIPT = [
   "exit 0",
 ].join("\n");
 
-export const FOLDER_DIALOG_COMMAND = "powershell.exe";
+/** By absolute path (R-369, security review 2026-11-05 S7): never a bare name from this folder. */
+export const FOLDER_DIALOG_COMMAND = WINDOWS_POWERSHELL;
 export const FOLDER_DIALOG_ARGS: readonly string[] = ["-NoProfile", "-NonInteractive", "-STA", "-Command", DIALOG_SCRIPT];
 
 export type DialogOutcome =
@@ -289,7 +291,7 @@ export function createFolderActions(options: {
       if (!isAbsoluteFolderPath(path) || !(await isDirectory(path))) {
         return { ok: false, error: failure("folder-missing", "This conversation's folder does not exist any more.") };
       }
-      launch("explorer.exe", [path]);
+      launch(EXPLORER_EXE, [path]);
       return { ok: true };
     },
   };

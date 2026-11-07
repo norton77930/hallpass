@@ -33,6 +33,7 @@ import { nothingClosed, ownershipRefusal, tabsContextHint } from "./ownership.js
 import type { AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import type { AgentToolRequest } from "./stop.js";
+import { downloadSourceOrigin } from "../download-observer.js";
 
 /**
  * The tab tools (003/T042, US4, FR-044..FR-046).
@@ -97,7 +98,11 @@ export type AgentTabToolDeps = {
    * than renders never commits, so its navigation would run to the bound; the record that appears
    * for it is what ends the navigation instead, with the download in the answer.
    */
-  downloads?: { list(sessionId: string): Promise<AgentDownloadRecord[]> };
+  downloads?: {
+    list(sessionId: string): Promise<AgentDownloadRecord[]>;
+    /** #36: the observer attributes a download from this origin to the session until the bound. */
+    expect?(sessionId: string, origin: string, untilMs: number): void;
+  };
   /**
    * The "leave site?" half of leaving a page (008/US3, FR-115, R-140).
    *
@@ -334,6 +339,10 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
       const settled = await watcher.settled;
       return settled ? { ok: true } : { ok: false, reason: "navigation-timeout" };
     }
+    // #36: the tab's address may never show the url the browser turns into a download, so the
+    // observer is told where this session is going, for as long as this navigation may take.
+    const destination = downloadSourceOrigin(mayDownload.url);
+    if (destination !== undefined) deps.downloads.expect?.(mayDownload.sessionId, destination, begunAt + boundMs);
     let over = false;
     const settling = watcher.settled.then((settled) => {
       over = true;
