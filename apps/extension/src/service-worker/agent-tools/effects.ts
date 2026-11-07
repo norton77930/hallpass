@@ -13,6 +13,8 @@ import {
   type SiteMode,
 } from "@hallpass/contracts";
 import type { captureTab, CaptureDeps, CaptureFrame, CaptureRegion } from "../../chrome-adapters/capture.js";
+import type { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
+import type { readMainWorldMarks } from "../../chrome-adapters/main-world-marks.js";
 import {
   clearFrameNonce,
   enumerateFrameOffsets,
@@ -44,6 +46,20 @@ import {
   type InputBudget,
   type PointerButton,
 } from "./input.js";
+import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
+import type { readFrameFocus } from "./frame-focus.js";
+import {
+  createFocusSiteOf,
+  createFrameSiteOf,
+  createPointSiteOf,
+  frameAnswerSite,
+  frameMovedAnswer,
+  frameMovedResponse,
+  gateSiteOf,
+  promptFrameOf,
+  rememberWithoutSiteRefusal,
+  withFrameAnswer,
+} from "./frame-consent.js";
 import {
   createFrameOffsets,
   createHybridFrameOffsets,
@@ -73,11 +89,13 @@ import {
   type ScreenshotSpaces,
 } from "./coordinate-space.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
-import { findOnTab, resolveRef, type AgentTarget } from "./refs.js";
+import { discoverRefFrame, findOnTab, resolveRef, type AgentTarget, type RefFrame } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import {
+  FrameMovedBeforeDispatch,
+  isFrameMovedBeforeDispatch,
   isSiteMovedBeforeDispatch,
   readTabAddress,
   siteMovedAnswer,
@@ -241,6 +259,28 @@ export type AgentEffectDeps = {
   writeFrameNonce?: typeof writeFrameNonce;
   /** How the correlation nonce's tell is removed after the round trip (004/T149). */
   clearFrameNonce?: typeof clearFrameNonce;
+  /**
+   * Which frame holds a named ref, asked before the gate and without scrolling (030 R-443, T892).
+   *
+   * The same "collect rooted at the ref" question `wait` and `file_upload` already ask
+   * (`discoverRefFrame`, the default), which never scrolls. `undefined` is the top document: a page
+   * of one document, or one where no frame claimed the ref - the delivery claim after the gate is
+   * then held to the top document too, so a frame that stayed quiet here cannot take the gesture.
+   */
+  claimRefFrame?: (context: AgentToolContext, binding: AgentPageBinding, ref: string) => Promise<RefFrame | undefined>;
+  /** The browser's sender for one message from a claimed frame (030 R-440, T891); the adapter by default. */
+  probeFrameSender?: typeof probeFrameSender;
+  /**
+   * Every frame's main-world value of the coordinate walk's nonce, with the browser's frame and
+   * document ids (030 R-442 as settled by T886, `resolvePointSite`); the adapter by default.
+   */
+  readFrameMarks?: typeof readMainWorldMarks;
+  /**
+   * Every frame's answer to "which of your child frames holds your focus", with the browser's frame
+   * and document ids (030 T908, `resolveFocusSite`): how keys sent with no target find the frame
+   * that decides them. The all-frames read by default.
+   */
+  readFrameFocus?: typeof readFrameFocus;
   /** How long a navigation started by an effect is given to unload the old document. */
   settleMs?: number;
   reportDiagnostic?: (code: string) => void;
@@ -1202,6 +1242,116 @@ function centreOf(rect: TargetRect): { x: number; y: number } {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
 }
 
+/**
+ * What the pre-gate claim found (030 R-443, data-model DecidingSite): which frame held each named
+ * ref, and the site that decides the action. It lives for one call.
+ *
+ * `deciding` is absent when every named ref is in the top document, or in no frame at all - the
+ * page's site decides, exactly as before this feature (FR-465).
+ */
+type PreGateClaim = {
+  frames: ReadonlyMap<string, RefFrame | undefined>;
+  deciding?: DecidingSite;
+  /**
+   * Each child frame a named ref was claimed in, and what its sender said before the gate - the
+   * frame, document and site the re-check right before the gesture holds it to (030 R-446).
+   */
+  probed?: ReadonlyMap<number, DecidingSite>;
+  /**
+   * Each point the action names, and the site found under it before the gate (030 R-442): `target`
+   * for a click, hover, key or `computer` action, `from` and `to` for a drag. The re-check runs the
+   * walk again at the point the gesture is delivered at.
+   */
+  points?: ReadonlyMap<PointEnd, DecidingSite>;
+  /**
+   * The site of the frame holding focus before the gate, for keys sent to focus (030 T908); the
+   * re-check reads focus again right before the first key.
+   */
+  focus?: DecidingSite;
+};
+
+/** Where an action's point sits in its arguments. */
+type PointEnd = "target" | "from" | "to";
+
+/** Nothing named before the gate: a tool that names no element, no point and sends no keys to focus. */
+const NO_CLAIM: PreGateClaim = { frames: new Map() };
+
+/**
+ * Whether the action's keys go to whatever has focus (030 T908): `type` or `key` with no target, and
+ * `computer`'s `type` or `key` with no point. Those are decided by the frame holding focus.
+ */
+function sendsKeysToFocus(tool: AgentToolName, args: Record<string, unknown>, position: ViewportPoint | undefined): boolean {
+  if (isKeyboardTool(tool)) return args.target === undefined;
+  if (tool !== "computer") return false;
+  const action = String(args.action);
+  return (action === "type" || action === "key") && position === undefined;
+}
+
+/**
+ * The refs an element-reference action names before the gate (030 FR-454, D-030-6).
+ *
+ * A point target names no ref yet - it is resolved after the gate, in the top document - so it is
+ * not claimed here; the frame under it is found by `namedPoints` instead.
+ */
+function namedRefs(tool: AgentToolName, args: Record<string, unknown>): string[] {
+  if (!isPointerTool(tool) && !isKeyboardTool(tool)) return [];
+  const targets = tool === "drag" ? [args.from, args.to] : [args.target];
+  return targets.flatMap((target) => {
+    const ref = (target as { ref?: unknown } | undefined)?.ref;
+    return typeof ref === "string" ? [ref] : [];
+  });
+}
+
+/**
+ * The points an element tool names as its target (`{target: {x, y}}`, a drag's `from`/`to`), in the
+ * frame's pixels (030 T898). `computer`'s own point is the preflight's.
+ */
+function namedPoints(tool: AgentToolName, args: Record<string, unknown>): Array<[PointEnd, ViewportPoint]> {
+  if (!isPointerTool(tool) && !isKeyboardTool(tool)) return [];
+  const ends: PointEnd[] = tool === "drag" ? ["from", "to"] : ["target"];
+  return ends.flatMap((end): Array<[PointEnd, ViewportPoint]> => {
+    const value = args[end] as { x?: unknown; y?: unknown } | undefined;
+    return typeof value?.x === "number" && typeof value.y === "number" ? [[end, { x: value.x, y: value.y }]] : [];
+  });
+}
+
+/**
+ * One site for the whole action, from each child frame's decision (030 FR-450, FR-464).
+ *
+ * Every named ref has to be decided by the same site. A drag between the page and another site's
+ * frame, or between two sites' frames, has no one site to ask about, so it counts as unknown and
+ * always asks; so does any frame whose site could not be established.
+ */
+function combineDecisions(decided: DecidingSite[], anyTop: boolean, pageSite: string): DecidingSite | undefined {
+  if (decided.length === 0) return undefined;
+  const unknown = decided.find((entry) => entry.kind === "unknown");
+  if (unknown) return unknown;
+  const frames = decided.filter((entry): entry is Extract<DecidingSite, { kind: "frame" }> => entry.kind === "frame");
+  if (frames.length === 0) return decided[0];
+  const first = frames[0]!;
+  if (anyTop || frames.length !== decided.length || frames.some((entry) => entry.site !== first.site)) {
+    return { kind: "unknown", pageSite };
+  }
+  return first;
+}
+
+/**
+ * Whether the delivery claim found `ref` in the frame and document the gate decided for (030 R-443).
+ *
+ * A ref the pre-gate claim did not place in a child frame - the top document, no frame at all, or a
+ * point resolved after the gate - must be delivered in the top document. A child frame's must be
+ * found in that same frame, in the same document (its own epoch). Anything else is cancelled before
+ * input leaves; the full re-check right before the gesture is R-446's.
+ */
+function landedWhereDecided(claim: PreGateClaim, ref: string, rect: TargetRect): boolean {
+  const decided = claim.frames.get(ref);
+  const decidedFrame = decided?.frameId ?? 0;
+  const deliveredFrame = rect.frame?.frameId ?? 0;
+  if (decidedFrame !== deliveredFrame) return false;
+  if (decidedFrame === 0) return true;
+  return rect.frame?.documentEpoch === decided?.documentEpoch;
+}
+
 export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   const execute = deps.execute ?? executeOnActiveTab;
   const probe = deps.probe ?? probeActiveTab;
@@ -1253,6 +1403,124 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   const watchTabCreated = deps.watchTabCreated ?? watchChromeTabCreated;
   const readTabUrl = deps.tabUrl ?? chromeTabUrl;
   const readAddress = deps.tabAddress ?? readTabAddress;
+  const claimRefFrame = deps.claimRefFrame ?? ((context, binding, ref) => discoverRefFrame(context, binding, ref));
+  const probed = deps.probeFrameSender ? { probeFrameSender: deps.probeFrameSender } : {};
+  /** A claimed child frame's site, from the browser's sender for one message it sends (030 R-440). */
+  const frameSiteOf = createFrameSiteOf(deps.probeFrameSender);
+  /** The site under a point (030 FR-455), over the input attachment the gesture will leave by. */
+  const pointSiteOf = createPointSiteOf({
+    attachments: deps.attachments,
+    ...(deps.readFrameMarks ? { readFrameMarks: deps.readFrameMarks } : {}),
+    ...probed,
+  });
+  /** The site of the frame holding focus (030 T908), where keys sent with no target land. */
+  const focusSiteOf = createFocusSiteOf({
+    ...(deps.readFrameFocus ? { readFrameFocus: deps.readFrameFocus } : {}),
+    ...probed,
+  });
+
+  /**
+   * The pre-gate claim (030 R-443, T892): which frame holds each ref the action names, found
+   * without scrolling, and the site that decides it.
+   *
+   * Nothing on the page moves before the owner answers: the question is the scroll-free "is this
+   * ref yours" collection, and the probe sends one message from the frame. A ref in the top
+   * document costs no probe, and a page whose refs are all there decides on its own site as before.
+   */
+  async function claimBeforeGate(
+    tool: AgentToolName,
+    args: Record<string, unknown>,
+    acting: Record<string, unknown>,
+    context: AgentToolContext,
+    binding: AgentPageBinding,
+    /** `computer`'s point, in the frame's pixels, when its action names one (004/T139 preflight). */
+    position: ViewportPoint | undefined,
+  ): Promise<PreGateClaim> {
+    const refs = namedRefs(tool, args);
+    // 030 T898: a point is asked of the browser before the gate - `computer`'s, or an element
+    // tool's point target, which is otherwise resolved in the top document only after it.
+    const pointed: Array<[PointEnd, ViewportPoint]> =
+      tool === "computer" ? (position === undefined ? [] : [["target", position]]) : namedPoints(tool, acting);
+    // 030 T908: keys with no target go to the frame holding focus, so that frame decides them.
+    const toFocus = sendsKeysToFocus(tool, args, position);
+    if (refs.length === 0 && pointed.length === 0 && !toFocus) return NO_CLAIM;
+    const frames = new Map<string, RefFrame | undefined>();
+    const probed = new Map<number, DecidingSite>();
+    const points = new Map<PointEnd, DecidingSite>();
+    const decided: DecidingSite[] = [];
+    let anyTop = false;
+    for (const ref of refs) {
+      if (frames.has(ref)) continue;
+      let frame: RefFrame | undefined;
+      try {
+        frame = await claimRefFrame(context, binding, ref);
+      } catch {
+        frame = undefined;
+      }
+      frames.set(ref, frame);
+      if (frame === undefined || frame.frameId === 0) {
+        anyTop = true;
+        continue;
+      }
+      const site = probed.get(frame.frameId) ?? (await frameSiteOf(binding, frame.frameId));
+      probed.set(frame.frameId, site);
+      decided.push(site);
+    }
+    for (const [end, point] of pointed) {
+      const site = await pointSiteOf(binding, point);
+      points.set(end, site);
+      // A point in the top document is the page's, exactly as a ref there is.
+      if (site.kind === "page" && site.frameId === undefined) anyTop = true;
+      else decided.push(site);
+    }
+    const focus = toFocus ? await focusSiteOf(binding) : undefined;
+    if (focus !== undefined) {
+      // Focus in the top document is the page's, exactly as a ref there is (FR-465).
+      if (focus.kind === "page" && focus.frameId === undefined) anyTop = true;
+      else decided.push(focus);
+    }
+    const deciding = combineDecisions(decided, anyTop, binding.site);
+    return {
+      frames,
+      ...(deciding === undefined ? {} : { deciding }),
+      ...(probed.size === 0 ? {} : { probed }),
+      ...(points.size === 0 ? {} : { points }),
+      ...(focus === undefined ? {} : { focus }),
+    };
+  }
+
+  /**
+   * The frame re-check right before the gesture (030 FR-460, R-446, T901), after the top-site check.
+   *
+   * Each child frame a ref was claimed in is probed again and must answer from the same frame and
+   * browser document with the same site; each point is walked again at the point the gesture is
+   * delivered at and must find the same site, frame and document. Anything else throws
+   * `FrameMovedBeforeDispatch` before the first event. A ref in the top document - every ref of a
+   * page of one document - has nothing to probe. Keys sent to focus read focus again and must find
+   * it in the same site, frame and document (T908), the top document included.
+   */
+  function frameRecheck(
+    binding: AgentPageBinding,
+    claim: PreGateClaim,
+    at: Partial<Record<PointEnd, ViewportPoint>>,
+  ): (() => Promise<void>) | undefined {
+    const probed = claim.probed;
+    const points = claim.points;
+    const focus = claim.focus;
+    if (probed === undefined && points === undefined && focus === undefined) return undefined;
+    const moved = () => new FrameMovedBeforeDispatch(frameAnswerSite(claim));
+    return async () => {
+      for (const [frameId, decided] of probed ?? []) {
+        if (!sameDecidingSite(decided, await frameSiteOf(binding, frameId))) throw moved();
+      }
+      for (const [end, decided] of points ?? []) {
+        const point = at[end];
+        if (point === undefined) throw moved();
+        if (!sameDecidingSite(decided, await pointSiteOf(binding, point))) throw moved();
+      }
+      if (focus !== undefined && !sameDecidingSite(focus, await focusSiteOf(binding))) throw moved();
+    };
+  }
 
   /**
    * The check a delivery runs at its last moment (014 change log 2026-10-11): is the tab still on
@@ -1274,10 +1542,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     binding: AgentPageBinding,
     callId: string,
     delivery: Parameters<NonNullable<AgentEffectDeps["onDelivered"]>>[1],
+    /** 030 T901: the frame re-check, after the top-site one; it throws when the frame moved. */
+    recheckFrame?: () => Promise<void>,
   ): () => Promise<boolean> {
     const check = onGatedSite(binding);
     return async () => {
       if (!(await check())) return false;
+      await recheckFrame?.();
       deps.onDelivered?.(callId, delivery);
       return true;
     };
@@ -1695,6 +1966,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     context: AgentToolContext,
     binding: AgentPageBinding,
     callId: string,
+    claim: PreGateClaim,
   ): (
     target: AgentTarget | undefined,
   ) => Promise<{ ok: true; ref: string; rect: TargetRect } | { ok: false; response: AgentNativeResponse }> {
@@ -1716,6 +1988,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // has left the document since - a fact only this locate, which actually asks every frame, can
       // observe. That is a dead reference, not a page this locate simply could not search.
       if ("stale" in rect) return { ok: false, response: staleReferenceAnswer(callId) };
+      // 030 R-443: the gate decided for the frame the pre-gate claim found; a delivery claim that
+      // lands anywhere else is not what the owner was asked about, so nothing is sent.
+      if (!landedWhereDecided(claim, resolved.ref, rect)) return { ok: false, response: frameMovedAnswer(callId, claim) };
       return { ok: true, ref: resolved.ref, rect };
     };
   }
@@ -1726,6 +2001,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     context: AgentToolContext,
     binding: AgentPageBinding,
     callId: string,
+    claim: PreGateClaim,
   ): Promise<AgentNativeResponse> {
     const acquired = await deps.attachments.acquire(binding.tabId, "input");
     if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
@@ -1733,7 +2009,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     // This delivery's locator, and with it this delivery's frame geometry: it goes out of scope
     // when the gesture is answered, which is the whole lifetime an offset is trustworthy for.
     const locate = locators.forDelivery();
-    const at = locator(locate, context, binding, callId);
+    const at = locator(locate, context, binding, callId, claim);
 
     if (tool === "drag") {
       // Both endpoints are named before either is located (004/T128, B70): naming a point target
@@ -1763,6 +2039,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       }
       if (toLocated === undefined) return targetNotLocatedAnswer(callId);
       if ("stale" in toLocated) return staleReferenceAnswer(callId);
+      // 030 R-443: both ends have to be where the gate decided they were.
+      if (!landedWhereDecided(claim, from.ref, fromLocated) || !landedWhereDecided(claim, to.ref, toLocated)) {
+        return frameMovedAnswer(callId, claim);
+      }
       const fromRect = fromLocated;
       const toRect = toLocated;
       // 004/T151: `createTargetLocator` composes a same-site frame's offset into the page's own
@@ -1780,7 +2060,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // Both ends, for the path a recorded frame draws (008/FR-105), once the check let it go.
       await pointer.drag(binding.tabId, centreOf(fromRect), centreOf(toRect), {
         ...(fromRect.frame?.sessionId === undefined ? {} : { sessionId: fromRect.frame.sessionId }),
-        beforeDispatch: onGatedSiteThenDelivered(binding, callId, { from: centreOf(fromRect), to: centreOf(toRect) }),
+        beforeDispatch: onGatedSiteThenDelivered(
+          binding,
+          callId,
+          { from: centreOf(fromRect), to: centreOf(toRect) },
+          frameRecheck(binding, claim, { from: centreOf(fromRect), to: centreOf(toRect) }),
+        ),
       });
       // Whether it moved is measured, not assumed: the dragged element's box is asked for again
       // and compared with the one the gesture started from. This locate verifies; it must not
@@ -1804,7 +2089,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     const point = centreOf(target.rect);
     // The one place the point a click or a hover was aimed at exists (008/FR-105, R-136); it is
     // told once the gesture's last check has let it go.
-    const deliveredAt = onGatedSiteThenDelivered(binding, callId, { point });
+    const deliveredAt = onGatedSiteThenDelivered(binding, callId, { point }, frameRecheck(binding, claim, { target: point }));
     // The one thing this worker can see for itself about a hover: the page gave the element a box
     // with area, so there was something at that point to hover.
     const targetVisible = target.rect.width > 0 && target.rect.height > 0;
@@ -1934,6 +2219,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     context: AgentToolContext,
     binding: AgentPageBinding,
     callId: string,
+    claim: PreGateClaim,
   ): Promise<AgentNativeResponse> {
     const acquired = await deps.attachments.acquire(binding.tabId, "input");
     if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
@@ -1979,7 +2265,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         { ok: true }
       >;
     if (named !== undefined) {
-      const target = await locator(locators.forDelivery(), context, binding, callId)(named);
+      const target = await locator(locators.forDelivery(), context, binding, callId, claim)(named);
       if (!target.ok) return target.response;
       clickedRef = target.ref;
       clickedFrame = target.rect.frame;
@@ -1998,7 +2284,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
           button: "left",
           clickCount: 1,
           ...(sessionId === undefined ? {} : { sessionId }),
-          beforeDispatch: onGatedSiteThenDelivered(binding, callId, {}),
+          beforeDispatch: onGatedSiteThenDelivered(
+            binding,
+            callId,
+            {},
+            frameRecheck(binding, claim, { target: centreOf(target.rect) }),
+          ),
         }),
       );
       if (focusing !== undefined) return focusing;
@@ -2012,10 +2303,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * press); the marker is written again here, which is the same fact. Keys sent to whatever has
      * focus have no gesture before them, so they ask the same question themselves: a tab that left
      * the site while the call waited - on a consent card, say - is given nothing, and no marker.
+     * They also read focus again (030 T908): focus that moved to another frame since the gate is a
+     * frame that moved, and no key is sent.
      */
     const keysMayLeave: () => Promise<boolean> =
       named === undefined
-        ? onGatedSiteThenDelivered(binding, callId, {})
+        ? onGatedSiteThenDelivered(binding, callId, {}, frameRecheck(binding, claim, {}))
         : async () => {
             deps.onDelivered?.(callId, {});
             return true;
@@ -2190,6 +2483,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     context: AgentToolContext,
     binding: AgentPageBinding,
     callId: string,
+    /** What was decided about the frame under the point (030 T898); re-checked before the gesture. */
+    claim: PreGateClaim,
   ): Promise<AgentNativeResponse> {
     const action = String(args.action);
 
@@ -2260,9 +2555,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * An action with a point starts with a pointer gesture, whose last check writes the marker once
      * it lets the gesture go (review S1-F1). Keys sent to whatever has focus (`type`/`key` without a
      * point) have no gesture before them, so the same check runs here, immediately before them, and
-     * a tab that left the site is given nothing (014 change log 2026-10-12).
+     * a tab that left the site is given nothing (014 change log 2026-10-12) - and focus is read
+     * again, so keys whose focus moved to another frame since the gate are not sent (030 T908).
      */
-    if (point === undefined && !(await onGatedSiteThenDelivered(binding, callId, {})())) {
+    if (point === undefined && !(await onGatedSiteThenDelivered(binding, callId, {}, frameRecheck(binding, claim, {}))())) {
       return siteMovedAnswer(callId);
     }
 
@@ -2278,7 +2574,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         point,
         pointer,
         keyboard,
-        beforeDispatch: onGatedSiteThenDelivered(binding, callId, {}),
+        beforeDispatch: onGatedSiteThenDelivered(
+          binding,
+          callId,
+          {},
+          point === undefined ? undefined : frameRecheck(binding, claim, { target: point }),
+        ),
       });
       return await verifyDelivered(
         callId,
@@ -2387,23 +2688,41 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       position = preflight;
     }
 
-    const record = await deps.siteModes.get(binding.site);
+    /**
+     * 030 R-443, R-444: which site decides. An element-reference action whose ref is in another
+     * site's frame is decided by that frame's site - its mode, its plan, its session plan - and one
+     * whose frame's site is unknown by nobody's (`site: null` always asks). Every other action is
+     * decided by the page's site, exactly as before (FR-465).
+     *
+     * 030 T898: so is a coordinate action - `computer`'s point, or an element tool's point target -
+     * by the innermost frame under its point, which the debugger is asked about here. An element
+     * tool attaches for it now rather than after the gate; `computer`'s preflight already has.
+     */
+    if (tool !== "computer" && namedPoints(tool, acting).length > 0) {
+      const acquired = await deps.attachments.acquire(binding.tabId, "input");
+      if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
+    }
+    const claim = await claimBeforeGate(tool, args, acting, context, binding, position.point);
+    const gateSite = gateSiteOf(claim.deciding, binding.site);
+    // The card names the frame only when the frame, not the page, is what is being decided (R-445).
+    const promptFrame = promptFrameOf(claim.deciding);
+    const record = gateSite === null ? undefined : await deps.siteModes.get(gateSite);
     const decision = decideGate({
       sessionId: context.sessionId,
       tabId,
-      site: binding.site,
-      mode: record.mode,
+      site: gateSite,
+      mode: record?.mode ?? "ask",
       tool,
       args,
-      ...(deps.statedPlan ? { plan: deps.statedPlan(binding.site) } : {}),
+      ...(deps.statedPlan && gateSite !== null ? { plan: deps.statedPlan(gateSite) } : {}),
       // 017: the calling session's own plan, for the site this decision is about.
-      sitePlanCovers: (await deps.sitePlanCovers?.(request.sessionId, binding.site)) === true,
+      sitePlanCovers: gateSite !== null && (await deps.sitePlanCovers?.(request.sessionId, gateSite)) === true,
     });
     if (decision.decision === "refuse") {
       return answer(callId, "failed", decision.reason);
     }
-    if (decision.decision === "admit" && decision.step !== undefined) {
-      deps.onAdmitted?.(binding.site, decision.step);
+    if (decision.decision === "admit" && decision.step !== undefined && gateSite !== null) {
+      deps.onAdmitted?.(gateSite, decision.step);
     }
     if (decision.decision === "admit") {
       // 008/R-139: the owner's consent for this tab is now a moment old, and a dialog that opens
@@ -2422,6 +2741,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         stopped: request.stopped,
         sessionId: request.sessionId,
         site: binding.site,
+        ...(promptFrame === undefined ? {} : { frame: promptFrame }),
         tool,
         argsSummary: summariseToolCall(tool, args),
         // The one target that cannot be described in words: a picture of the place instead.
@@ -2433,13 +2753,19 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (asked.decision === "timed-out") {
         // FR-043: nothing ran. The prompt is dead, so a late Allow cannot start it either. And if
         // it was raised where nobody could see it, the answer says where to click (011 FR-146).
-        return noAnswerResponse(callId, asked);
+        // 030 FR-461: a frame's card also names the frame's site and why nothing was sent.
+        return promptFrame === undefined
+          ? noAnswerResponse(callId, asked)
+          : withFrameAnswer(noAnswerResponse(callId, asked), claim, "undecided");
       }
       // 006 FR-087: the owner's Stop reaches a parked call in the same word an in-flight wait gets.
       if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
       // 014 FR-179: the owner ended this step and kept the session; not a decline, and not a stop.
       if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
-      if (asked.decision === "deny") return answer(callId, "denied", "owner-denied");
+      if (asked.decision === "deny") {
+        const denied = answer(callId, "denied", "owner-denied");
+        return promptFrame === undefined ? denied : withFrameAnswer(denied, claim, "refused");
+      }
       /**
        * The lease, read again now that the owner has answered (006 FR-087, S1 review).
        *
@@ -2451,9 +2777,16 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       const held = await deps.tabOwnership(request.sessionId, tabId);
       if (held.state !== "this") return ownershipRefusal(callId, held);
       if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
-      if (asked.rememberMode) {
-        // FR-042: the owner may set the site's mode from inside the prompt they are answering.
-        await deps.siteModes.set(binding.site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
+      // 030 FR-458, T899: a card for a frame whose site is unknown offers no Allow always, so a
+      // reply that asks to remember a mode answers a question nobody was shown. It is refused like
+      // a Refuse: nothing is stored, nothing is delivered, and the agent is told why.
+      const unanswerable = rememberWithoutSiteRefusal(callId, asked.rememberMode, gateSite, claim);
+      if (unanswerable !== undefined) return unanswerable;
+      if (asked.rememberMode && gateSite !== null) {
+        // FR-042: the owner may set the site's mode from inside the prompt they are answering - the
+        // site the card decided, which for a frame's card is the frame's site, never the page's
+        // (030 FR-457). A frame whose site is unknown has no site to store anything under (FR-458).
+        await deps.siteModes.set(gateSite, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
       }
       // The owner's own yes, which is the other half of "approved" (008/R-139).
       noteApproval(tabId, tool, args);
@@ -2472,7 +2805,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     if (tool === "computer") {
       const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
-        runPosition(acting, position.point, context, binding, callId),
+        runPosition(acting, position.point, context, binding, callId, claim),
       );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
@@ -2484,8 +2817,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // is the same one whichever way the input is delivered.
       const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
         isPointerTool(tool)
-          ? deliverPointer(tool, acting, context, binding, callId)
-          : deliverKeyboard(tool, acting, context, binding, callId),
+          ? deliverPointer(tool, acting, context, binding, callId, claim)
+          : deliverKeyboard(tool, acting, context, binding, callId, claim),
       );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
@@ -2688,6 +3021,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     } catch (error) {
       // 014 change log 2026-10-11: the gesture's last check found the tab elsewhere and sent nothing.
       if (isSiteMovedBeforeDispatch(error)) return siteMovedAnswer(callId);
+      // 030 FR-460, T901: the frame the decision was made for moved before the first event.
+      if (isFrameMovedBeforeDispatch(error)) return frameMovedResponse(callId, error.site);
       if (!isInputDispatchDeadline(error)) throw error;
       return inputNotAnswered(callId);
     } finally {

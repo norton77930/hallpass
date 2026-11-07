@@ -6,6 +6,9 @@ import { createStatedPlans } from "../src/service-worker/agent-tools/plans.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import { createAgentStopSignals, type AgentToolRequest } from "../src/service-worker/agent-tools/stop.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
+import { createAgentEffects } from "../src/service-worker/agent-tools/effects.js";
+import { testSessionContexts } from "./helpers/agent-session-contexts.js";
+import { testInputAttachments } from "./helpers/input-attachments.js";
 
 /**
  * 003/T047 — `browser_batch` (US5, FR-046, FR-047).
@@ -625,5 +628,168 @@ describe("017", () => {
       await runner.run(batchRequest([CLICK]));
       expect(asked, mode).toEqual([]);
     }
+  });
+});
+
+/**
+ * 030/T894 - a batch step inside another site's frame is decided by that site (FR-454).
+ *
+ * The dispatch here is the real effect runner, so the step meets the same pre-gate claim a single
+ * call does: the earlier step on the page's own site runs under that site's skip-checks, and the
+ * step that types into the second site's frame raises that site's card before any key is sent.
+ */
+describe("030 a batch step in another site's frame", () => {
+  const PAY = "https://pay.fixtures.test:19444";
+
+  /**
+   * The real effect runner behind the batch, on a page whose `t_card` is held by the second site's
+   * frame. Its plan lookups are the runtime's: the stated plans the batch writes, and the session
+   * plan `sitePlanCovers` answers for (017).
+   */
+  function framedEffects(options: {
+    siteModes: ReturnType<typeof createSiteModeStore>;
+    prompts: ReturnType<typeof createAgentPromptController>;
+    plans?: ReturnType<typeof createStatedPlans>;
+    sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
+  }) {
+    const input = testInputAttachments();
+    const plans = options.plans;
+    const effects = createAgentEffects({
+      context: testSessionContexts(),
+      siteModes: options.siteModes,
+      bindings: {
+        bind: async (tabId) => ({
+          ok: true,
+          binding: { tabId, documentEpoch: "doc-1", canonicalOrigin: SITE, site: SITE },
+        }),
+        invalidate: () => {},
+      },
+      prompts: options.prompts,
+      tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
+      attachments: input.attachments,
+      cursor: () => {},
+      ...(plans
+        ? {
+            statedPlan: (site: string) => plans.get(site),
+            onAdmitted: (site: string, step: number) => plans.admit(site, step),
+          }
+        : {}),
+      ...(options.sitePlanCovers ? { sitePlanCovers: options.sitePlanCovers } : {}),
+      // `t_card` is the second site's: the frame that holds it, and where delivery then finds it.
+      claimRefFrame: async (_context, _binding, ref) =>
+        ref === "t_card" ? { frameId: 12, documentEpoch: "doc-pay", canonicalOrigin: PAY } : undefined,
+      probeFrameSender: async (_tabId, frameId) => ({
+        documentId: "bdoc-12",
+        sender: { origin: PAY, frameId, documentId: "bdoc-12" },
+      }),
+      locate: async ({ ref }) =>
+        ref === "t_card"
+          ? {
+              x: 300,
+              y: 200,
+              width: 120,
+              height: 24,
+              frame: { frameId: 12, rect: { x: 20, y: 10, width: 120, height: 24 }, documentEpoch: "doc-pay", canonicalOrigin: PAY },
+            }
+          : { x: 100, y: 40, width: 80, height: 20 },
+      confirm: async () => ({ outcome: "hit" as const }),
+      confirmFocus: async () => true,
+      probe: async () => ({ ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE }),
+      tabAddress: async () => ({ url: `${SITE}/checkout` }),
+      tabUrl: async () => `${SITE}/checkout`,
+      watchTabCreated: () => () => {},
+      settleMs: 0,
+    });
+    return { effects, input };
+  }
+
+  const SAVE_THEN_CARD = [
+    { tool: "click", args: { target: { ref: "t_save" } } },
+    { tool: "type", args: { target: { ref: "t_card" }, text: "4242", mode: "insert" } },
+  ];
+  const keysSent = (commands: Array<{ method: string }>) =>
+    commands.some((command) => command.method !== "Input.dispatchMouseEvent" && command.method.startsWith("Input."));
+
+  it("asks for the frame's site at that step, while the earlier step on the page's site runs", async () => {
+    const siteModes = createSiteModeStore();
+    const prompts = createAgentPromptController({ timeoutMs: 2_000 });
+    const { effects, input } = framedEffects({ siteModes, prompts });
+    const { runner } = harness({ siteModes, prompts }, (request) => effects.run(request as AgentToolRequest));
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(batchRequest(SAVE_THEN_CARD));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+
+    expect(card).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "type" });
+    // The first step ran under the page's skip-checks; the frame's step has sent nothing yet.
+    const beforeAnswer = input.commands.filter((command) => command.method.startsWith("Input."));
+    expect(beforeAnswer.some((command) => command.method === "Input.dispatchMouseEvent")).toBe(true);
+    expect(beforeAnswer.some((command) => command.method !== "Input.dispatchMouseEvent")).toBe(false);
+
+    prompts.decide(card?.promptId ?? "", true);
+    const response = await pending;
+
+    expect(response.result).toMatchObject({ results: [{ index: 0, outcome: "ok" }, { index: 1, outcome: "ok" }] });
+    expect(keysSent(input.commands)).toBe(true);
+  });
+
+  /** 030/T904 (FR-459, US6 scenario 1): the top site's approved plan does not reach into the frame. */
+  it("asks at the frame's step though the owner approved the top site's plan naming it", async () => {
+    const siteModes = createSiteModeStore();
+    const prompts = createAgentPromptController({ timeoutMs: 2_000 });
+    const plans = createStatedPlans();
+    const { effects, input } = framedEffects({ siteModes, prompts, plans });
+    const { runner } = harness({ siteModes, prompts, plans }, (request) => effects.run(request as AgentToolRequest));
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const pending = runner.run(batchRequest(SAVE_THEN_CARD));
+    await vi.waitFor(() => expect(prompts.currentPlan()).toBeDefined());
+    expect(prompts.currentPlan()).toMatchObject({ site: SITE });
+    prompts.decidePlan(prompts.currentPlan()?.planId ?? "", true);
+
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+    expect(card).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "type" });
+    // Step one was the top site's plan's own and ran without a card; step two has sent no key.
+    expect(plans.get(SITE)?.admittedCount).toBe(1);
+    expect(input.commands.some((command) => command.method === "Input.dispatchMouseEvent")).toBe(true);
+    expect(keysSent(input.commands)).toBe(false);
+
+    prompts.decide(card?.promptId ?? "", false);
+    const response = await pending;
+
+    expect(response.result).toMatchObject({
+      results: [
+        { index: 0, outcome: "ok" },
+        { index: 1, outcome: "denied", reason: "owner-denied" },
+      ],
+    });
+    expect(keysSent(input.commands)).toBe(false);
+  });
+
+  /** 030/T904 (FR-459, FR-463, US6 scenario 2): the frame site's own approved plan covers its step. */
+  it("runs the frame's step without a card when its site was approved as follow-a-plan with its own plan", async () => {
+    const siteModes = createSiteModeStore();
+    const prompts = createAgentPromptController({ timeoutMs: 2_000 });
+    const plans = createStatedPlans();
+    // `propose_sites` named the frame's site and the owner approved it: the session plan covers it.
+    const sitePlanCovers = async (_sessionId: string, site: string) => site === PAY;
+    const { effects, input } = framedEffects({ siteModes, prompts, plans, sitePlanCovers });
+    const { runner } = harness({ siteModes, prompts, plans, sitePlanCovers }, (request) =>
+      effects.run(request as AgentToolRequest),
+    );
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+    await siteModes.set(PAY, { mode: "follow-a-plan" });
+    const asked = vi.spyOn(prompts, "ask");
+
+    const pending = runner.run(batchRequest(SAVE_THEN_CARD));
+    await vi.waitFor(() => expect(prompts.currentPlan()).toBeDefined());
+    prompts.decidePlan(prompts.currentPlan()?.planId ?? "", true);
+    const response = await pending;
+
+    expect(response.result).toMatchObject({ results: [{ index: 0, outcome: "ok" }, { index: 1, outcome: "ok" }] });
+    expect(asked).not.toHaveBeenCalled();
+    expect(keysSent(input.commands)).toBe(true);
   });
 });

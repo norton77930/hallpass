@@ -71,13 +71,48 @@ const PATHS: Record<number, number[]> = { 0: [], 11: [0], 12: [1], 13: [0, 0] };
 
 type Sent = { frameId: number | undefined; type: string };
 
-function installChrome(): { sent: Sent[] } {
+type ProbeSender = { origin?: string; frameId?: number; documentId?: string; tab?: { id?: number } };
+type ProbeListener = (message: unknown, sender: ProbeSender) => unknown;
+
+function installChrome(
+  options: {
+    /**
+     * 030/T902: the origin the browser attaches to each frame's site-probe message, by frame id.
+     * By default the frame's own origin.
+     */
+    senders?: Record<number, { origin: string }>;
+  } = {},
+): { sent: Sent[]; probed: number[] } {
   const sent: Sent[] = [];
+  const probed: number[] = [];
+  const listeners = new Set<ProbeListener>();
   (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    runtime: {
+      id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      onMessage: {
+        addListener: (listener: ProbeListener) => listeners.add(listener),
+        removeListener: (listener: ProbeListener) => listeners.delete(listener),
+      },
+    },
     scripting: {
-      async executeScript(input: { func?: unknown; target: { allFrames?: boolean } }) {
+      async executeScript(input: { func?: unknown; target: { allFrames?: boolean; frameIds?: number[] }; args?: unknown[] }) {
         if (input.func === undefined) return [];
+        const probedFrame = input.target.frameIds?.[0];
+        if (probedFrame !== undefined) {
+          // The sender probe (`probeFrameSender`): the frame sends one message carrying the nonce,
+          // and the browser attaches the sender below to it - never anything the frame wrote.
+          probed.push(probedFrame);
+          const document = DOCUMENTS[probedFrame];
+          if (!document) throw new Error("No frame with id");
+          const origin = options.senders?.[probedFrame]?.origin ?? document.origin;
+          const documentId = `bdoc-${probedFrame}`;
+          const [key, nonce] = input.args as [string, string];
+          const sender = { origin, frameId: probedFrame, documentId, tab: { id: TAB } };
+          queueMicrotask(() => {
+            for (const listener of [...listeners]) listener({ [key]: nonce }, sender);
+          });
+          return [{ frameId: probedFrame, documentId, result: true }];
+        }
         // The all-frames execution the enumerator is built on: one result per frame, each carrying
         // the frame's own id and the chain it reports for itself.
         return Object.entries(DOCUMENTS).map(([id, document]) => ({
@@ -132,7 +167,7 @@ function installChrome(): { sent: Sent[] } {
       },
     },
   };
-  return { sent };
+  return { sent, probed };
 }
 
 function collectArgs(frameId: number | undefined): Parameters<typeof collectFromActiveTab>[0] {
@@ -355,5 +390,142 @@ describe("T115 find over frames", () => {
     const response = await effects().run(findRequest("action"));
 
     expect(response.result).toEqual({ outcome: "too-broad", matches: [] });
+  });
+});
+
+/**
+ * 030/T902 (FR-462, R-448) - reads name the site of each frame, from the browser.
+ *
+ * Each child frame's site is the origin the browser attaches to one message the frame sends
+ * (`probeFrameSender`, R-440 as measured in T886); the frame's own report is never read for it.
+ * The top frame is the page's site. A node or a `find` match carries `site` only when its frame's
+ * differs from the page's, so a page whose frames all share its site reads as it did before.
+ */
+describe("030 read labels", () => {
+  function reads() {
+    return createAgentReads({
+      context: testSessionContexts(),
+      bindings: createAgentPageBindings(),
+      tabOwnership: async () => ({ state: "this" }),
+    });
+  }
+
+  type ReadResult = {
+    frames: Array<{ frame: string; site: string }>;
+    nodes: Array<{ name?: string; frame?: string; site?: string }>;
+  };
+
+  async function readPage(): Promise<ReadResult> {
+    const response = await reads().run({
+      callId: "call-sites",
+      sessionId: "session-frames",
+      tool: "read_page",
+      tabId: TAB,
+      args: { tabId: TAB },
+    });
+    expect(response.outcome).toBe("ok");
+    return response.result as ReadResult;
+  }
+
+  it("lists each frame with the site the browser gives it, and marks the nodes from another site", async () => {
+    const { probed } = installChrome();
+
+    const result = await readPage();
+
+    expect(result.frames.map((frame) => [frame.frame, frame.site])).toEqual([
+      ["0", TOP_ORIGIN],
+      ["f1", TOP_ORIGIN],
+      ["f2", TOP_ORIGIN],
+      ["f3", CROSS_ORIGIN],
+    ]);
+    expect(result.nodes.map((node) => [node.name, node.frame, node.site])).toEqual([
+      ["Top action", "0", undefined],
+      ["Child action", "f1", undefined],
+      ["Grandchild action", "f2", undefined],
+      ["Cross action", "f3", CROSS_ORIGIN],
+    ]);
+    expect(result.nodes.filter((node) => "site" in node)).toHaveLength(1);
+    // The top frame is the page's site and is never probed; every child frame is, once.
+    expect([...probed].sort()).toEqual([11, 12, 13]);
+  });
+
+  it("takes the site from the browser, never from what the frame says about itself", async () => {
+    // Frame 11 reports the page's origin for itself while the browser attributes its message to
+    // another site; frame 13 is sandboxed, so the browser gives it an opaque origin.
+    installChrome({ senders: { 11: { origin: CROSS_ORIGIN }, 13: { origin: "null" } } });
+
+    const result = await readPage();
+
+    expect(result.frames.map((frame) => [frame.frame, frame.site])).toEqual([
+      ["0", TOP_ORIGIN],
+      ["f1", CROSS_ORIGIN],
+      ["f2", "unknown"],
+      ["f3", CROSS_ORIGIN],
+    ]);
+    expect(result.nodes.map((node) => [node.name, node.site])).toEqual([
+      ["Top action", undefined],
+      ["Child action", CROSS_ORIGIN],
+      ["Grandchild action", "unknown"],
+      ["Cross action", CROSS_ORIGIN],
+    ]);
+  });
+
+  it("reads a page whose frames all share its site exactly as before", async () => {
+    installChrome({ senders: { 12: { origin: TOP_ORIGIN } } });
+
+    const response = await reads().run({
+      callId: "call-sites",
+      sessionId: "session-frames",
+      tool: "read_page",
+      tabId: TAB,
+      args: { tabId: TAB },
+    });
+
+    // The nodes are the 004 answer to the byte (the working list leaves the iframe owners out, so
+    // each frame's block follows its parent's at the parent's depth); only the frame list is new.
+    const before = [
+      { ref: "t_top_btn", role: "button", name: "Top action", depth: 1, frame: "0" },
+      { ref: "t_same_btn", role: "button", name: "Child action", depth: 1, frame: "f1" },
+      { ref: "t_grand_btn", role: "button", name: "Grandchild action", depth: 1, frame: "f2" },
+      { ref: "t_cross_btn", role: "button", name: "Cross action", depth: 1, frame: "f3" },
+    ];
+    expect(JSON.stringify((response.result as { nodes: unknown }).nodes)).toBe(JSON.stringify(before));
+    expect(response).toEqual({
+      callId: "call-sites",
+      outcome: "ok",
+      result: {
+        frames: [
+          { frame: "0", parent: "0", url: TOP_URL, site: TOP_ORIGIN, readable: true },
+          { frame: "f1", parent: "0", url: `${TOP_ORIGIN}/frames-child`, site: TOP_ORIGIN, readable: true },
+          { frame: "f2", parent: "f1", url: `${TOP_ORIGIN}/frames-grandchild`, site: TOP_ORIGIN, readable: true },
+          { frame: "f3", parent: "0", url: `${CROSS_ORIGIN}/frames-child`, site: TOP_ORIGIN, readable: true },
+        ],
+        nodes: before,
+        truncated: true,
+      },
+    });
+  });
+
+  it("marks a find match inside another site's frame with that site, and a same-site one with none", async () => {
+    installChrome();
+    const runner = createAgentEffects({
+      context: testSessionContexts(),
+      siteModes: createSiteModeStore(),
+      bindings: createAgentPageBindings(),
+      prompts: createAgentPromptController({ timeoutMs: 60 }),
+      attachments: testInputAttachments().attachments,
+      tabOwnership: async () => ({ state: "this" }),
+    });
+    const find = (query: string) =>
+      runner.run({ callId: "call-find", sessionId: "session-frames", tool: "find", tabId: TAB, args: { tabId: TAB, query } });
+
+    expect((await find("Cross action")).result).toEqual({
+      outcome: "resolved",
+      matches: [{ ref: "t_cross_btn", role: "button", label: "Cross action", frame: "f3", site: CROSS_ORIGIN }],
+    });
+    expect((await find("Grandchild action")).result).toEqual({
+      outcome: "resolved",
+      matches: [{ ref: "t_grand_btn", role: "button", label: "Grandchild action", frame: "f2" }],
+    });
   });
 });

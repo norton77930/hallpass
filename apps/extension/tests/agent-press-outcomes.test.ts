@@ -12,6 +12,7 @@ import {
 import { CONTENT_OPERATION_DEADLINE_MS } from "../src/service-worker/content-broker.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
+import { oneDocumentAnswer, oneDocumentFocus } from "./helpers/point-site.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 import { pageDeadlineFailure, pageFailure, type PageExecutionOutcome } from "../src/service-worker/page-ports.js";
 
@@ -75,7 +76,8 @@ function fakeBrowser() {
       if (held) return held;
       if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
       if (method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased") hooks.onRelease?.();
-      return {};
+      // 030: the frame under a point is asked of the debugger; this page is one document.
+      return oneDocumentAnswer(method) ?? {};
     },
     attached: () => [],
     oopifSessions: () => [],
@@ -191,6 +193,8 @@ async function harness(
         : { ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE };
     },
     settleMs: SETTLE_MS,
+    // 030 T908: keys with no target ask where focus is; this page is one document.
+    readFrameFocus: oneDocumentFocus,
     watchTabCreated: browser.watchTabCreated,
     tabUrl: async (tabId) => browser.urls.get(tabId),
     downloads: { createdSince: browser.createdSince, actingOnPage: browser.actingOnPage },

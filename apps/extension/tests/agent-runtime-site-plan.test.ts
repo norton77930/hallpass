@@ -5,6 +5,7 @@ import type { AgentInputAttachments } from "../src/service-worker/agent-tools/in
 import { AGENT_RECONCILE_ALARM, composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import type { AgentRecorder } from "../src/service-worker/recording/recorder.js";
 import { AGENT_SESSION_SITE_PLANS_KEY } from "../src/service-worker/site-plan-store.js";
+import { oneDocumentAnswer } from "./helpers/point-site.js";
 
 /**
  * 017/T470, T482 — the session site plan as the composed worker carries it (R-245, R-246).
@@ -276,7 +277,7 @@ async function pairedRuntime(): Promise<{
 }
 
 /** The consent card a call raised, about which site; fails loudly rather than hanging. */
-async function card(runtime: Runtime): Promise<{ promptId: string; site: string; tool?: string; kind?: string }> {
+async function card(runtime: Runtime): Promise<{ promptId: string; site: string; tool?: string; kind?: string; frame?: unknown }> {
   await vi.waitFor(() => expect(runtime.prompts.current()).toBeDefined(), { timeout: 3_000 });
   return runtime.prompts.current() as never;
 }
@@ -700,7 +701,9 @@ describe("017 review: the plan is bound to its agent", () => {
     // A coordinate press is aimed inside the viewport, so the page has to say how big it is.
     const debuggerApi = (globalThis as { chrome: { debugger: { sendCommand: unknown } } }).chrome.debugger;
     debuggerApi.sendCommand = async (_target: unknown, method: string) =>
-      method === "Page.getLayoutMetrics" ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } } : {};
+      method === "Page.getLayoutMetrics"
+        ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } }
+        : (oneDocumentAnswer(method) ?? {});
 
     send("computer", PRESS);
     const asked = await card(runtime);
@@ -753,6 +756,24 @@ describe("T486 everything outside the plan behaves as before", () => {
     const asked = await card(runtime);
     expect(asked.tool).toBe("upload_image");
     expect(asked.site).toBe(A);
+  });
+
+  // 030 SC-206: the composed runtime hands the upload runner the debugger, so a drop point on a
+  // page with one document is asked about under the page's own site, with no frame on the card -
+  // not as an unknown site because the walk had nothing to walk with.
+  it("asks about a drop point under the page's site when the page has one document (030 SC-206)", async () => {
+    const { runtime, send } = await pairedRuntime();
+    const debuggerApi = (globalThis as { chrome: { debugger: { sendCommand: unknown } } }).chrome.debugger;
+    debuggerApi.sendCommand = async (_target: unknown, method: string) =>
+      method === "Page.getLayoutMetrics"
+        ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } }
+        : (oneDocumentAnswer(method) ?? {});
+
+    send("upload_image", { tabId: TAB, target: { coordinate: { x: 40, y: 30 } }, file: FILE });
+    const asked = await card(runtime);
+    expect(asked.tool).toBe("upload_image");
+    expect(asked.site).toBe(A);
+    expect(asked.frame).toBeUndefined();
   });
 
   it("asks about a press on a site the plan does not list (FR-256)", async () => {

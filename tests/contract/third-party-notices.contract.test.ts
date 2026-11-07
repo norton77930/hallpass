@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PACKAGE_ROOT_ENTRIES } from "../../scripts/package.js";
 import {
@@ -7,6 +8,7 @@ import {
   GENERATED_START,
   generatedSection,
   NOTICES_FILE,
+  readNotice,
   repoRoot,
   shippedPackages,
   withGenerated,
@@ -44,6 +46,28 @@ describe("L4 third-party notices", () => {
     for (const dev of ["vite", "vitest", "typescript", "playwright", "@playwright/test", "jsdom"]) expect(names.has(dev), dev).toBe(false);
     // The other platforms' koffi binaries are optional and not staged.
     expect([...names].filter((name) => name.startsWith("@koromix/koffi-"))).toEqual(["@koromix/koffi-win32-x64"]);
+  });
+
+  it("reads a koffi binary package as koffi itself whether or not this platform installed it, so every platform generates the same file", () => {
+    // Public CI 0.19.0: Windows installs koffi-win32-x64 (no licence file) and noted it as such, Linux
+    // and macOS did not install it and read koffi's MIT text, so the committed file failed there.
+    const root = mkdtempSync(join(tmpdir(), "hallpass-notices-"));
+    try {
+      const write = (dir: string, files: Record<string, string>) => {
+        mkdirSync(resolve(root, dir), { recursive: true });
+        for (const [name, body] of Object.entries(files)) writeFileSync(resolve(root, dir, name), body);
+      };
+      write("node_modules/koffi", { "package.json": JSON.stringify({ license: "MIT" }), LICENSE: "MIT License\nkoffi text" });
+      write("node_modules/@koromix/koffi-win32-x64", { "package.json": JSON.stringify({ license: "MIT" }) });
+      const pkg = { name: "@koromix/koffi-win32-x64", version: "1.0.0", path: "node_modules/@koromix/koffi-win32-x64" };
+      const installed = readNotice(pkg, root);
+      rmSync(resolve(root, "node_modules/@koromix/koffi-win32-x64"), { recursive: true, force: true });
+      const absent = readNotice(pkg, root);
+      expect(installed.text).toBe("MIT License\nkoffi text");
+      expect(installed).toEqual(absent);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("every listed package has a licence text or an explicit note, and the zip carries the file", () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import type { AgentRecorder } from "../src/service-worker/recording/recorder.js";
+import { oneDocumentAnswer } from "./helpers/point-site.js";
 
 /**
  * 008/T221 — the recording decorator on `dispatchTool`, and the export that beats the session's end.
@@ -77,6 +78,21 @@ function installChrome(): void {
     alarms: { create() {}, clear: async () => true, onAlarm: { addListener() {} } },
     runtime: { id: "extension-1", onMessage: { addListener() {} } },
     scripting: { async executeScript() {} },
+    // 030 (FR-455): a drop point is walked to the frame under it before the gate, over the
+    // debugger. This page has one document, so the walk ends in the top frame and the tab's own
+    // site decides, as it did before frames were asked about.
+    debugger: {
+      async getTargets() {
+        return [];
+      },
+      async attach() {},
+      async detach() {},
+      async sendCommand(_target: unknown, method: string) {
+        return oneDocumentAnswer(method) ?? {};
+      },
+      onEvent: { addListener() {} },
+      onDetach: { addListener() {} },
+    },
     tabs: {
       // Page zoom (R-282): 100 %; an unreadable zoom leaves a `viewport reset` with no size to state.
       async getZoom() {

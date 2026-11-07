@@ -1455,6 +1455,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     screenshotSpaces,
     // The frame a drop point's picture was of, read the way the pictures read it (R-282).
     currentViewport: (tabId) => viewportEmulation.current(tabId),
+    // 030 (FR-455): the same debugger the effects use, so a drop point is walked to the frame under
+    // it before the gate. Without it every drop would be asked about as an unknown site.
+    attachments,
     reportDiagnostic: reportTestDiagnostic,
   });
 

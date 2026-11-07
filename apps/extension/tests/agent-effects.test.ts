@@ -13,6 +13,9 @@ import { createAgentPromptController } from "../src/service-worker/agent-tools/p
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 import type { PageExecutionOutcome } from "../src/service-worker/page-ports.js";
 import { testInputAttachments } from "./helpers/input-attachments.js";
+import { frameAnswerText } from "../src/service-worker/agent-tools/site-recheck.js";
+import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
+import { fakePointPage, oneDocumentAnswer, oneDocumentFocus, type FakeFrame } from "./helpers/point-site.js";
 
 /**
  * 003/T028 — the effect tools end to end inside the worker, with the page stubbed.
@@ -49,8 +52,10 @@ function installChrome(): { sent: Sent[]; epoch: { value: string }; injections: 
       },
     },
     scripting: {
-      async executeScript(details: { target: { tabId: number } }) {
-        injections.push(details.target.tabId);
+      async executeScript(details: { target: { tabId: number }; files?: string[] }) {
+        // Only the runtime's own file is an injection; the frame enumeration (030's pre-gate claim
+        // asks it too) runs a function and answers nothing here, so the page is one document.
+        if (details.files !== undefined) injections.push(details.target.tabId);
       },
     },
     tabs: {
@@ -91,6 +96,28 @@ function installChrome(): { sent: Sent[]; epoch: { value: string }; injections: 
   return { sent, epoch, injections };
 }
 
+/**
+ * 030: where the pre-gate claim finds each ref, and the browser's sender for that frame.
+ *
+ * A test whose `locate` puts a target in a child frame has to say that the claim before the gate
+ * found it there too, or the delivery claim lands somewhere the gate did not decide for and is
+ * cancelled. The frame's site is its own origin, so a test that means the click to run puts that
+ * site in skip-checks as well.
+ */
+function claimedIn(
+  frames: Record<string, { frameId: number; documentEpoch: string; canonicalOrigin: string }>,
+): Pick<Parameters<typeof createAgentEffects>[0], "claimRefFrame" | "probeFrameSender"> {
+  return {
+    claimRefFrame: async (_context, _binding, ref) => frames[ref],
+    probeFrameSender: async (_tabId, frameId) => {
+      const frame = Object.values(frames).find((entry) => entry.frameId === frameId);
+      return frame === undefined
+        ? {}
+        : { documentId: `bdoc-${frameId}`, sender: { origin: frame.canonicalOrigin, frameId, documentId: `bdoc-${frameId}` } };
+    },
+  };
+}
+
 function clicked(): Extract<PageExecutionOutcome, { ok: true }> {
   return { ok: true, effect: "activated", clicks: 1, documentChanged: false };
 }
@@ -109,6 +136,12 @@ function harness(
   // one. What it asserts about them is unchanged - the gate, the ownership check and the
   // verification step are the same for both routes.
   const input = testInputAttachments();
+  // 030: a point is looked up in the debugger before the gate; this suite's page is one document.
+  const recorded = input.attachments.send.bind(input.attachments);
+  input.attachments.send = async (tabId, method, params, sessionId) => {
+    const answered = await recorded(tabId, method, params, sessionId);
+    return oneDocumentAnswer(method) ?? answered;
+  };
   const located: string[] = [];
   const runner = createAgentEffects({
     context: testSessionContexts(),
@@ -128,6 +161,8 @@ function harness(
     ...((options.fakeConfirm ?? true) ? { confirm: async () => ({ outcome: "hit" as const }) } : {}),
     execute,
     probe: async () => ({ ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE }),
+    // 030 T908: keys with no target ask where focus is; this suite's page is one document.
+    readFrameFocus: oneDocumentFocus,
     settleMs: 0,
     ...overrides,
   });
@@ -472,10 +507,15 @@ describe("T028 agent effect tools", () => {
             canonicalOrigin: "https://frame-7.fixtures.test",
           },
         }),
+        ...claimedIn({
+          t_save: { frameId: 7, documentEpoch: "doc-frame-7", canonicalOrigin: "https://frame-7.fixtures.test" },
+        }),
       },
       { fakeConfirm: false },
     );
     await siteModes.set(SITE, { mode: "skip-checks" });
+    // 030: the target is in that frame, so the frame's own site decides.
+    await siteModes.set("https://frame-7.fixtures.test", { mode: "skip-checks" });
 
     const response = await runner.run(clickRequest());
 
@@ -517,10 +557,14 @@ describe("T028 agent effect tools", () => {
             sessionId: "session-oopif-9",
           },
         }),
+        ...claimedIn({
+          t_save: { frameId: 9, documentEpoch: "doc-frame-9", canonicalOrigin: "https://oopif.fixtures.test" },
+        }),
       },
       { fakeConfirm: false },
     );
     await siteModes.set(SITE, { mode: "skip-checks" });
+    await siteModes.set("https://oopif.fixtures.test", { mode: "skip-checks" });
 
     await runner.run(clickRequest());
 
@@ -561,10 +605,14 @@ describe("T028 agent effect tools", () => {
         // not focus, so the caret is stipulated as landed - the same way every other session/frame
         // test in this file names its own concern and fakes the rest.
         confirmFocus: async () => true,
+        ...claimedIn({
+          t_field: { frameId: 9, documentEpoch: "doc-frame-9", canonicalOrigin: "https://oopif.fixtures.test" },
+        }),
       },
       { fakeConfirm: false },
     );
     await siteModes.set(SITE, { mode: "skip-checks" });
+    await siteModes.set("https://oopif.fixtures.test", { mode: "skip-checks" });
 
     await runner.run(
       clickRequest({ tool: "type", args: { tabId: AGENT_TAB, target: { ref: "t_field" }, text: "a", mode: "insert" } }),
@@ -624,7 +672,7 @@ describe("T028 agent effect tools", () => {
    * Endpoints that do not share a coordinate space must be refused before anything is delivered.
    */
   it("refuses a drag whose endpoints do not share a frame, before delivering anything (T151)", async () => {
-    const { runner, siteModes, input } = harness({
+    const { runner, siteModes, input, prompts } = harness({
       locate: async ({ ref }) => {
         if (ref === "t_alpha") {
           return {
@@ -644,10 +692,19 @@ describe("T028 agent effect tools", () => {
         // `t_beta` names an ordinary page-level target - a different coordinate space entirely.
         return { x: 100, y: 40, width: 80, height: 20 };
       },
+      ...claimedIn({
+        t_alpha: { frameId: 9, documentEpoch: "doc-frame-9", canonicalOrigin: "https://oopif.fixtures.test" },
+      }),
     });
     await siteModes.set(SITE, { mode: "skip-checks" });
 
-    const response = await runner.run(dragRequest());
+    // 030: a drag from another site's frame onto the page has no one site to decide it, so it asks
+    // (frame unknown); the owner allows it once, and delivery then refuses it as before.
+    const pending = runner.run(dragRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ frame: { unknown: true } });
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    const response = await pending;
 
     expect(response).toEqual({ callId: "call-1", outcome: "failed", reason: "cross-frame-drag" });
     // Refused, not delivered: no pointer traffic at all.
@@ -1592,5 +1649,745 @@ describe("a point target lands where it was read off the picture", () => {
     await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { x: 500, y: 300 } } }));
 
     expect(asked()[0]).toEqual({ x: 500, y: 300 });
+  });
+});
+
+/**
+ * 030/T892, T893 - an element-reference action inside another site's frame is decided by that site.
+ *
+ * The page modelled here is the T885 `frame-consent.html` shape: a top document on `SITE` and one
+ * child frame from a second site holding a card field. Which frame holds a ref is found *before* the
+ * gate, through the same "collect rooted at the ref" question `discoverRefFrame` asks and without
+ * any scroll, and the frame's site is the browser's sender origin (`probeFrameSender`, faked here;
+ * its own matching is `frame-sender-probe.test.ts`). The scrolling locate that computes the click's
+ * point is the post-gate delivery claim, and it must land in the frame that was decided.
+ */
+describe("030 pre-gate claim", () => {
+  const PAY = "https://pay.fixtures.test:19444";
+  const DOCUMENTS: Record<number, { url: string; origin: string; epoch: string; handles: string[] }> = {
+    0: { url: PAGE_URL, origin: SITE, epoch: "doc-1", handles: ["t_save"] },
+    12: { url: `${PAY}/card`, origin: PAY, epoch: "doc-pay", handles: ["t_card", "t_card2"] },
+  };
+  const PATHS: Record<number, number[]> = { 0: [], 12: [0] };
+  const CARD_RECT = {
+    x: 300,
+    y: 200,
+    width: 120,
+    height: 24,
+    frame: {
+      frameId: 12,
+      rect: { x: 20, y: 10, width: 120, height: 24 },
+      documentEpoch: "doc-pay",
+      canonicalOrigin: PAY,
+    },
+  };
+  let sent: Array<{ type: string; frameId: number | undefined; payload: Record<string, unknown> }>;
+
+  /** A framed page the real discovery can ask: one all-frames enumeration, then one collect per frame. */
+  function installFramedChrome(): void {
+    sent = [];
+    const local: Record<string, unknown> = {};
+    (globalThis as { chrome?: unknown }).chrome = {
+      runtime: { id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      storage: {
+        local: {
+          async get(keys: string[]) {
+            const out: Record<string, unknown> = {};
+            for (const key of keys) if (key in local) out[key] = local[key];
+            return out;
+          },
+          async set(values: Record<string, unknown>) {
+            Object.assign(local, values);
+          },
+        },
+      },
+      scripting: {
+        async executeScript(input: { func?: unknown }) {
+          if (input.func === undefined) return [];
+          return Object.entries(DOCUMENTS).map(([id, document]) => ({
+            frameId: Number(id),
+            result: { url: document.url, path: PATHS[Number(id)] },
+          }));
+        },
+      },
+      tabs: {
+        async get(tabId: number) {
+          if (tabId !== AGENT_TAB) throw new Error("No tab with id");
+          return { id: AGENT_TAB, url: PAGE_URL };
+        },
+        async query() {
+          return [{ id: AGENT_TAB, url: PAGE_URL }];
+        },
+        async sendMessage(_tabId: number, message: unknown, options?: { frameId?: number }) {
+          const frame = message as { type: string; payload: Record<string, unknown> };
+          const frameId = options?.frameId;
+          sent.push({ type: frame.type, frameId, payload: frame.payload });
+          const document = DOCUMENTS[frameId ?? 0];
+          if (!document) throw new Error("Could not establish connection. Receiving end does not exist.");
+          if (frame.type === "content.probe") {
+            return { documentEpoch: document.epoch, canonicalOrigin: document.origin };
+          }
+          if (frame.type === "content.resolve-point") {
+            // A point target is resolved in the top document, where a frame is its holder element.
+            const targetHandle =
+              typeof frame.payload.targetHandle === "string" ? frame.payload.targetHandle : `t_at_${frame.payload.x}_${frame.payload.y}`;
+            return { ok: true, outcome: "resolved", candidates: [{ targetHandle }] };
+          }
+          if (frame.type === "content.collect-page") {
+            const root = frame.payload.rootTargetHandle;
+            return {
+              contextHandle: `snap-${frameId}`,
+              documentEpoch: document.epoch,
+              canonicalOrigin: document.origin,
+              visibleText: "",
+              semanticNodes: document.handles
+                .filter((handle) => root === undefined || handle === root)
+                .map((targetHandle) => ({ role: "button", label: targetHandle, targetHandle, depth: 1 })),
+              formValueItems: [],
+            };
+          }
+          throw new Error(`unexpected frame ${frame.type}`);
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    installFramedChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  /** The browser's sender for each frame the probe is sent to; frame 12 is the second site. */
+  function framedHarness(
+    overrides: Partial<Parameters<typeof createAgentEffects>[0]> = {},
+    senders: Record<number, { origin?: string; frameId?: number; documentId?: string }> = {
+      12: { origin: PAY, frameId: 12, documentId: "bdoc-12" },
+    },
+  ) {
+    const timeline: string[] = [];
+    const probed: number[] = [];
+    const built = harness({
+      locate: async ({ ref, scroll }) => {
+        timeline.push(`locate:${ref}:${scroll}`);
+        return ref === "t_card" ? CARD_RECT : { x: 100, y: 40, width: 80, height: 20 };
+      },
+      confirmFocus: async () => true,
+      probeFrameSender: async (_tabId, frameId) => {
+        probed.push(frameId);
+        const sender = senders[frameId];
+        return sender === undefined ? {} : { documentId: `bdoc-${frameId}`, sender };
+      },
+      ...overrides,
+    });
+    return { ...built, timeline, probed };
+  }
+
+  const typeIntoCard = (overrides: Partial<AgentNativeRequest> = {}) =>
+    clickRequest({
+      tool: "type",
+      args: { tabId: AGENT_TAB, target: { ref: "t_card" }, text: "4242", mode: "insert" },
+      ...overrides,
+    });
+  const inputEvents = (commands: Array<{ method: string }>) => commands.filter((c) => c.method.startsWith("Input."));
+
+  it("finds the frame before the gate without scrolling, and asks for the frame's site before any input", async () => {
+    const { runner, siteModes, prompts, input, timeline } = framedHarness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(typeIntoCard());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+
+    // The top site's skip-checks lends nothing to the frame: its own site is asked about.
+    expect(card).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "type" });
+    // Found by asking each frame "is this ref yours", with no scroll of any kind.
+    const collects = sent.filter((entry) => entry.type === "content.collect-page");
+    expect(collects.map((entry) => entry.frameId).sort()).toEqual([0, 12]);
+    expect(collects.every((entry) => entry.payload.scrollIntoView !== true)).toBe(true);
+    // The delivery claim - the one that scrolls - has not run, and nothing reached the page.
+    expect(timeline).toEqual([]);
+    expect(input.acquired).toEqual([]);
+    expect(inputEvents(input.commands)).toEqual([]);
+
+    expect(prompts.decide(card?.promptId ?? "", true)).toBe(true);
+    const response = await pending;
+
+    expect(response.outcome).toBe("ok");
+    expect(timeline).toEqual(["locate:t_card:true"]);
+    expect(inputEvents(input.commands).length).toBeGreaterThan(0);
+  });
+
+  it("gives the gate the frame site's mode and plan, never the page's", async () => {
+    const plansAsked: string[] = [];
+    const coversAsked: string[] = [];
+    const admitted: Array<{ site: string; step: number }> = [];
+    const { runner, siteModes, prompts, input } = framedHarness({
+      statedPlan: (site) => {
+        plansAsked.push(site);
+        return site === PAY
+          ? {
+              planId: "plan-pay",
+              sessionId: "session-h1",
+              site: PAY,
+              steps: [{ tool: "click", args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }],
+              admittedCount: 0,
+            }
+          : undefined;
+      },
+      sitePlanCovers: async (_sessionId, site) => {
+        coversAsked.push(site);
+        return false;
+      },
+      onAdmitted: (site, step) => admitted.push({ site, step }),
+    });
+    // The page asks; the frame's own site follows the plan stated for it.
+    await siteModes.set(SITE, { mode: "ask" });
+    await siteModes.set(PAY, { mode: "follow-a-plan" });
+
+    const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }));
+
+    expect(response.outcome).toBe("ok");
+    expect(prompts.current()).toBeUndefined();
+    expect(plansAsked).toEqual([PAY]);
+    expect(coversAsked).toEqual([PAY]);
+    expect(admitted).toEqual([{ site: PAY, step: 0 }]);
+    expect(inputEvents(input.commands).length).toBeGreaterThan(0);
+  });
+
+  it("runs a click in a frame whose own site is skip-checks while the page's site asks (Story 1.5)", async () => {
+    const { runner, siteModes, prompts } = framedHarness();
+    await siteModes.set(SITE, { mode: "ask" });
+    await siteModes.set(PAY, { mode: "skip-checks" });
+
+    const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }));
+
+    expect(response.outcome).toBe("ok");
+    expect(prompts.current()).toBeUndefined();
+  });
+
+  it("asks with frame unknown when the browser gives the frame an opaque origin, whatever the page's mode", async () => {
+    const { runner, siteModes, prompts, input } = framedHarness(
+      {},
+      { 12: { origin: "null", frameId: 12, documentId: "bdoc-12" } },
+    );
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(typeIntoCard());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+    expect(card).toMatchObject({ site: SITE, frame: { unknown: true } });
+    prompts.decide(card?.promptId ?? "", false);
+
+    await expect(pending).resolves.toEqual({
+      callId: "call-1",
+      outcome: "denied",
+      reason: "owner-denied",
+      hint: frameAnswerText("unknown", "unknown-site"),
+    });
+    expect(inputEvents(input.commands)).toEqual([]);
+  });
+
+  it("asks about a same-site ref exactly as before, with no frame field and no probe", async () => {
+    const { runner, prompts, probed } = framedHarness();
+
+    const pending = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+
+    expect(card).toEqual({
+      promptId: card?.promptId,
+      raisedAt: card?.raisedAt,
+      site: SITE,
+      tool: "click",
+      argsSummary: "click a page element",
+    });
+    expect(probed).toEqual([]);
+    prompts.decide(card?.promptId ?? "", false);
+    await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "denied", reason: "owner-denied" });
+  });
+
+  it("cancels with the frame-moved answer when the delivery claim lands in another frame, and sends nothing", async () => {
+    const { runner, siteModes, input } = framedHarness({
+      locate: async () => ({ ...CARD_RECT, frame: { ...CARD_RECT.frame, frameId: 13 } }),
+    });
+    await siteModes.set(PAY, { mode: "skip-checks" });
+
+    const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }));
+
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "stale",
+      reason: "stale-context",
+      hint: frameAnswerText(PAY, "frame-moved"),
+    });
+    expect(inputEvents(input.commands)).toEqual([]);
+  });
+
+  it("cancels a ref no frame claimed before the gate that the delivery then finds inside a frame", async () => {
+    const { runner, siteModes, input } = framedHarness({ locate: async () => CARD_RECT });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    // `t_ghost` is nobody's before the gate, so the page's site decided; it then turns up in frame 12.
+    const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_ghost" } } }));
+
+    expect(response).toEqual({
+      callId: "call-1",
+      outcome: "stale",
+      reason: "stale-context",
+      hint: frameAnswerText("unknown", "frame-moved"),
+    });
+    expect(inputEvents(input.commands)).toEqual([]);
+  });
+
+  it("stores Allow always for the frame's site and leaves the page's site as it was (T893)", async () => {
+    const { runner, siteModes, prompts } = framedHarness();
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const pending = runner.run(typeIntoCard());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+    const response = await pending;
+
+    expect(response.outcome).toBe("ok");
+    expect((await siteModes.get(PAY)).mode).toBe("skip-checks");
+    expect((await siteModes.get(SITE)).mode).toBe("follow-a-plan");
+  });
+
+  it("delivers nothing on Refuse or on no answer, and names the frame's site (T893)", async () => {
+    const { runner, prompts, input } = framedHarness();
+
+    const refused = runner.run(typeIntoCard());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(refused).resolves.toEqual({
+      callId: "call-1",
+      outcome: "denied",
+      reason: "owner-denied",
+      hint: frameAnswerText(PAY, "refused"),
+    });
+
+    // The harness's prompt bound is 60 ms; nobody answers this one.
+    await expect(runner.run(typeIntoCard({ callId: "call-2" }))).resolves.toEqual({
+      callId: "call-2",
+      outcome: "timed-out",
+      reason: "no-answer",
+      hint: frameAnswerText(PAY, "undecided"),
+    });
+    expect(input.acquired).toEqual([]);
+    expect(inputEvents(input.commands)).toEqual([]);
+  });
+
+  it("cancels when the delivery claim finds the ref in the same frame but another document", async () => {
+    const { runner, siteModes, input } = framedHarness({
+      locate: async () => ({ ...CARD_RECT, frame: { ...CARD_RECT.frame, documentEpoch: "doc-pay-next" } }),
+    });
+    await siteModes.set(PAY, { mode: "skip-checks" });
+
+    const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }));
+
+    expect(response).toMatchObject({ outcome: "stale", hint: frameAnswerText(PAY, "frame-moved") });
+    expect(inputEvents(input.commands)).toEqual([]);
+  });
+
+  /**
+   * 030/T899 - a frame that lies about its site does not borrow trust (FR-451, FR-458, FR-464,
+   * SC-204). The frame's own report is what the content runtime says (`canonicalOrigin` of the
+   * claim); the deciding site is the browser's sender origin.
+   */
+  describe("T899 a frame's own report never decides", () => {
+    const claimingTop = { claimRefFrame: async () => ({ frameId: 12, documentEpoch: "doc-pay", canonicalOrigin: SITE }) };
+
+    it("asks for the sender's site when the frame reports the top site, while the top site is skip-checks", async () => {
+      const { runner, siteModes, prompts, input } = framedHarness(claimingTop);
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(typeIntoCard());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY } });
+      expect(inputEvents(input.commands)).toEqual([]);
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending).resolves.toMatchObject({ outcome: "denied", hint: frameAnswerText(PAY, "refused") });
+    });
+
+    it("asks with frame unknown for a sandboxed frame whose own report is the top site's", async () => {
+      // Measured: a sandboxed frame reports its holder's site for itself; the browser gives "null".
+      const { runner, siteModes, prompts } = framedHarness(claimingTop, {
+        12: { origin: "null", frameId: 12, documentId: "bdoc-12" },
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(typeIntoCard());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { unknown: true } });
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await pending;
+    });
+
+    it("refuses an answer to an unknown-site card that asks to remember a mode: nothing stored, nothing sent", async () => {
+      const { runner, siteModes, prompts, input } = framedHarness({}, { 12: { origin: "null", frameId: 12, documentId: "bdoc-12" } });
+      await siteModes.set(SITE, { mode: "follow-a-plan" });
+      const stored = vi.spyOn(siteModes, "set");
+
+      const pending = runner.run(typeIntoCard());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      // The card offers no Allow always (T900); a reply that carries one anyway is not an answer.
+      prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "denied",
+        reason: "owner-denied",
+        hint: frameAnswerText("unknown", "unknown-site"),
+      });
+      expect(stored).not.toHaveBeenCalled();
+      expect((await siteModes.get(SITE)).mode).toBe("follow-a-plan");
+      expect(input.acquired).toEqual([]);
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+  });
+
+  /**
+   * 030/T901 - the frame is asked about again right before the gesture (FR-460, R-446, SC-205): the
+   * same frame, the same browser document and the same site, or nothing is sent.
+   */
+  describe("T901 the frame re-check right before the gesture", () => {
+    /** A probe whose answers a test can change while the card is up. */
+    function changingProbe() {
+      const state = { origin: PAY, documentId: "bdoc-12" };
+      const probed: number[] = [];
+      return {
+        state,
+        probed,
+        probeFrameSender: async (_tabId: number, frameId: number) => {
+          probed.push(frameId);
+          return frameId === 12
+            ? { documentId: state.documentId, sender: { origin: state.origin, frameId, documentId: state.documentId } }
+            : {};
+        },
+      };
+    }
+
+    it("cancels with the frame-moved answer when the frame's document changed after the answer", async () => {
+      const probe = changingProbe();
+      const { runner, prompts, input } = framedHarness({ probeFrameSender: probe.probeFrameSender });
+
+      const pending = runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      probe.state.documentId = "bdoc-12-next";
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "stale",
+        reason: "stale-context",
+        hint: frameAnswerText(PAY, "frame-moved"),
+      });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("cancels when the frame's sender origin changed after the answer", async () => {
+      const probe = changingProbe();
+      const { runner, prompts, input } = framedHarness({
+        probeFrameSender: probe.probeFrameSender,
+        // Both ends in the pay frame, in the same document.
+        locate: async ({ ref }) =>
+          ref === "t_card2"
+            ? { ...CARD_RECT, x: 300, y: 240, frame: { ...CARD_RECT.frame, rect: { ...CARD_RECT.frame.rect, y: 50 } } }
+            : CARD_RECT,
+      });
+
+      const pending = runner.run(dragRequest({ args: { tabId: AGENT_TAB, from: { ref: "t_card" }, to: { ref: "t_card2" } } }));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      probe.state.origin = "https://other.fixtures.test";
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending).resolves.toMatchObject({ outcome: "stale", hint: frameAnswerText(PAY, "frame-moved") });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("types nothing when the frame moved before the focusing click", async () => {
+      const probe = changingProbe();
+      const { runner, prompts, input } = framedHarness({ probeFrameSender: probe.probeFrameSender });
+
+      const pending = runner.run(typeIntoCard());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      probe.state.documentId = "bdoc-12-next";
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending).resolves.toMatchObject({ outcome: "stale", hint: frameAnswerText(PAY, "frame-moved") });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("runs an unchanged frame's click exactly once, probing it before the gate and before the press", async () => {
+      const probe = changingProbe();
+      const { runner, siteModes, input } = framedHarness({ probeFrameSender: probe.probeFrameSender });
+      await siteModes.set(PAY, { mode: "skip-checks" });
+
+      const response = await runner.run(clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }));
+
+      expect(response.outcome).toBe("ok");
+      expect(mouse(input.commands).filter((event) => event.type === "mousePressed")).toHaveLength(1);
+      expect(probe.probed).toEqual([12, 12]);
+    });
+
+    it("adds no probe for a ref in the top document", async () => {
+      const { runner, siteModes, probed } = framedHarness();
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      expect((await runner.run(clickRequest())).outcome).toBe("ok");
+      expect(probed).toEqual([]);
+    });
+  });
+
+  /**
+   * 030/T898, T901 - an element tool given a point (`{target: {x, y}}`) is decided by the frame under
+   * that point, before the gate, and the frame under the delivery point is asked about again right
+   * before the gesture. The page has one frame from `PAY` in its own process; its holder's content
+   * box is (100, 50)-(400, 250), and a point target resolves in the top document to that holder.
+   */
+  describe("T898 a point target is decided by the frame under it", () => {
+    const HOLDER = { x: 100, y: 50, width: 300, height: 200 };
+    const payFrame = (): FakeFrame => ({
+      cdpFrameId: "T-PAY",
+      box: { ...HOLDER },
+      outOfProcess: true,
+      frameId: 12,
+      documentId: "bdoc-12",
+      sender: PAY,
+      securityOrigin: SITE,
+    });
+    const WALK = new Set([
+      "Page.getFrameTree",
+      "DOM.enable",
+      "DOM.getNodeForLocation",
+      "DOM.describeNode",
+      "DOM.getBoxModel",
+      "DOM.resolveNode",
+      "Runtime.callFunctionOn",
+      "Runtime.releaseObject",
+    ]);
+
+    function pointed(frame: FakeFrame) {
+      const page = fakePointPage([frame], { pageSite: SITE });
+      const recorder = testInputAttachments();
+      const recorded = recorder.attachments.send.bind(recorder.attachments);
+      const attachments = {
+        ...recorder.attachments,
+        async send(tabId: number, method: string, params?: Record<string, unknown>, sessionId?: string) {
+          await recorded(tabId, method, params, sessionId);
+          return WALK.has(method) ? page.send(method, params ?? {}, sessionId) : {};
+        },
+        oopifSessions: () => page.sessions(),
+      } as AgentInputAttachments;
+      const built = framedHarness({
+        attachments,
+        // A point resolves in the top document: inside the holder it is the holder element, wherever
+        // the point inside it was; elsewhere a small box of its own around the point.
+        locate: async ({ ref }) => {
+          const [x, y] = (/^t_at_(\d+)_(\d+)$/.exec(ref) ?? []).slice(1).map(Number);
+          const inside = x! >= HOLDER.x && x! < HOLDER.x + HOLDER.width && y! >= HOLDER.y && y! < HOLDER.y + HOLDER.height;
+          return inside ? { ...HOLDER } : { x: x! - 5, y: y! - 5, width: 10, height: 10 };
+        },
+        readFrameMarks: async (_tabId, key) => page.readMarks(key),
+        probeFrameSender: async (_tabId, frameId) => page.probeSender(frameId),
+      });
+      return { ...built, page, input: recorder };
+    }
+    const pointClick = (x: number, y: number, tool: AgentNativeRequest["tool"] = "click") =>
+      clickRequest({ tool, args: { tabId: AGENT_TAB, target: { x, y } } });
+
+    it("asks for the frame's site before any input event, while the page's site is skip-checks", async () => {
+      const { runner, siteModes, prompts, input } = pointed(payFrame());
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(pointClick(160, 90));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "click" });
+      expect(inputEvents(input.commands)).toEqual([]);
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+      expect((await pending).outcome).toBe("ok");
+      expect(mouse(input.commands).filter((event) => event.type === "mousePressed")).toHaveLength(1);
+    });
+
+    it("asks for a drag whose point endpoints are over the frame, and a hover over it", async () => {
+      const { runner, siteModes, prompts, input } = pointed(payFrame());
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const dragging = runner.run(dragRequest({ args: { tabId: AGENT_TAB, from: { x: 120, y: 60 }, to: { x: 300, y: 200 } } }));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ frame: { site: PAY }, tool: "drag" });
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await dragging;
+
+      const hovering = runner.run(pointClick(160, 90, "hover"));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ frame: { site: PAY }, tool: "hover" });
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await hovering;
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("keeps the page's decision for a point outside every frame, with no nonce or probe", async () => {
+      const { runner, siteModes, prompts, page } = pointed(payFrame());
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(pointClick(20, 20, "hover"));
+
+      expect(prompts.current()).toBeUndefined();
+      expect(response.outcome).toBe("ok");
+      expect(page.probed).toEqual([]);
+      expect(page.marksRead).toEqual([]);
+    });
+
+    it("cancels with the frame-moved answer when the frame under the delivery point changed after the answer (T901)", async () => {
+      const frame = payFrame();
+      const { runner, prompts, input } = pointed(frame);
+
+      const pending = runner.run(pointClick(160, 90));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      frame.documentId = "bdoc-12-next";
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending).resolves.toMatchObject({ outcome: "stale", hint: frameAnswerText(PAY, "frame-moved") });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+  });
+
+  /**
+   * 030/T908 - keys sent to whatever has focus (`type`/`key` with no target, `computer` type/key
+   * with no coordinate) are decided by the frame that holds focus, found by asking every frame and
+   * named by the browser's own frame and document ids, then by its sender origin. The page is the
+   * one modelled above: the top document on `SITE` and frame 12 from `PAY` at path `[0]`.
+   */
+  describe("T908 keys sent to focus are decided by the frame that holds it", () => {
+    /** Every frame's focus answer, as `readFrameFocus` gives it; `holder` is the frame focus is in. */
+    function focusIn(state: { holder: "top" | "pay" }) {
+      return async () => [
+        { frameId: 0, documentId: "bdoc-top", result: { path: [], focusedChild: state.holder === "pay" ? 0 : -1 } },
+        { frameId: 12, documentId: "bdoc-12", result: { path: [0], focusedChild: -1 } },
+      ];
+    }
+    const typeToFocus = () => clickRequest({ tool: "type", args: { tabId: AGENT_TAB, text: "x" } });
+
+    it("asks for the focused frame's site before typing, while the page's site is skip-checks (CR-I1)", async () => {
+      const { runner, siteModes, prompts, input } = framedHarness({ readFrameFocus: focusIn({ holder: "pay" }) });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(typeToFocus());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "type" });
+      expect(inputEvents(input.commands)).toEqual([]);
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "denied",
+        reason: "owner-denied",
+        hint: frameAnswerText(PAY, "refused"),
+      });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("asks for the focused frame's site before a key with no target", async () => {
+      const { runner, siteModes, prompts, input } = framedHarness({ readFrameFocus: focusIn({ holder: "pay" }) });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(clickRequest({ tool: "key", args: { tabId: AGENT_TAB, key: "Enter" } }));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "key" });
+      expect(inputEvents(input.commands)).toEqual([]);
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+      expect((await pending).outcome).toBe("ok");
+      expect(input.commands.some((command) => command.method === "Input.dispatchKeyEvent")).toBe(true);
+    });
+
+    it("asks for the focused frame's site before computer type with no coordinate", async () => {
+      const recorder = testInputAttachments();
+      const recorded = recorder.attachments.send.bind(recorder.attachments);
+      recorder.attachments.send = async (tabId, method, params, sessionId) => {
+        const answered = await recorded(tabId, method, params, sessionId);
+        return method === "Page.getLayoutMetrics" ? { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } } : answered;
+      };
+      const { runner, siteModes, prompts } = framedHarness({
+        attachments: recorder.attachments,
+        readFrameFocus: focusIn({ holder: "pay" }),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(clickRequest({ tool: "computer", args: { tabId: AGENT_TAB, action: "type", text: "x" } }));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "computer" });
+      expect(inputEvents(recorder.commands)).toEqual([]);
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending).resolves.toMatchObject({ outcome: "denied", hint: frameAnswerText(PAY, "refused") });
+      expect(inputEvents(recorder.commands)).toEqual([]);
+    });
+
+    it("keeps the page's decision for focus in the top document, with no probe", async () => {
+      const { runner, siteModes, prompts, input, probed } = framedHarness({ readFrameFocus: focusIn({ holder: "top" }) });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(typeToFocus());
+
+      expect(prompts.current()).toBeUndefined();
+      expect(response.outcome).toBe("ok");
+      expect(probed).toEqual([]);
+      expect(input.commands.some((command) => command.method === "Input.insertText" || command.method === "Input.dispatchKeyEvent")).toBe(true);
+    });
+
+    it("keeps the page's decision for focus in a child that is the page's own site", async () => {
+      const { runner, siteModes, prompts } = framedHarness(
+        { readFrameFocus: focusIn({ holder: "pay" }) },
+        // A srcdoc or about:blank child: the browser gives it its holder's site.
+        { 12: { origin: SITE, frameId: 12, documentId: "bdoc-12" } },
+      );
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      expect((await runner.run(typeToFocus())).outcome).toBe("ok");
+      expect(prompts.current()).toBeUndefined();
+    });
+
+    it("asks as unknown when the frame holding focus cannot be named, whatever the page's mode", async () => {
+      const { runner, siteModes, prompts, input } = framedHarness({
+        // Focus is in child 0, which did not answer the read.
+        readFrameFocus: async () => [{ frameId: 0, documentId: "bdoc-top", result: { path: [], focusedChild: 0 } }],
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(typeToFocus());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { unknown: true } });
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending).resolves.toMatchObject({ outcome: "denied", hint: frameAnswerText("unknown", "unknown-site") });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("types nothing when focus moved into another site's frame after the answer", async () => {
+      const state: { holder: "top" | "pay" } = { holder: "top" };
+      const { runner, prompts, input } = framedHarness({ readFrameFocus: focusIn(state) });
+
+      const pending = runner.run(typeToFocus());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()?.frame).toBeUndefined();
+      state.holder = "pay";
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "stale",
+        reason: "stale-context",
+        hint: frameAnswerText("unknown", "frame-moved"),
+      });
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
   });
 });

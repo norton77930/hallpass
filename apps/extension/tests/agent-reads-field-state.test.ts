@@ -50,11 +50,30 @@ const PATHS: Record<number, number[]> = { 0: [], 11: [0] };
 
 function installChrome(framed: boolean): void {
   const documents: Record<number, (typeof DOCUMENTS)[number]> = framed ? DOCUMENTS : { 0: DOCUMENTS[0]! };
+  type Listener = (message: unknown, sender: { origin: string; frameId: number; documentId: string; tab: { id: number } }) => unknown;
+  const listeners = new Set<Listener>();
   (globalThis as { chrome?: unknown }).chrome = {
-    runtime: { id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    runtime: {
+      id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      onMessage: {
+        addListener: (listener: Listener) => listeners.add(listener),
+        removeListener: (listener: Listener) => listeners.delete(listener),
+      },
+    },
     scripting: {
-      async executeScript(input: { func?: unknown }) {
+      async executeScript(input: { func?: unknown; target: { frameIds?: number[] }; args?: unknown[] }) {
         if (input.func === undefined) return [];
+        // 030/T902: the frame-site probe - the browser attributes the frame's one message to this
+        // page's origin, which every document of this fixture shares.
+        const probed = input.target.frameIds?.[0];
+        if (probed !== undefined) {
+          const [key, nonce] = input.args as [string, string];
+          const sender = { origin: ORIGIN, frameId: probed, documentId: `bdoc-${probed}`, tab: { id: TAB } };
+          queueMicrotask(() => {
+            for (const listener of [...listeners]) listener({ [key]: nonce }, sender);
+          });
+          return [{ frameId: probed, documentId: `bdoc-${probed}`, result: true }];
+        }
         return Object.entries(documents).map(([id, document]) => ({
           frameId: Number(id),
           result: { url: document.url, path: PATHS[Number(id)] },

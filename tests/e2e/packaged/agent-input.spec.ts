@@ -184,7 +184,14 @@ test.describe("agent input", () => {
         (node) => node.name === "Child action" && node.frame === crossFrameLabel,
       );
       expect(crossBtn?.ref, `cross-origin child's button has no ref: ${JSON.stringify(structure.nodes)}`).toBeTruthy();
-      const crossClicked = await call("click", { tabId, target: { ref: crossBtn!.ref! } });
+      // 030 FR-450, D-030-1: sites match by full origin, so this child - another port - is another
+      // site's frame and asks for its own site; the top site's skip-checks does not decide it.
+      const crossClicking = live.callTool("click", { tabId, target: { ref: crossBtn!.ref! } });
+      await panel.waitForText(ui("agent.promptTitle"));
+      await panel.clickButton(ui("agent.allowOnce"));
+      const crossResult = await crossClicking;
+      expect(crossResult.isError, `click failed: ${crossResult.text}\nmcp-server stderr:\n${live.stderr()}`).toBe(false);
+      const crossClicked = crossResult.json;
       expect(crossClicked).toMatchObject({ observed: { effect: "activated", verified: true } });
       const crossOriginFrame = framesPage.frames().find((frame) => frame.url().startsWith(CROSS_SITE));
       expect(crossOriginFrame, "the cross-origin frame never loaded").toBeTruthy();
@@ -331,7 +338,15 @@ test.describe("agent input", () => {
       );
       expect(oopifBtn?.ref, `OOPIF child's button has no ref: ${JSON.stringify(structure.nodes)}`).toBeTruthy();
 
-      const clicked = await call("click", { tabId, target: { ref: oopifBtn!.ref! } });
+      // 030 FR-450: the child is another site's frame, so the top site's skip-checks does not decide
+      // it - the first effect inside it asks for the frame's own site. Allow always stores that
+      // site's mode (FR-457), so the typing below runs inside the same frame without a second card.
+      const clicking = client.callTool("click", { tabId, target: { ref: oopifBtn!.ref! } });
+      await panel.waitForText(ui("agent.promptTitle"));
+      await panel.clickButton(ui("agent.allowAlways"));
+      const clickResult = await clicking;
+      expect(clickResult.isError, `click failed: ${clickResult.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
+      const clicked = clickResult.json;
       expect(clicked).toMatchObject({ observed: { effect: "activated", verified: true } });
       const oopifFrame = oopifPage.frames().find((frame) => frame.url().startsWith(OOPIF_SITE));
       expect(oopifFrame, "the out-of-process frame never loaded").toBeTruthy();

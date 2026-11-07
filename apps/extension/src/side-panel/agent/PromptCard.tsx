@@ -108,6 +108,38 @@ type PromptCardProps = {
 };
 
 /**
+ * 030 FR-457, FR-458: where an action is when it is inside an embedded frame (`site` stays the
+ * page's). Both sites are named; a frame whose site could not be established says so. With
+ * `withAnswer`, a known frame site also says the buttons answer for it - true of the consent card,
+ * whose answers are about a site, and not of a card whose answers are about something else.
+ */
+function frameLine(
+  prompt: NonNullable<AgentPanelState["prompt"]>,
+  t: (key: string) => string,
+  withAnswer: boolean,
+): ReactElement | null {
+  const frame = prompt.frame;
+  if (frame === undefined) return null;
+  if ("site" in frame) {
+    return (
+      <div data-frame="site">
+        <p>
+          {t("agent.prompt.frameSite")
+            .replace("{frameSite}", () => displayOrigin(frame.site))
+            .replace("{site}", () => displayOrigin(prompt.site))}
+        </p>
+        {withAnswer ? <p>{t("agent.prompt.frameAnswer").replace("{frameSite}", () => displayOrigin(frame.site))}</p> : null}
+      </div>
+    );
+  }
+  return (
+    <div data-frame="unknown">
+      <p>{t("agent.prompt.frameUnknown").replace("{site}", () => displayOrigin(prompt.site))}</p>
+    </div>
+  );
+}
+
+/**
  * 020 T606 (P5): the one question on screen, and under it how many more wait behind it - the other
  * questions of the projection, each shown once this one is answered. A queue the worker keeps behind
  * a single consent is not in the projection, so it is not counted here.
@@ -320,6 +352,12 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
       >
         <h2 id="agent-prompt-title">{t("agent.promptTitle")}</h2>
         <p>{t("agent.prompt.uploadDirectory").replace("{agent}", () => props.promptAgent)}</p>
+        {/*
+          030 FR-454: the upload is into an embedded frame, named as the consent card names it. Its
+          answers are about the owner's directories, not a site, so there is no "answer is about"
+          line and "from now on" stays.
+        */}
+        {frameLine(prompt, t, false)}
         {/* Inert text, each on its own line: a path is not a link and not something to interpret. */}
         <ul className="agent-prompt-files">
           {files.map((file) => (
@@ -349,7 +387,9 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
   }
 
   if (prompt && onTop === "consent") {
-    const answer = (allow: boolean, always = false): void => {
+    // 030: where the action is, when it is inside an embedded frame (`site` stays the page's).
+    const frameUnknown = prompt.frame !== undefined && "unknown" in prompt.frame;
+    const answer =(allow: boolean, always = false): void => {
       props.send({
         type: "ui.agent.effect-decide",
         payload: {
@@ -399,6 +439,12 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
           because an owner cannot decide about a question they are not allowed to read. Rendered as
           text inside a quotation, so nothing the page wrote is ever part of the panel's sentence.
         */}
+        {/*
+          030 FR-457, FR-458: the action is inside an embedded frame. Both sites are named, and the
+          buttons below answer for the frame's site (the worker decides under it), so the card says
+          that. A frame whose site could not be established says so and has no "always" (below).
+        */}
+        {frameLine(prompt, t, true)}
         {prompt.dialogText === undefined ? null : (
           <blockquote className="agent-prompt-quote">
             {t("agent.prompt.dialogQuote").replace("{text}", () => prompt.dialogText ?? "")}
@@ -427,9 +473,12 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
           <button type="button" className="agent-primary" onClick={() => answer(true)}>
             {t("agent.allowOnce")}
           </button>
-          <button type="button" onClick={() => answer(true, true)}>
-            {t("agent.allowAlways")}
-          </button>
+          {/* FR-458: an unknown frame site has nothing to remember, so no "always". */}
+          {frameUnknown ? null : (
+            <button type="button" onClick={() => answer(true, true)}>
+              {t("agent.allowAlways")}
+            </button>
+          )}
           <button type="button" onClick={() => answer(false)}>
             {t("agent.refuse")}
           </button>

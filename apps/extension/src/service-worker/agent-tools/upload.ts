@@ -16,11 +16,24 @@ import {
 } from "./coordinate-space.js";
 import { captureFrameFacts } from "./photograph.js";
 import type { CaptureFrame } from "../../chrome-adapters/capture.js";
+import type { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
+import type { readMainWorldMarks } from "../../chrome-adapters/main-world-marks.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
+import {
+  createFrameSiteOf,
+  createPointSiteOf,
+  frameMovedAnswer,
+  gateSiteOf,
+  promptFrameOf,
+  rememberWithoutSiteRefusal,
+  withFrameAnswer,
+} from "./frame-consent.js";
+import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
+import type { AgentInputAttachments } from "./input.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
-import { discoverRefFrame } from "./refs.js";
+import { discoverRefFrame, type RefFrame } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 
@@ -63,6 +76,16 @@ export type AgentUploadDeps = {
   deliverImage?: typeof deliverImageOnTab;
   /** 004/T160: which frame owns `ref`, when it names one. Overridable the way `setFiles` is. */
   discoverFrame?: typeof discoverRefFrame;
+  /** The browser's sender for one message from a claimed frame (030 R-440, T891); the adapter by default. */
+  probeFrameSender?: typeof probeFrameSender;
+  /**
+   * The shared debugger attachment a drop point's frame is found over (030 FR-455, R-442), the one
+   * the effects use. Absent, the site under a drop point cannot be established and every drop asks
+   * as an unknown site (FR-464) - never the page's mode by default.
+   */
+  attachments?: Pick<AgentInputAttachments, "acquire" | "send" | "oopifSessions">;
+  /** Every frame's main-world value of the coordinate walk's nonce (030 R-442); the adapter by default. */
+  readFrameMarks?: typeof readMainWorldMarks;
   /**
    * Each tab's latest whole-viewport picture space (012 change log 2026-10-17, R-280): a drop
    * `coordinate` is read off that picture, so it is mapped back into the frame's pixels.
@@ -85,7 +108,25 @@ function answer(callId: string, outcome: AgentNativeResponse["outcome"], reason:
   return { callId, outcome, reason };
 }
 
-type Admitted = { ok: true; context: AgentToolContext; binding: AgentPageBinding };
+/**
+ * What the pre-gate claim found for the named ref (030 R-443, O-030-1): the frame that holds it, and
+ * the site that decides the upload when that frame is a child frame.
+ *
+ * `frame` undefined is the top document (a page of one document, or no frame claimed the ref), and
+ * `frameId: 0` is the top document claiming it; neither has `deciding`, so the page's site decides
+ * exactly as before this feature (FR-465). The delivery is addressed to this frame, never re-found.
+ *
+ * A drop at a point (030 FR-455) claims no frame - the top frame takes the drop and descends itself
+ * (FR-171) - and carries `point`: where the walk was asked and what it found, for the re-check right
+ * before the drop. A point in the top document has no `deciding`, as a top-document ref has none.
+ */
+type UploadClaim = {
+  frame: RefFrame | undefined;
+  deciding?: DecidingSite;
+  point?: { at: ViewportPoint; decided: DecidingSite };
+};
+
+type Admitted = { ok: true; context: AgentToolContext; binding: AgentPageBinding; claim: UploadClaim };
 type NotAdmitted = { ok: false; response: AgentNativeResponse };
 
 /**
@@ -107,11 +148,105 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
   const setFiles = deps.setFiles ?? setFilesOnTab;
   const deliverImage = deps.deliverImage ?? deliverImageOnTab;
   const discoverFrame = deps.discoverFrame ?? discoverRefFrame;
+  const attachments = deps.attachments;
+  /** The site under a drop point, resolved exactly as the effects resolve a coordinate gesture's. */
+  const pointSiteOf =
+    attachments === undefined
+      ? async (binding: AgentPageBinding): Promise<DecidingSite> => ({ kind: "unknown", pageSite: binding.site })
+      : createPointSiteOf({
+          attachments,
+          ...(deps.readFrameMarks ? { readFrameMarks: deps.readFrameMarks } : {}),
+          ...(deps.probeFrameSender ? { probeFrameSender: deps.probeFrameSender } : {}),
+        });
+  /** A claimed child frame's site, from the browser's sender for one message it sends (030 R-440). */
+  const frameSiteOf = createFrameSiteOf(deps.probeFrameSender);
+
+  /**
+   * Which frame holds the ref, found before the gate (030 R-443, O-030-1), and the site that decides.
+   *
+   * The scroll-free "is this ref yours" question (`discoverRefFrame`), asked before the owner is: it
+   * is a read of the page, and nothing on the page moves. A discovery that fails leaves the ref to
+   * the top document, which is where the delivery then goes - so a frame that stayed quiet here is
+   * never written into. The top document costs no probe.
+   */
+  async function claimBeforeGate(context: AgentToolContext, binding: AgentPageBinding, ref: string): Promise<UploadClaim> {
+    let frame: RefFrame | undefined;
+    try {
+      frame = await discoverFrame(context, binding, ref);
+    } catch {
+      frame = undefined;
+    }
+    if (frame === undefined || frame.frameId === 0) return { frame };
+    return { frame, deciding: await frameSiteOf(binding, frame.frameId) };
+  }
+
+  /**
+   * Whether the frame the gate decided for is still the one the delivery would reach (030 FR-460).
+   *
+   * Asked after the gate and right before the bytes go out, only for a ref a child frame claimed
+   * (the top document's delivery is addressed to frame 0 and cannot land anywhere else). The claim
+   * is asked again and must land in the same frame and the same document; the browser's sender is
+   * read again and must name the same site in the same document. Any doubt is a move: nothing is
+   * written into a frame the owner did not decide about.
+   */
+  async function movedSinceGate(
+    context: AgentToolContext,
+    binding: AgentPageBinding,
+    ref: string,
+    claim: UploadClaim,
+  ): Promise<boolean> {
+    const decided = claim.frame;
+    if (decided === undefined || decided.frameId === 0) return false;
+    let again: RefFrame | undefined;
+    try {
+      again = await discoverFrame(context, binding, ref);
+    } catch {
+      again = undefined;
+    }
+    if (again === undefined || again.frameId !== decided.frameId || again.documentEpoch !== decided.documentEpoch) {
+      return true;
+    }
+    const deciding = claim.deciding;
+    // An unknown site had no document the browser vouched for, so there is nothing to compare
+    // beyond the claim above; the owner was asked about exactly that.
+    if (deciding === undefined || deciding.kind === "unknown") return false;
+    return !sameDecidingSite(deciding, await frameSiteOf(binding, decided.frameId));
+  }
+
+  /**
+   * Which frame is under a drop point, found before the gate (030 FR-455, R-442), and the site that
+   * decides the drop - the same walk a coordinate click takes (`effects.ts`).
+   *
+   * The walk rides the input attachment, so it is acquired here, before the owner is asked; it
+   * reads the page and moves nothing. An attachment that cannot be had leaves the walk unanswered,
+   * which is an unknown site: the drop is still possible, with the owner's yes and no Allow always.
+   */
+  async function claimPointBeforeGate(binding: AgentPageBinding, at: ViewportPoint): Promise<UploadClaim> {
+    await attachments?.acquire(binding.tabId, "input").catch(() => undefined);
+    const decided = await pointSiteOf(binding, at);
+    // A point in the top document is the page's, exactly as a ref there is (FR-465).
+    const top = decided.kind === "page" && decided.frameId === undefined;
+    return { frame: undefined, ...(top ? {} : { deciding: decided }), point: { at, decided } };
+  }
+
+  /**
+   * Whether the site under the drop point is still the one the gate decided for (030 FR-460, R-446):
+   * the point is walked again right before the drop and must find the same site, frame and document.
+   */
+  async function pointMovedSinceGate(binding: AgentPageBinding, claim: UploadClaim): Promise<boolean> {
+    const point = claim.point;
+    if (point === undefined) return false;
+    return !sameDecidingSite(point.decided, await pointSiteOf(binding, point.at));
+  }
 
   /**
    * The part both tools share, in the order every effect runs it: the tab must be this session's
-   * (FR-034), the page must be bound and actionable, and the site's mode must admit the call - or
-   * the owner must, through the card whose one line is `argsSummary`.
+   * (FR-034), the page must be bound and actionable, and the deciding site's mode must admit the
+   * call - or the owner must, through the card whose one line is `argsSummary`.
+   *
+   * The deciding site is the page's, unless the target - a `ref`, or a drop point - is in a child
+   * frame from another site (030 FR-454, FR-455): then that frame's site, its mode and its plan
+   * decide, and a frame whose site could not be established always asks (`site: null`, FR-464).
    */
   async function admit(
     request: AgentToolRequest,
@@ -120,6 +255,12 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     args: Record<string, unknown>,
     /** Asked once the tab is bound and before the gate: a reason here refuses with nothing asked. */
     beforeGate?: (binding: AgentPageBinding) => Promise<string | undefined>,
+    /**
+     * What the upload names, when it names something: an element, whose frame is claimed before
+     * the gate, or a drop point (read once `beforeGate` has set the picture's space), whose frame
+     * is walked to before the gate.
+     */
+    target?: { ref: string } | { point: () => ViewportPoint },
   ): Promise<Admitted | NotAdmitted> {
     const { callId } = request;
     const ownership = await deps.tabOwnership(request.sessionId, tabId);
@@ -134,19 +275,28 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     const refused = beforeGate ? await beforeGate(binding) : undefined;
     if (refused !== undefined) return { ok: false, response: answer(callId, "failed", refused) };
 
-    const record = await deps.siteModes.get(binding.site);
+    const claim: UploadClaim =
+      target === undefined
+        ? { frame: undefined }
+        : "ref" in target
+          ? await claimBeforeGate(context, binding, target.ref)
+          : await claimPointBeforeGate(binding, target.point());
+    const gateSite = gateSiteOf(claim.deciding, binding.site);
+    // The card names the frame only when the frame, not the page, is what is being decided (R-445).
+    const promptFrame = promptFrameOf(claim.deciding);
+    const record = gateSite === null ? undefined : await deps.siteModes.get(gateSite);
     const decision = decideGate({
       sessionId: context.sessionId,
       tabId,
-      site: binding.site,
-      mode: record.mode,
+      site: gateSite,
+      mode: record?.mode ?? "ask",
       tool,
       args,
-      ...(deps.statedPlan ? { plan: deps.statedPlan(binding.site) } : {}),
+      ...(deps.statedPlan && gateSite !== null ? { plan: deps.statedPlan(gateSite) } : {}),
     });
     if (decision.decision === "refuse") return { ok: false, response: answer(callId, "failed", decision.reason) };
-    if (decision.decision === "admit" && decision.step !== undefined) {
-      deps.onAdmitted?.(binding.site, decision.step);
+    if (decision.decision === "admit" && decision.step !== undefined && gateSite !== null) {
+      deps.onAdmitted?.(gateSite, decision.step);
     }
     if (decision.decision === "prompt") {
       const delivery = deliveryOf(tool, args);
@@ -158,28 +308,42 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
         stopped: request.stopped,
         sessionId: request.sessionId,
         site: binding.site,
+        ...(promptFrame === undefined ? {} : { frame: promptFrame }),
         tool,
         argsSummary: summariseToolCall(tool, args),
         ...(delivery === undefined ? {} : { delivery }),
       });
       if (asked.decision === "busy") return { ok: false, response: answer(callId, "busy", "prompt-pending") };
-      if (asked.decision === "timed-out") return { ok: false, response: noAnswerResponse(callId, asked) };
+      if (asked.decision === "timed-out") {
+        // 030 FR-461: a frame's card also names the frame's site and why nothing was sent.
+        const noAnswer = noAnswerResponse(callId, asked);
+        return { ok: false, response: promptFrame === undefined ? noAnswer : withFrameAnswer(noAnswer, claim, "undecided") };
+      }
       if (asked.decision === "stopped") return { ok: false, response: answer(callId, "stopped", "owner-stopped") };
       // 014 FR-179: the step ended, the session did not, and nothing was decided about the site.
       if (asked.decision === "interrupted")
         return { ok: false, response: answer(callId, "stopped", "owner-interrupted") };
-      if (asked.decision === "deny") return { ok: false, response: answer(callId, "denied", "owner-denied") };
+      if (asked.decision === "deny") {
+        const denied = answer(callId, "denied", "owner-denied");
+        return { ok: false, response: promptFrame === undefined ? denied : withFrameAnswer(denied, claim, "refused") };
+      }
       // 006 FR-087: the tab may have been handed back while the question stood (see effects.ts).
       const held = await deps.tabOwnership(request.sessionId, tabId);
       if (held.state !== "this") return { ok: false, response: ownershipRefusal(callId, held) };
       if (asked.decision === "released") {
         return { ok: false, response: ownershipRefusal(callId, { state: "not-yours" }) };
       }
-      if (asked.rememberMode) {
-        await deps.siteModes.set(binding.site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
+      // 030 FR-458: a card for a frame whose site is unknown offers no Allow always, so a reply that
+      // asks to remember a mode answers a question nobody was shown - refused as the effects refuse it.
+      const unanswerable = rememberWithoutSiteRefusal(callId, asked.rememberMode, gateSite, claim);
+      if (unanswerable !== undefined) return { ok: false, response: unanswerable };
+      if (asked.rememberMode && gateSite !== null) {
+        // The site the card decided: a frame's card stores the frame's site, never the page's
+        // (030 FR-457).
+        await deps.siteModes.set(gateSite, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
       }
     }
-    return { ok: true, context, binding };
+    return { ok: true, context, binding, claim };
   }
 
   async function runFileUpload(request: AgentToolRequest): Promise<AgentNativeResponse> {
@@ -196,13 +360,20 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       ref: string;
       files: Array<{ name: string; type: string; bytesBase64: string }>;
     };
-    const admitted = await admit(request, "file_upload", args.tabId, args as unknown as Record<string, unknown>);
+    // 004/T160: this ref carries no frame identity of its own, so its frame is found - since 030
+    // (O-030-1) before the gate, because that frame's site is what decides the upload.
+    const admitted = await admit(
+      request,
+      "file_upload",
+      args.tabId,
+      args as unknown as Record<string, unknown>,
+      undefined,
+      { ref: args.ref },
+    );
     if (!admitted.ok) return admitted.response;
-    const { context, binding } = admitted;
-
-    // 004/T160: this ref carries no frame identity of its own - asked for only once the effect is
-    // admitted, since it is a read of the page and the gate above is what the owner consented to.
-    const frame = await discoverFrame(context, binding, args.ref);
+    const { context, binding, claim } = admitted;
+    if (await movedSinceGate(context, binding, args.ref, claim)) return frameMovedAnswer(callId, claim);
+    const frame = claim.frame;
 
     let result: Awaited<ReturnType<typeof setFilesOnTab>>;
     try {
@@ -270,23 +441,32 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       );
       return viewportChangedReason(space, facts.frame?.width);
     };
+    const named = args.target;
     const admitted = await admit(
       request,
       "upload_image",
       args.tabId,
       args as unknown as Record<string, unknown>,
       readSpace,
+      // The drop point in the frame's pixels, once `readSpace` has read the picture's space: the
+      // point the walk is asked about is the point delivered.
+      "ref" in named ? { ref: named.ref } : { point: () => toViewportPoint(named.coordinate, space) },
     );
     if (!admitted.ok) return admitted.response;
-    const { context, binding } = admitted;
+    const { context, binding, claim } = admitted;
 
-    // A ref goes to the frame that minted it (004/T160, as `file_upload`); a point goes to the top
-    // frame, which does its own one-level descent into a frame it can read (FR-171).
-    const frame = "ref" in args.target ? await discoverFrame(context, binding, args.target.ref) : undefined;
+    // A ref goes to the frame that minted it (004/T160, as `file_upload`), found before the gate and
+    // decided by its site (030 O-030-1); a point goes to the top frame, which does its own one-level
+    // descent into a frame it can read (FR-171), decided by the site under it (030 FR-455). Either is
+    // asked about again right before the delivery (FR-460).
+    const moved =
+      "ref" in named
+        ? await movedSinceGate(context, binding, named.ref, claim)
+        : await pointMovedSinceGate(binding, claim);
+    if (moved) return frameMovedAnswer(callId, claim);
+    const frame = claim.frame;
     const target =
-      "ref" in args.target
-        ? { handle: args.target.ref }
-        : { point: toViewportPoint(args.target.coordinate, space) };
+      "ref" in named ? { handle: named.ref } : { point: claim.point?.at ?? toViewportPoint(named.coordinate, space) };
 
     let result: Awaited<ReturnType<typeof deliverImageOnTab>>;
     try {

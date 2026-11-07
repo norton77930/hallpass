@@ -4,6 +4,7 @@ import {
   DEFAULT_BOUNDS,
   type AgentReadPageResult,
 } from "@hallpass/contracts";
+import { decideFrameSite, type FrameSiteSender } from "./frame-site.js";
 
 /**
  * One page out of every frame it is made of (004/T113, US4 read half, R-114, FR-063).
@@ -100,6 +101,46 @@ export type FrameEnumerator = (tabId: number) => Promise<BrowserFrame[]>;
  */
 export const FRAME_ANSWER_BOUND_MS = 2_000;
 
+/**
+ * Where each frame's site comes from in a read (030 R-448, FR-462).
+ *
+ * `pageSite` is the top frame's site - the page's, as `site-mode-store` keys it - and costs no
+ * lookup. `siteOf` answers a child frame's site: an origin, or `"unknown"`. It is asked in parallel
+ * with that frame's read and inside the same one bound, so a page of quiet frames still costs one
+ * bound; a lookup that fails or loses the race is `"unknown"`. Injected, like the enumeration: the
+ * worker's answer is the browser's sender origin (`senderFrameSites`).
+ */
+export type FrameSites = {
+  pageSite: string;
+  siteOf: (input: { tabId: number; frameId: number }) => Promise<string>;
+};
+
+/** What the browser attached to one frame's message (the `probeFrameSender` answer, structurally). */
+export type FrameSenderProbeAnswer = { documentId?: string; sender?: FrameSiteSender };
+
+/**
+ * A read's frame sites from the browser's sender origin (030 R-440 as measured in T886, R-448).
+ *
+ * The frame is asked for one message; the site is the origin the browser attached to it, matched
+ * to the frame and document the probe ran in. The frame's own report is never read. No answer, an
+ * opaque origin, or anything that is not http(s) is `"unknown"`, exactly as for consent.
+ */
+export function senderFrameSites(
+  probe: (tabId: number, frameId: number, boundMs: number) => Promise<FrameSenderProbeAnswer>,
+  pageSite: string,
+  boundMs: number = FRAME_ANSWER_BOUND_MS,
+): FrameSites {
+  return {
+    pageSite,
+    async siteOf({ tabId, frameId }) {
+      const probed = await probe(tabId, frameId, boundMs);
+      if (probed.documentId === undefined || probed.sender === undefined) return "unknown";
+      const decided = decideFrameSite({ sender: probed.sender }, { frameId, documentId: probed.documentId }, pageSite);
+      return decided.kind === "unknown" ? "unknown" : decided.site;
+    },
+  };
+}
+
 export type MergePageFramesDeps = {
   enumerateFrames: FrameEnumerator;
   readSubtree: FrameSubtreeReader;
@@ -107,6 +148,11 @@ export type MergePageFramesDeps = {
   boundMs?: number;
   maxNodes?: number;
   maxChars?: number;
+  /**
+   * 030/T902: each frame's site. Without it every frame is listed `"unknown"` and no node is
+   * marked - the merge as it was before sites existed.
+   */
+  sites?: FrameSites;
 };
 
 /** Which ceiling ran out, so the answer can say what was cut rather than that something was. */
@@ -161,6 +207,8 @@ type PendingFrame<T> = {
   answer?: T;
   readable: boolean;
   reason?: "not-allowed" | "no-answer";
+  /** 030/T902: the frame's site, when the caller asked for sites; `"unknown"` when not established. */
+  site?: string;
 };
 
 /**
@@ -208,20 +256,33 @@ function flatten(
   pending: PendingFrame<{ nodes: FrameSubtreeNode[] }>,
   baseDepth: number,
   out: AgentReadPageResult["nodes"],
+  /** 030/T902: the page's site, when sites were asked for; a node of another site's frame names it. */
+  pageSite?: string,
 ): void {
   const children = [...pending.children];
+  const marked = foreignSite(pending, pageSite);
   for (const node of pending.answer?.nodes ?? []) {
     const depth = baseDepth + node.depth;
     const { frameOwner, ...carried } = node;
-    out.push({ ...carried, depth, frame: pending.label });
+    out.push({ ...carried, depth, frame: pending.label, ...(marked === undefined ? {} : { site: marked }) });
     if (frameOwner === true) {
       const child = children.shift();
-      if (child) flatten(child, depth + 1, out);
+      if (child) flatten(child, depth + 1, out, pageSite);
     }
   }
   for (const child of children) {
-    flatten(child, baseDepth, out);
+    flatten(child, baseDepth, out, pageSite);
   }
+}
+
+/**
+ * The site a frame's nodes and matches carry (030 FR-462): its own, only when it is not the page's.
+ * Nothing when sites were not asked for, so such a read is marked exactly as before.
+ */
+function foreignSite(pending: { site?: string }, pageSite: string | undefined): string | undefined {
+  if (pageSite === undefined) return undefined;
+  const site = pending.site ?? "unknown";
+  return site === pageSite ? undefined : site;
 }
 
 /**
@@ -238,6 +299,7 @@ async function askEveryFrame<T>(
   frames: BrowserFrame[],
   ask: (input: { tabId: number; frameId: number }) => Promise<T>,
   boundMs: number,
+  sites?: FrameSites,
 ): Promise<{ root?: PendingFrame<T>; inOrder: PendingFrame<T>[] }> {
   const { root, inOrder } = buildTree<T>(frames);
   if (!root) return { inOrder };
@@ -256,11 +318,35 @@ async function askEveryFrame<T>(
     };
   });
 
+  /**
+   * 030/T902: a child frame's site, looked up beside its read and against the same deadline. The
+   * top frame is the page's site; a frame the browser keeps scripts out of could not answer one.
+   */
+  const lookUpSite = async (pending: PendingFrame<T>, lookup: FrameSites): Promise<void> => {
+    if (pending === root) {
+      pending.site = lookup.pageSite;
+      return;
+    }
+    if (isForbiddenFrame(pending.frame.url)) {
+      pending.site = "unknown";
+      return;
+    }
+    let site: string | typeof EXPIRED;
+    try {
+      site = await Promise.race([lookup.siteOf({ tabId, frameId: pending.frame.frameId }), expired]);
+    } catch {
+      site = EXPIRED;
+    }
+    pending.site = site === EXPIRED ? "unknown" : site;
+  };
+
   await Promise.all(
     inOrder.map(async (pending) => {
+      const site = sites === undefined ? undefined : lookUpSite(pending, sites);
       if (isForbiddenFrame(pending.frame.url)) {
         pending.readable = false;
         pending.reason = "not-allowed";
+        await site;
         return;
       }
       let answer: T | typeof EXPIRED;
@@ -271,6 +357,7 @@ async function askEveryFrame<T>(
         // reported with the word for that and not with a second one meaning "it failed loudly".
         answer = EXPIRED;
       }
+      await site;
       if (answer === EXPIRED) {
         pending.readable = false;
         pending.reason = "no-answer";
@@ -313,6 +400,9 @@ function listFrames<T>(inOrder: PendingFrame<T>[]): NonNullable<AgentReadPageRes
     frame: pending.label,
     parent: pending.parentLabel,
     url: pending.frame.url,
+    // 030/T902: the browser's sender origin (or the page's, for the top frame); `"unknown"` when it
+    // could not be established, or when the caller did not ask for sites.
+    site: pending.site ?? "unknown",
     readable: pending.readable,
     ...(pending.reason === undefined ? {} : { reason: pending.reason }),
   }));
@@ -327,11 +417,12 @@ export async function mergePageFrames(tabId: number, deps: MergePageFramesDeps):
     await deps.enumerateFrames(tabId),
     deps.readSubtree,
     deps.boundMs ?? FRAME_ANSWER_BOUND_MS,
+    deps.sites,
   );
   if (!root) return { frames: [], nodes: [], truncated: false };
 
   const merged: AgentReadPageResult["nodes"] = [];
-  flatten(root, 0, merged);
+  flatten(root, 0, merged, deps.sites?.pageSite);
 
   const capped = capPageNodes(merged, { maxNodes, maxChars });
   return {
@@ -453,6 +544,8 @@ export async function askPageFrames<T>(
     enumerateFrames: FrameEnumerator;
     ask: (input: { tabId: number; frameId: number }) => Promise<T>;
     boundMs?: number;
+    /** 030/T902: each frame's site, as `mergePageFrames` takes it. */
+    sites?: FrameSites;
   },
 ): Promise<FrameAnswer<T>[]> {
   const { inOrder } = await askEveryFrame(
@@ -460,6 +553,7 @@ export async function askPageFrames<T>(
     await deps.enumerateFrames(tabId),
     deps.ask,
     deps.boundMs ?? FRAME_ANSWER_BOUND_MS,
+    deps.sites,
   );
   return listFrames(inOrder).map((frame, index) => {
     const answer = inOrder[index]?.answer;

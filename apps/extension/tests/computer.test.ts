@@ -8,6 +8,8 @@ import { createAgentPromptController } from "../src/service-worker/agent-tools/p
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 import { createScreenshotSpaceStore } from "../src/service-worker/screenshot-space-store.js";
+import { frameAnswerText } from "../src/service-worker/agent-tools/site-recheck.js";
+import { fakePointPage, oneDocumentAnswer, oneDocumentFocus, type FakeFrame } from "./helpers/point-site.js";
 
 /**
  * 004/T138 — acting by position (US7, FR-069, FR-070, R-120).
@@ -25,9 +27,21 @@ const SITE = "https://fixtures.test:19443";
 const PAGE_URL = `${SITE}/canvas`;
 const VIEWPORT = { width: 1280, height: 720 };
 
-type Command = { tabId: number; method: string; params: Record<string, unknown> };
+type Command = { tabId: number; method: string; params: Record<string, unknown>; sessionId?: string };
 
-function fakeAttachments(): { attachments: AgentInputAttachments; commands: Command[] } {
+/** The walk's own commands (030 R-442), answered by the page model rather than this fake. */
+const POINT_WALK_METHODS = new Set([
+  "Page.getFrameTree",
+  "DOM.enable",
+  "DOM.getNodeForLocation",
+  "DOM.describeNode",
+  "DOM.getBoxModel",
+  "DOM.resolveNode",
+  "Runtime.callFunctionOn",
+  "Runtime.releaseObject",
+]);
+
+function fakeAttachments(page?: ReturnType<typeof fakePointPage>): { attachments: AgentInputAttachments; commands: Command[] } {
   const commands: Command[] = [];
   const attachments = {
     async acquire() {
@@ -36,8 +50,13 @@ function fakeAttachments(): { attachments: AgentInputAttachments; commands: Comm
     async drop() {},
     async release() {},
     async releaseAll() {},
-    async send(tabId: number, method: string, params?: Record<string, unknown>) {
-      commands.push({ tabId, method, params: params ?? {} });
+    async send(tabId: number, method: string, params?: Record<string, unknown>, sessionId?: string) {
+      commands.push({ tabId, method, params: params ?? {}, ...(sessionId === undefined ? {} : { sessionId }) });
+      // 030: which frame is under a point is asked of the page model when a test has one, and is
+      // otherwise a page of one document.
+      if (page !== undefined && POINT_WALK_METHODS.has(method)) return page.send(method, params ?? {}, sessionId);
+      const oneDocument = oneDocumentAnswer(method);
+      if (oneDocument !== undefined) return oneDocument;
       // The one geometry query the position tool makes: the tab's own viewport, which is what a
       // refusal has to be able to name.
       if (method === "Page.getLayoutMetrics") {
@@ -46,6 +65,7 @@ function fakeAttachments(): { attachments: AgentInputAttachments; commands: Comm
       // 012/T311: the picture of an emulated tab comes over this attachment, not off the window.
       return method === "Page.captureScreenshot" ? { data: "cHJvdG9jb2w=" } : {};
     },
+    oopifSessions: () => page?.sessions() ?? [],
     attached: () => [],
     state: () => undefined,
     onEvent() {},
@@ -97,8 +117,8 @@ function installChrome(): void {
   };
 }
 
-function harness(overrides: Partial<Parameters<typeof createAgentEffects>[0]> = {}) {
-  const fake = fakeAttachments();
+function harness(overrides: Partial<Parameters<typeof createAgentEffects>[0]> = {}, page?: ReturnType<typeof fakePointPage>) {
+  const fake = fakeAttachments(page);
   const siteModes = createSiteModeStore();
   const capture = vi.fn(async () => ({ data: "UE5H", mimeType: "image/png" as const, cropped: true, scale: 1 }));
   const runner = createAgentEffects({
@@ -112,6 +132,14 @@ function harness(overrides: Partial<Parameters<typeof createAgentEffects>[0]> = 
     capture,
     probe: async () => ({ ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE }),
     settleMs: 0,
+    // 030 T908: keys with no point ask where focus is; this page's focus is in its top document.
+    readFrameFocus: oneDocumentFocus,
+    ...(page === undefined
+      ? {}
+      : {
+          readFrameMarks: (_tabId: number, key: string) => page.readMarks(key),
+          probeFrameSender: (_tabId: number, frameId: number) => page.probeSender(frameId),
+        }),
     ...overrides,
   });
   return { runner, siteModes, capture, ...fake };
@@ -544,5 +572,160 @@ describe("computer aims in the latest picture's pixels", () => {
     await runner.run(request({ action: "scroll", x: 40, y: 60, amount: 1 }));
 
     expect(mouse(commands).find((event) => event.type === "mouseWheel")).toMatchObject({ x: 40, y: 60 });
+  });
+});
+
+/**
+ * 030/T898, T901 - a coordinate action is decided by the innermost frame under its point (FR-455,
+ * SC-203), and that frame is asked about again right before the gesture (FR-460, R-446).
+ *
+ * The page is modelled in the debugger's own terms (`helpers/point-site.ts`): one frame from a
+ * second site in its own process, whose holder's content box is (100, 50)-(400, 250).
+ */
+describe("030 a coordinate action is decided by the frame under its point", () => {
+  const SECOND = "https://pay.fixtures.test:19444";
+  const THIRD = "https://fixtures.test:19445";
+  const OVER_FRAME = { x: 160, y: 90 };
+  const OUTSIDE = { x: 20, y: 20 };
+  const payFrame = (): FakeFrame => ({
+    cdpFrameId: "T-PAY",
+    box: { x: 100, y: 50, width: 300, height: 200 },
+    outOfProcess: true,
+    frameId: 5,
+    documentId: "bdoc-5",
+    sender: SECOND,
+    securityOrigin: SITE,
+  });
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function framed(frames: FakeFrame[]) {
+    const page = fakePointPage(frames, { pageSite: SITE });
+    const prompts = createAgentPromptController({ timeoutMs: 2_000 });
+    const built = harness({ prompts }, page);
+    return { ...built, page, prompts };
+  }
+  const inputEvents = (commands: Command[]) => commands.filter((command) => command.method.startsWith("Input."));
+  const presses = (commands: Command[]) => mouse(commands).filter((event) => event.type === "mousePressed");
+
+  it("asks for the frame's site before any input event, while the page's site is skip-checks (T898)", async () => {
+    const { runner, siteModes, prompts, commands } = framed([payFrame()]);
+    await allowed(siteModes);
+
+    const pending = runner.run(request({ action: "left_click", ...OVER_FRAME }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+    expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: SECOND }, tool: "computer" });
+    expect(inputEvents(commands)).toEqual([]);
+
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    expect((await pending).outcome).toBe("ok");
+    expect(presses(commands)).toEqual([{ type: "mousePressed", ...OVER_FRAME, button: "left", clickCount: 1 }]);
+  });
+
+  it("keeps the page's decision outside every frame, with no nonce or probe before or after the gate (T898, T901)", async () => {
+    const { runner, siteModes, prompts, commands, page } = framed([payFrame()]);
+    await allowed(siteModes);
+
+    const response = await runner.run(request({ action: "left_click", ...OUTSIDE }));
+
+    expect(response.outcome).toBe("ok");
+    expect(prompts.current()).toBeUndefined();
+    expect(page.probed).toEqual([]);
+    expect(page.marksRead).toEqual([]);
+    expect(commands.some((command) => command.method === "Runtime.callFunctionOn")).toBe(false);
+    expect(presses(commands)).toHaveLength(1);
+  });
+
+  it("is decided by the frame's own mode: skip-checks there runs without a card while the page asks", async () => {
+    const { runner, siteModes, prompts, commands } = framed([payFrame()]);
+    await siteModes.set(SECOND, { mode: "skip-checks" });
+
+    const response = await runner.run(request({ action: "double_click", ...OVER_FRAME }));
+
+    expect(response.outcome).toBe("ok");
+    expect(prompts.current()).toBeUndefined();
+    expect(presses(commands)).toHaveLength(1);
+  });
+
+  it("asks about a frame whose site cannot be established, and offers no frame site (Story 2.2)", async () => {
+    const { runner, siteModes, prompts, commands } = framed([{ ...payFrame(), sender: "null" }]);
+    await allowed(siteModes);
+
+    const pending = runner.run(request({ action: "scroll", ...OVER_FRAME, amount: 2 }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ site: SITE, frame: { unknown: true } });
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+
+    expect(await pending).toMatchObject({ outcome: "denied", hint: frameAnswerText("unknown", "unknown-site") });
+    expect(inputEvents(commands)).toEqual([]);
+  });
+
+  it("cancels with the frame-moved answer when the frame changed document after the answer (T901)", async () => {
+    const frame = payFrame();
+    const { runner, siteModes, prompts, commands } = framed([frame]);
+    await allowed(siteModes);
+
+    const pending = runner.run(request({ action: "left_click", ...OVER_FRAME }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    // The frame navigates while the card is up: same frame, a new document.
+    frame.documentId = "bdoc-5-next";
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+
+    expect(await pending).toEqual({
+      callId: "call-computer",
+      outcome: "stale",
+      reason: "stale-context",
+      hint: frameAnswerText(SECOND, "frame-moved"),
+    });
+    expect(inputEvents(commands)).toEqual([]);
+  });
+
+  it("cancels when the point is over another site by the time of the gesture (T901)", async () => {
+    const frame = payFrame();
+    const { runner, siteModes, prompts, commands } = framed([frame]);
+    await allowed(siteModes);
+
+    const pending = runner.run(request({ action: "left_click", ...OVER_FRAME }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    // The frame now shows a third site's document.
+    frame.sender = THIRD;
+    frame.documentId = "bdoc-5-third";
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+
+    expect(await pending).toMatchObject({ outcome: "stale", hint: frameAnswerText(SECOND, "frame-moved") });
+    expect(inputEvents(commands)).toEqual([]);
+  });
+
+  it("cancels when the frame slid away from the point after the answer (T901)", async () => {
+    const frame = payFrame();
+    const { runner, siteModes, prompts, commands } = framed([frame]);
+    await allowed(siteModes);
+
+    const pending = runner.run(request({ action: "left_click", ...OVER_FRAME }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    frame.box = { x: 600, y: 400, width: 300, height: 200 };
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+
+    expect(await pending).toMatchObject({ outcome: "stale", hint: frameAnswerText(SECOND, "frame-moved") });
+    expect(inputEvents(commands)).toEqual([]);
+  });
+
+  it("runs an unchanged frame's action exactly once (T901)", async () => {
+    const { runner, siteModes, commands, page } = framed([payFrame()]);
+    await siteModes.set(SECOND, { mode: "skip-checks" });
+
+    const response = await runner.run(request({ action: "left_click", ...OVER_FRAME }));
+
+    expect(response.outcome).toBe("ok");
+    expect(presses(commands)).toHaveLength(1);
+    // Asked before the gate, and again right before the press.
+    expect(page.probed).toEqual([5, 5]);
   });
 });

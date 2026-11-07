@@ -13,7 +13,7 @@
  *
  * Run through `npm run dev:test-pages`.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -146,6 +146,24 @@ const PAGE_FILES = [
    */
   "upload-image",
   "upload-image-child",
+  /**
+   * 030/T885: frames for consent per site. `frame-consent`, `frame-nested` (through
+   * `frame-nested-mid`) and `frame-navigating` frame `frame-consent-child` from the second site
+   * (`__OOPIF_ORIGIN__`); `frame-sandboxed` frames `frame-sandboxed-child` from its own site with
+   * `sandbox="allow-scripts"`; `frame-srcdoc` and `frame-blank` have no address; `frame-navigating`
+   * moves its frame to `frame-navigated` on the sibling-port origin (`__CROSS_ORIGIN__`) when it
+   * receives `postMessage("go")`. Every frame has a fixed size and is on screen without scrolling.
+   */
+  "frame-consent",
+  "frame-consent-child",
+  "frame-sandboxed",
+  "frame-sandboxed-child",
+  "frame-srcdoc",
+  "frame-blank",
+  "frame-nested",
+  "frame-nested-mid",
+  "frame-navigating",
+  "frame-navigated",
 ] as const;
 
 type PageFileName = (typeof PAGE_FILES)[number];
@@ -846,7 +864,8 @@ function index(port: number): string {
   );
 }
 
-function handle(port: number, request: IncomingMessage, response: ServerResponse): void {
+/** Exported so the fixture test can serve the pages over plain HTTP, without the test TLS leaf. */
+export function handle(port: number, request: IncomingMessage, response: ServerResponse): void {
   const path = (request.url ?? "/").split("?")[0] ?? "/";
 
   if (path === "/" || path === "") {
@@ -1009,4 +1028,8 @@ function main(): void {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-main();
+// Start the servers only when this file is the program (`npm run dev:test-pages`), not when a test
+// imports `handle`.
+if (process.argv[1] !== undefined && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

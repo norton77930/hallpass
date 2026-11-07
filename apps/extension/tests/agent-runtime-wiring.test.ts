@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import { ASK_TIMEOUT_MS } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
+import { oneDocumentAnswer } from "./helpers/point-site.js";
 
 /**
  * 003/T018 — the agent path wired together: transport → pairing → tab manager.
@@ -676,7 +677,7 @@ describe("T018 agent runtime wiring", () => {
       async detach() {},
       async sendCommand(_target: unknown, method: string) {
         if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
-        return {};
+        return oneDocumentAnswer(method) ?? {};
       },
       onEvent: { addListener() {} },
       onDetach: { addListener() {} },

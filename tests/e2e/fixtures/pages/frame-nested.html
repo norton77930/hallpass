@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame nested fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 520px; height: 260px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Nested frame</h1>
+<p>A frame from this site that itself holds a frame from the second site.</p>
+<iframe id="mid-frame" title="same-site frame" width="520" height="260" src="/frame-nested-mid"></iframe>
+</body>
+</html>

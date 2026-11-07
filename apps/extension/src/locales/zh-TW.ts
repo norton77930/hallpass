@@ -290,6 +290,10 @@ export const messages: Record<MessageKey, string> = {
   "agent.allowOnce": "只允許這一次",
   "agent.allowAlways": "這個網站以後都允許",
   "agent.refuse": "拒絕",
+  // 030 FR-457、FR-458:動作發生在內嵌框架裡,以及這個答案是針對誰。
+  "agent.prompt.frameSite": "在來自 {frameSite} 的內嵌框架裡，位於 {site} 頁面",
+  "agent.prompt.frameUnknown": "在 {site} 頁面內、來源不明的內嵌框架裡",
+  "agent.prompt.frameAnswer": "你的答案針對的是 {frameSite}，不是外面的頁面。",
   // 014 FR-187、FR-188:這次移動,以及主人的三個答案。
   "agent.prompt.transition": "這個工作階段的分頁從 {from} 移到了 {to}。可以繼續在那裡工作嗎?",
   "agent.transitionContinue": "繼續",

@@ -568,3 +568,161 @@ describe("T191 prompt cards", () => {
     );
   });
 });
+
+/** 030 T896, T900 (FR-457, FR-458, SC-207): the card for an action inside an embedded frame. */
+describe("030 frame card", () => {
+  let port: FakeAgentPort;
+  const PAGE = "https://shop.example";
+  const FRAME = "https://pay.example";
+  const PROMPT = { promptId: "prompt-f", site: PAGE, tool: "click" as const, argsSummary: "click a page element", targetLabel: "Pay", targetRole: "button" };
+
+  beforeEach(() => {
+    port = installAgentPort();
+    renderShell();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it("names the frame's site and the page, and the answers are for the frame's site", () => {
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
+    const text = screen.getByRole("dialog").textContent ?? "";
+    expect(text).toContain(ui("agent.prompt.frameSite").replace("{frameSite}", FRAME).replace("{site}", PAGE));
+    expect(text).toContain(ui("agent.prompt.frameAnswer").replace("{frameSite}", FRAME));
+    expect(text).toContain(ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Pay"));
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowAlways") }));
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.refuse") }));
+    expect(port.sent).toEqual([
+      { type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true } },
+      { type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true, rememberMode: "skip-checks" } },
+      { type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: false } },
+    ]);
+    for (const sent of port.sent) expect(agentPanelCommandSchema.safeParse(sent).success).toBe(true);
+  });
+
+  it("renders a prompt without a frame exactly as before", () => {
+    project(port, { ...IDLE, prompt: PROMPT });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toBe(
+      [
+        ui("agent.promptTitle"),
+        ui("agent.consentBody").replace("{agent}", "Claude Code").replace("{action}", ui("agent.summary.click")).replace("{site}", PAGE),
+        ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Pay"),
+        ui("agent.allowOnce"),
+        ui("agent.allowAlways"),
+        ui("agent.refuse"),
+      ].join(""),
+    );
+    expect(dialog.querySelector("[data-frame]")).toBeNull();
+  });
+
+  it("says the frame's site is unknown, names the page, and offers no Always allow", () => {
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { unknown: true as const } } });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain(ui("agent.prompt.frameUnknown").replace("{site}", PAGE));
+    expect(screen.queryByRole("button", { name: ui("agent.allowAlways") })).toBeNull();
+    expect(screen.getByRole("button", { name: ui("agent.refuse") })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
+    expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true } }]);
+  });
+});
+
+/**
+ * 030 T895 (FR-454, FR-457, FR-458): an upload into an element inside another site's frame is
+ * asked about on the same frame line the consent card has, whichever upload card raises it.
+ */
+describe("030 upload frame card", () => {
+  let port: FakeAgentPort;
+  const PAGE = "https://shop.example";
+  const FRAME = "https://pay.example";
+  const UPLOAD = { promptId: "prompt-u", site: PAGE, tool: "file_upload" as const, argsSummary: "put 1 of your files into a form on the page" };
+  const IMAGE = {
+    promptId: "prompt-i",
+    site: PAGE,
+    tool: "upload_image" as const,
+    argsSummary: "put a screenshot the agent took into a file input on the page",
+    delivery: "input" as const,
+  };
+  const DIRECTORY = {
+    ...UPLOAD,
+    kind: "upload-directory" as const,
+    files: [{ path: "D:\\photos\\card.png", directory: "D:\\photos" }],
+  };
+  const frameLine = (dialog: HTMLElement) => dialog.querySelector("[data-frame]")?.getAttribute("data-frame");
+
+  beforeEach(() => {
+    port = installAgentPort();
+    renderShell();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it("names the frame's site and the page on a file_upload and an upload_image card", () => {
+    for (const prompt of [UPLOAD, IMAGE]) {
+      project(port, { ...IDLE, prompt: { ...prompt, frame: { site: FRAME } } });
+      const dialog = screen.getByRole("dialog");
+      expect(frameLine(dialog)).toBe("site");
+      expect(dialog.textContent).toContain(
+        ui("agent.prompt.frameSite").replace("{frameSite}", FRAME).replace("{site}", PAGE),
+      );
+      expect(screen.getByRole("button", { name: ui("agent.allowAlways") })).toBeTruthy();
+    }
+  });
+
+  it("says an upload's frame site is unknown and offers no Always allow", () => {
+    for (const prompt of [UPLOAD, IMAGE]) {
+      project(port, { ...IDLE, prompt: { ...prompt, frame: { unknown: true as const } } });
+      const dialog = screen.getByRole("dialog");
+      expect(frameLine(dialog)).toBe("unknown");
+      expect(dialog.textContent).toContain(ui("agent.prompt.frameUnknown").replace("{site}", PAGE));
+      expect(screen.queryByRole("button", { name: ui("agent.allowAlways") })).toBeNull();
+    }
+  });
+
+  it("shows the frame line on the directory card too, which still remembers only directories", () => {
+    project(port, { ...IDLE, prompt: { ...DIRECTORY, frame: { site: FRAME } } });
+    let dialog = screen.getByRole("dialog");
+    expect(dialog.getAttribute("data-prompt")).toBe("upload-directory");
+    expect(frameLine(dialog)).toBe("site");
+    expect(dialog.textContent).toContain(
+      ui("agent.prompt.frameSite").replace("{frameSite}", FRAME).replace("{site}", PAGE),
+    );
+
+    project(port, { ...IDLE, prompt: { ...DIRECTORY, frame: { unknown: true as const } } });
+    dialog = screen.getByRole("dialog");
+    expect(frameLine(dialog)).toBe("unknown");
+    expect(dialog.textContent).toContain(ui("agent.prompt.frameUnknown").replace("{site}", PAGE));
+    // Its "from now on" widens the owner's directories, not any site's mode (FR-193), so it stays.
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.uploadAlways") }));
+    expect(port.sent).toEqual([
+      { type: "ui.agent.effect-decide", payload: { promptId: "prompt-u", allow: true, rememberDirectory: true } },
+    ]);
+  });
+
+  it("renders a directory card without a frame exactly as before", () => {
+    project(port, { ...IDLE, prompt: DIRECTORY });
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.querySelector("[data-frame]")).toBeNull();
+    expect(dialog.textContent).toBe(
+      [
+        ui("agent.promptTitle"),
+        ui("agent.prompt.uploadDirectory").replace("{agent}", "Claude Code"),
+        "D:\\photos\\card.png",
+        ui("agent.uploadFileDirectory").replace("{directory}", "D:\\photos"),
+        ui("agent.uploadOnce"),
+        ui("agent.uploadAlways"),
+        ui("agent.uploadDecline"),
+      ].join(""),
+    );
+  });
+});

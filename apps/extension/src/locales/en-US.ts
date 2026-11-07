@@ -305,6 +305,10 @@ export const messages = {
   "agent.allowOnce": "Allow once",
   "agent.allowAlways": "Always allow on this site",
   "agent.refuse": "Refuse",
+  // 030 FR-457, FR-458: the action is inside an embedded frame, and whose answer it is.
+  "agent.prompt.frameSite": "Inside an embedded frame from {frameSite}, on {site}",
+  "agent.prompt.frameUnknown": "Inside an embedded frame whose site is unknown, on {site}",
+  "agent.prompt.frameAnswer": "Your answer is about {frameSite}, not the page around it.",
   // 014 FR-187, FR-188: the move, and the three answers to it. Both origins in the question,
   // because where the tab *was* is half of what the owner is deciding about.
   "agent.prompt.transition": "This session's tab moved from {from} to {to}. May it keep working there?",

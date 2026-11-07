@@ -89,3 +89,68 @@ export class SiteMovedBeforeDispatch extends Error {
 export function isSiteMovedBeforeDispatch(error: unknown): error is SiteMovedBeforeDispatch {
   return error instanceof SiteMovedBeforeDispatch;
 }
+
+/**
+ * The site of an embedded frame as an answer names it: the canonical origin the browser reported
+ * for the frame's sender, or `"unknown"` when it could not be established (030 R-440, R-447).
+ */
+export type FrameAnswerSite = string;
+
+/** The one reason a refused or cancelled frame action is given (030 FR-461, R-447). */
+export type FrameAnswerReason = "refused" | "undecided" | "frame-moved" | "unknown-site";
+
+/**
+ * What an agent is told when an action inside an embedded frame from another site was refused or
+ * cancelled (030 FR-461, R-447): the frame's site, and exactly one reason.
+ *
+ * Plain text for an agent, with the site shown the way origins are everywhere else (the canonical
+ * `scheme://host[:port]` string). A frame whose site is not known says so instead of printing a
+ * placeholder, so the agent is never given a site name that is not one.
+ */
+export function frameAnswerText(site: FrameAnswerSite, reason: FrameAnswerReason): string {
+  const known = site !== "unknown";
+  const frame = known ? `an embedded frame from ${site}` : "an embedded frame whose site could not be established";
+  switch (reason) {
+    case "refused":
+      return (
+        `The owner refused this action inside ${frame}, so nothing was sent. ` +
+        "Do not retry it unprompted; ask the owner what they want instead."
+      );
+    case "undecided":
+      return (
+        `No decision was made about this action inside ${frame}: the card timed out or was dismissed, ` +
+        "so nothing was sent. You may ask the owner, then try again."
+      );
+    case "frame-moved":
+      return (
+        `${known ? `The embedded frame from ${site}` : "The embedded frame"} moved to another site or document ` +
+        "after the decision, so nothing was sent. Read the page again to see where the frame is now, " +
+        "then retry; if the frame is on a site that needs the owner's decision, the next call will ask them."
+      );
+    case "unknown-site":
+      return (
+        "This embedded frame's site could not be established, and the owner refused or did not answer, " +
+        "so nothing was sent. Read the page again, or ask the owner, before trying anything inside that frame."
+      );
+  }
+}
+
+/**
+ * The frame's counterpart of `SiteMovedBeforeDispatch`: thrown from the pre-dispatch check when the
+ * frame an action was decided for is no longer the same site or document, before any event left.
+ * It carries the frame's site so the one place every delivery passes can answer with
+ * `frameAnswerText(site, "frame-moved")`.
+ */
+export class FrameMovedBeforeDispatch extends Error {
+  readonly site: FrameAnswerSite;
+
+  constructor(site: FrameAnswerSite) {
+    super("frame-moved-before-dispatch");
+    this.name = "FrameMovedBeforeDispatch";
+    this.site = site;
+  }
+}
+
+export function isFrameMovedBeforeDispatch(error: unknown): error is FrameMovedBeforeDispatch {
+  return error instanceof FrameMovedBeforeDispatch;
+}
