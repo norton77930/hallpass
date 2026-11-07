@@ -11,6 +11,7 @@ import { memoryConversationIndex, memoryFolderList, type ConversationIndex } fro
 import { memoryModelStore, type ModelStore } from "../src/broker/model-store.js";
 import type { ConversationBrowserAccess } from "../src/broker/browser-token.js";
 import type { UserEnvironmentPorts } from "../src/broker/user-environment.js";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 
 /**
  * Shared pieces of the 019/S4 conversation tests (T535-T538, T540): the fake ACP agent as a real
@@ -122,7 +123,7 @@ export function sleep(ms: number): Promise<void> {
 export async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   label: string,
-  timeoutMs = 10_000,
+  timeoutMs = scaledMs(10_000),
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -286,7 +287,7 @@ export async function poolHarness(options: PoolHarnessOptions = {}) {
   };
 
   /** Send, then wait until the turn has ended (a `state` event other than running/waiting after the send). */
-  const turn = async (conversationId: string, text: string, timeoutMs = 10_000): Promise<void> => {
+  const turn = async (conversationId: string, text: string, timeoutMs = scaledMs(10_000)): Promise<void> => {
     const from = rec.events.length;
     const sent = await pool.send(conversationId, text);
     if (!sent.ok) throw new Error(`send failed: ${sent.error.code} ${sent.error.detail}`);

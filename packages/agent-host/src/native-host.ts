@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { AGENT_LINK_PROTOCOL, agentBrowserNameSchema, type AgentBrowserRecord } from "@hallpass/contracts";
 import {
@@ -25,6 +25,7 @@ import {
   type FrameChannel,
 } from "./bridge-link.js";
 import { brokerSupported, createBrokerSupervisor, launchBroker, type BrokerSupervisor } from "./broker-launch.js";
+import { ensurePrivateDirectorySync, HOST_FILE_MODE } from "./host-files.js";
 import { browsersDirectory, hostDataDirectory } from "./host-paths.js";
 import { createRelayMux, type RelayMux } from "./relay-mux.js";
 import {
@@ -92,7 +93,7 @@ function log(code: string, detail?: string): void {
   const line = `${new Date().toISOString()} ${code}${detail === undefined ? "" : ` ${detail}`}\n`;
   process.stderr.write(line);
   try {
-    appendFileSync(logPath, line);
+    appendFileSync(logPath, line, { mode: HOST_FILE_MODE });
   } catch {
     // A log that cannot be written must not take the relay down with it.
   }
@@ -199,7 +200,8 @@ const RELAY_ACK_BOUND_MS = (() => {
 
 function startLog(): void {
   try {
-    mkdirSync(hostDataDirectory(), { recursive: true });
+    // Owner-only, and an existing directory repaired to it (security review 2026-11-05 S2).
+    ensurePrivateDirectorySync(hostDataDirectory());
     if (statSync(logPath).size > LOG_SIZE_CAP_BYTES) {
       // Rotate rather than truncate: the previous generation is still readable at `.1` (one before
       // it is dropped, which is the bound), and the live file starts empty only because it just

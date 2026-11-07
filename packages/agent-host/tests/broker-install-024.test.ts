@@ -413,6 +413,37 @@ describe("024 T760 the tree's kill (R-377)", () => {
   }, 15_000);
 });
 
+/**
+ * Review 2026-11-05 C5 - the timeout path settles even when the tree outlives the kill. A grandchild
+ * that inherited the pipes keeps `close` from firing; the abort path had a bound for that and the
+ * timeout path did not, so an install or `--version` whose kill missed a grandchild never answered.
+ */
+describe("C5 a timed-out command answers even when a grandchild keeps the pipes", () => {
+  it("settles with timedOut once the kill has been asked for and the wait has passed", async () => {
+    // `close` must not come while the wait runs. A real grandchild cannot promise that everywhere: on
+    // Windows `stdio: "inherit"` does not hold the parent's pipes (measured: `close` 17 ms after the kill).
+    // So the kill reports success and leaves the command running, which keeps its pipes open on every
+    // platform, and the command is ended only after the run has answered.
+    let left: number | undefined;
+    const startedAt = Date.now();
+    try {
+      const result = await runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        timeoutMs: 300,
+        killWaitMs: 500,
+        killTree: async (pid) => {
+          left = pid;
+          return true;
+        },
+      });
+      expect(result).toMatchObject({ code: null, timedOut: true });
+      expect(result).not.toHaveProperty("killFailed");
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    } finally {
+      if (left !== undefined) process.kill(left);
+    }
+  }, 15_000);
+});
+
 describe("024 T762 interrupted (R-378)", () => {
   it.runIf(process.platform === "win32")("a state left running by a dead broker becomes interrupted at start, stays so until the next attempt, and cleanStaging still runs", async () => {
     const gone = await deadPid();

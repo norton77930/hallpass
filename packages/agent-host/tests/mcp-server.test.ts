@@ -3,6 +3,7 @@ import { createServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 import { z } from "zod";
 import {
   agentToolArgSchemas,
@@ -1855,6 +1856,40 @@ describe("T012 agent MCP server", () => {
     });
 
     /**
+     * Security review 2026-11-05 C1 — an "always" for a directory that is already on the list.
+     *
+     * Two sessions raise cards about the same directory and the owner answers both "from now on":
+     * the second answer finds the directory already there. The store reports "nothing to write"
+     * (`written: false`, nothing refused), which is not a failure - the list is exactly what the
+     * owner was promised. It used to be answered `upload-directory-not-recorded` with an empty hint.
+     */
+    it("uploads when the directory the owner allowed is already on the list (C1)", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        answers: UPLOADED,
+      });
+      await worker.waitForHello();
+
+      const pending = client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+      const asked = (await worker.waitForControlFrame("upload-consent-request")) as { callId: string };
+      // Another session's "always" landed while this card stood.
+      await mkdir(join(dataDir, "hallpass"), { recursive: true });
+      await writeFile(join(dataDir, "hallpass", "config.json"), JSON.stringify({ uploadRoots: [outside.directory] }));
+      worker.send({ type: "upload-consent-result", callId: asked.callId, decision: "always" });
+
+      const result = await pending;
+      expect(result.isError).toBe(false);
+      expect(result.json).toMatchObject({ files: [{ name: "diary.txt" }] });
+      expect(worker.requests).toHaveLength(1);
+      // Still listed once: an answer that changed nothing wrote nothing.
+      expect(await configuredRoots()).toEqual([outside.directory]);
+    });
+
+    /**
      * 014/T384 (S3 review F3) — two sessions asking at once is not the owner doing anything.
      *
      * The worker holds one question at a time, so a second session's card is refused `busy` before
@@ -2540,7 +2575,7 @@ describe("T337 the screenshot cache's environment overrides", () => {
   });
 });
 
-async function waitForCondition(predicate: () => boolean, label: string, timeoutMs = 5_000): Promise<void> {
+async function waitForCondition(predicate: () => boolean, label: string, timeoutMs = scaledMs(5_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;

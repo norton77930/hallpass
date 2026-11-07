@@ -787,7 +787,7 @@ export type GifRecorderStatusResult = z.infer<typeof gifRecorderStatusResultSche
  * What `export` answers with: where the file went and what is in it.
  *
  * `downloadId` is the browser's own, so the agent can find the same file again in
- * `downloads_context` with the path the browser decided - which may not be the name that was asked
+ * `downloads_context` with the name the browser decided - which may not be the name that was asked
  * for, because the browser uniquifies a collision and this tool does not argue with it.
  */
 export const gifRecorderExportResultSchema = z.strictObject({
@@ -1301,7 +1301,8 @@ export type AgentBatchResult = z.infer<typeof agentBatchResultSchema>;
  * Download reporting (005/T180, US2, FR-077..FR-080).
  *
  * A record carries what the *browser's* download record carries and nothing from any page: the
- * browser's id, the path it saved to, the source url, the state in our four words, when it started
+ * browser's id, the file's name (not the path it saved to, which names the owner's profile folder;
+ * #36), the source url, the state in our four words, when it started
  * and ended, the bytes, whether the browser flagged it, and which sessions it was attributed to.
  * The extension only observes these (FR-076); nothing here can name an action on one.
  */
@@ -1328,7 +1329,7 @@ export const AGENT_DOWNLOADS_KEPT = 20;
 
 const agentDownloadIdSchema = z.number().int().nonnegative();
 
-/** The saved path exactly as the browser reports it; empty until the browser has decided it. */
+/** The file's name, without the folder the browser saved it in (#36); empty until the browser has decided it. */
 const agentDownloadFilenameSchema = z.string().max(4096);
 
 const agentDownloadUrlSchema = z.string().max(2048);
@@ -1460,7 +1461,7 @@ export type AgentWaitDownload = z.infer<typeof agentWaitDownloadSchema>;
  * happen" beside `waitedMs` would let a wait report its own failure as an answer.
  *
  * `download` rides beside `waitedMs` only for a `download-complete` wait: it is what the agent
- * waited to learn (the saved path and how it ended), and the four page conditions have nothing
+ * waited to learn (the saved name and how it ended), and the four page conditions have nothing
  * of the kind to say.
  *
  * 008 adds the second ending, and it is here rather than among the outcomes for the same reason
@@ -2231,7 +2232,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "Sends one of this session's tabs to a url, or back/forward through its history, and returns the url it " +
       "actually settled on. Navigating never asks the owner for anything; the site mode of wherever you land " +
       "governs what you may then do there. Refs from before the navigation are stale afterwards. A url the " +
-      "browser downloads rather than renders answers ok with `download` (its id, path, url and state) the moment " +
+      "browser downloads rather than renders answers ok with `download` (its id, file name, url and state) the moment " +
       "the download begins; wait for `download-complete` to learn how it ends. A page with unsaved work can " +
       "ask to stay: without `force` the tab does not leave and the call answers `blocked-by-beforeunload`; " +
       "`force: true` leaves anyway and is an effect the site's mode governs. " +
@@ -2265,12 +2266,16 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     name: "downloads_context",
     title: "List the downloads this session caused",
     description:
-      "Lists the browser downloads that began while this session held a tab, newest first, at most twenty: " +
-      "the browser's id, the path it saved the file to (`filename`, empty until the browser has decided it), " +
+      "Lists the browser downloads this session caused, newest first, at most twenty: one counts when it " +
+      "came from a site one of your tabs was on or your own `navigate` was going to, or is a file a page " +
+      "produced during your own action on it (a click, a key, a form value) and that names no source site " +
+      "(a `data:` link, or a blob from a sandboxed page) - a file that names a site counts only by the site rule. Each has the browser's id, " +
+      "the name it saved the file under (`filename`, no folder, empty until the browser has decided it), " +
       "the source url, the state (`in_progress`, `complete`, `failed`, `canceled`), start and end times, " +
       "bytes, and whether the browser flagged it as dangerous. `attribution` is `shared` when another " +
-      "session also held a tab at the time and was told too. Needs no tab. The file stays where the browser " +
-      "put it; read it from there with your own file access. Nothing here starts, opens, moves or removes a download.",
+      "session was told about the same download too. Needs no tab. The file stays in the owner's download " +
+      "folder, which is not given here; ask the owner where that is if you need to open it. Nothing here " +
+      "starts, opens, moves or removes a download.",
     inputShape: {},
   },
   {
@@ -2278,7 +2283,10 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Read a tab's text",
     description:
       "Returns the readable text of one of this session's tabs: the whole document's visible text, with " +
-      "the contents of form controls left out. `max_chars` bounds the text the answer carries and is the " +
+      "the contents of form controls left out. Visible means what the owner could see by scrolling: text " +
+      "the page hides (not displayed, invisible, fully transparent, outside the page's top or left edge, " +
+      "or clipped to a pixel) is left out, but text in the page's own colour or in a very small size is " +
+      "still returned. `max_chars` bounds the text the answer carries and is the " +
       "same ceiling `read_page` uses; says `truncated` when the text was longer than the bound, and " +
       "`truncatedBy: \"chars\"` when that bound is what cut it. Reading never asks the owner for anything.",
     inputShape: agentGetPageTextShape,
@@ -2447,7 +2455,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "or ends at `maxMs` with `bound-reached`. It changes nothing on the page and never asks the owner " +
       "anything; the owner's Stop ends it at once. `download-complete` (no `ref`) waits for the next download " +
       "this session caused to finish - complete, failed or canceled - and answers with its `download` " +
-      "{id, filename, url, state}, where `filename` is the path the browser saved it to. A download that " +
+      "{id, filename, url, state}, where `filename` is the name the browser saved it under, without the folder. A download that " +
       "finished before you called is still answered once; call `downloads_context` to list them all.",
     inputShape: {
       tabId: agentTabIdSchema,

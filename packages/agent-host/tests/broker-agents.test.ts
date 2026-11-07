@@ -21,6 +21,7 @@ import {
 } from "../src/broker/agents.js";
 import { CONVERSATION_MODE_FIXED_AGENTS } from "@hallpass/contracts";
 import { CODEX_SHIM_COMMAND } from "../src/broker/codex-strict.js";
+import { WHERE_EXE } from "../src/broker/windows-programs.js";
 
 /**
  * 019/T530, T531, T534 - finding the owner's coding agent, reading its version, saying what is
@@ -78,7 +79,7 @@ function ports(machine: Machine = {}): AgentPorts & { calls: string[]; writes: s
     },
     exec: async (file, args) => {
       calls.push([file, ...args].join(" "));
-      if (file === "where.exe") {
+      if (file === WHERE_EXE) {
         const lines = machine.where?.[args[0]!];
         return lines ? { code: 0, stdout: `${lines.join("\r\n")}\r\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
       }
@@ -167,7 +168,7 @@ describe("discoverCli (T530, R-315)", () => {
   it("reports nothing when neither route finds it", async () => {
     const p = ports();
     expect(await discoverCli("claude-code", p)).toBeUndefined();
-    expect(p.calls).toEqual(["where.exe claude.exe"]);
+    expect(p.calls).toEqual([`${WHERE_EXE} claude.exe`]);
   });
 
   it("survives where.exe itself failing to run", async () => {
@@ -320,7 +321,7 @@ describe("Hermes: an installed ACP program (021 T640, R-345, R-348)", () => {
     const onPath = "D:\\tools\\hermes.exe";
     const p = ports({ files: { [onPath]: "", [HERMES_EXE]: "" }, where: { hermes: [onPath] } });
     expect(await discoverCli("hermes", p)).toBe(onPath);
-    expect(p.calls).toEqual(["where.exe hermes"]);
+    expect(p.calls).toEqual([`${WHERE_EXE} hermes`]);
   });
 
   it("falls back to %USERPROFILE%\\.local\\bin\\hermes.exe", async () => {

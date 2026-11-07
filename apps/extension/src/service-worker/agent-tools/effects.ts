@@ -267,7 +267,7 @@ export type AgentEffectDeps = {
    * without it `observedForMs` would claim a silence nobody observed, so it is wired wherever the
    * observer exists.
    */
-  downloads?: Pick<DownloadObserver, "createdSince">;
+  downloads?: Pick<DownloadObserver, "createdSince"> & Partial<Pick<DownloadObserver, "actingOnPage">>;
   /** The clock a press's window is measured by; injected with the rest of the browser. */
   now?: () => number;
 };
@@ -285,6 +285,9 @@ export type AgentEffectRunner = {
   handles(tool: AgentToolName): boolean;
   run(request: AgentToolRequest): Promise<AgentNativeResponse>;
 };
+
+/** How a call ends the download observer's window for its own page action (FR-077, #36 follow-up). */
+type PageActionWindow = { close?: (() => void) | undefined };
 
 /** The 002 settle window, reused: the same page needs the same time whoever asked. */
 const DEFAULT_SETTLE_MS = 400;
@@ -1173,6 +1176,20 @@ function isPointerTool(tool: AgentToolName): boolean {
  */
 function isPositionPress(action: string): boolean {
   return action === "left_click" || action === "right_click" || action === "double_click" || action === "triple_click";
+}
+
+/**
+ * The effects that put input into the page, and so may make it produce a file (FR-077, #36
+ * follow-up): every click, a drag, typing, a key, a form value, and `computer`'s actions that land.
+ * Hovering, scrolling and `computer`'s screenshot, wait and scroll only look or move the view.
+ */
+function putsInputIntoPage(tool: AgentToolName, args: Record<string, unknown>): boolean {
+  if (tool === "hover" || tool === "scroll") return false;
+  if (tool === "computer") {
+    const action = String(args.action);
+    return action !== "screenshot" && action !== "wait" && action !== "scroll";
+  }
+  return true;
 }
 
 /** The two the keyboard delivers (004/T123): typing a string, and pressing one named key. */
@@ -2294,7 +2311,21 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     deps.onApproved?.(tabId, tool);
   }
 
-  async function runEffect(request: AgentToolRequest): Promise<AgentNativeResponse> {
+  /**
+   * One call, with the download observer's page-action window closed when it answers (FR-077, #36
+   * follow-up) - however it answers, the settle wait and verification included, since a press reads
+   * the downloads it began at the end of that wait. A batch step comes through here as its own call.
+   */
+  async function runCall(request: AgentToolRequest): Promise<AgentNativeResponse> {
+    const pageAction: PageActionWindow = {};
+    try {
+      return await runEffect(request, pageAction);
+    } finally {
+      pageAction.close?.();
+    }
+  }
+
+  async function runEffect(request: AgentToolRequest, pageAction: PageActionWindow): Promise<AgentNativeResponse> {
     const { callId, tool } = request;
     // Where this call's input budget is measured from (015 review F4): as near the host's own start
     // of its per-call wait as this runner can see.
@@ -2426,6 +2457,17 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       }
       // The owner's own yes, which is the other half of "approved" (008/R-139).
       noteApproval(tabId, tool, args);
+    }
+
+    /**
+     * FR-077, #36 follow-up: from here the call is this session's own action on the page, so a file
+     * the page produces now that names no origin (a `data:` link has no referrer) is this session's.
+     * Opened only once the gate let the call through - never while the owner is still being asked,
+     * when anything that downloads is the owner's doing - and bounded by the call's own time, so a
+     * call that never reaches its end cannot hold it open. `runCall` closes it when the call answers.
+     */
+    if (putsInputIntoPage(tool, args)) {
+      pageAction.close = deps.downloads?.actingOnPage?.(request.sessionId, now() + AGENT_CALL_TIMEOUT_MS);
     }
 
     if (tool === "computer") {
@@ -2657,6 +2699,6 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     handles(tool) {
       return tool === "find" || isAgentEffectTool(tool);
     },
-    run: runEffect,
+    run: runCall,
   };
 }

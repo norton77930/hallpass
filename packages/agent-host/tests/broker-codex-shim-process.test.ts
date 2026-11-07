@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 import { CODEX_SHIM_COMMAND, CODEX_SHIM_ENV, CODEX_SHIM_EXIT_BOUND_MS } from "../src/broker/codex-strict.js";
 
 // Each case starts cmd.exe, the shim, cmd.exe again and the fake CLI: slow under the parallel run.
@@ -102,7 +103,7 @@ function startLikeAdapter(
   return { child, lines, exit };
 }
 
-async function until(check: () => boolean, what: string, timeoutMs = 20_000): Promise<void> {
+async function until(check: () => boolean, what: string, timeoutMs = scaledMs(20_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);

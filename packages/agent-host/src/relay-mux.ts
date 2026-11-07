@@ -147,10 +147,10 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
   /**
    * Which session made each call in flight.
    *
-   * Indirect through the session rather than straight to a connection, so the two awkward cases
-   * fall out instead of being special-cased: a server that reconnects gets its own pending answers
-   * on its new socket, and a session that ended stops routing entirely (its calls resolve to a
-   * session that is no longer there and are dropped, not delivered to whoever attaches next).
+   * An entry lives no longer than the socket that made the call: a session that ended, or whose id
+   * another socket took, has its entries forgotten, so a late answer is dropped rather than delivered
+   * to whoever holds the id by then. A server loses nothing by it, because it has already answered
+   * its own calls `call-unconfirmed` by the time it can dial again (`mcp-server.ts`, 004/T162).
    */
   const calls = new Map<string, string>();
   /** 019 R-312: the hash of the secret the broker of this relay holds, and the broker's session. */
@@ -164,6 +164,14 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
       }
     }
     return undefined;
+  }
+
+  function forgetCalls(sessionId: string): void {
+    for (const [callId, owner] of calls) {
+      if (owner === sessionId) {
+        calls.delete(callId);
+      }
+    }
   }
 
   function deliver(frame: unknown, sessionId: string | undefined, key: string): void {
@@ -218,10 +226,16 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
         // the drop is why the server dialled again - and closing it is a no-op. When it is not, the
         // id has been taken from a live connection, and leaving that one attached would orphan a
         // peer that still believes it holds the session. One id, one socket, either way.
+        //
+        // That socket's calls go with it, whichever agent this greeting claims to be: `agentId` is
+        // the greeter's own word, so only the socket can say whose answer an answer is. Closing it is
+        // what tells a caller still waiting (`call-unconfirmed`). A repeat greeting on the same socket
+        // (006 FR-087, the worker forgot the session) replaces nothing and keeps its calls.
         const previous = sessions.get(sessionId);
         sessions.set(sessionId, connection);
         connection.send({ type: "hello-ack", relayPid: options.relayPid });
         if (previous !== undefined && previous !== connection) {
+          forgetCalls(sessionId);
           log("relay.mux.hello-replaced");
           void previous.close?.();
         }
@@ -356,11 +370,7 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
       }
       sessions.delete(sessionId);
       if (sessionId === brokerSession) brokerSession = undefined;
-      for (const [callId, owner] of calls) {
-        if (owner === sessionId) {
-          calls.delete(callId);
-        }
-      }
+      forgetCalls(sessionId);
       log("relay.mux.detached", `sessions=${sessions.size} calls=${calls.size}`);
       options.toWorker({ type: "session-ended", sessionId });
     },

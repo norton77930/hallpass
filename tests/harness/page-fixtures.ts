@@ -110,6 +110,8 @@ const FIXTURES = [
    * dialog are the same renderer turn, so the key dispatch does not return while the box is up.
    */
   "keydown-alert",
+  /** Issue #37: paragraphs the owner can reach and paragraphs that are hidden. */
+  "hidden-text",
 ] as const;
 
 /** 015/T417: how long the slow file of `/two-downloads` holds back the rest of its body. */
@@ -792,6 +794,29 @@ ${filler(4)}`,
   })();
 </script>
 ${filler(4)}`,
+      );
+
+    case "hidden-text":
+      // Issue #37: text a stylesheet or the geometry keeps from the owner. The three words the owner
+      // can reach (an ordinary paragraph, one past a 3000px spacer, one inside `display:contents`)
+      // are returned by a page read; the five hidden ones are not. `display:contents` has no box, so
+      // its text sits directly in that element, with and without `overflow`, and `visibility:hidden`
+      // on such an element still hides it. No navigation strip, so the page holds only these.
+      return html(
+        "Hidden text fixture",
+        `<p>shownwordnormal</p>
+<div style="height:3000px"></div>
+<p>shownwordbelowfold</p>
+<p style="display:contents">shownwordcontents</p>
+<p style="display:contents;overflow:hidden">shownwordcontentsoverflow</p>
+<p style="display:contents;visibility:hidden">hiddenwordcontentsvisibility</p>
+<p style="display:none">hiddenwordnone</p>
+<p style="visibility:hidden">hiddenwordvisibility</p>
+<p style="opacity:0">hiddenwordopacity</p>
+<p style="position:absolute;left:-9999px">hiddenwordoffscreen</p>
+<p style="position:absolute;width:1px;height:1px;overflow:hidden">hiddenwordclipped</p>`,
+        "",
+        false,
       );
 
     case "origin-change":

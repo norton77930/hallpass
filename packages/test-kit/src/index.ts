@@ -8,6 +8,7 @@ export {
 } from "./build-config.js";
 export { systemClock, fixedClock } from "./clock.js";
 export { opaqueId } from "./ids.js";
+export { parseTimeScale, scaledMs, TIME_SCALE } from "./time-scale.js";
 export { createFakeChrome } from "./fake-chrome.js";
 export {
   decodeGif,

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server as NetServer, type Socket } from "node:net";
 import { dirname } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   agentLinkFrameSchema,
   type AgentBridgeRecord,
 } from "@hallpass/contracts";
+import { ensurePrivateDirectory, HOST_FILE_MODE } from "./host-files.js";
 import { bridgeFilePath, type HostEnvironment } from "./host-paths.js";
 import { encodeFrame, FrameDecoder } from "./native-frame.js";
 
@@ -48,9 +49,10 @@ export async function writeBridgeRecord(record: BridgeRecord, env?: HostEnvironm
  * since 018 the per-browser records one directory down - so the target's own directory is created).
  */
 export async function writeHostFileAtomically(target: string, value: unknown): Promise<void> {
-  await mkdir(dirname(target), { recursive: true });
+  // Owner-only, directory and file (security review 2026-11-05 S2): the record carries the token.
+  await ensurePrivateDirectory(dirname(target));
   const temp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(temp, `${JSON.stringify(value)}\n`, "utf8");
+  await writeFile(temp, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: HOST_FILE_MODE });
   try {
     for (let attempt = 0; ; attempt += 1) {
       try {

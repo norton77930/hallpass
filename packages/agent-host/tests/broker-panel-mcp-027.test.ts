@@ -134,6 +134,29 @@ describe("027 the broker and the extra MCP servers", () => {
     }
   });
 
+  /**
+   * Security review 2026-11-05 S8 - the Check's failure detail is shown on the settings page, and it
+   * carries the last line the owner's server wrote to stderr. Every other string the broker shows
+   * passes `redact()`; this one replaced only the server's own named variables. A server that echoes
+   * a credential it found elsewhere - a URL with a password, a vendor token - put it on the page.
+   */
+  it("S8: the check's detail is redacted like every other shown string", async () => {
+    const leaky: PanelMcpServer = {
+      name: "leaky",
+      command: process.execPath,
+      args: ["-e", "console.error('cannot reach https://user:s3cretPass1@example.com with token=ghp_ABCDEFGHIJKLMNOPQRSTUVWX0123'); process.exit(1)"],
+      variables: [],
+      agents: ["hermes"],
+    };
+    const result = await checkPanelMcpServer(leaky, { ...process.env }, { boundMs: 10_000 });
+    expect(result.outcome).toBe("failed");
+    const detail = (result as { detail: string }).detail;
+    expect(detail).toContain("[redacted]");
+    expect(detail).not.toContain("s3cretPass1");
+    expect(detail).not.toContain("ghp_ABCDEFGHIJKLMNOPQRSTUVWX0123");
+    expect(detail).toContain("example.com");
+  });
+
   it("R-420: a name the owner's Codex holds as a URL server is marked codexSkipped", async () => {
     const { run, listed, pool } = handler('[mcp_servers.github]\nurl = "https://example.test/mcp"\n');
     try {

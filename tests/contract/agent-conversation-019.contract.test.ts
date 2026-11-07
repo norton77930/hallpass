@@ -59,6 +59,7 @@ const ERROR_CODES = [
   "skill-write-failed",
   // 027 R-418: an extra MCP server the broker would not keep.
   "mcp-server-refused",
+  "question-invalid",
 ];
 
 const VIEW = {
@@ -95,6 +96,14 @@ const EVENTS = {
   mode: { type: "mode", mode: "agent-review" },
   state: { type: "state", state: "running" },
   notice: { type: "notice", code: "agent-exited", text: "The agent stopped." },
+  // 029: a form question and how it ended.
+  question: {
+    type: "question",
+    requestId: REQUEST,
+    message: "Which colour?",
+    fields: [{ key: "colour", kind: "choice", label: "Colour", required: true, options: [{ value: "red", label: "Red" }] }],
+  },
+  questionClosed: { type: "question-closed", requestId: REQUEST, ending: "answered", summary: "Colour: Red" },
 };
 
 const PANEL = {
@@ -228,9 +237,9 @@ describe("T519 conversation link frames (R-323)", () => {
     expectRejected(f, { ...base, ok: false, error: { code: "folder-missing" } }, "an error without its detail");
   });
 
-  it("names exactly the thirty-two ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command, 021's three, 025's two, 026's two and 027's one", () => {
+  it("names exactly the thirty-three ConversationError codes, including in-use-elsewhere, not-found, busy, path-entry, invalid-command, 021's three, 025's two, 026's two, 027's one and 029's one", () => {
     const f = frame();
-    expect(ERROR_CODES).toHaveLength(32);
+    expect(ERROR_CODES).toHaveLength(33);
     for (const code of ERROR_CODES) {
       expectAccepted(
         f,

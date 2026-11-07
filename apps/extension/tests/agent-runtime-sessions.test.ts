@@ -357,6 +357,47 @@ describe("T095 several agent sessions in one worker", () => {
     expect(fake.marked).toEqual([groupA]);
   });
 
+  /**
+   * Security review 2026-11-05 S14 - the owner's site list holds sites. A held tab on a browser page
+   * (`chrome://settings`, a `file:` page) has no origin (`siteOfUrl` answers nothing for an origin of
+   * "null"), so no row appears for it. Pinned here because the review asked the question and the
+   * answer was in a parser's behaviour rather than in a line anybody wrote.
+   */
+  it("lists no browser-internal page as a site, however the session's tab got there", async () => {
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+    fake.tabs.push({ id: 9, url: "chrome://settings/", title: "Settings", groupId: -1, active: false, windowId: 900 });
+    await runtime.tabs.adopt("session-a", 7);
+    await runtime.tabs.adopt("session-a", 9);
+
+    const sites = (await runtime.projection()).sites.map((record) => record.site);
+    expect(sites).toContain("https://agent.test");
+    expect(sites.some((site) => site.startsWith("chrome:"))).toBe(false);
+  });
+
+  /**
+   * Security review 2026-11-05 S15 - a session id is one agent's. A greeting that reuses a known
+   * session id under another agent id used to inherit that session's leases, tab group and standing
+   * (the worker simply overwrote `agentId`), so a process holding another agent's session id - which
+   * S2 discloses through `holder` - could act with its tabs under its pairing. The known session is
+   * ended and the greeting registers a fresh one for the agent it names, which then pairs on its own.
+   */
+  it("ends a known session whose greeting names another agent, and registers the greeting afresh", async () => {
+    const port = fakePort();
+    const runtime = await pairedRuntime(port);
+    await runtime.tabs.adopt("session-a", 7);
+    expect(await runtime.tabs.ownership("session-a", 7)).toEqual({ state: "this" });
+
+    port.emit(announce("session-a", "agent-2", "Somebody Else"));
+
+    // The tab the first agent's session held is let go; the id now names agent-2's session, which
+    // holds nothing and is not paired.
+    await vi.waitFor(async () => expect(await runtime.tabs.ownership("session-a", 7)).not.toEqual({ state: "this" }));
+    expect(storedSessions(fake)["session-a"]?.tabIds ?? []).toEqual([]);
+    port.emit(pairRequest("session-a", "agent-2"));
+    await vi.waitFor(async () => expect((await runtime.pairing.state()).pending?.agentId).toBe("agent-2"));
+  });
+
   it("bounds the reconciliation with an alarm and releases only the sessions that stayed away", async () => {
     const port = fakePort();
     const runtime = await pairedRuntime(port);

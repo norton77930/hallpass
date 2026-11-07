@@ -17,6 +17,7 @@ import { HERMES_AGENT_MODES, launchSettings, writeLaunchFiles } from "./agent-la
 import { CODEX_SHIM_COMMAND, CODEX_SHIM_ENV, codexAdapterModesAsMeasured } from "./codex-strict.js";
 import { redact, withoutEnvironmentValues } from "./redact.js";
 import { runCommand } from "./run-command.js";
+import { WHERE_EXE } from "./windows-programs.js";
 import { dotEnvNames, hermesHome, hermesKeyEnvName, userEnvironmentNames, type UserEnvironmentPorts } from "./user-environment.js";
 import { joinUnder, pathFor } from "./data-path.js";
 
@@ -432,7 +433,7 @@ function knownLocations(agent: ConversationAgent, env: AgentPorts["env"]): strin
 /** `where.exe <name>`, the lines it printed; none when it fails or cannot run. */
 async function whereAll(name: string, ports: AgentPorts): Promise<string[]> {
   try {
-    const where = await ports.exec("where.exe", [name]);
+    const where = await ports.exec(WHERE_EXE, [name]);
     if (where.code === 0) return where.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   } catch {
     // where.exe missing or blocked: the known locations are the only route left.

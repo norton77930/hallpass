@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { scaledMs } from "../../test-kit/dist/time-scale.js";
 import { dialRelay, encodeFrame, FrameDecoder, type RelayDial } from "../src/index.js";
 import { startFakeAgentWorker, type FakeAgentWorker } from "../../../tests/harness/fake-agent-worker.js";
 import { startMcpClient, type McpHarnessClient } from "../../../tests/harness/mcp-client.js";
@@ -172,7 +173,7 @@ describe("T067 host logging carries codes, not content", () => {
   });
 });
 
-async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = scaledMs(10_000)): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;

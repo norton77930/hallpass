@@ -3,6 +3,18 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.19.0 — 2026-11-07
+
+- **agent 的問題變成卡片**(#17):側邊欄的 Claude Code 或 Codex 問你有選項或欄位的問題時，問題會以卡片出現在輸入框上方，可以「送出」答案、「略過」或「停止」這一輪。沒按「送出」就不會替你回答。Claude Code 自己的提問工具在側邊欄重新可用。Codex 不會再被告知你沒回答一個你根本沒看到的問題。卡片會寫出是哪個 agent 問的，屬於某個工具呼叫時也會寫出那個呼叫。秘密欄位會遮住輸入，之後也不再顯示。只顯示表單問題，不顯示連結。Hermes 和 DeepSeek 不變。已用真的 Claude Code 和 Hermes 驗證;Codex 的步驟有測試涵蓋，但還沒有用真的 Codex 實測。
+- **下載**(#36):agent 只會拿到存下來的檔名，不會拿到你磁碟上的路徑。下載屬於正在那個網站上操作的 session;頁面自己產生、沒有網站的檔案(`data:` 或 `blob:` 連結),屬於正在執行頁面操作的那個 session。
+- **頁面文字**(#37):`get_page_text` 不會回傳你在頁面上看不到的文字。
+- **更安全的 session 與同意**:說明過的計畫只對說明它的 session 有效。session id 只屬於一個 agent:前一個還在結束時，另一個 agent 用同一個 id 打招呼會被拒絕，回覆也不會跟著 id 跑到另一條連線。配對一次只顯示一張卡。`evaluate` 執行前會再確認一次分頁的網站。撤銷上傳資料夾在 worker 重啟後仍然有效，允許上傳的檔案會透過檢查過的那個 handle 讀取。
+- **側邊欄**:網頁或 agent 寫的文字顯示時會去掉格式和控制字元。broker 顯示和記錄的內容會遮掉 header 值、URL 裡的密碼和 AWS key id;Windows 系統程式改用完整路徑啟動;逾時的指令即使孫程序還開著輸出，也會回覆。host 的資料夾和檔案只有你自己能讀。
+- **release zip**(#38):改由 tag 觸發的 workflow 建置，旁邊附 `.sha256` 檔和 build provenance(`gh attestation verify`)。zip 會列出每個隨附套件和它的授權。zod 4.6.7。
+- **Linux 與 macOS**(#29):跑測試不會再在 checkout 裡留下 `\tmp\hallpass-…` 檔案。
+- **維護者**(#28、#22):找私有引用的 contract 檢查改用一次 `git grep`。`HALLPASS_TEST_TIME_SCALE` 可以在慢或忙的機器上拉長測試時限；jsdom 測試每個 worker 只載入一次 jsdom。
+- 主機和擴充功能要一起升級：重新安裝主機並重新載入擴充功能。
+
 ## 0.18.2 — 2026-11-02
 
 - **維護者**:`publish:snapshot` 只透過 index 設定檔案權限，在 Linux 和 macOS 上 CRLF 檔案進公開 repo 時也會維持 LF(0.18.1 在那些系統上可能從磁碟重新讀取)。檔案權限和 `uninstall.sh --purge` 的 contract 測試在 Linux 和 macOS 上也能通過。使用者端行為沒有改變。

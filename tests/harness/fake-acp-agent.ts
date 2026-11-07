@@ -112,6 +112,22 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
  * - prompt keyword `ask:elicit` (#17): asks "Which colour do you prefer?" as a form elicitation (red / blue)
  *                         when the client advertised `elicitation.form` at initialize, and says back
  *                         `elicit:<action>`; otherwise says `elicit:unsupported`.
+ * - prompt keywords `ask:form:<shape>` (029 T864): one form question each, only to a client that
+ *                         advertised `elicitation.form` (else `elicit:unsupported`); says back
+ *                         `elicit:<action>` and, for an accept, `content:<the content as JSON>`.
+ *                         `kinds`: one field of each kind of 029 R-432 (`colour` oneOf, `size` enum,
+ *                         `toppings` array 1..2, `note` text <= 50, `email` format email, `count`
+ *                         integer 1..9 default 2, `price` number, `ok` boolean default true), `colour`
+ *                         required. `secret`: one required text field marked `_meta.codex.isSecret`.
+ *                         `tool`: announces tool call `mcp__github__create_issue` first and ties the
+ *                         question to it. `withdraw`: cancels its own request (`$/cancel_request`) after
+ *                         FAKE_ACP_WITHDRAW_MS (default 200) and says `elicit:withdrawn`. `big`: 21 text
+ *                         fields. `empty`: a fieldless MCP approval, sent as `session/request_permission`
+ *                         (as Codex does), says `permission:<outcome>`. `outside`: ends the turn, then
+ *                         asks 100 ms later and logs `{ event: "outside-elicit", action }` (FAKE_ACP_LOG).
+ *                         `claude` / `codex` (029 R-438): two questions shaped as Claude Code's question
+ *                         tool and as Codex's user-input request are sent - their tags, option preview,
+ *                         and each question's own free-text field with its marker.
  * - FAKE_ACP_SET_SNAPSHOT_EARLY=1  (#24) a `session/set_config_option` applies the change and takes the
  *                         options it answers with on arrival, before FAKE_ACP_SET_DELAY_MS: a held answer
  *                         then misses what a later set changed meanwhile (an out-of-order snapshot).
@@ -481,6 +497,175 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
     }
   };
 
+  /** 029 T864: the form questions of `ask:form:<shape>`; see the header. */
+  const FORM_SHAPES: Record<string, { message: string; requestedSchema: acp.ElicitationSchema }> = {
+    kinds: {
+      message: "Pick your order",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          colour: { type: "string", title: "Colour", oneOf: [{ const: "red", title: "Red" }, { const: "blue", title: "Blue", description: "The calm one" }] },
+          size: { type: "string", title: "Size", enum: ["S", "M", "L"] },
+          toppings: {
+            type: "array",
+            title: "Toppings",
+            minItems: 1,
+            maxItems: 2,
+            items: { anyOf: [{ const: "cheese", title: "Cheese" }, { const: "ham", title: "Ham" }, { const: "olive", title: "Olive" }] },
+          },
+          note: { type: "string", title: "Note", maxLength: 50 },
+          email: { type: "string", title: "Email", format: "email" },
+          count: { type: "integer", title: "Count", minimum: 1, maximum: 9, default: 2 },
+          price: { type: "number", title: "Price" },
+          ok: { type: "boolean", title: "Deliver", default: true },
+        },
+        required: ["colour"],
+      } as acp.ElicitationSchema,
+    },
+    secret: {
+      message: "Codex needs your input to continue.",
+      requestedSchema: {
+        type: "object",
+        properties: { token: { type: "string", title: "API token", _meta: { codex: { isSecret: true } } } },
+        required: ["token"],
+      } as acp.ElicitationSchema,
+    },
+    tool: {
+      message: "Which repository should the issue go to?",
+      requestedSchema: { type: "object", properties: { repo: { type: "string", title: "Repository" } }, required: ["repo"] } as acp.ElicitationSchema,
+    },
+    withdraw: {
+      message: "Answer within a moment",
+      requestedSchema: { type: "object", properties: { answer: { type: "string", title: "Answer" } } } as acp.ElicitationSchema,
+    },
+    big: {
+      message: "Too many questions",
+      requestedSchema: {
+        type: "object",
+        properties: Object.fromEntries(Array.from({ length: 21 }, (_unused, index) => [`q${index + 1}`, { type: "string", title: `Question ${index + 1}` }])),
+      } as acp.ElicitationSchema,
+    },
+    claude: {
+      message: "Please answer the following questions.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          question_0: {
+            type: "string",
+            title: "Auth",
+            description: "Which sign-in should the app use?",
+            oneOf: [
+              { const: "OAuth", title: "OAuth", description: "Sign in through the browser", _meta: { "_claude/askUserQuestionOption": { preview: "await signIn({ provider })" } } },
+              { const: "API key", title: "API key", description: "A key in the settings" },
+            ],
+          },
+          question_0_custom: {
+            type: "string",
+            title: "Other",
+            description: "Type your own answer, or add a note to the option you chose above (optional).",
+            _meta: { _askUserQuestionCustomAnswer: { questionId: "question_0", isCustomAnswer: true } },
+          },
+          question_1: {
+            type: "array",
+            title: "Features",
+            description: "Which features should the first release have?",
+            items: { anyOf: [{ const: "Search", title: "Search" }, { const: "Export", title: "Export", description: "CSV and PDF" }] },
+          },
+          question_1_custom: {
+            type: "string",
+            title: "Other",
+            description: "Type your own answer to add to your selection above (optional).",
+            _meta: { _askUserQuestionCustomAnswer: { questionId: "question_1", isCustomAnswer: true } },
+          },
+        },
+      } as acp.ElicitationSchema,
+    },
+    codex: {
+      message: "Codex needs your input to continue.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          scope: {
+            type: "string",
+            title: "Which scope should the new token have?",
+            description: "Token scope",
+            oneOf: [
+              { const: "repo", title: "repo", description: "Read and write code" },
+              { const: "read:org", title: "read:org" },
+              { const: "None of the above", title: "None of the above", description: "Provide a different answer in the note field." },
+            ],
+            _meta: { codex: { isOther: true, isSecret: false } },
+          },
+          scope_note: { type: "string", title: "Additional answer or note", _meta: { codex: { questionId: "scope", role: "user_note", isSecret: false } } },
+        },
+        required: ["scope"],
+      } as acp.ElicitationSchema,
+    },
+    outside: {
+      message: "Asked after the turn",
+      requestedSchema: { type: "object", properties: { answer: { type: "string" } } } as acp.ElicitationSchema,
+    },
+  };
+
+  const askForm = async (sessionId: string, shape: string, signal: AbortSignal) => {
+    if (shape === "empty") {
+      // Codex sends an MCP tool approval (a form with no fields) as a permission request.
+      const toolCallId = `call-${++toolCounter}`;
+      const toolCall = { toolCallId, title: "Approve mcp__github__create_issue?", kind: "other" as const, status: "pending" as const };
+      await update(sessionId, { sessionUpdate: "tool_call", ...toolCall });
+      const answer = await unlessCancelled(signal, connection.requestPermission({ sessionId, toolCall, options: permissionOptions() }));
+      await chunk(sessionId, `permission:${answer.outcome.outcome}`);
+      return;
+    }
+    if (!clientTakesForms) {
+      await chunk(sessionId, "elicit:unsupported");
+      return;
+    }
+    const { message, requestedSchema } = FORM_SHAPES[shape]!;
+    if (shape === "outside") {
+      setTimeout(() => {
+        connection
+          .createElicitation({ sessionId, mode: "form", message, requestedSchema })
+          .then(
+            (answer) => log({ event: "outside-elicit", action: answer.action }),
+            (error: unknown) => log({ event: "outside-elicit", action: "error", message: String(error) }),
+          );
+      }, 100);
+      await chunk(sessionId, "turn-ends");
+      return;
+    }
+    let toolCallId: string | undefined;
+    if (shape === "tool") {
+      toolCallId = `call-${++toolCounter}`;
+      await update(sessionId, { sessionUpdate: "tool_call", toolCallId, title: "mcp__github__create_issue", kind: "other", status: "pending" });
+    }
+    const withdraw = new AbortController();
+    if (shape === "withdraw") setTimeout(() => withdraw.abort(), Number(env.FAKE_ACP_WITHDRAW_MS ?? 200));
+    let answer: acp.CreateElicitationResponse;
+    try {
+      answer = await unlessCancelled(
+        signal,
+        connection.request(
+          "elicitation/create",
+          { sessionId, ...(toolCallId ? { toolCallId } : {}), mode: "form", message, requestedSchema },
+          { cancellationSignal: withdraw.signal },
+        ),
+      );
+    } catch (error) {
+      if (withdraw.signal.aborted) {
+        await chunk(sessionId, "elicit:withdrawn");
+        return;
+      }
+      throw error;
+    }
+    if (withdraw.signal.aborted) {
+      await chunk(sessionId, "elicit:withdrawn");
+      return;
+    }
+    await chunk(sessionId, `elicit:${answer.action}`);
+    if (answer.action === "accept") await chunk(sessionId, `content:${JSON.stringify((answer as { content?: unknown }).content ?? null)}`);
+  };
+
   /** DeepSeek announces every action as `other` with the command and its reason (021, measured). */
   const DEEPSEEK_INPUT: Record<string, { command: string; justification: string }> = {
     edit: { command: "write_file src/app.ts", justification: "Update the greeting in src/app.ts" },
@@ -710,6 +895,7 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
       const drift = /^drift:(.+)$/.exec(token);
       const mcp = /^mcp:([a-z_]+)(?::(.+))?$/.exec(token);
       const selfModel = /^self-model:(.+)$/.exec(token);
+      const form = /^ask:form:(kinds|secret|tool|withdraw|big|empty|outside|claude|codex)$/.exec(token);
       if (chunks) {
         matched = true;
         for (let index = 1; index <= Number(chunks[1]); index++) {
@@ -777,6 +963,9 @@ export function serveFakeAcpAgent(stream: acp.Stream, options: FakeAcpAgentOptio
           );
           await chunk(sessionId, `elicit:${answer.action}`);
         }
+      } else if (form) {
+        matched = true;
+        await askForm(sessionId, form[1]!, signal);
       }
     }
     if (!matched) await chunk(sessionId, `echo:${text}`);

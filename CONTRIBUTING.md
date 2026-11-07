@@ -32,6 +32,14 @@ npm test                  # unit (vitest, node) + side-panel tests (jsdom)
 npm run test:contract     # contract tests over the build config, the manifests and the bundled host
 ```
 
+On a slow or busy machine (a laptop on battery, a build running alongside), tests that spawn processes can
+run past their default deadlines and fail with `Test timed out` or a harness `timed out waiting for ...`
+although nothing is wrong. Set `HALLPASS_TEST_TIME_SCALE` to stretch the default deadlines, for example
+`$env:HALLPASS_TEST_TIME_SCALE=4; npm test`. It multiplies vitest's test and hook timeout (15 s) and the
+default waits of the shared test helpers and the readiness waits of process tests; a bound that is what a
+test checks (for example "within 2 s") is not scaled. Unset, empty, non-numeric or below 1 means 1, which is what CI runs at. The packages
+must be built first (`npx tsc -b`), as for the rest of the suite.
+
 Two more need a real Chrome and are run locally before a release:
 
 - **The packaged gate** (`tests/e2e/packaged/agent-*.spec.ts`) attaches to a Chrome you start with
@@ -45,6 +53,16 @@ Two more need a real Chrome and are run locally before a release:
 - **The acceptance probes** (`tests/acceptance/probe-004`) drive the bridge with a real coding-agent
   session (`claude -p`) against public pages and write a timestamped report. They cost API calls;
   run them for a release, not for every change.
+
+### Releasing
+
+A release is a tag. `npm run publish:snapshot` commits the snapshot to the public repository and tags
+it `v<version>`; pushing that tag runs `.github/workflows/release.yml` (issue #38), which on a Windows
+runner runs typecheck and the unit suite, `npm run package`, checks that the tag names the version the
+package carries, attests the zip and publishes a GitHub release with `hallpass-<version>.zip` and its
+`.sha256`. Nothing is uploaded by hand. `scripts/package.ts` refuses to stage a `koffi.node` whose
+digest is not the pinned one (`KOFFI_WIN32_X64_NODE_SHA256`); bumping koffi means re-measuring it
+from the registry tarball the lockfile names.
 
 ### The side-panel conversation: the fake agent
 

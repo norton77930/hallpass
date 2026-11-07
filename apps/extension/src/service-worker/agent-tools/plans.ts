@@ -10,7 +10,9 @@ import type { StatedPlan } from "./gate.js";
  *
  * Keyed by site rather than by plan id because that is the question the gate asks: "is there a plan
  * for the site this effect would land on". A second batch on the same site replaces the first,
- * which is right - the owner's latest answer is their answer.
+ * which is right - the owner's latest answer is their answer. Each plan names the session that
+ * stated it, and the gate admits it for that session alone (security review 2026-11-05 S6); a
+ * session that ends takes its plans with it (`clearSession`), whatever ended it.
  */
 
 export type StatedPlanStore = {
@@ -21,6 +23,8 @@ export type StatedPlanStore = {
   admit(site: string, step: number): void;
   /** Drops the plan when the batch that stated it is over, or when it is replaced. */
   clear(planId: string): void;
+  /** Drops every plan a session stated: the session is over, so its consent is (S6). */
+  clearSession(sessionId: string): void;
 };
 
 export function createStatedPlans(): StatedPlanStore {
@@ -44,6 +48,11 @@ export function createStatedPlans(): StatedPlanStore {
     clear(planId) {
       for (const [site, plan] of bySite) {
         if (plan.planId === planId) bySite.delete(site);
+      }
+    },
+    clearSession(sessionId) {
+      for (const [site, plan] of bySite) {
+        if (plan.sessionId === sessionId) bySite.delete(site);
       }
     },
   };

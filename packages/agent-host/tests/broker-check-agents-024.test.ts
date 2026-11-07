@@ -27,6 +27,7 @@ import type { FolderActions } from "../src/broker/folders.js";
 import { runCommand } from "../src/broker/run-command.js";
 import type { UserEnvironmentPorts } from "../src/broker/user-environment.js";
 import { FAKE_AGENT, makeTempDir, removeDir, sleep, waitFor } from "./conversation-harness.js";
+import { WHERE_EXE } from "../src/broker/windows-programs.js";
 
 /**
  * 024 T754 (R-374, D-024-19, FR-397, SC-177): `ui.conversation.check-agents` re-runs each agent's
@@ -107,7 +108,7 @@ function machine(where: Record<string, string[]>): { ports: AgentPorts; execs: E
       fs: { exists, readText: (path) => readFile(path, "utf8"), writeText: async () => undefined },
       exec: async (file, args, options) => {
         execs.push({ file, timeoutMs: options?.timeoutMs });
-        if (file === "where.exe") {
+        if (file === WHERE_EXE) {
           const lines = where[args[0] ?? ""];
           return lines === undefined ? { code: 1, stdout: "", stderr: "" } : { code: 0, stdout: `${lines.join("\r\n")}\r\n`, stderr: "" };
         }
@@ -456,7 +457,7 @@ describe("024 R-374 a found program whose --version is slower than the readiness
       codexShimEntry: "C:\\no-shim.js",
       fs: { exists: async (path) => path === HERMES, readText: async () => "", writeText: async () => undefined },
       exec: async (file, args, options) => {
-        if (file === "where.exe") return args[0] === "hermes" ? { code: 0, stdout: `${HERMES}\r\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
+        if (file === WHERE_EXE) return args[0] === "hermes" ? { code: 0, stdout: `${HERMES}\r\n`, stderr: "" } : { code: 1, stdout: "", stderr: "" };
         if (file !== HERMES || args[0] !== "--version") return { code: 1, stdout: "", stderr: "" };
         if ((options?.timeoutMs ?? LAUNCH_EXEC_BOUND_MS) < answersAfterMs) return { code: null, stdout: "", stderr: "", timedOut: true };
         return new Promise<ExecResult>((done) => {
@@ -519,7 +520,7 @@ describe("024 R-374 a found program whose --version is slower than the readiness
       codexShimEntry: "C:\\no-shim.js",
       fs: { exists: async (path) => path === codex, readText: async () => "", writeText: async () => undefined },
       exec: async (file, args) =>
-        file === "where.exe"
+        file === WHERE_EXE
           ? { code: 0, stdout: `${codex}\r\n`, stderr: "" }
           : file === codex && args[0] === "--version"
             ? { code: null, stdout: "", stderr: "", timedOut: true }

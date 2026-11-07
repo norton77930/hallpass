@@ -356,11 +356,51 @@ describe("relay multiplexer", () => {
       { type: "hello", sessionId: "s-1", agentId: "claude-code", displayName: "Claude Code" },
     ]);
     expect(mux.sessionIds()).toEqual(["s-1"]);
+    // The call stays behind with its socket: the server answered it `call-unconfirmed` when the link
+    // dropped (T162), before it could dial again, so it has nothing waiting for this answer.
     mux.fromWorker({ callId: "c-1", outcome: "ok", result: null });
-    expect(second.sent).toEqual([
-      { type: "hello-ack", relayPid: RELAY_PID },
-      { callId: "c-1", outcome: "ok", result: null },
-    ]);
+    expect(second.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }]);
+  });
+
+  /**
+   * 006 FR-087: the worker forgot the session and the server greets again on the socket it still has,
+   * with other calls possibly in flight. No socket changed hands, so those answers still have an owner.
+   */
+  it("keeps the calls in flight when a session greets again on the same socket", () => {
+    const { mux } = createHarness();
+    const connection = fakeConnection();
+    mux.fromServer(connection, hello("s-1"));
+    mux.fromServer(connection, { callId: "c-1", sessionId: "s-1", tool: "wait", args: {} });
+
+    mux.fromServer(connection, hello("s-1"));
+    mux.fromWorker({ callId: "c-1", outcome: "ok", result: null });
+
+    expect(connection.sent.at(-1)).toEqual({ callId: "c-1", outcome: "ok", result: null });
+    expect(connection.closes).toBe(0);
+  });
+
+  /**
+   * An answer belongs to the socket that made the call, not to whoever holds the id by the time the
+   * answer comes back. A session id is not a secret (S2 discloses it through `holder` and
+   * `held-by-session`), and the taker's `agentId` is its own claim, so this greets with the same one.
+   */
+  it("does not deliver a call's answer to the connection that took its session id over", () => {
+    const { mux, logs } = createHarness();
+    const caller = fakeConnection();
+    const taker = fakeConnection();
+    mux.fromServer(caller, hello("s-1"));
+    mux.fromServer(caller, { callId: "c-1", sessionId: "s-1", tool: "screenshot", args: {} });
+
+    mux.fromServer(taker, hello("s-1"));
+    const pendingAfterTakeover = mux.pendingCallCount();
+    mux.fromWorker({ callId: "c-1", outcome: "ok", result: { data: "png", mimeType: "image/png" } });
+
+    expect(taker.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }]);
+    expect(caller.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }]);
+    expect(logs).toContain("relay.mux.dropped call");
+    // The answer has nowhere to go, so a superseded relay's drain has nothing to wait for.
+    expect(pendingAfterTakeover).toBe(0);
+    expect(caller.closes).toBe(1);
   });
 
   /**

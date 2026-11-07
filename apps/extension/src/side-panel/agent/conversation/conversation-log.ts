@@ -40,6 +40,8 @@ type PermissionEvent = Extract<ConversationEvent, { type: "permission" }>;
 type NoticeEvent = Extract<ConversationEvent, { type: "notice" }>;
 type PermissionClosedEvent = Extract<ConversationEvent, { type: "permission-closed" }>;
 type ModelEvent = Extract<ConversationEvent, { type: "model" }>;
+export type QuestionEvent = Extract<ConversationEvent, { type: "question" }>;
+type QuestionClosedEvent = Extract<ConversationEvent, { type: "question-closed" }>;
 
 export type TimelineItem =
   /**
@@ -53,6 +55,11 @@ export type TimelineItem =
   | { kind: "notice"; key: string; notice: NoticeEvent }
   /** 020 FR-319: how a card this panel showed was closed, as the broker reported it. */
   | { kind: "answer"; key: string; title: string; answer: PermissionClosedEvent["answer"] }
+  /**
+   * 029 R-435, R-436: how a question card this panel showed ended - the broker's summary of an
+   * answer (secrets already hidden), or the question's message for any other ending.
+   */
+  | { kind: "question-ended"; key: string; ending: QuestionClosedEvent["ending"]; message: string; summary?: string }
   /** 023 R-371: the agent said it was thinking (the fact only); drawn while it is the last item. */
   | { kind: "thinking"; key: string };
 
@@ -60,6 +67,8 @@ export type ConversationPicture = {
   timeline: TimelineItem[];
   /** Cards still waiting for the owner, oldest first (FR-290, FR-294: they wait, never expire). */
   permissions: PermissionEvent[];
+  /** 029: form questions still waiting for the owner, oldest first (FR-442: they never expire). */
+  questions: QuestionEvent[];
   /** The latest the broker said, if it said anything yet. */
   mode?: ConversationMode;
   modeNote?: string;
@@ -78,7 +87,8 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
   const timeline: TimelineItem[] = [];
   const actionSlots = new Map<string, { item: Extract<TimelineItem, { kind: "actions" }>; index: number }>();
   const permissions = new Map<string, PermissionEvent>();
-  const picture: ConversationPicture = { timeline, permissions: [] };
+  const questions = new Map<string, QuestionEvent>();
+  const picture: ConversationPicture = { timeline, permissions: [], questions: [] };
   for (const { seq, event } of entries) {
     switch (event.type) {
       case "text": {
@@ -125,6 +135,24 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
         permissions.delete(event.requestId);
         break;
       }
+      case "question":
+        questions.set(event.requestId, event);
+        break;
+      case "question-closed": {
+        // FR-444, FR-445: one line where the conversation stood, whichever panel document answered.
+        const closed = questions.get(event.requestId);
+        if (closed !== undefined) {
+          timeline.push({
+            kind: "question-ended",
+            key: `question-${seq}`,
+            ending: event.ending,
+            message: closed.message,
+            ...(event.summary === undefined ? {} : { summary: event.summary }),
+          });
+        }
+        questions.delete(event.requestId);
+        break;
+      }
       case "mode":
         picture.mode = event.mode;
         if (event.note === undefined) delete picture.modeNote;
@@ -147,6 +175,7 @@ export function pictureOf(entries: readonly ConversationLogEntry[]): Conversatio
     }
   }
   picture.permissions = [...permissions.values()];
+  picture.questions = [...questions.values()];
   return picture;
 }
 

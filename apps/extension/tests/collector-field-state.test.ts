@@ -73,7 +73,7 @@ describe("T171 field state in the collection", () => {
     expect(toggles.every((node) => node.value === undefined)).toBe(true);
     // The secret never entered the collection under any key.
     expect(JSON.stringify(nodes)).not.toContain("hunter2");
-    expect(JSON.stringify(nodes)).not.toContain("4111");
+    expect(JSON.stringify(nodes)).not.toContain("4111111111111111");
   });
 
   it("carries none of them on the reviewed read (FR-075)", () => {

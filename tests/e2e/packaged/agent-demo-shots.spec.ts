@@ -15,6 +15,7 @@ import {
   type SidePanelDriver,
 } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
+import { savedDownloadPath } from "../fixtures/saved-download.js";
 
 /** The fixture page the owner's panel is opened beside; the agent itself works on a real site. */
 const OWNER_SITE = "https://127.0.0.1:19443";
@@ -170,7 +171,8 @@ test.describe("README demo GIF", () => {
       };
       const record = listed.downloads.find((entry) => entry.id === exported.downloadId);
       expect(record?.state, `recorder download ${exported.downloadId}: ${JSON.stringify(listed)}`).toBe("complete");
-      pageHalves(frames, record!.filename);
+      // The agent is told the name only (#36); the gate asks the browser where the file is.
+      pageHalves(frames, await savedDownloadPath(extensionContext, extensionId, record!.id));
 
       await call("tabs_close", { tabId });
       tabId = undefined;

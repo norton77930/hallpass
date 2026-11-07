@@ -133,3 +133,51 @@ broker does not replay cards.
 **Decision**: questions are held beside permission cards; every check that today reads "a card waits"
 (the idle stop, mode change, restart, model change, the `waiting-for-owner` state) counts both. Hallpass
 sets no expiry (FR-294 applies alike).
+
+## Amendments (implementation, 2026-11-04)
+
+- **R-436**: the answered line is built once by the broker and shown as is in either language, so it
+  uses language-neutral marks: ✓ / ✗ for yes / no and •••••• for a secret.
+- **R-434**: a `question-invalid` refusal is shown as the conversation's refusal notice (as every other
+  command refusal is), with the card left open. The card itself keeps Send unavailable while a value is
+  missing or outside its limits, so the broker's check refuses only what the panel could not know.
+- **R-435**: a closing connection aborts every open request's signal too; only the agent's own
+  `$/cancel_request` (-32800) is a withdrawal, so an exit still ends the card `agent-exited`.
+
+## R-438 — Showing a question the way the agent means it (owner review, 2026-11-04)
+
+**Finding**: the tested adapters say more than the form's types. Claude Code's question tool titles each
+question with its short tag and puts its words in the description (one question: its words are the
+message); each option may carry a preview under `_meta["_claude/askUserQuestionOption"]`; and each
+question has its own free-text answer field, marked `_meta._askUserQuestionCustomAnswer.questionId` (a
+marker the adapter names as meant for any client and any bridge). Codex's user-input request puts the
+words in the title and the tag in the description, under `_meta.codex`, offers "None of the above", and
+adds a note field marked `_meta.codex.role: "user_note"` with its `questionId`. The first card drew all
+of these as plain separate fields: the tag as the heading, the words as a grey hint, each Other box as a
+field of its own.
+
+**Decision**: the broker maps the hints (`chip` for the tag, the words as the label, `preview` on an
+option, `otherFor` on a free-text field that belongs to a choice field of the same form) and nothing is
+inferred from text. The card draws the tag as a small chip over the question's words, the options as rows
+to pick (the picked one in the accent's soft fill) with their description and preview under them, and a
+question's own answer box or note inside that question after its options, with the agent's hint said in
+full above it. A field's label may now be 1000 characters (it holds the question's words); an option's
+stays 200, a preview 4000.
+
+## R-439 — The card as the agent's own client draws a question (owner's screenshots, 2026-11-04)
+
+**Finding**: the R-438 card was drawn from the adapters' code, not from how a question looks to the
+owner. The owner showed three screenshots of a question asked by the agent's own question tool in the
+Claude app: one question at a time; a grey header with the question's words and "1 of 3" with arrows;
+the options as full-width rows split by hairlines, a radio (one choice) or a box (several) on the left,
+the words and a grey description under them; "Other" as the last row; Skip, and a dark Next (Submit on
+the last question) with Ctrl+Enter. The short tag is not shown, nor the options numbered.
+
+**Decision**: the card is drawn that way. A question's own answer box (R-438 `otherFor`) is the
+"Other" row when the question may be left unpicked, and opens a box when picked; on a question that
+must be picked (Codex) it stays a note under the options. Nothing is picked for the owner; Next waits
+for the page's required answer, Send for every page's; a value outside its limits is named. The message
+of an agent's question tool (its fields carry tags) is generic and not shown; another form's message
+is. Hallpass's own lines - who asks, where the answer goes, the agent's waiting time (FR-443) - are the
+small print above the buttons.
+

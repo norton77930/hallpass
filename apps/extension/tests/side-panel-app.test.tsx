@@ -1,4 +1,5 @@
 import { act, cleanup, render } from "@testing-library/react";
+import { scaledMs } from "@hallpass/test-kit";
 import { afterEach, describe, expect, it } from "vitest";
 import { TEST_BUILD_EXTENSION_ID } from "../src/build-config.js";
 import { App } from "../src/side-panel/App.js";
@@ -28,7 +29,7 @@ describe("side-panel App composition", () => {
     };
   }
 
-  it("renders only the agent shell: no service status, no sign-in, no workspace", { timeout: 30_000 }, async () => {
+  it("renders only the agent shell: no service status, no sign-in, no workspace", { timeout: scaledMs(30_000) }, async () => {
     installAgentPortOnly();
     const view = render(<App />);
     await act(async () => {
@@ -39,7 +40,7 @@ describe("side-panel App composition", () => {
     // one-second default in this environment, and a timeout here would be about the bundler rather
     // than about what is rendered. 020 T591: the chunk also carries the Markdown renderer.
     expect(
-      await view.findByRole("heading", { name: "No agent is connected to this browser" }, { timeout: 20_000 }),
+      await view.findByRole("heading", { name: "No agent is connected to this browser" }, { timeout: scaledMs(20_000) }),
     ).toBeTruthy();
     expect(document.querySelector("[data-agent-state]")).toBeTruthy();
     // 016 FR-224: the browser's side-panel header names the product; the panel does not repeat it.

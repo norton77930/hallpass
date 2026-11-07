@@ -1,4 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
+import { basename } from "node:path";
 import type { BrowserContext } from "@playwright/test";
 import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
@@ -6,6 +7,7 @@ import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
 import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
+import { isBareFileName, savedDownloadPath } from "../fixtures/saved-download.js";
 
 const locale = localeFromEnv();
 const copy = copyFor(locale);
@@ -18,10 +20,10 @@ const SITE = "https://127.0.0.1:19443";
  * (FR-076..FR-080, SC-042, half of SC-043; `download.html`).
  *
  * The unit tests prove the ring and the wait; this is the one place the whole path is real - the
- * browser's own `downloads.onCreated`/`onChanged`, the attribution by lease, the MCP answer, and a
- * `filename` that is a path on this machine's disk. Two claims that only a real browser can settle:
- * the saved path exists where the browser says it does, and a download that finished *before* the
- * wait was called is still answered once and never twice.
+ * browser's own `downloads.onCreated`/`onChanged`, the attribution, the MCP answer, and a
+ * `filename` that is the file's name with no folder (#36, FR-079). Two claims that only a real
+ * browser can settle: the file the agent is told about exists where the browser saved it, and a
+ * download that finished *before* the wait was called is still answered once and never twice.
  *
  * The test deletes the file it caused afterwards; the extension never does (FR-076). The named zip
  * URL of the acceptance standard is the probe's case (s8), not this one: this gate does not reach
@@ -57,7 +59,7 @@ test.describe("agent downloads", () => {
       "must be one the runner started and pointed at the installed host (HALLPASS_CDP_ENDPOINT).",
   );
 
-  test("reports a page-produced file by its saved path, once, to the session that caused it", async ({
+  test("reports a page-produced file by its saved name, once, to the session that caused it", async ({
     extensionContext,
     extensionId,
     extensionWorker,
@@ -128,14 +130,16 @@ test.describe("agent downloads", () => {
       const download = waited.download!;
       expect(download.state).toBe("complete");
       expect(download.url).toMatch(/^data:text\/csv/);
-      // SC-042's claim from the caller's side: the path the browser reports is a file on this disk.
-      expect(download.filename, "the browser's saved path must be non-empty").not.toBe("");
-      expect(existsSync(download.filename), `${download.filename} does not exist`).toBe(true);
-      // The name is not asserted here on purpose: a browser attached through Playwright's CDP
+      // The agent is told the file's name and never the folder it is in (#36, FR-079), and that
+      // name is the one the browser saved: the gate asks the browser itself where the file is.
+      expect(isBareFileName(download.filename), `filename names a folder: ${download.filename}`).toBe(true);
+      savedPath = await savedDownloadPath(extensionContext, extensionId, download.id);
+      expect(existsSync(savedPath), `${savedPath} does not exist`).toBe(true);
+      expect(basename(savedPath)).toBe(download.filename);
+      // `report.csv` itself is not asserted on purpose: a browser attached through Playwright's CDP
       // client has its downloads redirected to Playwright's artifacts directory under an opaque
-      // name (measured 2026-09-13: `…\playwright-artifacts-*\<guid>`), so `report.csv` is only what
-      // the owner's unattached browser would save. The name half of SC-042 is the probe's (S8).
-      savedPath = download.filename;
+      // name (measured 2026-09-13 and again 2026-11-07: `…\playwright-artifacts-*\<guid>`), so
+      // `report.csv` is only what the owner's unattached browser would save. That is the probe's (S8).
 
       // ============= 2. listed once, complete, as this session's own =============
       const listed = (await call("downloads_context")) as { downloads: DownloadRecord[] };
@@ -199,13 +203,13 @@ test.describe("agent downloads", () => {
       expect(first.outcome, JSON.stringify(first)).toBe("condition-met");
       expect(first.download?.url, JSON.stringify(first)).toBe(`${SITE}/two-downloads/fast.csv`);
       expect(first.download?.state).toBe("complete");
-      if (first.download?.filename) saved.push(first.download.filename);
+      saved.push(await savedDownloadPath(extensionContext, extensionId, first.download!.id));
 
       const second = (await call("wait", { tabId, condition: "download-complete", maxMs: 15_000 })) as WaitAnswer;
       expect(second.outcome, JSON.stringify(second)).toBe("condition-met");
       expect(second.download?.url, JSON.stringify(second)).toBe(`${SITE}/two-downloads/slow.csv`);
       expect(second.download?.state).toBe("complete");
-      if (second.download?.filename) saved.push(second.download.filename);
+      saved.push(await savedDownloadPath(extensionContext, extensionId, second.download!.id));
       expect(second.download?.id).not.toBe(first.download?.id);
 
       // Reality: the browser has both items, and it finished them in the order they were answered.

@@ -27,8 +27,13 @@ npm run snapshot:check        # scans the next commit's tree for strings/paths t
 npm run package               # release/hallpass-<version>.zip (extension + Vite-bundled host + install.ps1)
 ```
 
-CI (`.github/workflows/ci.yml`, windows-latest) runs, in order: `npm ci`, typecheck, `npm test`,
+CI (`.github/workflows/ci.yml`, a windows-latest / ubuntu-latest / macos-latest matrix; macOS reports
+without failing the run until it has passed once) runs, in order: `npm ci`, typecheck, `npm test`,
 `npm run build:extension`, `npm run test:contract`, `npm run snapshot:check`.
+
+On a slow or busy machine set `HALLPASS_TEST_TIME_SCALE=4` (PowerShell: `$env:HALLPASS_TEST_TIME_SCALE=4; npm test`):
+it multiplies vitest's 15 s test/hook timeout and the harness default waits (never a bound that is the claim
+under test); CI runs at 1. The parsing is `packages/test-kit/src/time-scale.ts` (`vitest.config.ts` repeats it inline).
 
 Single test: `npx vitest run --project unit packages/domain/src/foo.test.ts` (or add `-t "<name>"`).
 Project membership is by path — see `vitest.config.ts`: `packages/**/*.test.ts` and

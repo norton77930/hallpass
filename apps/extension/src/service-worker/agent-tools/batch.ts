@@ -166,7 +166,7 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
         if (excluded.has(index) || !isAgentEffectTool(step.tool)) continue;
         stated.push({ tool: step.tool, args: parsedArgs(step.tool, stepArgs[index] ?? {}) });
       }
-      deps.plans.set({ planId, site, steps: stated, admittedCount: 0 });
+      deps.plans.set({ planId, sessionId: request.sessionId, site, steps: stated, admittedCount: 0 });
     }
 
     const handle = deps.stops.begin(callId, request.sessionId);

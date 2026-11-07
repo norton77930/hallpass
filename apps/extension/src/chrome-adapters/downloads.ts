@@ -22,6 +22,8 @@
 export type DownloadSnapshot = {
   id: number;
   url: string;
+  /** The page that started it, as the browser reports it; empty when the browser names none (#36). */
+  referrer: string;
   /** The saved path; empty until the browser has decided it (edge case in the spec). */
   filename: string;
   state: "in_progress" | "complete" | "failed" | "canceled";
@@ -47,6 +49,7 @@ export type DownloadDelta = {
 type ChromeDownloadItem = {
   id: number;
   url: string;
+  referrer?: string;
   filename: string;
   state: string;
   error?: string;
@@ -131,6 +134,7 @@ export function watchDownloadCreated(listener: (item: DownloadSnapshot) => void)
     listener({
       id: item.id,
       url: item.url,
+      referrer: item.referrer ?? "",
       filename: item.filename ?? "",
       state: stateOf(item.state, item.error) ?? "in_progress",
       startedAt: item.startTime,

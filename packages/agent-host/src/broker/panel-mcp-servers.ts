@@ -9,6 +9,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { PANEL_MCP_SERVERS_MAX, panelMcpServerSchema, type ConversationAgent, type PanelMcpServer } from "@hallpass/contracts";
 import { cannotMergeOver, findOwnerEntry } from "./codex-config.js";
+import { redact } from "./redact.js";
 import { killTreeAsync } from "./run-command.js";
 
 /**
@@ -137,7 +138,9 @@ function reasonOf(error: unknown, stderr: string, server: PanelMcpServer, env: E
     if (value !== undefined && value.length >= 3) text = text.split(value).join(`<${name}>`);
   }
   text = text.replace(/\s+/gu, " ").trim();
-  return (text === "" ? "The server did not start." : text).slice(0, DETAIL_MAX);
+  // The one redactor every shown string passes (R-326; security review 2026-11-05 S8): the line
+  // is the owner's server's own stderr, which may name a credential the variables above do not.
+  return (text === "" ? "The server did not start." : redact(text)).slice(0, DETAIL_MAX);
 }
 
 const UNSAFE_FOR_CMD = /["%\r\n\0]/u;
