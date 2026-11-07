@@ -54,8 +54,13 @@ export type StatedPlan = {
 export type GateInput = {
   sessionId: string;
   tabId: number;
-  /** The origin of the page the effect would land on, as `site-mode-store` keys it. */
-  site: string;
+  /**
+   * The deciding site (030 R-444): the origin of the frame the effect would land on, as
+   * `site-mode-store` keys it - the page's site when the target is in the top frame or a frame that
+   * shares it. `null` means the frame's site could not be established, and then every mode prompts
+   * (FR-464): no mode, plan or session plan the caller passes may stand in for the owner.
+   */
+  site: string | null;
   /** The owner's standing decision for that site, defaulted to `ask` by the store. */
   mode: SiteMode;
   tool: AgentToolName;
@@ -136,6 +141,12 @@ export function decideGate(input: GateInput): GateDecision {
     // Answering `admit` here would turn a wiring mistake into consent nobody was asked for, and
     // answering `prompt` would ask the owner about a read. Neither is this function's to give.
     return { decision: "refuse", reason: "not-a-gated-tool" };
+  }
+  if (input.site === null) {
+    // 030 FR-464, R-444: the mode, plan and session plan the caller passed belong to some site, and
+    // which site this effect lands on is exactly what is not known - so none of them answers here,
+    // and falling back to the page's would be consent the owner never gave for this frame.
+    return { decision: "prompt" };
   }
   if (input.mode === "skip-checks") {
     return { decision: "admit" };

@@ -118,13 +118,13 @@ const LICENSE_FILE = /^(licen[cs]e|copying)(\.|$)/iu;
 
 /**
  * The licence a package declares for itself and the text it carries, read from its install directory.
- * A package that is not installed on this platform (koffi's binary packages are optional and per
- * platform) is read as its parent's: the same author publishes them under the same licence, and the
- * text is the parent's, which is what makes the generated file the same on every platform.
+ * koffi's binary packages (optional and per platform, so installed on one platform only) are always
+ * read as koffi itself: the same author publishes them under the same licence, the binary package
+ * carries no licence file of its own, and reading the parent whether or not this platform installed
+ * the binary is what makes the generated file the same on every platform.
  */
 export function readNotice(pkg: ShippedPackage, root: string = repoRoot): NoticeEntry {
-  let dir = resolve(root, pkg.path);
-  if (!existsSync(dir) && pkg.name.startsWith("@koromix/koffi-")) dir = resolve(root, "node_modules/koffi");
+  const dir = pkg.name.startsWith("@koromix/koffi-") ? resolve(root, "node_modules/koffi") : resolve(root, pkg.path);
   const manifestPath = resolve(dir, "package.json");
   if (!existsSync(manifestPath)) throw new Error(`${pkg.name} is not installed at ${pkg.path}; run npm ci`);
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { license?: unknown; licenses?: Array<{ type?: string }> };

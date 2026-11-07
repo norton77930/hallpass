@@ -170,9 +170,9 @@ describe("T077 the 004 tool surface", () => {
   it("lists the frames a read covered, and which frame each node came from", () => {
     const result = contractSchema("agentReadPageResultSchema");
     const frames = [
-      { frame: "0", parent: "0", url: "https://example.test/", readable: true },
-      { frame: "f1", parent: "0", url: "https://embed.test/", readable: false, reason: "not-allowed" },
-      { frame: "f2", parent: "f1", url: "https://embed.test/deep", readable: false, reason: "no-answer" },
+      { frame: "0", parent: "0", url: "https://example.test/", site: "https://example.test", readable: true },
+      { frame: "f1", parent: "0", url: "https://embed.test/", site: "https://embed.test", readable: false, reason: "not-allowed" },
+      { frame: "f2", parent: "f1", url: "https://embed.test/deep", site: "unknown", readable: false, reason: "no-answer" },
     ];
     const nodes = [
       { frame: "0", role: "button", name: "Save", depth: 2, ref: REF },
@@ -194,7 +194,7 @@ describe("T077 the 004 tool surface", () => {
     // agent would see a gap in the page and have nothing to decide about it.
     expectRejected(
       result,
-      { frames: [{ frame: "f1", parent: "0", url: "https://embed.test/", readable: false }], nodes, truncated: false },
+      { frames: [{ frame: "f1", parent: "0", url: "https://embed.test/", site: "https://embed.test", readable: false }], nodes, truncated: false },
       "an unreadable frame with no reason",
     );
     expectRejected(

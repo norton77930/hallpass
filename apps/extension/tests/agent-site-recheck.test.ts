@@ -9,7 +9,16 @@ import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import { createAgentReads } from "../src/service-worker/agent-tools/reads.js";
 import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
-import { SITE_MOVED_HINT } from "../src/service-worker/agent-tools/site-recheck.js";
+import { oneDocumentAnswer, oneDocumentFocus } from "./helpers/point-site.js";
+import {
+  FrameMovedBeforeDispatch,
+  SITE_MOVED_HINT,
+  SiteMovedBeforeDispatch,
+  frameAnswerText,
+  isFrameMovedBeforeDispatch,
+  isSiteMovedBeforeDispatch,
+  siteMovedAnswer,
+} from "../src/service-worker/agent-tools/site-recheck.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 
 /**
@@ -44,7 +53,8 @@ function fakeBrowser(onAcquire?: (address: Address) => void) {
     async send(_tabId: number, method: string, params?: Record<string, unknown>) {
       sent.push({ method, ...(params === undefined ? {} : { params }) });
       if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
-      return {};
+      // 030: the frame under a point is asked of the debugger; this page is one document.
+      return oneDocumentAnswer(method) ?? {};
     },
     attached: () => [],
     oopifSessions: () => [],
@@ -117,6 +127,8 @@ async function effectsHarness(
     confirm: async () => ({ outcome: "hit" }),
     probe: async () => ({ ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE }),
     settleMs: 0,
+    // 030 T908: keys with no target ask where focus is; this page is one document.
+    readFrameFocus: oneDocumentFocus,
     ...(onDelivered === undefined ? {} : { onDelivered: (callId: string) => onDelivered(callId) }),
     // The cursor's glide is the wait the page moves during.
     cursor: async () => onCursor(browser.address),
@@ -368,5 +380,76 @@ describe("014 re-check of the site before delivery (2026-10-11)", () => {
 
     expect(capture).not.toHaveBeenCalled();
     expect(response).toEqual({ ...SITE_MOVED, callId: "call-shot" });
+  });
+});
+
+describe("030 frame answers", () => {
+  const FRAME_SITE = "https://pay.example";
+  const reasons = ["refused", "undecided", "frame-moved", "unknown-site"] as const;
+
+  it("each reason with a known site names it", () => {
+    for (const reason of reasons.filter((r) => r !== "unknown-site")) {
+      expect(frameAnswerText(FRAME_SITE, reason), reason).toContain(FRAME_SITE);
+    }
+  });
+
+  it("refused says the owner refused the action inside an embedded frame from the site", () => {
+    expect(frameAnswerText(FRAME_SITE, "refused")).toContain(
+      "The owner refused this action inside an embedded frame from https://pay.example,",
+    );
+  });
+
+  it("undecided says no decision was made", () => {
+    const text = frameAnswerText(FRAME_SITE, "undecided");
+    expect(text).toContain("embedded frame from https://pay.example");
+    expect(text).toContain("No decision was made");
+    expect(text).toContain("timed out or was dismissed");
+  });
+
+  it("frame-moved says nothing was sent because the frame moved", () => {
+    const text = frameAnswerText(FRAME_SITE, "frame-moved");
+    expect(text).toContain("embedded frame from https://pay.example");
+    expect(text).toContain("moved to another site or document");
+    expect(text).toContain("nothing was sent");
+  });
+
+  it("unknown reads as an unknown site and still states its reason", () => {
+    const text = frameAnswerText("unknown", "unknown-site");
+    expect(text).toContain("site could not be established");
+    expect(text).toContain("refused or did not answer");
+    expect(text).not.toContain("https://");
+    expect(frameAnswerText("unknown", "refused")).toContain("embedded frame whose site could not be established");
+  });
+
+  it("every reason tells the agent what it may do next, and the four texts differ", () => {
+    const texts = reasons.map((reason) => frameAnswerText(FRAME_SITE, reason));
+    expect(new Set(texts).size).toBe(4);
+    for (const text of texts) expect(text).toMatch(/ask the owner|read the page again/i);
+    for (const text of texts) expect(text).not.toMatch(/[*`#]/);
+  });
+
+  it("FrameMovedBeforeDispatch carries the frame site and is told apart from the site-moved error", () => {
+    const error = new FrameMovedBeforeDispatch(FRAME_SITE);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.site).toBe(FRAME_SITE);
+    expect(error.name).toBe("FrameMovedBeforeDispatch");
+    expect(isFrameMovedBeforeDispatch(error)).toBe(true);
+    expect(isSiteMovedBeforeDispatch(error)).toBe(false);
+    expect(isFrameMovedBeforeDispatch(new SiteMovedBeforeDispatch())).toBe(false);
+    expect(new FrameMovedBeforeDispatch("unknown").site).toBe("unknown");
+  });
+
+  it("the existing site-moved texts and answer are unchanged", () => {
+    expect(SITE_MOVED_HINT).toBe(
+      "The tab moved, or began moving, to another site before this step reached it, so nothing was sent " +
+        "or captured. If that site needs the owner's decision, the next call on this tab will ask them.",
+    );
+    expect(siteMovedAnswer("c1")).toEqual({
+      callId: "c1",
+      outcome: "stale",
+      reason: "stale-context",
+      hint: SITE_MOVED_HINT,
+    });
+    expect(new SiteMovedBeforeDispatch().message).toBe("site-moved-before-dispatch");
   });
 });

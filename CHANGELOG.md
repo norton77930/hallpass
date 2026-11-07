@@ -5,6 +5,25 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.20.0 — 2026-11-07
+
+- **Embedded frames are asked about by their own site** (#35). An action inside a frame from another
+  site, such as a payment or sign-in form embedded in a shop page, is decided by that frame's site,
+  not by the page around it. A site's mode set to skip checks no longer covers another site's frame
+  inside it. The card says the action is inside an embedded frame from the frame's site on the page's
+  site; Allow always stores the frame's site. A frame whose site cannot be established (a sandboxed
+  frame, for example) always asks and offers Allow once and Refuse only. This covers clicks, hovers,
+  drags, typing, keys, coordinate actions (the frame under the point decides), typing and keys with no
+  target (the frame holding focus decides), batches and uploads.
+- If the frame changes site between your answer and the action, nothing is done and the agent is told
+  the frame moved. A plan you approved covers only its own site; a step in another site's frame asks.
+  `read_page` and `find` mark each frame and reference with its site. A frame's site is taken from the
+  browser, never from what the frame says about itself. Pages without frames from other sites behave
+  as before.
+- The third-party notices now carry koffi's licence text for its Windows binary, and the file comes
+  out the same on Windows, Linux and macOS (the 0.19.0 check of it failed on Linux and macOS).
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.19.0 — 2026-11-07
 
 - **Agent questions as cards** (#17). When a side-panel Claude Code or Codex asks you something with

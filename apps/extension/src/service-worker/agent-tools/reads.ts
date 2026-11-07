@@ -17,12 +17,14 @@ import {
 } from "../../chrome-adapters/capture.js";
 import { queryTabSnapshots } from "../../chrome-adapters/tabs.js";
 import { enumerateTabFrames } from "../../chrome-adapters/scripting.js";
+import { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
 import { collectFromActiveTab } from "../content-broker.js";
 import {
   capPageNodes,
   carriedFieldState,
   mergePageFrames,
   mergePageText,
+  senderFrameSites,
   tabFrames,
   type FrameSubtreeNode,
 } from "./frames.js";
@@ -96,6 +98,8 @@ export type AgentReadDeps = {
   ensureAttached?: PhotographDeps["ensureAttached"];
   /** Which documents a tab is made of (004/US4): the scripting API's all-frames execution. */
   enumerateFrames?: typeof enumerateTabFrames;
+  /** 030/T902: the browser's sender for one message from a frame (R-440); the adapter by default. */
+  probeFrameSender?: typeof probeFrameSender;
   /**
    * Where a tab is and where it is going (014 change log 2026-10-11): read when a screenshot starts
    * and again immediately before its capture. Defaults to `chrome.tabs.get`.
@@ -190,6 +194,7 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
   const capture = deps.capture ?? captureTab;
   const listTabs = deps.listTabs ?? queryTabSnapshots;
   const enumerateFrames = deps.enumerateFrames ?? enumerateTabFrames;
+  const probeSender = deps.probeFrameSender ?? probeFrameSender;
   /** One set of deps for both halves of a screenshot: the frame it is judged in, and the picture. */
   const photographDeps: PhotographDeps = {
     capture,
@@ -458,6 +463,9 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
         if (collected.truncated === true) truncatedByCollector = true;
         return { nodes: projectNodes(collected, options, onDropped) };
       },
+      // 030/T902 (FR-462): each frame names its site, from the browser's sender origin, so the
+      // agent sees which elements another site decides before it acts on one. Still no gate.
+      sites: senderFrameSites(probeSender, binding.site),
       ...limits,
     });
     // The top document not answering is the page not being readable at all - a different answer

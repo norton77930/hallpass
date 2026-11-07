@@ -124,7 +124,14 @@ function installChrome(): Harness {
     },
     alarms: { create() {}, clear: async () => true, onAlarm: { addListener() {} } },
     runtime: { id: "extension-1", onMessage: { addListener() {} } },
-    scripting: { async executeScript() {} },
+    scripting: {
+      // 030 T908: keys with no target ask every frame where focus is; this page is one document,
+      // and its focus is its own. Every other script answers nothing, as before.
+      async executeScript(details: { func?: { name?: string } }) {
+        if (details.func?.name !== "focusOfFrame") return undefined;
+        return [{ frameId: 0, documentId: "bdoc-top", result: { path: [], focusedChild: -1 } }];
+      },
+    },
     tabs: {
       async sendMessage() {
         return { documentEpoch: "doc-1", canonicalOrigin: SITE };

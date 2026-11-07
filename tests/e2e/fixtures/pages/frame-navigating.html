@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame navigating fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 480px; height: 180px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Navigating frame</h1>
+<p id="top-status">The frame has not moved. Send this page the message go and it moves to a third origin.</p>
+<iframe id="moving-frame" title="moving frame" width="480" height="180" src="__OOPIF_ORIGIN__/frame-consent-child"></iframe>
+<script>
+  window.addEventListener("message", function (event) {
+    if (event.data !== "go") return;
+    document.getElementById("top-status").textContent = "The frame is moving.";
+    document.getElementById("moving-frame").src = "__CROSS_ORIGIN__/frame-navigated";
+  });
+</script>
+</body>
+</html>

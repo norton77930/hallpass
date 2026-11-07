@@ -1,8 +1,9 @@
 import { AGENT_READ_PAGE_MAX_NODES, createBounds, type AgentFindResult } from "@hallpass/contracts";
 import { enumerateTabFrames } from "../../chrome-adapters/scripting.js";
+import { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
 import { collectFromActiveTab, resolveHandleOnTab, resolveOnActiveTab } from "../content-broker.js";
 import type { AgentToolContext } from "./context.js";
-import { askPageFrames, carriedFieldState, tabFrames, type CarriedFieldState } from "./frames.js";
+import { askPageFrames, carriedFieldState, senderFrameSites, tabFrames, type CarriedFieldState } from "./frames.js";
 import type { AgentPageBinding } from "./page-binding.js";
 
 /**
@@ -273,6 +274,8 @@ export async function findOnTab(
   query: string,
   maxCandidates: number,
   enumerateFrames: typeof enumerateTabFrames = enumerateTabFrames,
+  /** 030/T902: the browser's sender for one message from a frame (R-440), for each match's site. */
+  probe: typeof probeFrameSender = probeFrameSender,
 ): Promise<{ ok: true; result: AgentFindResult } | { ok: false; reason: FrameFailure }> {
   const frames = await tabFrames(binding.tabId, binding.canonicalOrigin, enumerateFrames);
   if (frames.length <= 1) {
@@ -308,6 +311,8 @@ export async function findOnTab(
         throw error;
       }
     },
+    // 030/T902 (FR-462): a match inside another site's frame names that site.
+    sites: senderFrameSites(probe, binding.site),
   });
   // The top document not answering is the page not being readable at all - a different answer from
   // "one of this page's frames stayed quiet", and the word a 003 find already had for it.
@@ -318,8 +323,10 @@ export async function findOnTab(
   for (const answer of answers) {
     if (!answer.readable || answer.answer === undefined) continue;
     if (answer.answer.outcome === "too-broad") tooBroad = true;
+    // Only when it is not the page's, so a page of one site answers exactly as before.
+    const site = answer.site === binding.site ? {} : { site: answer.site };
     for (const match of answer.answer.matches) {
-      matches.push({ ...match, frame: answer.frame });
+      matches.push({ ...match, frame: answer.frame, ...site });
     }
   }
   if (tooBroad || matches.length > maxCandidates) {

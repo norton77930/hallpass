@@ -5,6 +5,8 @@ import { createAgentPageBindings, PAGE_NOT_RESPONDING_HINT } from "../src/servic
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
 import { createAgentUpload } from "../src/service-worker/agent-tools/upload.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
+import { frameAnswerText } from "../src/service-worker/agent-tools/site-recheck.js";
+import { fakePointPage, pointSiteAttachments, type FakeFrame } from "./helpers/point-site.js";
 
 /**
  * 003/T062 — `file_upload` inside the worker (US7, FR-051).
@@ -168,8 +170,13 @@ describe("T062 agent file upload", () => {
       discoverFrame: discoverFrame as unknown as NonNullable<
         Parameters<typeof createAgentUpload>[0]["discoverFrame"]
       >,
+      // 030/T895: the frame's site decides, and the browser names it as the frame's own.
+      probeFrameSender: async (_tabId, frameId) => ({
+        documentId: "bdoc-3",
+        sender: { origin: "https://embed.test", frameId, documentId: "bdoc-3" },
+      }),
     });
-    await siteModes.set(SITE, { mode: "skip-checks" });
+    await siteModes.set("https://embed.test", { mode: "skip-checks" });
 
     const response = await runner.run(request());
 
@@ -268,6 +275,10 @@ describe("T334 agent upload_image", () => {
         tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" },
       setFiles: setFiles as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["setFiles"]>,
       deliverImage: deliverImage as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["deliverImage"]>,
+      // 030: a drop point is asked of the debugger; these pages are of one document.
+      attachments: pointSiteAttachments().attachments as unknown as NonNullable<
+        Parameters<typeof createAgentUpload>[0]["attachments"]
+      >,
       ...overrides,
     });
     return { runner, deliverImage, setFiles, siteModes, prompts };
@@ -405,8 +416,13 @@ describe("T334 agent upload_image", () => {
     }));
     const { runner, deliverImage, siteModes } = imageHarness({
       discoverFrame: discoverFrame as unknown as NonNullable<Parameters<typeof createAgentUpload>[0]["discoverFrame"]>,
+      // 030/T895: the frame's site decides, and the browser names it as the frame's own.
+      probeFrameSender: async (_tabId, frameId) => ({
+        documentId: "bdoc-3",
+        sender: { origin: "https://embed.test", frameId, documentId: "bdoc-3" },
+      }),
     });
-    await siteModes.set(SITE, { mode: "skip-checks" });
+    await siteModes.set("https://embed.test", { mode: "skip-checks" });
 
     await runner.run(imageRequest({ ref: "t_zone" }));
 
@@ -576,5 +592,445 @@ describe("015 upload: page-not-responding binding", () => {
       hint: PAGE_NOT_RESPONDING_HINT,
     });
     expect(setFiles).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 030/T895 (FR-454, O-030-1) - `file_upload` and `upload_image` into an element inside another
+ * site's embedded frame are decided by that frame's site, before anything is written.
+ *
+ * The ref's frame is found before the gate (the same scroll-free "is this ref yours" question), its
+ * site is the browser's sender origin for one message the frame sends (`probeFrameSender`, faked
+ * here; its own matching is `frame-sender-probe.test.ts`), and the gate, the card and Allow always
+ * all use that site. The page's site lends the frame nothing.
+ */
+describe("030 upload into a frame from another site", () => {
+  const PAY = "https://pay.fixtures.test:19444";
+  const PAY_FRAME = { frameId: 12, documentEpoch: "doc-pay", canonicalOrigin: PAY };
+  const PICTURE = { name: "screenshot.png", type: "image/png", bytesBase64: "iVBORw0KGgo=" };
+  type Deps = Parameters<typeof createAgentUpload>[0];
+  type Claim = { frameId: number; documentEpoch: string; canonicalOrigin: string } | undefined;
+  type Sender = { origin?: string; frameId?: number; documentId?: string };
+
+  function framedHarness(
+    options: {
+      /** What the claim finds on each call, in order; the last one repeats. */
+      claims?: Claim[];
+      /** The browser's sender for the probed frame; `null` is a frame that never answered. */
+      sender?: Sender | null;
+    } = {},
+  ) {
+    const timeline: string[] = [];
+    const claims = options.claims ?? [PAY_FRAME];
+    let claimed = 0;
+    const discoverFrame = vi.fn(async (_context: unknown, _binding: unknown, ref: string) => {
+      timeline.push(`claim:${ref}`);
+      const found = claims[Math.min(claimed, claims.length - 1)];
+      claimed += 1;
+      return found;
+    });
+    const sender = options.sender === undefined ? { origin: PAY, frameId: 12, documentId: "bdoc-12" } : options.sender;
+    const probeFrameSender = vi.fn(async (_tabId: number, frameId: number) => {
+      timeline.push(`probe:${frameId}`);
+      return sender === null ? {} : { documentId: "bdoc-12", sender };
+    });
+    const setFiles = vi.fn(async () => {
+      timeline.push("setFiles");
+      return { ok: true as const, files: [{ name: "receipt.txt", size: 5 }] };
+    });
+    const deliverImage = vi.fn(async () => {
+      timeline.push("deliverImage");
+      return { ok: true as const, delivery: "input" as const, file: { name: "screenshot.png", size: 8 } };
+    });
+    const siteModes = createSiteModeStore();
+    const prompts = createAgentPromptController({ timeoutMs: 60 });
+    const runner = createAgentUpload({
+      context: testSessionContexts(),
+      siteModes,
+      bindings: createAgentPageBindings(),
+      prompts,
+      tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
+      setFiles: setFiles as unknown as NonNullable<Deps["setFiles"]>,
+      deliverImage: deliverImage as unknown as NonNullable<Deps["deliverImage"]>,
+      discoverFrame: discoverFrame as unknown as NonNullable<Deps["discoverFrame"]>,
+      probeFrameSender: probeFrameSender as unknown as NonNullable<Deps["probeFrameSender"]>,
+    });
+    return { runner, setFiles, deliverImage, siteModes, prompts, timeline, discoverFrame, probeFrameSender };
+  }
+
+  const uploadRequest = (): AgentNativeRequest => request();
+  const imageRequest = (): AgentNativeRequest => ({
+    callId: "call-2",
+    sessionId: "session-h1",
+    tool: "upload_image",
+    tabId: AGENT_TAB,
+    args: { tabId: AGENT_TAB, target: { ref: "t_card_scan" }, file: PICTURE },
+  });
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("finds the frame before the gate and asks for the frame's site, with nothing written before the answer", async () => {
+    for (const [build, delivered] of [
+      [uploadRequest, "setFiles"],
+      [imageRequest, "deliverImage"],
+    ] as const) {
+      const { runner, siteModes, prompts, timeline, setFiles, deliverImage } = framedHarness();
+      // The page's skip-checks lends nothing to the frame: its own site is asked about.
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(build());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY } });
+      expect(timeline).toEqual([expect.stringMatching(/^claim:/), "probe:12"]);
+      expect(setFiles).not.toHaveBeenCalled();
+      expect(deliverImage).not.toHaveBeenCalled();
+
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+      expect((await pending).outcome).toBe("ok");
+      expect(timeline.at(-1)).toBe(delivered);
+      const sent = delivered === "setFiles" ? setFiles : deliverImage;
+      expect(sent).toHaveBeenCalledWith(
+        expect.objectContaining({ frameId: 12, documentEpoch: "doc-pay", frameOrigin: PAY }),
+      );
+    }
+  });
+
+  it("runs without asking when the frame's own site is in skip-checks, whatever the page's mode", async () => {
+    const { runner, siteModes, prompts, setFiles } = framedHarness();
+    await siteModes.set(PAY, { mode: "skip-checks" });
+    const asked = vi.spyOn(prompts, "ask");
+
+    const response = await runner.run(uploadRequest());
+
+    expect(response.outcome).toBe("ok");
+    expect(asked).not.toHaveBeenCalled();
+    expect(setFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores Allow always under the frame's site and leaves the page's mode as it was", async () => {
+    const { runner, siteModes, prompts } = framedHarness();
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const pending = runner.run(imageRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+
+    expect((await pending).outcome).toBe("ok");
+    expect((await siteModes.get(PAY)).mode).toBe("skip-checks");
+    expect((await siteModes.get(SITE)).mode).toBe("follow-a-plan");
+  });
+
+  it("answers a refusal and a timeout with the frame's site and the reason, and writes nothing", async () => {
+    const refused = framedHarness();
+    const pending = refused.runner.run(uploadRequest());
+    await vi.waitFor(() => expect(refused.prompts.current()).toBeDefined());
+    refused.prompts.decide(refused.prompts.current()?.promptId ?? "", false);
+    await expect(pending).resolves.toEqual({
+      callId: "call-1",
+      outcome: "denied",
+      reason: "owner-denied",
+      hint: frameAnswerText(PAY, "refused"),
+    });
+    expect(refused.setFiles).not.toHaveBeenCalled();
+
+    const undecided = framedHarness();
+    const timedOut = await undecided.runner.run(imageRequest());
+    expect(timedOut).toMatchObject({ outcome: "timed-out", reason: "no-answer" });
+    expect(timedOut.hint?.startsWith(frameAnswerText(PAY, "undecided"))).toBe(true);
+    expect(undecided.deliverImage).not.toHaveBeenCalled();
+  });
+
+  it("asks about a frame whose site could not be established, and stores nothing for it", async () => {
+    for (const sender of [null, { origin: "null", frameId: 12, documentId: "bdoc-12" }]) {
+      const { runner, siteModes, prompts, setFiles } = framedHarness({ sender });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(uploadRequest());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ site: SITE, frame: { unknown: true } });
+      // The card offers no Allow always (FR-458); a reply that carries one anyway is not an answer
+      // (contracts/prompt-and-reads.md), and is refused exactly as the effect tools refuse it.
+      prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "denied",
+        reason: "owner-denied",
+        hint: frameAnswerText("unknown", "unknown-site"),
+      });
+      expect(setFiles).not.toHaveBeenCalled();
+      // Only the page's own record: nothing is stored under a site nobody could name (FR-458).
+      expect((await siteModes.list()).map((entry) => entry.site)).toEqual([SITE]);
+    }
+
+    const refused = framedHarness({ sender: null });
+    const pending = refused.runner.run(imageRequest());
+    await vi.waitFor(() => expect(refused.prompts.current()).toBeDefined());
+    refused.prompts.decide(refused.prompts.current()?.promptId ?? "", false);
+    await expect(pending).resolves.toMatchObject({
+      outcome: "denied",
+      hint: frameAnswerText("unknown", "unknown-site"),
+    });
+    expect(refused.deliverImage).not.toHaveBeenCalled();
+  });
+
+  it("cancels with the frame-moved answer when the claim after the gate lands in another document or frame", async () => {
+    for (const moved of [{ ...PAY_FRAME, documentEpoch: "doc-pay-2" }, { ...PAY_FRAME, frameId: 14 }, undefined]) {
+      const { runner, siteModes, setFiles } = framedHarness({ claims: [PAY_FRAME, moved] });
+      await siteModes.set(PAY, { mode: "skip-checks" });
+
+      const response = await runner.run(uploadRequest());
+
+      expect(response).toEqual({
+        callId: "call-1",
+        outcome: "stale",
+        reason: "stale-context",
+        hint: frameAnswerText(PAY, "frame-moved"),
+      });
+      expect(setFiles).not.toHaveBeenCalled();
+    }
+  });
+
+  it("cancels when the browser names another document or site for the frame after the gate", async () => {
+    for (const after of [
+      { origin: PAY, frameId: 12, documentId: "bdoc-13" },
+      { origin: "https://other.fixtures.test", frameId: 12, documentId: "bdoc-12" },
+    ]) {
+      const { runner, siteModes, deliverImage, probeFrameSender } = framedHarness();
+      await siteModes.set(PAY, { mode: "skip-checks" });
+      probeFrameSender
+        .mockImplementationOnce(async () => ({
+          documentId: "bdoc-12",
+          sender: { origin: PAY, frameId: 12, documentId: "bdoc-12" },
+        }))
+        .mockImplementationOnce(async () => ({ documentId: after.documentId, sender: after }));
+
+      const response = await runner.run(imageRequest());
+
+      expect(response).toMatchObject({ outcome: "stale", hint: frameAnswerText(PAY, "frame-moved") });
+      expect(deliverImage).not.toHaveBeenCalled();
+    }
+  });
+
+  it("decides a top-frame ref and a same-site frame by the page's site, with no frame on the card", async () => {
+    for (const claim of [
+      { frameId: 0, documentEpoch: "doc-1", canonicalOrigin: SITE },
+      { frameId: 12, documentEpoch: "doc-same", canonicalOrigin: SITE },
+    ]) {
+      const { runner, prompts, probeFrameSender } = framedHarness({
+        claims: [claim],
+        sender: { origin: SITE, frameId: 12, documentId: "bdoc-12" },
+      });
+
+      const pending = runner.run(uploadRequest());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ site: SITE });
+      expect(prompts.current()).not.toHaveProperty("frame");
+      // The top document costs no probe (FR-465).
+      expect(probeFrameSender).toHaveBeenCalledTimes(claim.frameId === 0 ? 0 : 1);
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "denied", reason: "owner-denied" });
+    }
+  });
+});
+
+/**
+ * 030 (FR-455, FR-460, FR-464, SC-206) - an `upload_image` drop at a point is decided by the
+ * innermost frame under that point, exactly as a coordinate click is (`computer.test.ts`).
+ *
+ * The page is modelled in the debugger's own terms (`helpers/point-site.ts`): one frame from a
+ * second site in its own process, whose holder's content box is (100, 50)-(400, 250). The drop
+ * itself still goes to the top frame, which does its own descent (FR-171); what changes is whose
+ * consent it waits for, and that the frame is asked about again right before the drop.
+ */
+describe("030 a drop point is decided by the frame under it", () => {
+  const PAY = "https://pay.fixtures.test:19444";
+  const OVER_FRAME = { x: 160, y: 90 };
+  const OUTSIDE = { x: 20, y: 20 };
+  const PICTURE = { name: "screenshot.png", type: "image/png", bytesBase64: "iVBORw0KGgo=" };
+  type Deps = Parameters<typeof createAgentUpload>[0];
+  const payFrame = (): FakeFrame => ({
+    cdpFrameId: "T-PAY",
+    box: { x: 100, y: 50, width: 300, height: 200 },
+    outOfProcess: true,
+    frameId: 5,
+    documentId: "bdoc-5",
+    sender: PAY,
+    securityOrigin: SITE,
+  });
+
+  function dropHarness(frames: FakeFrame[], pageOptions: { missingSessions?: string[] } = {}) {
+    const page = fakePointPage(frames, { pageSite: SITE, ...pageOptions });
+    const fake = pointSiteAttachments(page);
+    const deliverImage = vi.fn(async () => ({
+      ok: true as const,
+      delivery: "drop" as const,
+      file: { name: "screenshot.png", size: 8 },
+      point: { x: 160, y: 90 },
+    }));
+    const siteModes = createSiteModeStore();
+    const prompts = createAgentPromptController({ timeoutMs: 2_000 });
+    const runner = createAgentUpload({
+      context: testSessionContexts(),
+      siteModes,
+      bindings: createAgentPageBindings(),
+      prompts,
+      tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
+      setFiles: vi.fn() as unknown as NonNullable<Deps["setFiles"]>,
+      deliverImage: deliverImage as unknown as NonNullable<Deps["deliverImage"]>,
+      attachments: fake.attachments as unknown as NonNullable<Deps["attachments"]>,
+      readFrameMarks: (_tabId: number, key: string) => page.readMarks(key),
+      probeFrameSender: (_tabId: number, frameId: number) => page.probeSender(frameId),
+    });
+    return { runner, deliverImage, siteModes, prompts, page, ...fake };
+  }
+
+  const dropAt = (coordinate: { x: number; y: number }): AgentNativeRequest => ({
+    callId: "call-3",
+    sessionId: "session-h1",
+    tool: "upload_image",
+    tabId: AGENT_TAB,
+    args: { tabId: AGENT_TAB, target: { coordinate }, file: PICTURE },
+  });
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  it("asks for the site of the frame under the point, while the page's site is skip-checks", async () => {
+    const { runner, siteModes, prompts, deliverImage } = dropHarness([payFrame()]);
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(dropAt(OVER_FRAME));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+    expect(prompts.current()).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "upload_image", delivery: "drop" });
+    expect(deliverImage).not.toHaveBeenCalled();
+
+    prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+    expect((await pending).outcome).toBe("ok");
+    // The drop still goes to the top frame at the point; Allow always is the frame's site's.
+    expect(deliverImage).toHaveBeenCalledTimes(1);
+    expect(deliverImage).toHaveBeenCalledWith(expect.objectContaining({ target: { point: OVER_FRAME } }));
+    expect(deliverImage).toHaveBeenCalledWith(expect.not.objectContaining({ frameId: expect.anything() }));
+    expect((await siteModes.get(PAY)).mode).toBe("skip-checks");
+  });
+
+  it("is decided by the frame's own mode, and walks the point again right before the drop", async () => {
+    const { runner, siteModes, prompts, deliverImage, page } = dropHarness([payFrame()]);
+    await siteModes.set(PAY, { mode: "skip-checks" });
+    const asked = vi.spyOn(prompts, "ask");
+
+    const response = await runner.run(dropAt(OVER_FRAME));
+
+    expect(response.outcome).toBe("ok");
+    expect(asked).not.toHaveBeenCalled();
+    expect(deliverImage).toHaveBeenCalledTimes(1);
+    // Asked before the gate, and again right before the drop.
+    expect(page.probed).toEqual([5, 5]);
+  });
+
+  it("asks as an unknown site, with nothing remembered, over a point whose frame cannot be resolved", async () => {
+    const { runner, siteModes, prompts, deliverImage } = dropHarness([payFrame()], { missingSessions: ["T-PAY"] });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(dropAt(OVER_FRAME));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ site: SITE, frame: { unknown: true }, delivery: "drop" });
+    // Allow once: the drop is still possible with the owner's yes.
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+
+    expect((await pending).outcome).toBe("ok");
+    expect(deliverImage).toHaveBeenCalledTimes(1);
+
+    // A reply carrying Allow always answers a card that offered none: refused, nothing stored or sent.
+    const remembering = dropHarness([payFrame()], { missingSessions: ["T-PAY"] });
+    await remembering.siteModes.set(SITE, { mode: "skip-checks" });
+    const remembered = remembering.runner.run(dropAt(OVER_FRAME));
+    await vi.waitFor(() => expect(remembering.prompts.current()).toBeDefined());
+    remembering.prompts.decide(remembering.prompts.current()?.promptId ?? "", true, "skip-checks");
+    await expect(remembered).resolves.toMatchObject({
+      outcome: "denied",
+      reason: "owner-denied",
+      hint: frameAnswerText("unknown", "unknown-site"),
+    });
+    expect(remembering.deliverImage).not.toHaveBeenCalled();
+    // Only the page's own record: nothing is stored under a site nobody could name (FR-458).
+    expect((await siteModes.list()).map((entry) => entry.site)).toEqual([SITE]);
+    expect((await remembering.siteModes.list()).map((entry) => entry.site)).toEqual([SITE]);
+
+    const refused = dropHarness([payFrame()], { missingSessions: ["T-PAY"] });
+    const denied = refused.runner.run(dropAt(OVER_FRAME));
+    await vi.waitFor(() => expect(refused.prompts.current()).toBeDefined());
+    refused.prompts.decide(refused.prompts.current()?.promptId ?? "", false);
+    await expect(denied).resolves.toMatchObject({ outcome: "denied", hint: frameAnswerText("unknown", "unknown-site") });
+    expect(refused.deliverImage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the top frame's decision, card and text exactly as before outside every frame (SC-206)", async () => {
+    const { runner, siteModes, prompts, deliverImage, page } = dropHarness([payFrame()]);
+
+    const pending = runner.run(dropAt(OUTSIDE));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+    expect(card).toMatchObject({
+      site: SITE,
+      tool: "upload_image",
+      argsSummary: "drop a screenshot the agent took onto a point on the page",
+      delivery: "drop",
+    });
+    expect(card).not.toHaveProperty("frame");
+    prompts.decide(card?.promptId ?? "", false);
+    await expect(pending).resolves.toEqual({ callId: "call-3", outcome: "denied", reason: "owner-denied" });
+    expect(deliverImage).not.toHaveBeenCalled();
+
+    // Under the page's skip-checks it runs unasked, with no nonce or probe before or after the gate.
+    await siteModes.set(SITE, { mode: "skip-checks" });
+    expect((await runner.run(dropAt(OUTSIDE))).outcome).toBe("ok");
+    expect(deliverImage).toHaveBeenCalledTimes(1);
+    expect(page.probed).toEqual([]);
+    expect(page.marksRead).toEqual([]);
+  });
+
+  it("cancels with the frame-moved answer when the frame changed after the answer, and drops nothing", async () => {
+    for (const move of [
+      (frame: FakeFrame) => {
+        frame.documentId = "bdoc-5-next";
+      },
+      (frame: FakeFrame) => {
+        frame.sender = "https://fixtures.test:19445";
+        frame.documentId = "bdoc-5-third";
+      },
+      (frame: FakeFrame) => {
+        frame.box = { x: 600, y: 400, width: 300, height: 200 };
+      },
+    ]) {
+      const frame = payFrame();
+      const { runner, siteModes, prompts, deliverImage } = dropHarness([frame]);
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(dropAt(OVER_FRAME));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      move(frame);
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-3",
+        outcome: "stale",
+        reason: "stale-context",
+        hint: frameAnswerText(PAY, "frame-moved"),
+      });
+      expect(deliverImage).not.toHaveBeenCalled();
+    }
   });
 });

@@ -88,9 +88,9 @@ describe("004/T112 merging every readable frame into one page tree", () => {
       ["Footer", "0", 1],
     ]);
     expect(page.frames).toEqual([
-      { frame: "0", parent: "0", url: "https://fixtures.test/frames.html", readable: true },
-      { frame: "f1", parent: "0", url: "https://fixtures.test/left.html", readable: true },
-      { frame: "f2", parent: "0", url: "https://fixtures.test/right.html", readable: true },
+      { frame: "0", parent: "0", url: "https://fixtures.test/frames.html", site: "unknown", readable: true },
+      { frame: "f1", parent: "0", url: "https://fixtures.test/left.html", site: "unknown", readable: true },
+      { frame: "f2", parent: "0", url: "https://fixtures.test/right.html", site: "unknown", readable: true },
     ]);
     expect(page.truncated).toBe(false);
   });
@@ -135,6 +135,7 @@ describe("004/T112 merging every readable frame into one page tree", () => {
       frame: "f1",
       parent: "0",
       url: "https://fixtures.test/quiet.html",
+      site: "unknown",
       readable: false,
       reason: "no-answer",
     });
@@ -218,6 +219,7 @@ describe("004/T112 merging every readable frame into one page tree", () => {
       frame: "f1",
       parent: "0",
       url: "chrome://settings/",
+      site: "unknown",
       readable: false,
       reason: "not-allowed",
     });
@@ -326,5 +328,134 @@ describe("004/T115 merging every readable frame into one page text", () => {
     });
 
     expect(page).toEqual({ text: "frame-0\nframe-3\nframe-7", truncated: true, truncatedBy: "chars" });
+  });
+});
+
+/**
+ * 030/T902 (FR-462, R-448) - each listed frame names its site, and a node from a frame of another
+ * site carries that site.
+ *
+ * The site is looked up per child frame (`siteOf`; in the worker, the browser's sender origin) in
+ * parallel with that frame's read and inside the same one bound. The top frame is the page's site
+ * and costs no lookup. A node carries `site` only when its frame's differs from the page's, so a
+ * page whose frames all share its site reads exactly as before.
+ */
+describe("030 frame sites in the merge", () => {
+  const PAGE = "https://fixtures.test";
+  const PAY = "https://pay.test";
+  const FRAMES = [
+    frame(0, -1, `${PAGE}/frames.html`),
+    frame(3, 0, `${PAGE}/left.html`),
+    frame(7, 0, `${PAY}/card.html`),
+  ];
+  const reader = () =>
+    readerFor({
+      0: async () => ({
+        nodes: [
+          node("iframe", "left", 0, { frameOwner: true }),
+          node("iframe", "card", 0, { frameOwner: true }),
+          node("button", "Top", 0),
+        ],
+      }),
+      3: async () => ({ nodes: [node("button", "Left", 0)] }),
+      7: async () => ({ nodes: [node("textbox", "Card number", 0)] }),
+    });
+
+  it("lists every frame's site, the top as the page's, and marks only the nodes from another site", async () => {
+    const looked: number[] = [];
+    const page = await mergePageFrames(TAB, {
+      enumerateFrames: async () => FRAMES,
+      readSubtree: reader().read,
+      sites: {
+        pageSite: PAGE,
+        siteOf: async ({ frameId }) => {
+          looked.push(frameId);
+          return frameId === 7 ? PAY : PAGE;
+        },
+      },
+    });
+
+    expect(page.frames.map((entry) => [entry.frame, entry.site])).toEqual([
+      ["0", PAGE],
+      ["f1", PAGE],
+      ["f2", PAY],
+    ]);
+    expect(page.nodes).toEqual([
+      { role: "iframe", name: "left", depth: 0, frame: "0" },
+      { role: "button", name: "Left", depth: 1, frame: "f1" },
+      { role: "iframe", name: "card", depth: 0, frame: "0" },
+      { role: "textbox", name: "Card number", depth: 1, frame: "f2", site: PAY },
+      { role: "button", name: "Top", depth: 0, frame: "0" },
+    ]);
+    expect(looked.sort()).toEqual([3, 7]);
+  });
+
+  it("reads a page of same-site frames exactly as before, apart from the frame list naming the site", async () => {
+    const sameSite = [frame(0, -1, `${PAGE}/frames.html`), frame(3, 0, `${PAGE}/left.html`), frame(7, 0, `${PAGE}/right.html`)];
+    const before = await mergePageFrames(TAB, { enumerateFrames: async () => sameSite, readSubtree: reader().read });
+    const after = await mergePageFrames(TAB, {
+      enumerateFrames: async () => sameSite,
+      readSubtree: reader().read,
+      sites: { pageSite: PAGE, siteOf: async () => PAGE },
+    });
+
+    expect(after.nodes).toEqual(before.nodes);
+    expect(JSON.stringify(after.nodes)).toBe(JSON.stringify(before.nodes));
+    expect(after.frames).toEqual(before.frames.map((entry) => ({ ...entry, site: PAGE })));
+    expect(after.truncated).toBe(before.truncated);
+  });
+
+  it("names a frame unknown when its lookup fails, outlasts the bound, or the browser forbids scripts there", async () => {
+    const looked: number[] = [];
+    const page = await mergePageFrames(TAB, {
+      enumerateFrames: async () => [...FRAMES, frame(9, 0, "chrome-extension://abc/page.html")],
+      readSubtree: reader().read,
+      boundMs: 30,
+      sites: {
+        pageSite: PAGE,
+        siteOf: ({ frameId }) => {
+          looked.push(frameId);
+          return frameId === 3 ? Promise.reject(new Error("gone")) : new Promise<string>(() => {});
+        },
+      },
+    });
+
+    expect(page.frames.map((entry) => [entry.frame, entry.site])).toEqual([
+      ["0", PAGE],
+      ["f1", "unknown"],
+      ["f2", "unknown"],
+      ["f3", "unknown"],
+    ]);
+    expect(page.nodes.filter((entry) => entry.frame !== "0").map((entry) => [entry.name, entry.site])).toEqual([
+      ["Left", "unknown"],
+      ["Card number", "unknown"],
+    ]);
+    // A frame the browser keeps scripts out of is never asked.
+    expect(looked.sort()).toEqual([3, 7]);
+  });
+
+  it("looks the sites up in parallel, inside the one bound", async () => {
+    let started = 0;
+    let releaseAll: (() => void) | undefined;
+    const allStarted = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    const page = await mergePageFrames(TAB, {
+      enumerateFrames: async () => FRAMES,
+      readSubtree: reader().read,
+      boundMs: 1_000,
+      sites: {
+        pageSite: PAGE,
+        // Each lookup waits until both have started: one after the other would never finish.
+        siteOf: async ({ frameId }) => {
+          started += 1;
+          if (started === 2) releaseAll?.();
+          await allStarted;
+          return frameId === 7 ? PAY : PAGE;
+        },
+      },
+    });
+
+    expect(page.frames.map((entry) => entry.site)).toEqual([PAGE, PAGE, PAY]);
   });
 });

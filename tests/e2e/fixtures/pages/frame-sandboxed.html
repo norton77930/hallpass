@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame sandboxed fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 480px; height: 180px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Sandboxed frame</h1>
+<p>A frame from this site, sandboxed with scripts allowed and without allow-same-origin: its origin is opaque.</p>
+<iframe id="sandboxed-frame" title="sandboxed frame" width="480" height="180" sandbox="allow-scripts" src="/frame-sandboxed-child"></iframe>
+</body>
+</html>

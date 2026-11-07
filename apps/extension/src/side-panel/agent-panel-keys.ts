@@ -251,6 +251,10 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.allowOnce",
   "agent.allowAlways",
   "agent.refuse",
+  // 030 FR-457, FR-458: the card for an action inside an embedded frame.
+  "agent.prompt.frameSite",
+  "agent.prompt.frameUnknown",
+  "agent.prompt.frameAnswer",
   "agent.planTitle",
   "agent.planSite",
   "agent.planExclude",

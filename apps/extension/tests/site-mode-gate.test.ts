@@ -287,3 +287,124 @@ describe("017 session plan", () => {
     expect(compared).toBe(MODES.length * AGENT_TOOL_NAMES.length * plans.length);
   });
 });
+
+/**
+ * 030/T888 - the deciding site may be unknown (FR-464, R-444).
+ *
+ * When a frame's site cannot be established, the caller passes `site: null`. Nothing the caller
+ * also passes - a mode, a plan that names this very step, a session plan that covers the tool - may
+ * stand in for the owner then: every mode prompts. A known site answers exactly as it did before.
+ */
+describe("030 unknown deciding site", () => {
+  const MODES: readonly SiteMode[] = ["ask", "follow-a-plan", "skip-checks"];
+  const argsFor = (tool: AgentToolName): Record<string, unknown> =>
+    tool === "type"
+      ? { ref: "tgt-2", text: "hello" }
+      : tool === "dialog"
+        ? { tabId: 7, action: "accept" }
+        : base.args;
+
+  it("prompts for every gated tool in every mode when the site is unknown", () => {
+    const gated = AGENT_TOOL_NAMES.filter(requiresGate);
+    expect(gated.length).toBeGreaterThan(0);
+    for (const mode of MODES) {
+      for (const tool of gated) {
+        expect(decideGate({ ...base, site: null, mode, tool, args: argsFor(tool) }), `${mode} ${tool}`).toEqual({
+          decision: "prompt",
+        });
+      }
+    }
+  });
+
+  it("prompts under follow-a-plan even when a plan for the page's site names this step", () => {
+    // A plan whose site is the page's would admit this step on a known site; with the frame's site
+    // unknown it must not.
+    for (const stated of [plan(), plan({ admittedCount: 1 })]) {
+      const step = stated.steps[stated.admittedCount]!;
+      expect(decideGate({ ...base, mode: "follow-a-plan", tool: step.tool, args: step.args, plan: stated })).toEqual({
+        decision: "admit",
+        step: stated.admittedCount,
+      });
+      expect(
+        decideGate({ ...base, site: null, mode: "follow-a-plan", tool: step.tool, args: step.args, plan: stated }),
+      ).toEqual({ decision: "prompt" });
+    }
+    // A dialog under a matching plan is admitted on a known site, never on an unknown one.
+    const dialogArgs = { tabId: 7, action: "accept" };
+    expect(decideGate({ ...base, mode: "follow-a-plan", tool: "dialog", args: dialogArgs, plan: plan() })).toEqual({
+      decision: "admit",
+    });
+    expect(
+      decideGate({ ...base, site: null, mode: "follow-a-plan", tool: "dialog", args: dialogArgs, plan: plan() }),
+    ).toEqual({ decision: "prompt" });
+  });
+
+  it("prompts when a session site plan would cover the tool", () => {
+    for (const tool of AGENT_SITE_PLAN_COVERED_TOOLS) {
+      for (const mode of MODES) {
+        expect(
+          decideGate({ ...base, site: null, mode, tool, args: argsFor(tool), sitePlanCovers: true }),
+          `${tool} under ${mode}`,
+        ).toEqual({ decision: "prompt" });
+      }
+    }
+  });
+
+  it("still refuses an ungated tool, whose answer does not depend on the site", () => {
+    for (const mode of MODES) {
+      expect(decideGate({ ...base, site: null, mode, tool: "find" })).toEqual({
+        decision: "refuse",
+        reason: "not-a-gated-tool",
+      });
+    }
+  });
+
+  it("answers exactly as before for a known site", () => {
+    expect(decideGate({ ...base, mode: "skip-checks", tool: "click" })).toEqual({ decision: "admit" });
+    expect(decideGate({ ...base, mode: "ask", tool: "click" })).toEqual({ decision: "prompt" });
+    expect(decideGate({ ...base, mode: "ask", tool: "click", sitePlanCovers: true })).toEqual({ decision: "admit" });
+    expect(decideGate({ ...base, mode: "follow-a-plan", tool: "click", plan: plan() })).toEqual({
+      decision: "admit",
+      step: 0,
+    });
+  });
+});
+
+/**
+ * 030/T904 - a plan covers only its own site (FR-459, FR-463).
+ *
+ * The caller passes the deciding site and that site's own mode and plan. A step whose target is in
+ * another site's frame is therefore weighed against the frame site's plan, never the page's: the
+ * page's plan naming the very step admits nothing there, and the frame site's own plan - a stated
+ * one, or the session plan `propose_sites` approved for it - admits it like any other site's.
+ */
+describe("030 a plan covers only its own site", () => {
+  const FRAME_SITE = "https://pay.fixtures.test:19444";
+
+  it("asks about a step in another site's frame though the page's approved plan names it", () => {
+    const pagePlan = plan();
+    // On the page's own site the step is the plan's.
+    expect(decideGate({ ...base, mode: "follow-a-plan", tool: "click", plan: pagePlan })).toEqual({
+      decision: "admit",
+      step: 0,
+    });
+    // Decided by the frame's site, whose mode is its own and which has no plan of its own.
+    for (const mode of ["ask", "follow-a-plan"] as const) {
+      expect(decideGate({ ...base, site: FRAME_SITE, mode, tool: "click" }), mode).toEqual({ decision: "prompt" });
+    }
+    // And the page's plan, were it handed in, is a plan for another site.
+    expect(decideGate({ ...base, site: FRAME_SITE, mode: "follow-a-plan", tool: "click", plan: pagePlan })).toEqual({
+      decision: "prompt",
+    });
+  });
+
+  it("runs the step without asking under the frame site's own follow-a-plan plan", () => {
+    expect(
+      decideGate({ ...base, site: FRAME_SITE, mode: "follow-a-plan", tool: "click", plan: plan({ site: FRAME_SITE }) }),
+    ).toEqual({ decision: "admit", step: 0 });
+    // The session plan `propose_sites` approved for the frame's site (FR-463).
+    expect(
+      decideGate({ ...base, site: FRAME_SITE, mode: "follow-a-plan", tool: "click", sitePlanCovers: true }),
+    ).toEqual({ decision: "admit" });
+  });
+});

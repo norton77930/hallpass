@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { agentLinkFrameSchema, agentPanelCommandSchema, agentPanelMessageSchema } from "./agent-tools.js";
+import {
+  agentEffectPromptSchema,
+  agentFindResultSchema,
+  agentLinkFrameSchema,
+  agentPanelCommandSchema,
+  agentPanelMessageSchema,
+  agentReadPageResultSchema,
+} from "./agent-tools.js";
 
 /**
  * 022 T612 - the panel <-> worker messages for the viewed tab (contracts/attachments.md, R-342):
@@ -134,5 +141,88 @@ describe("024 ui.agent.open-settings", () => {
     expect(
       agentPanelCommandSchema.safeParse({ type: "ui.agent.open-settings", payload: { route: "#agents", url: "https://evil.test" } }).success,
     ).toBe(false);
+  });
+});
+
+/**
+ * 030 T887 - the frame field on a prompt, and the site on frames, nodes and find matches
+ * (contracts/prompt-and-reads.md, R-445, R-448).
+ */
+describe("030", () => {
+  const prompt = (extra: Record<string, unknown> = {}) => ({
+    promptId: "p-1",
+    site: "https://shop.test",
+    tool: "click",
+    argsSummary: "press Pay",
+    ...extra,
+  });
+  const parsePrompt = (extra?: Record<string, unknown>) => agentEffectPromptSchema.safeParse(prompt(extra)).success;
+
+  it("a prompt without frame parses unchanged", () => {
+    const parsed = agentEffectPromptSchema.parse(prompt());
+    expect(parsed).toEqual(prompt());
+    expect("frame" in parsed).toBe(false);
+  });
+
+  it("frame takes a site or unknown: true", () => {
+    expect(parsePrompt({ frame: { site: "https://pay.test" } })).toBe(true);
+    expect(parsePrompt({ frame: { site: "https://localhost:19443" } })).toBe(true);
+    expect(parsePrompt({ frame: { unknown: true } })).toBe(true);
+  });
+
+  it("frame refuses unknown: false, site with unknown, extra keys, an empty frame and a non-origin site", () => {
+    expect(parsePrompt({ frame: { unknown: false } })).toBe(false);
+    expect(parsePrompt({ frame: { site: "https://pay.test", unknown: true } })).toBe(false);
+    expect(parsePrompt({ frame: { unknown: true, url: "https://pay.test/x" } })).toBe(false);
+    expect(parsePrompt({ frame: { site: "https://pay.test", extra: 1 } })).toBe(false);
+    expect(parsePrompt({ frame: {} })).toBe(false);
+    expect(parsePrompt({ frame: { site: "https://pay.test/path" } })).toBe(false);
+    expect(parsePrompt({ frame: { site: "unknown" } })).toBe(false);
+    expect(parsePrompt({ frame: { site: "" } })).toBe(false);
+  });
+
+  it("frame refuses the page's own site: a frame of the page's site is decided as the page (R-445)", () => {
+    expect(parsePrompt({ frame: { site: "https://shop.test" } })).toBe(false);
+    expect(parsePrompt({ frame: { site: "https://shop.test:8443" } })).toBe(true);
+  });
+
+  const frameEntry = (extra: Record<string, unknown> = {}) => ({
+    frame: "f1",
+    parent: "0",
+    url: "https://pay.test/embed",
+    readable: true,
+    ...extra,
+  });
+  const parseFrames = (frame: Record<string, unknown>) =>
+    agentReadPageResultSchema.safeParse({ frames: [frame], nodes: [], truncated: false }).success;
+
+  it("a read_page frame requires site, an origin or unknown", () => {
+    expect(parseFrames(frameEntry())).toBe(false);
+    expect(parseFrames(frameEntry({ site: "https://pay.test" }))).toBe(true);
+    expect(parseFrames(frameEntry({ site: "unknown" }))).toBe(true);
+    expect(parseFrames(frameEntry({ site: "https://pay.test/embed" }))).toBe(false);
+    expect(parseFrames(frameEntry({ site: "pay.test" }))).toBe(false);
+  });
+
+  const parseNode = (extra: Record<string, unknown>) =>
+    agentReadPageResultSchema.safeParse({ nodes: [{ role: "button", depth: 0, ...extra }], truncated: false }).success;
+
+  it("a read_page node site is optional and validated", () => {
+    expect(parseNode({})).toBe(true);
+    expect(parseNode({ site: "https://pay.test" })).toBe(true);
+    expect(parseNode({ site: "unknown" })).toBe(true);
+    expect(parseNode({ site: "https://pay.test/embed" })).toBe(false);
+    expect(parseNode({ site: "" })).toBe(false);
+  });
+
+  const parseMatch = (extra: Record<string, unknown>) =>
+    agentFindResultSchema.safeParse({ outcome: "resolved", matches: [{ ref: "e1", ...extra }] }).success;
+
+  it("a find match site is optional and validated", () => {
+    expect(parseMatch({})).toBe(true);
+    expect(parseMatch({ site: "https://pay.test" })).toBe(true);
+    expect(parseMatch({ site: "unknown" })).toBe(true);
+    expect(parseMatch({ site: "https://pay.test/embed" })).toBe(false);
+    expect(parseMatch({ site: "" })).toBe(false);
   });
 });

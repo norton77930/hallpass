@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame consent fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 480px; height: 180px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Frame consent</h1>
+<p>One frame from the second site (a different site from this page, so an out-of-process frame) with a small form.</p>
+<iframe id="consent-frame" title="consent frame" width="480" height="180" src="__OOPIF_ORIGIN__/frame-consent-child"></iframe>
+</body>
+</html>

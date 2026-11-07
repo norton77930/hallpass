@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame consent child</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h2 { font-size: 18px; margin: 4px 0 8px; }
+  p { margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<h2 id="frame-heading">Consent frame</h2>
+<label for="frame-field">Frame note</label>
+<input type="text" id="frame-field" name="frame-field">
+<button type="button" id="frame-button" onclick="document.getElementById('frame-status').textContent = 'clicked'">Frame action</button>
+<p id="frame-status">not clicked</p>
+</body>
+</html>

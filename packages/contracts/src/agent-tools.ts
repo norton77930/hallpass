@@ -967,6 +967,33 @@ function refineFieldState(
 }
 
 /**
+ * A site is scheme + host, with the port kept because the fixtures live on one (R-108).
+ *
+ * `new URL(value).origin === value` is what rules out a path, a trailing slash, credentials, a
+ * query and a default port written out - the same test the build config applies to an endpoint, and
+ * for the same reason: a record keyed by anything but the origin would either apply one page's
+ * decision to another page or fail to apply the owner's decision at all. The wildcard is checked
+ * separately because the URL parser accepts `*` as an ordinary host character.
+ */
+function isSiteOrigin(value: string): boolean {
+  if (value === "" || value.includes("*")) {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.origin !== "null" && parsed.origin === value;
+}
+
+export const siteOriginSchema = z.string().refine(isSiteOrigin, { message: "expected scheme://host[:port]" });
+
+/** A frame's site as a read reports it: an origin, or `"unknown"` when the browser gave none (030 R-445). */
+const agentFrameSiteSchema = z.union([siteOriginSchema, z.literal("unknown")]);
+
+/**
  * One node of a structural read (FR-037).
  *
  * `ref` is optional and that is the honest shape. The page's registry mints a handle only where the
@@ -993,6 +1020,12 @@ const agentReadPageNodeSchema = z.strictObject({
    * which is all a 003 read could see.
    */
   frame: agentFrameLabelSchema.optional(),
+  /**
+   * The site of the document the node is in (030 R-448): present only when it differs from the
+   * page's site, so a page with no foreign frames reads exactly as before. `"unknown"` marks a
+   * frame whose site the browser did not establish.
+   */
+  site: agentFrameSiteSchema.optional(),
   /** A link's destination, so an agent can decide about it without navigating to find out. */
   href: z.string().max(2048).optional(),
   /** The control's own type (`email`, `checkbox`, …); what makes a textbox answerable. */
@@ -1014,13 +1047,17 @@ const agentReadPageNodeSchema = z.strictObject({
  *
  * `readable: false` always carries a reason: a frame that is simply missing from the answer reads
  * as a page that does not contain it, and the agent would go looking for the element it holds in
- * the wrong document. `url` is what the *browser* reports for the frame - never page content.
+ * the wrong document. `url` is the address this frame reports for itself.
+ *
+ * `site` (030 R-445) is the frame's site as the browser establishes it, on every frame; `"unknown"`
+ * when it could not be. It is what consent for an action inside the frame is decided by.
  */
 const agentReadPageFrameSchema = z
   .strictObject({
     frame: agentFrameLabelSchema,
     parent: agentFrameLabelSchema,
     url: z.string().max(2048),
+    site: agentFrameSiteSchema,
     readable: z.boolean(),
     reason: z.enum(["not-allowed", "no-answer"]).optional(),
   })
@@ -2131,6 +2168,8 @@ export const agentFindResultSchema = z.strictObject({
        * it. Optional and absent for a page of one document, which is every match a 003 find made.
        */
       frame: agentFrameLabelSchema.optional(),
+      /** The match's site, present only when it differs from the page's site (030 R-448). */
+      site: agentFrameSiteSchema.optional(),
       ...agentFieldStateShape,
     }).superRefine(refineFieldState),
   ),
@@ -2171,6 +2210,13 @@ const POINT_SPACE_NOTE =
 const POINTER_NOTE =
   "The target is a ref from `find`, or a viewport point {x, y} which the page resolves to an element. " +
   POINT_SPACE_NOTE;
+
+/**
+ * 030 FR-463: the one sentence every effect tool carries, so an agent that is refused inside a frame
+ * knows whose consent it is waiting on.
+ */
+const FRAME_SITE_NOTE =
+  "An action inside another site's embedded frame is decided by that site, not by the page around it.";
 
 /**
  * What an agent has to know before it moves a tab (014 FR-186, contracts/transitions.md).
@@ -2300,6 +2346,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "how far below the root to go, and `ref` roots the read at one element. A node that carries a ref can be " +
       "used directly by `click` and the other effect tools; a node without one cannot be acted on. " +
       "The read covers every readable frame of the page, and each node says which frame it came from. " +
+      "It marks frames and references from other sites. " +
       "`depth` defaults to 15 for the interactive read and is unlimited for `filter: \"all\"`, and " +
       "`max_chars` bounds the text the answer carries; says `truncated` when something was left out and " +
       "`truncatedBy` (`depth`, `chars`, `nodes`) which bound to raise. A ref keeps working for as long as " +
@@ -2334,7 +2381,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Finds elements on a tab matching a plain description and returns refs for them. " +
       "Answers `no-match` when nothing matches and `too-broad` when too many do - it never picks one for you. " +
-      "It searches every readable frame and inside open shadow roots. Reading never prompts the owner, and " +
+      "It searches every readable frame and inside open shadow roots, and marks frames and references from " +
+      "other sites. Reading never prompts the owner, and " +
       "refs from an earlier `find` or `read_page` on the same tab keep working. A match that is a form field " +
       "carries the same `value` / `checked` / `redacted` as a `read_page` node.",
     inputShape: agentFindShape,
@@ -2342,7 +2390,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
   {
     name: "click",
     title: "Click",
-    description: `Activates one element. ${POINTER_NOTE} ${TRANSITION_NOTE}`,
+    description: `Activates one element. ${POINTER_NOTE} ${FRAME_SITE_NOTE} ${TRANSITION_NOTE}`,
     inputShape: pointerToolShape,
   },
   {
@@ -2350,13 +2398,13 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Right-click",
     description:
       "Delivers a right-button press, release and `contextmenu` to the page's own handlers. " +
-      `The browser's native context menu does not open; a menu the page opens itself does. ${POINTER_NOTE}`,
+      `The browser's native context menu does not open; a menu the page opens itself does. ${POINTER_NOTE} ${FRAME_SITE_NOTE}`,
     inputShape: pointerToolShape,
   },
   {
     name: "double_click",
     title: "Double-click",
-    description: `Two activations and the \`dblclick\` the page listens for. ${POINTER_NOTE}`,
+    description: `Two activations and the \`dblclick\` the page listens for. ${POINTER_NOTE} ${FRAME_SITE_NOTE}`,
     inputShape: pointerToolShape,
   },
   {
@@ -2364,7 +2412,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Triple-click",
     description:
       "Three activations, the third carrying `detail: 3`, delivered to the page's own handlers. " +
-      `The browser's own text selection is a default action and does not happen. ${POINTER_NOTE}`,
+      `The browser's own text selection is a default action and does not happen. ${POINTER_NOTE} ${FRAME_SITE_NOTE}`,
     inputShape: pointerToolShape,
   },
   {
@@ -2372,7 +2420,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Hover",
     description:
       "Delivers pointer and mouse enter/over/move events. A menu the page opens in script opens; " +
-      `one that opens purely through CSS \`:hover\` does not. ${POINTER_NOTE}`,
+      `one that opens purely through CSS \`:hover\` does not. ${POINTER_NOTE} ${FRAME_SITE_NOTE}`,
     inputShape: pointerToolShape,
   },
   {
@@ -2380,7 +2428,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Drag and drop",
     description:
       "Drags one element onto another using the HTML drag-and-drop events. Each endpoint is a ref or a point, " +
-      `and they must be different. The result says whether the dragged element actually moved. ${POINT_SPACE_NOTE}`,
+      `and they must be different. The result says whether the dragged element actually moved. ${POINT_SPACE_NOTE} ${FRAME_SITE_NOTE}`,
     inputShape: agentDragShape,
   },
   {
@@ -2388,7 +2436,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Type text",
     description:
       "Types into a text input or textarea. Without a target it types into the focused element. " +
-      "`replace` (the default) sets the value; `insert` appends to it.",
+      "`replace` (the default) sets the value; `insert` appends to it. " +
+      FRAME_SITE_NOTE,
     inputShape: agentTypeShape,
   },
   {
@@ -2396,7 +2445,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Press a key",
     description:
       "Presses one of the supported keys as keyboard events the page handles itself; no browser default action runs. " +
-      "Shift is supported only with Tab. Without a target the key goes to the focused element.",
+      "Shift is supported only with Tab. Without a target the key goes to the focused element. " +
+      FRAME_SITE_NOTE,
     inputShape: agentKeyShape,
   },
   {
@@ -2428,6 +2478,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "size to aim within. Use it for what the page's structure does not describe - a " +
       "canvas, a drawn menu - and prefer the ref-based tools everywhere else, because they say what they " +
       "acted on. Acting at a point changes the page, so the site's mode applies as it does to a click. " +
+      FRAME_SITE_NOTE +
+      " " +
       // 013 FR-176: the screenshot action answers the same shape the `screenshot` tool does, so it
       // carries the same id - and an agent that only ever aims by point must be told so here.
       "A `screenshot` answer carries an `imageId` that `upload_image` accepts for 5 minutes.",
@@ -2442,7 +2494,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "names no tab of its own - they all run on this call's tab - and cannot be another batch, tabs_create or " +
       "tabs_close. Each step that changes the page is subject to the site's mode exactly as if you had sent it " +
       "alone; on a site the owner set to follow-a-plan you are asked once about the whole batch instead. A " +
-      "navigate step moves the tab, and the steps after it are governed by the destination site.",
+      "navigate step moves the tab, and the steps after it are governed by the destination site. " +
+      FRAME_SITE_NOTE,
     inputShape: agentBatchShape,
   },
   {
@@ -2514,6 +2567,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "predates that question; `upload-not-allowed` for such a file means the owner's host does " +
       "(reinstall it). " +
       "Setting files changes the page, so the site's mode applies exactly as it does to a click. " +
+      FRAME_SITE_NOTE +
+      " " +
       // 013 FR-176: the one thing an agent cannot discover by trying is that a picture it already
       // has needs no path at all - it would otherwise write the screenshot to disk to upload it.
       "For a screenshot this session took, use `upload_image` with its `imageId` instead: there is no path.",
@@ -2530,7 +2585,7 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
       "screenshot and quote the new id. `filename` is what the page will show; by default `screenshot.jpg` for a " +
       "whole-viewport screenshot (a JPEG) and `screenshot.png` for a region (a PNG). " +
       "For a file of the owner's own, on their disk, use `file_upload`. Putting a file into a page changes it, " +
-      `so the site's mode applies exactly as it does to a click. ${POINT_SPACE_NOTE}`,
+      `so the site's mode applies exactly as it does to a click. ${FRAME_SITE_NOTE} ${POINT_SPACE_NOTE}`,
     inputShape: agentUploadImageShape,
   },
   {
@@ -2566,7 +2621,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Before working across several sites, propose them here with a short purpose. The owner approves or " +
       "declines in the browser's side panel; approved sites then need no consent card for page actions in " +
-      "this session. Page JavaScript and file uploads still ask. Sites not approved behave as before.",
+      "this session. Page JavaScript and file uploads still ask. Sites not approved behave as before; " +
+      "an embedded frame's site may be proposed like any site.",
     inputShape: agentProposeSitesShape,
   },
   /**
@@ -3744,30 +3800,6 @@ export type SiteMode = (typeof SITE_MODES)[number];
 
 export const siteModeSchema = z.enum(SITE_MODES);
 
-/**
- * A site is scheme + host, with the port kept because the fixtures live on one (R-108).
- *
- * `new URL(value).origin === value` is what rules out a path, a trailing slash, credentials, a
- * query and a default port written out - the same test the build config applies to an endpoint, and
- * for the same reason: a record keyed by anything but the origin would either apply one page's
- * decision to another page or fail to apply the owner's decision at all. The wildcard is checked
- * separately because the URL parser accepts `*` as an ordinary host character.
- */
-function isSiteOrigin(value: string): boolean {
-  if (value === "" || value.includes("*")) {
-    return false;
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  return parsed.origin !== "null" && parsed.origin === value;
-}
-
-export const siteOriginSchema = z.string().refine(isSiteOrigin, { message: "expected scheme://host[:port]" });
-
 /** The per-site projection the worker sends the side panel, and the panel's commands act on. */
 export const siteModeRecordSchema = z.strictObject({
   site: siteOriginSchema,
@@ -4044,6 +4076,15 @@ export const agentEffectPromptSchema = z.strictObject({
   promptId: z.string().min(1).max(128),
   raisedAt: questionArrivalSchema,
   site: siteOriginSchema,
+  /**
+   * Set when the action's target is inside an embedded frame that decides the prompt (030 R-445):
+   * `{ site }` is the frame's site, which then differs from `site` above; `{ unknown: true }` means
+   * the frame's site could not be established. Absent when the deciding site is the page's own, so
+   * every earlier prompt parses unchanged.
+   */
+  frame: z
+    .union([z.strictObject({ site: siteOriginSchema }), z.strictObject({ unknown: z.literal(true) })])
+    .optional(),
   tool: agentToolNameSchema,
   /**
    * Which question this is, when the tool name alone would not say (008 FR-114, FR-115).
@@ -4123,6 +4164,12 @@ export const agentEffectPromptSchema = z.strictObject({
       height: z.number().int().positive().max(AGENT_REGION_MAX_PX),
     })
     .optional(),
+}).superRefine((value, ctx) => {
+  // 030 R-445: a frame of the page's own site is decided as the page, so its card carries no frame;
+  // a frame field naming the page's site would be a card claiming the page is a separate site.
+  if (value.frame !== undefined && "site" in value.frame && value.frame.site === value.site) {
+    ctx.addIssue({ code: "custom", path: ["frame", "site"], message: "a frame's site differs from the page's" });
+  }
 });
 
 export type AgentEffectPrompt = z.infer<typeof agentEffectPromptSchema>;
