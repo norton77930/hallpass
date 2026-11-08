@@ -1,8 +1,16 @@
 import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { basename, join } from "node:path";
+import * as fsPromises from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createUploadConfigStore } from "../src/upload-config-store.js";
+
+// Pass-through spy, so a test can see which temp file each write used without depending on a
+// directory poll happening to catch two writes in flight (that poll missed them on fast Linux CI).
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 import { readUploadConfig, uploadConfigPath } from "../src/upload-policy.js";
 
 /**
@@ -199,26 +207,26 @@ describe("T370 upload config store", () => {
 
     let polling = true;
     const seenEmpty: string[] = [];
-    const temps = new Set<string>();
     const watcher = (async () => {
       while (polling) {
         const config = await readUploadConfig(env).catch(() => ({ uploadRoots: [] }));
         // The file on disk always names at least the directory it started with. An empty list here
         // is the reader meeting a document that was half-written.
         if (config.uploadRoots.length === 0) seenEmpty.push(new Date().toISOString());
-        for (const name of await readdir(join(dataDir, "hallpass")).catch(() => [])) {
-          if (name.endsWith(".tmp")) temps.add(name);
-        }
       }
     })();
 
+    const writes = vi.mocked(fsPromises.writeFile);
+    writes.mockClear();
     await Promise.all([first.add([pictures]), second.add([music])]);
     polling = false;
     await watcher;
 
     expect(seenEmpty).toEqual([]);
-    // Two writes in flight are two files: one name for both is the bug, whatever the timing did.
-    expect([...temps].length).toBeGreaterThan(1);
+    // Two writes are two temp files: one name for both is the bug, whatever the timing did.
+    const temps = writes.mock.calls.map(([target]) => basename(String(target))).filter((name) => name.endsWith(".tmp"));
+    expect(temps).toHaveLength(2);
+    expect(new Set(temps).size).toBe(2);
     expect([...temps].every((name) => /^config\.json\.\d+\.\d+\.tmp$/u.test(name)), temps.toString()).toBe(true);
   });
 

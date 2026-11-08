@@ -61,12 +61,12 @@ export const KOFFI_PACKAGE_FILES = [
 ] as const;
 
 /**
- * SHA-256 of `@koromix/koffi-win32-x64/win32_x64/koffi.node` at the version the lockfile pins (3.3.3),
+ * SHA-256 of `@koromix/koffi-win32-x64/win32_x64/koffi.node` at the version the lockfile pins (3.3.6),
  * taken from the registry tarball the lockfile's integrity names (issue #38). The one file in the zip
  * that is neither built here nor readable, so it is the one that is compared before it is copied: a
  * `node_modules` that holds anything else is not packaged. Bumping koffi means re-measuring this.
  */
-export const KOFFI_WIN32_X64_NODE_SHA256 = "f7af4982457657d2e7ad46acb076614ed7122d6efbdbfbc75f21ec12681fa121";
+export const KOFFI_WIN32_X64_NODE_SHA256 = "44f208587238fab352e63714c40bbb691c6fc1cf906af9f244eebf9690f56dd3";
 
 const KOFFI_NODE_FILE = "@koromix/koffi-win32-x64/win32_x64/koffi.node";
 

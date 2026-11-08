@@ -8,15 +8,15 @@ travels with the release zip.
 
 | Package | Version | Licence | Where it ships |
 | --- | --- | --- | --- |
-| react | 19.2.8 | MIT | extension side panel |
-| react-dom | 19.2.8 | MIT | extension side panel |
+| react | 19.3.1 | MIT | extension side panel |
+| react-dom | 19.3.1 | MIT | extension side panel |
 | react-markdown | 10.1.0 | MIT | extension side panel (agent replies as Markdown) |
 | remark-gfm | 4.0.1 | MIT | extension side panel (tables and lists in agent replies) |
 | zod | 4.6.7 | MIT | extension, MCP server, relay |
-| @modelcontextprotocol/sdk | 1.32.0 | MIT | MCP server |
+| @modelcontextprotocol/sdk | 1.32.2 | MIT | MCP server |
 | gifenc | 1.0.3 | MIT | extension off-screen document (GIF encoding for session recordings) |
 | @agentclientprotocol/sdk | 1.9.0 | Apache-2.0 | side-panel agent broker (client for the owner's coding agent) |
-| koffi | 3.3.3 | MIT | side-panel agent broker (Windows job object that ends agent processes with the browser) |
+| koffi | 3.3.6 | MIT | side-panel agent broker (Windows job object that ends agent processes with the browser) |
 
 `react-markdown` and `remark-gfm` bring the unified, micromark, mdast and hast families into the
 side-panel bundle, and the MCP SDK brings its own dependencies into the host bundles; every one of them
@@ -46,8 +46,8 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | --- | --- | --- |
 | @agentclientprotocol/sdk | 1.9.0 | Apache-2.0 |
 | @hono/node-server | 2.1.1 | MIT |
-| @koromix/koffi-win32-x64 | 3.3.3 | MIT |
-| @modelcontextprotocol/sdk | 1.32.0 | MIT |
+| @koromix/koffi-win32-x64 | 3.3.6 | MIT |
+| @modelcontextprotocol/sdk | 1.32.2 | MIT |
 | @types/debug | 4.1.13 | MIT |
 | @types/estree | 1.0.9 | MIT |
 | @types/estree-jsx | 1.0.5 | MIT |
@@ -114,7 +114,7 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | hasown | 2.0.4 | MIT |
 | hast-util-to-jsx-runtime | 2.3.6 | MIT |
 | hast-util-whitespace | 3.0.0 | MIT |
-| hono | 4.13.11 | MIT |
+| hono | 4.13.13 | MIT |
 | html-url-attributes | 3.0.1 | MIT |
 | http-errors | 2.0.1 | MIT |
 | iconv-lite | 0.7.3 | MIT |
@@ -132,7 +132,7 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | jose | 6.2.12 | MIT |
 | json-schema-traverse | 1.0.0 | MIT |
 | json-schema-typed | 8.0.2 | BSD-2-Clause |
-| koffi | 3.3.3 | MIT |
+| koffi | 3.3.6 | MIT |
 | longest-streak | 3.1.0 | MIT |
 | markdown-table | 3.0.4 | MIT |
 | math-intrinsics | 1.1.0 | MIT |
@@ -200,8 +200,8 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | qs | 6.16.0 | BSD-3-Clause |
 | range-parser | 1.3.0 | MIT |
 | raw-body | 3.0.2 | MIT |
-| react | 19.2.8 | MIT |
-| react-dom | 19.2.8 | MIT |
+| react | 19.3.1 | MIT |
+| react-dom | 19.3.1 | MIT |
 | react-markdown | 10.1.0 | MIT |
 | remark-gfm | 4.0.1 | MIT |
 | remark-parse | 11.0.0 | MIT |
@@ -210,7 +210,7 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | require-from-string | 2.0.2 | MIT |
 | router | 2.2.0 | MIT |
 | safer-buffer | 2.1.2 | MIT |
-| scheduler | 0.27.0 | MIT |
+| scheduler | 0.28.0 | MIT |
 | send | 1.2.1 | MIT |
 | serve-static | 2.2.1 | MIT |
 | setprototypeof | 1.2.0 | ISC |
@@ -468,7 +468,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-#### @koromix/koffi-win32-x64 3.3.3 (MIT)
+#### @koromix/koffi-win32-x64 3.3.6 (MIT)
 
 ```text
 MIT License
@@ -495,7 +495,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-#### @modelcontextprotocol/sdk 1.32.0 (MIT)
+#### @modelcontextprotocol/sdk 1.32.2 (MIT)
 
 ```text
 MIT License
@@ -2265,7 +2265,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-#### hono 4.13.11 (MIT)
+#### hono 4.13.13 (MIT)
 
 ```text
 MIT License
@@ -2731,7 +2731,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-#### koffi 3.3.3 (MIT)
+#### koffi 3.3.6 (MIT)
 
 ```text
 MIT License
@@ -4545,7 +4545,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-#### react 19.2.8 (MIT)
+#### react 19.3.1 (MIT)
 
 ```text
 MIT License
@@ -4571,7 +4571,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-#### react-dom 19.2.8 (MIT)
+#### react-dom 19.3.1 (MIT)
 
 ```text
 MIT License
@@ -4809,7 +4809,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-#### scheduler 0.27.0 (MIT)
+#### scheduler 0.28.0 (MIT)
 
 ```text
 MIT License
