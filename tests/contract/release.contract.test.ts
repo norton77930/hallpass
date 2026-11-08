@@ -80,7 +80,7 @@ describe("#38 the native binary is the one the lockfile named", () => {
   it("pins the digest of koffi's win32-x64 binary, matching the lockfile's version", () => {
     expect(KOFFI_WIN32_X64_NODE_SHA256).toMatch(/^[0-9a-f]{64}$/);
     const lock = JSON.parse(read("package-lock.json")) as { packages: Record<string, { version: string }> };
-    expect(lock.packages["node_modules/@koromix/koffi-win32-x64"]?.version).toBe("3.3.3");
+    expect(lock.packages["node_modules/@koromix/koffi-win32-x64"]?.version).toBe("3.3.6");
   });
 
   it("refuses to stage a koffi.node whose digest is not the pinned one, and stages the right one", () => {

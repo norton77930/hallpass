@@ -5,6 +5,17 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.20.1 — 2026-11-08
+
+- **Dependencies.** Patch and minor updates: `@modelcontextprotocol/sdk` 1.32.2, koffi 3.3.6 (its
+  Windows binary re-checked against the registry before the release zip pins it), hono 4.13.13,
+  React 19.3.1, vite 8.3.5, vitest 5.1.0, axe-core 4.14.0, Testing Library patches, and fast-uri
+  3.1.9 for the side-panel Claude Code agent. Major updates (TypeScript 7, jsdom 30, the agent
+  protocol SDK 2.x and others) are not in this release.
+- **Maintainers.** A host test that depended on timing failed on fast Linux machines; it now checks
+  each write's temporary file directly.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.20.0 — 2026-11-07
 
 - **Embedded frames are asked about by their own site** (#35). An action inside a frame from another

@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.20.1 — 2026-11-08
+
+- **相依套件**:只做 patch 和 minor 更新:`@modelcontextprotocol/sdk` 1.32.2、koffi 3.3.6(它的 Windows 二進位檔在 release zip 釘住之前，先和 npm registry 的版本核對過)、hono 4.13.13、React 19.3.1、vite 8.3.5、vitest 5.1.0、axe-core 4.14.0、Testing Library 的修正版，以及側欄 Claude Code agent 用的 fast-uri 3.1.9。大版本更新(TypeScript 7、jsdom 30、agent 協定 SDK 2.x 等)不在這一版。
+- **維護者**:一個依賴執行速度的主機測試在較快的 Linux 機器上會失敗，現在改成直接檢查每次寫入用的暫存檔。
+- 主機和擴充功能要一起升級：重新安裝主機並重新載入擴充功能。
+
 ## 0.20.0 — 2026-11-07
 
 - **內嵌框架依它自己的網站詢問**(#35):在別的網站的框架裡操作，例如購物頁裡內嵌的付款或登入表單，改由那個框架的網站決定，不再看外面的頁面。某個網站設成略過檢查，也不會涵蓋它裡面別站的框架。卡片會寫出動作是在「來自框架網站、位於頁面網站的內嵌框架裡」;「永遠允許」存的是框架的網站。網站無法確定的框架(例如 sandbox 框架)一定會問，而且只提供「允許一次」和「拒絕」。涵蓋點擊、hover、拖曳、打字、按鍵、座標操作(由該點下方的框架決定)、不指定目標的打字和按鍵(由有焦點的框架決定)、batch 和上傳。
