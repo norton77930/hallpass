@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ATTENTION_SENTENCES, type AgentNativeRequest } from "@hallpass/contracts";
+import { CONSENT_TIMEOUT_HINT, type AgentNativeRequest, type AgentToolName } from "@hallpass/contracts";
+import { decideGate } from "../src/service-worker/agent-tools/gate.js";
+import { pageActionGrantsFrom, recordSessionGrant } from "../src/service-worker/agent-tools/page-action-grants.js";
+import type { PromptRaised } from "../src/service-worker/agent-tools/prompts.js";
+import { createSessionGrantStore } from "../src/service-worker/session-grant-store.js";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import {
   createAgentEffects,
@@ -14,7 +18,8 @@ import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 import type { PageExecutionOutcome } from "../src/service-worker/page-ports.js";
 import { testInputAttachments } from "./helpers/input-attachments.js";
 import { frameAnswerText } from "../src/service-worker/agent-tools/site-recheck.js";
-import type { AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
+import { createInputAttachments, IDLE_DETACH_MS, type AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
+import type { DebuggerAdapter } from "../src/chrome-adapters/debugger.js";
 import { fakePointPage, oneDocumentAnswer, oneDocumentFocus, type FakeFrame } from "./helpers/point-site.js";
 
 /**
@@ -792,6 +797,8 @@ describe("T028 agent effect tools", () => {
       callId: "call-1",
       outcome: "timed-out",
       reason: "no-answer",
+      // 031 R-455: every expiry tells the agent to have the owner answer in Chrome.
+      hint: CONSENT_TIMEOUT_HINT,
     });
     expect(execute).not.toHaveBeenCalled();
   });
@@ -800,9 +807,8 @@ describe("T028 agent effect tools", () => {
    * 011/T293 — the one answer the agent can act on when nobody answered.
    *
    * `reason` does not move: an agent that has never heard of this feature reads `no-answer` and
-   * branches exactly as it did. Beside it is the sentence to relay to the person at the terminal,
-   * and it is there only because this question was raised into a side panel nobody had open - the
-   * one situation in which telling them where to click is the thing that unsticks the call.
+   * branches exactly as it did. Beside it is the sentence to relay to the person at the terminal.
+   * 031 R-455: it no longer depends on whether a panel was open - every expiry carries it.
    */
   it("says where to click when the question nobody answered was raised into a closed panel", async () => {
     const prompts = createAgentPromptController({
@@ -815,7 +821,7 @@ describe("T028 agent effect tools", () => {
       callId: "call-1",
       outcome: "timed-out",
       reason: "no-answer",
-      hint: ATTENTION_SENTENCES.consent,
+      hint: CONSENT_TIMEOUT_HINT,
     });
     expect(execute).not.toHaveBeenCalled();
   });
@@ -2389,5 +2395,296 @@ describe("030 pre-gate claim", () => {
       });
       expect(inputEvents(input.commands)).toEqual([]);
     });
+  });
+});
+
+/**
+ * 031 T916, T917 - the owner's "This session" answer, and what the agent's own client is asked.
+ *
+ * A session grant is the 017 site plan's twin for one session: it stands in for the card on the
+ * covered page actions of one site (R-456, R-457), it is written only from an Allow the owner gave
+ * with `session`, and it never reaches another session. The grant store here is the real one over
+ * a fake `chrome.storage.session`; only the agent binding is a test double.
+ */
+describe("031 session grants for page actions", () => {
+  const AGENT = "agent-1";
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function grantsHarness() {
+    const raised: PromptRaised[] = [];
+    const area: Record<string, unknown> = {};
+    const store = createSessionGrantStore({
+      session: {
+        async get(keys: string[]) {
+          const out: Record<string, unknown> = {};
+          for (const key of keys) if (key in area) out[key] = area[key];
+          return out;
+        },
+        async set(values: Record<string, unknown>) {
+          Object.assign(area, values);
+        },
+      },
+    });
+    // A longer bound than the suite's 60 ms: these tests answer a second card on purpose.
+    const prompts = createAgentPromptController({ timeoutMs: 5_000, onRaised: (question) => raised.push(question) });
+    const built = harness({
+      prompts,
+      sessionGrants: pageActionGrantsFrom(store, (sessionId) =>
+        sessionId === "session-h1" || sessionId === "session-h2" ? AGENT : undefined,
+      ),
+    });
+    return { ...built, prompts, store, raised };
+  }
+
+  it("writes a page-actions grant from Chrome for an Allow with This session, and the next click is not asked", async () => {
+    const { runner, prompts, store, siteModes } = grantsHarness();
+
+    const first = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: SITE, kind: "page-actions", source: "browser" }),
+    ]);
+    // A session answer is not a mode: the site still asks every other session.
+    expect((await siteModes.get(SITE)).mode).toBe("ask");
+
+    const second = await runner.run(clickRequest({ callId: "call-2" }));
+    expect(second.outcome).toBe("ok");
+    expect(prompts.current()).toBeUndefined();
+  });
+
+  it("records the client as the source when the answer came from the agent's own client", async () => {
+    const { runner, prompts, store, siteModes } = grantsHarness();
+
+    const first = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.decideByCall("call-1", prompts.current()?.promptId ?? "", "session", "client", "session-h1")).toBe(true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: SITE, kind: "page-actions", source: "client" }),
+    ]);
+    // FR-472: the client can never set the site's mode, whatever it answers.
+    expect((await siteModes.get(SITE)).mode).toBe("ask");
+  });
+
+  it("writes nothing for Allow once, so the next click is asked again", async () => {
+    const { runner, prompts, store } = grantsHarness();
+
+    const first = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+    expect(await store.list("session-h1", AGENT)).toEqual([]);
+
+    const second = runner.run(clickRequest({ callId: "call-2" }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(second).resolves.toMatchObject({ outcome: "denied" });
+  });
+
+  it("asks another session on the same site, whatever this session was granted", async () => {
+    const { runner, prompts, store } = grantsHarness();
+    await store.add("session-h1", AGENT, { site: SITE, kind: "page-actions", source: "browser" });
+
+    const other = runner.run(clickRequest({ callId: "call-2", sessionId: "session-h2" }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ site: SITE, tool: "click" });
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(other).resolves.toMatchObject({ outcome: "denied" });
+  });
+
+  it("asks a session the runtime no longer knows, even with a grant left in the store", async () => {
+    const { runner, prompts, store } = grantsHarness();
+    await store.add("session-gone", AGENT, { site: SITE, kind: "page-actions", source: "browser" });
+
+    const stale = runner.run(clickRequest({ sessionId: "session-gone" }));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(stale).resolves.toMatchObject({ outcome: "denied" });
+  });
+
+  it("asks a session whose id another agent's grant was left under, after a worker restart", async () => {
+    const { runner, prompts, store } = grantsHarness();
+    // What a worker that restarted finds: a grant this session id holds from another paired agent.
+    // The runtime now has the id as agent-1's (its greeting created it), and the owner's yes was
+    // never given to agent-1.
+    await store.add("session-h1", "agent-2", { site: SITE, kind: "page-actions", source: "browser" });
+
+    const borrowed = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ site: SITE, tool: "click" });
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(borrowed).resolves.toMatchObject({ outcome: "denied" });
+  });
+
+  it("keeps asking for page JavaScript, uploads, a forced leave and tabs_close when the session is covered", () => {
+    // What the runtime hands the gate for a covered session (R-456): the same flag a site plan
+    // sets. These five keep their own consent under it (R-457, 017 FR-255).
+    const base = { sessionId: "session-h1", tabId: AGENT_TAB, site: SITE, mode: "ask" as const, sitePlanCovers: true };
+    const cases: Array<{ tool: AgentToolName; args: Record<string, unknown> }> = [
+      { tool: "evaluate", args: { tabId: AGENT_TAB, expression: "1" } },
+      { tool: "file_upload", args: { tabId: AGENT_TAB } },
+      { tool: "upload_image", args: { tabId: AGENT_TAB } },
+      { tool: "navigate", args: { tabId: AGENT_TAB, url: `${SITE}/next`, force: true } },
+      { tool: "tabs_close", args: { tabId: AGENT_TAB } },
+    ];
+    for (const { tool, args } of cases) {
+      expect(decideGate({ ...base, tool, args }), tool).toEqual({ decision: "prompt" });
+    }
+  });
+
+  it("never turns a session answer into a grant for a tool or a site a grant cannot cover", async () => {
+    const add = vi.fn(async () => {});
+    const grants = { covers: async () => false, add };
+    const session = { decision: "allow", session: true, answeredFrom: "client" } as const;
+    for (const tool of ["evaluate", "file_upload", "upload_image", "navigate", "tabs_close"] as const) {
+      await recordSessionGrant(grants, "session-h1", SITE, tool, session);
+    }
+    // A frame whose site is unknown has no site to hold one (030 FR-458).
+    await recordSessionGrant(grants, "session-h1", null, "click", session);
+    // And an Allow without `session` is a once.
+    await recordSessionGrant(grants, "session-h1", SITE, "click", { decision: "allow", answeredFrom: "client" });
+    expect(add).not.toHaveBeenCalled();
+
+    await recordSessionGrant(grants, "session-h1", SITE, "dialog", session);
+    expect(add).toHaveBeenCalledWith("session-h1", SITE, "client");
+  });
+
+  it("tells the agent's client a click on this site may be allowed for the session, with the site and the action (T917)", async () => {
+    const { runner, prompts, raised } = grantsHarness();
+
+    const pending = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await pending;
+
+    expect(raised).toEqual([
+      expect.objectContaining({
+        callId: "call-1",
+        sessionId: "session-h1",
+        kind: "effect",
+        site: SITE,
+        action: "click a page element",
+        choices: ["once", "session", "deny"],
+        boundMs: 5_000,
+      }),
+    ]);
+  });
+});
+
+/**
+ * 031/T945 (R-466, FR-482): an effect holds the tab's attachment for the whole call.
+ *
+ * The idle release drops `input` 20 s after the last call ends with no lifetime holder left. An
+ * effect that merely *acquired* `input` was not a call in progress, so a recording that stopped
+ * while a click was still being aimed started that countdown under it, and a call still running at
+ * the 20 s mark lost its debugger mid-gesture.
+ */
+describe("031 an effect holds the attachment for the whole call", () => {
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  /** Chrome's debugger, as far as one tab's attach, detach and commands go. */
+  function scriptedDebugger() {
+    const attached = new Set<number>();
+    const detached: number[] = [];
+    const commands: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const adapter: DebuggerAdapter = {
+      async attach(tabId) {
+        if (attached.has(tabId)) throw new Error("Already attached");
+        attached.add(tabId);
+      },
+      async detach(tabId) {
+        if (!attached.delete(tabId)) throw new Error("Not attached");
+        detached.push(tabId);
+      },
+      async send(tabId, method, params) {
+        if (!attached.has(tabId)) throw new Error("Debugger is not attached to the tab");
+        commands.push({ method, ...(params ? { params } : {}) });
+        return oneDocumentAnswer(method) ?? {};
+      },
+      onEvent() {},
+      onDetach() {},
+      async attachedTabIds() {
+        return [...attached];
+      },
+    };
+    return { adapter, detached, commands };
+  }
+
+  it("is not detached mid-call when a lifetime holder lets go and the call runs past the 20 s mark", async () => {
+    vi.useFakeTimers();
+    const debug = scriptedDebugger();
+    const attachments = createInputAttachments({ debug: debug.adapter });
+    await attachments.acquire(AGENT_TAB, "recording");
+    let aiming = false;
+    let aimed!: () => void;
+    const aim = new Promise<void>((resolve) => (aimed = resolve));
+    const { runner, siteModes } = harness({
+      attachments,
+      locate: async () => {
+        aiming = true;
+        await aim;
+        return { x: 100, y: 40, width: 80, height: 20 };
+      },
+    });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(clickRequest());
+    await vi.waitFor(() => expect(aiming).toBe(true));
+    // The recording stops while the click is still being aimed, and the call runs on past 20 s.
+    await attachments.drop(AGENT_TAB, "recording");
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS + 5_000);
+    expect(debug.detached).toEqual([]);
+
+    aimed();
+    await vi.advanceTimersByTimeAsync(2_000);
+    const response = await pending;
+
+    expect(response.outcome).toBe("ok");
+    expect(debug.commands.filter((command) => command.method === "Input.dispatchMouseEvent").map((c) => c.params?.type)).toEqual([
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+    ]);
+    // The countdown runs from the end of the call, and then lets go as the idle rule says.
+    expect(debug.detached).toEqual([]);
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(debug.detached).toEqual([AGENT_TAB]);
+  });
+
+  it("ends every hold it took once it answers, and answers a refused hold as the acquire did", async () => {
+    const { runner, siteModes, input } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    expect((await runner.run(clickRequest())).outcome).toBe("ok");
+    expect(input.holds.length).toBeGreaterThan(0);
+    expect(input.holds.every((hold) => hold.done)).toBe(true);
+
+    input.refuse.reason = "devtools-open";
+    const refused = await runner.run(clickRequest({ callId: "call-2" }));
+    expect(refused).toEqual({
+      callId: "call-2",
+      outcome: "failed",
+      reason: "input-unavailable",
+      refusal: { reason: "input-unavailable", unavailableReason: "devtools-open" },
+    });
+    expect(input.holds.every((hold) => hold.done)).toBe(true);
   });
 });

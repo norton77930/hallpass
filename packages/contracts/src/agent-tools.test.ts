@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_SITE_PLAN_MAX_ORIGINS,
+  AGENT_ACTIVITY_KEPT,
+  agentActivityItemSchema,
   agentEffectPromptSchema,
   agentFindResultSchema,
   agentLinkFrameSchema,
   agentPanelCommandSchema,
   agentPanelMessageSchema,
   agentReadPageResultSchema,
+  promptRaisedFrameSchema,
 } from "./agent-tools.js";
 
 /**
@@ -224,5 +228,130 @@ describe("030", () => {
     expect(parseMatch({ site: "unknown" })).toBe(true);
     expect(parseMatch({ site: "https://pay.test/embed" })).toBe(false);
     expect(parseMatch({ site: "" })).toBe(false);
+  });
+});
+
+/**
+ * 032 T952 (contracts/terminal-consent-032.md, R-485): a site change and a site plan are asked in the
+ * agent's client too. Each carries what its question names - the site the tab came from, the sites
+ * the plan proposes - and offers only the session-bounded yes and a no (D-032-1); a field meant for
+ * one kind is refused on every other.
+ */
+describe("032 prompt-raised for a transition and a site plan", () => {
+  const raised = (extra: Record<string, unknown> = {}) => ({
+    type: "prompt-raised",
+    sessionId: "session-h1",
+    callId: "call-1",
+    promptId: "prompt-1",
+    kind: "effect",
+    site: "https://shop.test",
+    action: "click the Buy button",
+    choices: ["once", "session", "deny"],
+    boundMs: 120_000,
+    ...extra,
+  });
+  const parses = (extra: Record<string, unknown>) => promptRaisedFrameSchema.safeParse(raised(extra)).success;
+  const transition = {
+    kind: "transition",
+    from: "https://www.wikipedia.org",
+    site: "https://zh.wikipedia.org",
+    choices: ["session", "deny"],
+  };
+  const sitePlan = {
+    kind: "site-plan",
+    site: "https://a.test",
+    sites: ["https://a.test", "https://b.test"],
+    choices: ["session", "deny"],
+  };
+  const many = (count: number) => Array.from({ length: count }, (_, i) => `https://s${i}.test`);
+
+  it("accepts a transition naming where the tab came from, and a site plan listing its sites", () => {
+    expect(parses(transition)).toBe(true);
+    expect(parses(sitePlan)).toBe(true);
+    expect(parses({ ...sitePlan, sites: many(AGENT_SITE_PLAN_MAX_ORIGINS) })).toBe(true);
+    expect(parses({ ...transition, from: "x".repeat(2048) })).toBe(true);
+    // It is a link frame like the other three terminal-consent frames.
+    expect(agentLinkFrameSchema.safeParse(raised(transition)).success).toBe(true);
+    expect(agentLinkFrameSchema.safeParse(raised(sitePlan)).success).toBe(true);
+  });
+
+  it("refuses a transition without its from-site and a site plan without its sites, or with too many", () => {
+    const { from: _from, ...noFrom } = transition;
+    expect(parses(noFrom)).toBe(false);
+    const { sites: _sites, ...noSites } = sitePlan;
+    expect(parses(noSites)).toBe(false);
+    expect(parses({ ...sitePlan, sites: [] })).toBe(false);
+    expect(parses({ ...sitePlan, sites: many(AGENT_SITE_PLAN_MAX_ORIGINS + 1) })).toBe(false);
+    expect(parses({ ...sitePlan, sites: ["https://a.test", "x".repeat(2049)] })).toBe(false);
+    expect(parses({ ...sitePlan, sites: [""] })).toBe(false);
+    expect(parses({ ...transition, from: "" })).toBe(false);
+    expect(parses({ ...transition, from: "x".repeat(2049) })).toBe(false);
+  });
+
+  it("refuses a field meant for another kind", () => {
+    expect(parses({ from: "https://a.test" })).toBe(false);
+    expect(parses({ kind: "diagnostics", choices: ["once", "deny"], from: "https://a.test" })).toBe(false);
+    expect(parses({ sites: ["https://a.test"] })).toBe(false);
+    expect(parses({ ...transition, sites: ["https://a.test"] })).toBe(false);
+    expect(parses({ ...sitePlan, from: "https://a.test" })).toBe(false);
+  });
+
+  it("offers exactly session and deny for a transition and a site plan, and once and deny for the rest", () => {
+    for (const question of [transition, sitePlan]) {
+      expect(parses({ ...question, choices: ["once", "session", "deny"] }), `${question.kind} with once`).toBe(false);
+      expect(parses({ ...question, choices: ["once", "deny"] }), `${question.kind} once/deny`).toBe(false);
+      expect(parses({ ...question, choices: ["deny", "session"] }), `${question.kind} in another order`).toBe(true);
+      expect(parses({ ...question, choices: ["session", "session"] }), `${question.kind} no deny`).toBe(false);
+      expect(parses({ ...question, choices: ["session", "deny", "deny"] }), `${question.kind} repeated`).toBe(false);
+    }
+    expect(parses({ choices: ["session", "deny"] }), "an effect without once").toBe(false);
+    expect(parses({ kind: "diagnostics", choices: ["session", "deny"] }), "diagnostics without once").toBe(false);
+    expect(parses({ choices: ["once", "deny"] })).toBe(true);
+  });
+});
+
+/** 032 T968 - one activity line per settled consent question (contracts/activity-consent.md, R-488). */
+describe("032 activity item kind consent", () => {
+  const line: Record<string, unknown> = { at: 1, kind: "consent", site: "https://a.test", question: "effect", channel: "client", answer: "session" };
+  const parses = (value: Record<string, unknown>): boolean => agentActivityItemSchema.safeParse(value).success;
+
+  it("accepts a consent line of site, question, channel and answer, with no outcome", () => {
+    expect(parses(line)).toBe(true);
+    for (const question of ["effect", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"]) {
+      expect(parses({ ...line, question }), question).toBe(true);
+    }
+    for (const answer of ["once", "session", "always", "deny"]) {
+      for (const channel of ["client", "browser"]) expect(parses({ ...line, channel, answer }), `${channel} ${answer}`).toBe(true);
+    }
+    expect(parses({ ...line, channel: "none", answer: "timed-out" })).toBe(true);
+    expect(parses({ ...line, channel: "browser", answer: "timed-out" })).toBe(true);
+  });
+
+  it("refuses a consent line that lacks a field, carries an unknown value or an outcome", () => {
+    for (const key of ["site", "question", "channel", "answer"]) {
+      const { [key]: _gone, ...rest } = line;
+      expect(parses(rest), `without ${key}`).toBe(false);
+    }
+    expect(parses({ ...line, question: "stop" })).toBe(false);
+    expect(parses({ ...line, channel: "terminal" })).toBe(false);
+    expect(parses({ ...line, answer: "maybe" })).toBe(false);
+    expect(parses({ ...line, outcome: "approved" })).toBe(false);
+  });
+
+  it("allows channel none only for a timeout", () => {
+    expect(parses({ ...line, channel: "none", answer: "session" })).toBe(false);
+    expect(parses({ ...line, channel: "none", answer: "deny" })).toBe(false);
+  });
+
+  it("refuses the consent fields on any other kind, and still needs an outcome there", () => {
+    expect(parses({ at: 1, kind: "dialog", outcome: "accepted", site: "a.test", question: "effect" })).toBe(false);
+    expect(parses({ at: 1, kind: "upload", outcome: "delivered", channel: "client" })).toBe(false);
+    expect(parses({ at: 1, kind: "interrupt", outcome: "interrupted", answer: "once" })).toBe(false);
+    expect(parses({ at: 1, kind: "interrupt", outcome: "interrupted" })).toBe(true);
+    expect(parses({ at: 1, kind: "interrupt" })).toBe(false);
+  });
+
+  it("keeps the latest 20 per session in the projection", () => {
+    expect(AGENT_ACTIVITY_KEPT).toBe(20);
   });
 });

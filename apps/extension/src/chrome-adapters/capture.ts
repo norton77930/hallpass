@@ -74,9 +74,18 @@ export type CapturedImage = {
   height?: number;
 };
 
-/** Where a picture comes from: the visible tab, or the attachment an emulated tab already has. */
+/**
+ * Where a picture comes from: the visible tab, the tab's own surface over its attachment (031), or
+ * the clipped protocol picture of an emulated viewport.
+ *
+ * `surface` (031/T940, D-031-10, R-462) is the viewport `captureVisibleTab` would have handed back -
+ * one unclipped `Page.captureScreenshot` - so everything after it (the frame-pixel fitting, the
+ * density a region is cropped at, the JPEG ladder) is the visible-tab path's, unchanged. It needs no
+ * activation for the active tab of a window, covered or minimized, which T938 measured fresh.
+ */
 export type CapturePath =
   | { kind: "visible-tab" }
+  | { kind: "surface" }
   | {
       kind: "protocol";
       clip: CaptureRegion;
@@ -125,6 +134,25 @@ export type CaptureDeps = {
 
 /** The longest a background tab's picture waits for its first fresh frame (2026-10-11). */
 export const FRESH_FRAME_CAP_MS = 300;
+
+/**
+ * The longest a surface capture is waited for (031/T940, R-462, R-463).
+ *
+ * T938's returned captures took 61-81 ms for an active tab in a covered window and 210-606 ms in a
+ * minimized one on branded Chrome (1.3-4.1 s on Playwright Chromium); the ones that failed never
+ * returned at all. Five seconds is above every capture that came back, with room, and leaves the
+ * fallback picture time inside the host's per-call bound - a capture that has not answered by then
+ * is the hung kind, not a slow one.
+ */
+export const SURFACE_CAPTURE_TIMEOUT_MS = 5_000;
+
+/** What the tab and its window are, for the path choice (031/T940); absent is "no attachment to use". */
+export type CaptureTabState = {
+  /** Whether the tab is the active one of its window. */
+  active: boolean;
+  /** Chrome's `windows.Window["state"]`; unknown is not minimized. */
+  windowState?: string | undefined;
+};
 
 /** Two animation frames: the first is scheduled before the next paint, the second after it. */
 const TWO_FRAMES_SOURCE =
@@ -179,14 +207,26 @@ async function activateWithChrome(tabId: number): Promise<void> {
  * fact: a session gave this tab a viewport of its own, so the only picture of *that* viewport is
  * the protocol's. A whole-viewport shot is a `clip` of the frame rather than no clip at all, so
  * that the scale travels the same way in both cases and the picture is exactly the emulated size.
+ *
+ * 031 (T940, R-462, R-463): with `tab` - handed in only by a caller that can hold the tab's
+ * attachment - a tab nothing emulates is photographed off its own surface when it is the active
+ * tab of its window, whatever the window's state, because that is what T938 measured fresh with no
+ * activation. A background tab keeps the visible-tab path and its activate-and-restore: without
+ * activation its capture often never returned. In a minimized window there is no visible tab to
+ * photograph at all, so a background tab there is brought forward inside the minimized window and
+ * its surface taken - the measured-good case - and the window itself is never restored.
  */
 export function decideCapturePath(
   record: CaptureFrame | undefined,
   region: CaptureRegion | undefined,
   scale: number,
   pageScale?: number,
+  tab?: CaptureTabState,
 ): CapturePath {
-  if (!record) return { kind: "visible-tab" };
+  if (!record) {
+    if (tab !== undefined && (tab.active || tab.windowState === "minimized")) return { kind: "surface" };
+    return { kind: "visible-tab" };
+  }
   return {
     kind: "protocol",
     clip: region ?? { x: 0, y: 0, width: record.width, height: record.height },
@@ -491,6 +531,38 @@ export async function captureThroughProtocol(input: {
   return data;
 }
 
+/** A surface capture that did not answer within `SURFACE_CAPTURE_TIMEOUT_MS` (031/T940). */
+export class SurfaceCaptureTimeout extends Error {
+  constructor() {
+    super("surface-capture-timed-out");
+    this.name = "SurfaceCaptureTimeout";
+  }
+}
+
+/**
+ * The tab's viewport off its own surface, as a PNG data url (031/T940, D-031-10).
+ *
+ * Unclipped, so it is the picture `captureVisibleTab` takes - the viewport at the display's density -
+ * and the caller's fitting and cropping apply to it unchanged. Bounded: R-462's failure is a
+ * command that never answers, and its late answer settles a promise nobody reads any more.
+ */
+async function captureSurface(send: CaptureSend, tabId: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const shot = await Promise.race([
+      send(tabId, "Page.captureScreenshot", { format: "png", fromSurface: true }),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new SurfaceCaptureTimeout()), SURFACE_CAPTURE_TIMEOUT_MS);
+      }),
+    ]);
+    const data = shot["data"];
+    if (typeof data !== "string" || data.length === 0) throw new Error("the surface capture answered no image");
+    return `data:image/png;base64,${data}`;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /**
  * Captures one tab, activating it first when it is not the one its window is showing.
  *
@@ -538,7 +610,10 @@ async function capturePicture(input: CaptureInput, deps: CaptureDeps): Promise<C
   const scale = input.scale ?? 1;
   // Without a `send` there is nothing to take a protocol picture over, so the tab is photographed
   // the way every other tab is: honest about the path, rather than failing the call.
-  const path = input.path?.kind === "protocol" && deps.send ? input.path : { kind: "visible-tab" as const };
+  const path: CapturePath =
+    (input.path?.kind === "protocol" || input.path?.kind === "surface") && deps.send
+      ? input.path
+      : { kind: "visible-tab" };
 
   if (!input.isActive) {
     await activate(input.tabId);
@@ -547,7 +622,7 @@ async function capturePicture(input: CaptureInput, deps: CaptureDeps): Promise<C
     if (!input.isActive) {
       // Right after activation the surface may still be the one the tab was last painted with
       // (2026-10-11): one fresh frame first, through the channel the path already uses.
-      const send = path.kind === "protocol" ? deps.send : undefined;
+      const send = path.kind === "visible-tab" ? undefined : deps.send;
       const awaitFrame =
         deps.awaitFrame ??
         (send
@@ -590,7 +665,9 @@ async function capturePicture(input: CaptureInput, deps: CaptureDeps): Promise<C
         ...(answered === undefined ? {} : { width: answered.width, height: answered.height }),
       };
     }
-    const dataUrl = await capture(input.windowId);
+    // 031: the surface is the same viewport picture, so from here on the two paths are one.
+    const dataUrl =
+      path.kind === "surface" && deps.send ? await captureSurface(deps.send, input.tabId) : await capture(input.windowId);
     let measured: CaptureFrame | undefined;
     if (!input.region) {
       // The whole viewport, in the frame's CSS pixels and under the size budget (2026-10-17). A

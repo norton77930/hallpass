@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ATTENTION_SENTENCES, promptWaitingFrameSchema } from "@hallpass/contracts";
+import { CONSENT_TIMEOUT_HINT, promptWaitingFrameSchema } from "@hallpass/contracts";
 import {
-  ASK_TIMEOUT_MS,
   CLOSED_PANEL_TIMEOUT_MS,
   PROMPT_WAITING_TICK_MS,
   createAgentPromptController,
@@ -52,20 +51,26 @@ describe("T290 the bound a question is raised with", () => {
     vi.useRealTimers();
   });
 
-  it("holds an unanswerable question for two minutes and a visible one for twenty-five seconds", async () => {
+  /**
+   * 031/T926 (D-031-6, FR-473, R-453): one bound for every question. The old rule gave a card in
+   * front of the person 25 s, which an owner reading the question in their terminal - or walking
+   * back to Chrome - routinely lost.
+   */
+  it("holds every question for two minutes, whether or not a panel is visible", async () => {
     const closed = createAgentPromptController({ panelPresence: () => false });
     const open = createAgentPromptController({ panelPresence: () => true });
 
     const unseen = closed.ask({ ...PROMPT });
     const seen = open.ask({ ...PROMPT });
 
-    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
-    await expect(seen).resolves.toEqual({ decision: "timed-out" });
-    // Still standing: nobody has had a chance to see it yet, which is the whole point of the bound.
-    expect(closed.current(), "the closed-panel question expired at the open-panel bound").toBeDefined();
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(open.current(), "the visible question expired at the old 25 s bound").toBeDefined();
+    expect(closed.current()).toBeDefined();
 
-    await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - ASK_TIMEOUT_MS);
-    await expect(unseen).resolves.toEqual({ decision: "timed-out", hint: ATTENTION_SENTENCES.consent });
+    await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - 25_000);
+    await expect(seen).resolves.toEqual({ decision: "timed-out", hint: CONSENT_TIMEOUT_HINT });
+    await expect(unseen).resolves.toEqual({ decision: "timed-out", hint: CONSENT_TIMEOUT_HINT });
+    expect(CLOSED_PANEL_TIMEOUT_MS).toBe(120_000);
   });
 
   it("keeps the bound it was raised with when a panel connects mid-wait", async () => {
@@ -76,22 +81,26 @@ describe("T290 the bound a question is raised with", () => {
     await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS);
     connected = true;
 
-    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(25_000);
     expect(controller.current(), "the running bound was shortened under the person answering it").toBeDefined();
 
     await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS);
-    await expect(asked).resolves.toEqual({ decision: "timed-out", hint: ATTENTION_SENTENCES.consent });
+    await expect(asked).resolves.toEqual({ decision: "timed-out", hint: CONSENT_TIMEOUT_HINT });
   });
 
-  it("says where to click only for a question nobody could see", async () => {
+  /**
+   * 031/T926 (FR-474, R-455): the expiry always tells the agent what to do. The old rule sent no
+   * hint for a card a panel could show; but the owner may have been reading the question in their
+   * terminal, and "a panel was visible" is no evidence that anybody saw it.
+   */
+  it("tells the agent to have the owner answer in Chrome on every expiry, panel or not", async () => {
     const open = createAgentPromptController({ panelPresence: () => true });
 
     const asked = open.ask({ ...PROMPT });
 
-    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
-    // A card the person is looking at and does not answer is a decision, not a card nobody saw:
-    // there is no instruction that would have helped, so none is sent.
-    await expect(asked).resolves.toEqual({ decision: "timed-out" });
+    await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS);
+    await expect(asked).resolves.toEqual({ decision: "timed-out", hint: CONSENT_TIMEOUT_HINT });
+    expect(CONSENT_TIMEOUT_HINT).toContain("retry");
   });
 });
 
@@ -104,6 +113,37 @@ describe("T290 the ticks while a question waits", () => {
     vi.useRealTimers();
   });
 
+  /**
+   * 032 T961 (R-486, FR-488): the first tick goes the moment a question is armed, having waited
+   * nothing. It is what tells the host when a question only Chrome shows was shown - such a
+   * question sends no `prompt-raised` - so the host's cap counts that question's two minutes from
+   * then, and there is no five-second gap in which the backstop could fire first.
+   */
+  it("says so the moment a question is armed, with nothing waited yet, for every kind", () => {
+    const { ticks, onWaiting } = collector();
+    const controller = createAgentPromptController({ panelPresence: () => false, onWaiting });
+    const base = { boundMs: CLOSED_PANEL_TIMEOUT_MS, panelConnected: false, sessionId: "session-h1", waitedMs: 0 };
+
+    void controller.ask({ ...PROMPT });
+    expect(ticks).toEqual([{ ...base, kind: "ask", callId: "call-1" }]);
+    controller.cancel();
+
+    void controller.ask({ ...PROMPT, callId: "call-t", kind: "transition", transition: { from: "https://a.test", to: "https://agent.test" } });
+    controller.cancel();
+    void controller.askPlan({ callId: "call-p", sessionId: "session-h1", site: "https://agent.test", steps: [] });
+    controller.cancel();
+    void controller.askSitePlan({ callId: "call-s", hostCallId: "call-h", sessionId: "session-h1", origins: ["https://a.test"], purpose: "x" });
+    controller.cancel();
+    void controller.ask({ ...PROMPT, callId: "call-u", kind: "upload-directory", tool: "file_upload" });
+
+    expect(ticks.slice(1)).toEqual([
+      { ...base, kind: "ask", callId: "call-t" },
+      { ...base, kind: "plan", callId: "call-p" },
+      { ...base, kind: "plan", callId: "call-h" },
+      { ...base, kind: "ask", callId: "call-u" },
+    ]);
+  });
+
   it("says it is still waiting every five seconds, with the wait and the bound it was given", async () => {
     const { ticks, onWaiting } = collector();
     const controller = createAgentPromptController({ panelPresence: () => false, onWaiting });
@@ -111,21 +151,24 @@ describe("T290 the ticks while a question waits", () => {
     void controller.ask({ ...PROMPT });
 
     await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS);
+    const tick = {
+      kind: "ask",
+      callId: "call-1",
+      sessionId: "session-h1",
+      boundMs: CLOSED_PANEL_TIMEOUT_MS,
+      panelConnected: false,
+    };
+    // 032 R-486: the tick at the raise, then every five seconds.
     expect(ticks).toEqual([
-      {
-        kind: "ask",
-        callId: "call-1",
-        sessionId: "session-h1",
-        waitedMs: PROMPT_WAITING_TICK_MS,
-        boundMs: CLOSED_PANEL_TIMEOUT_MS,
-        panelConnected: false,
-      },
+      { ...tick, waitedMs: 0 },
+      { ...tick, waitedMs: PROMPT_WAITING_TICK_MS },
     ]);
 
     await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS);
-    expect(ticks[1]).toEqual({ ...ticks[0], waitedMs: 2 * PROMPT_WAITING_TICK_MS });
+    expect(ticks[2]).toEqual({ ...tick, waitedMs: 2 * PROMPT_WAITING_TICK_MS });
     // The host reads the arithmetic and nothing else, so each tick has to stand on its own.
-    expect(promptWaitingFrameSchema.safeParse({ type: "prompt-waiting", ...ticks[1] }).success).toBe(true);
+    expect(promptWaitingFrameSchema.safeParse({ type: "prompt-waiting", ...ticks[0] }).success).toBe(true);
+    expect(promptWaitingFrameSchema.safeParse({ type: "prompt-waiting", ...ticks[2] }).success).toBe(true);
   });
 
   it("carries the kind the raising tool gave it, and `plan` for a whole batch", async () => {
@@ -144,8 +187,9 @@ describe("T290 the ticks while a question waits", () => {
     });
     await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS);
 
-    expect(ticks.map((tick) => tick.kind)).toEqual(["dialog", "plan"]);
-    expect(ticks[1]?.callId).toBe("call-2");
+    // Each question's tick at its raise (032 R-486) and its first five-second one.
+    expect(ticks.map((tick) => tick.kind)).toEqual(["dialog", "dialog", "plan", "plan"]);
+    expect(ticks[2]?.callId).toBe("call-2");
   });
 
   it("stops the moment the question ends, whichever way it ends", async () => {
@@ -154,7 +198,8 @@ describe("T290 the ticks while a question waits", () => {
       const controller = createAgentPromptController({ panelPresence: () => false, onWaiting });
       const asked = controller.ask({ ...PROMPT });
       await vi.advanceTimersByTimeAsync(PROMPT_WAITING_TICK_MS);
-      expect(ticks, `${ending}: the first tick`).toHaveLength(1);
+      // The tick at the raise (032 R-486) and the first five-second one.
+      expect(ticks, `${ending}: the first ticks`).toHaveLength(2);
 
       if (ending === "answered") controller.decide(controller.current()?.promptId ?? "", true);
       else if (ending === "timed-out") await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS);
@@ -179,14 +224,25 @@ describe("T290 the ticks while a question waits", () => {
    * apply, and the server's own pairing ticker is already saying something - so a tick here would
    * be a second progress line about a question the person is looking at.
    */
-  it("says nothing while a panel is open to show the card", async () => {
+  /**
+   * 031/T926 (R-453): the ticks start at every raise. Without them a question shown in a visible
+   * panel - and now in the agent's client - lost its call to the host's 30 s backstop long before
+   * its own two minutes, so they are the keep-alive for every question, and `panelConnected` alone
+   * picks what the person is told.
+   */
+  it("ticks from the raise while a panel is open too, saying the panel is connected", async () => {
     const { ticks, onWaiting } = collector();
     const controller = createAgentPromptController({ panelPresence: () => true, onWaiting });
 
     void controller.ask({ ...PROMPT });
-    await vi.advanceTimersByTimeAsync(4 * PROMPT_WAITING_TICK_MS);
+    await vi.advanceTimersByTimeAsync(2 * PROMPT_WAITING_TICK_MS);
 
-    expect(ticks).toEqual([]);
+    const tick = { kind: "ask", callId: "call-1", sessionId: "session-h1", boundMs: CLOSED_PANEL_TIMEOUT_MS, panelConnected: true };
+    expect(ticks).toEqual([
+      { ...tick, waitedMs: 0 },
+      { ...tick, waitedMs: 5_000 },
+      { ...tick, waitedMs: 10_000 },
+    ]);
   });
 
   it("says nothing while nothing is pending", async () => {
@@ -208,35 +264,106 @@ describe("T290 the ticks while a question waits", () => {
  * opens - a person who is looking at the card does not need to be told where the card is.
  */
 describe("T292 the attention derivation", () => {
+  /**
+   * 031/T926 (D-031-6, FR-473, R-454): the mark is shown whenever a question is pending. The old
+   * rule switched it off while a panel was visible; but "visible" is a panel in the focused window,
+   * not the owner's eyes on it, and the owner may be in the terminal. Presence no longer suppresses.
+   */
   const rows: Array<{ pairingPending: boolean; promptPending: boolean; panelConnected: boolean; on: boolean }> = [
     { pairingPending: false, promptPending: false, panelConnected: false, on: false },
     { pairingPending: false, promptPending: false, panelConnected: true, on: false },
     { pairingPending: false, promptPending: true, panelConnected: false, on: true },
-    { pairingPending: false, promptPending: true, panelConnected: true, on: false },
+    { pairingPending: false, promptPending: true, panelConnected: true, on: true },
     { pairingPending: true, promptPending: false, panelConnected: false, on: true },
-    { pairingPending: true, promptPending: false, panelConnected: true, on: false },
+    { pairingPending: true, promptPending: false, panelConnected: true, on: true },
     { pairingPending: true, promptPending: true, panelConnected: false, on: true },
-    { pairingPending: true, promptPending: true, panelConnected: true, on: false },
+    { pairingPending: true, promptPending: true, panelConnected: true, on: true },
   ];
 
-  it("marks the icon exactly when something is waiting where nobody can see it", () => {
+  it("marks the icon exactly when something is waiting, whoever can see it", () => {
     for (const row of rows) {
       const { on, ...input } = row;
       expect(deriveAttention(input), JSON.stringify(input)).toBe(on);
     }
   });
 
-  it("follows each of the four things that can change under it", () => {
+  it("follows the question, not the panel", () => {
     const waiting = { pairingPending: false, promptPending: true, panelConnected: true };
 
-    // The person closes the panel while the card is up.
+    // The person closes the panel while the card is up, and opens it again: the mark stays.
     expect(deriveAttention({ ...waiting, panelConnected: false })).toBe(true);
-    // They open it again: the card is in front of them, so the icon has nothing to add.
-    expect(deriveAttention(waiting)).toBe(false);
-    // The question ends - answered, expired, stopped - with the panel still closed.
+    expect(deriveAttention(waiting)).toBe(true);
+    // The question ends - answered, expired, stopped - with the panel open or closed.
     expect(deriveAttention({ ...waiting, promptPending: false, panelConnected: false })).toBe(false);
+    expect(deriveAttention({ ...waiting, promptPending: false })).toBe(false);
     // A pairing card is the same situation: it is a question, and the same icon says so.
     expect(deriveAttention({ pairingPending: true, promptPending: false, panelConnected: false })).toBe(true);
+  });
+
+  /**
+   * 032 T962 (FR-488, R-486): the mark is on for every kind of question, including the ones only
+   * Chrome shows. The runtime derives `promptPending` from `prompts.currentSession()`
+   * (agent-runtime.ts `refreshAttention`); this pins that each kind sets it while it stands and
+   * clears it when it ends.
+   */
+  it("is on while a site change, a batch plan, a site plan or a directory question stands", () => {
+    const prompts = createAgentPromptController({ panelPresence: () => true });
+    const mark = (panelConnected: boolean) =>
+      deriveAttention({ pairingPending: false, promptPending: prompts.currentSession() !== undefined, panelConnected });
+    const questions: Array<[string, () => void, () => void]> = [
+      [
+        "transition",
+        () =>
+          void prompts.ask({
+            ...PROMPT,
+            kind: "transition",
+            transition: { from: "https://a.test", to: "https://agent.test" },
+          }),
+        () => prompts.decide(prompts.current()?.promptId ?? "", true),
+      ],
+      [
+        "plan",
+        () =>
+          void prompts.askPlan({
+            callId: "call-p",
+            sessionId: "session-h1",
+            site: "https://agent.test",
+            steps: [{ tool: "click", summary: "click a page element" }],
+          }),
+        () => prompts.decidePlan(prompts.currentPlan()?.planId ?? "", true),
+      ],
+      [
+        "site-plan",
+        () =>
+          void prompts.askSitePlan({
+            callId: "call-s",
+            sessionId: "session-h1",
+            origins: ["https://a.test", "https://b.test"],
+            purpose: "Compare",
+          }),
+        () => prompts.decideSitePlan(prompts.currentSitePlan()?.proposalId ?? "", false, []),
+      ],
+      [
+        "upload-directory",
+        () =>
+          void prompts.ask({
+            ...PROMPT,
+            tool: "file_upload",
+            kind: "upload-directory",
+            files: [{ path: "C:/x/a.txt", directory: "C:/x" }],
+          } as Parameters<typeof prompts.ask>[0]),
+        () => prompts.decide(prompts.current()?.promptId ?? "", false),
+      ],
+    ];
+    for (const [kind, raise, answer] of questions) {
+      expect(mark(false), `${kind}: before`).toBe(false);
+      raise();
+      expect(prompts.currentSession(), kind).toBe("session-h1");
+      expect(mark(false), `${kind}: panel out of sight`).toBe(true);
+      expect(mark(true), `${kind}: panel in sight`).toBe(true);
+      expect(answer(), `${kind}: answered`).toBe(true);
+      expect(mark(true), `${kind}: after`).toBe(false);
+    }
   });
 });
 
@@ -678,7 +805,8 @@ describe("H1 a question raised inside a batch", () => {
 
     // The id the relay knows and the router is holding; the step's own id is dropped as unaddressed
     // on the way, and the batch call is answered by a backstop with the card still on screen.
-    expect(ticks.map((tick) => tick.callId)).toEqual(["call-1"]);
+    // 032 R-486: the tick at the raise, and the first five-second one.
+    expect(ticks.map((tick) => tick.callId)).toEqual(["call-1", "call-1"]);
   });
 
   it("ends a step's question when the host gives up on the batch", async () => {
@@ -728,33 +856,35 @@ describe("D-011-7 a question whose panel goes out of sight mid-wait", () => {
     vi.useRealTimers();
   });
 
-  it("extends a consent question to two minutes from the raise and starts ticking at once", async () => {
+  /**
+   * 031/T926 (R-453): with one bound and ticks from every raise, a panel going out of sight has
+   * nothing left to extend. The question keeps its one ticker and its two minutes from the raise;
+   * only what the ticks say about the panel follows the change.
+   */
+  it("keeps a consent question's one ticker and two minutes when its panel goes out of sight", async () => {
     let visible = true;
     const { ticks, onWaiting } = collector();
     const controller = createAgentPromptController({ panelPresence: () => visible, onWaiting });
 
     const asked = controller.ask({ ...PROMPT });
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(ticks, "nothing is said about a card in front of the person").toEqual([]);
+    // 032 R-486: the first of them at the raise itself, having waited nothing.
+    expect(ticks.map((tick) => tick.panelConnected), "ticking from the raise").toEqual([true, true, true]);
 
     visible = false;
     controller.panelPresenceChanged();
     // Told twice (every focus move and window report announces): still one question, one ticker.
     controller.panelPresenceChanged();
 
-    // At once, not five seconds later: the server's bound may be about to pass.
-    expect(ticks).toEqual([
-      { kind: "ask", callId: "call-1", sessionId: "session-h1", waitedMs: 10_000, boundMs: CLOSED_PANEL_TIMEOUT_MS, panelConnected: false },
-    ]);
-    await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
-    expect(controller.current(), "the question expired at the bound it was raised with").toBeDefined();
-    expect(ticks.at(-1)?.waitedMs).toBe(35_000);
-    expect(ticks.map((tick) => tick.waitedMs)).toEqual([10_000, 15_000, 20_000, 25_000, 30_000, 35_000]);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(controller.current(), "the question expired at the old 25 s bound").toBeDefined();
+    expect(ticks.map((tick) => tick.waitedMs)).toEqual([0, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000, 35_000]);
+    expect(ticks.slice(3).every((tick) => !tick.panelConnected && tick.boundMs === CLOSED_PANEL_TIMEOUT_MS)).toBe(true);
 
     await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - 35_000 - 1);
-    expect(controller.current(), "two minutes counted from the raise, not from the move").toBeDefined();
+    expect(controller.current(), "two minutes counted from the raise").toBeDefined();
     await vi.advanceTimersByTimeAsync(1);
-    await expect(asked).resolves.toEqual({ decision: "timed-out", hint: ATTENTION_SENTENCES.consent });
+    await expect(asked).resolves.toEqual({ decision: "timed-out", hint: CONSENT_TIMEOUT_HINT });
   });
 
   it("extends a pairing card to two minutes from the raise and starts ticking at once", async () => {

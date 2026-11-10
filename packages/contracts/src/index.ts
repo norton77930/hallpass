@@ -85,6 +85,7 @@ export {
   agentLinkFrameSchema,
   AGENT_PROMPT_KINDS,
   ATTENTION_SENTENCES,
+  CONSENT_TIMEOUT_HINT,
   // 014: the owner's own vocabulary - what a stop or an interrupt says, the reasons the
   // three consent surfaces answer with, the two sentences an interrupted call may carry, and
   // the shape of a path on the owner's machine.
@@ -103,6 +104,8 @@ export {
   SITE_PLAN_FEATURE,
   SITE_PLAN_UNAVAILABLE,
   AGENT_SITE_PLAN_MAX_ORIGINS,
+  // 031: how many session grants a card is sent.
+  AGENT_SESSION_GRANTS_SHOWN,
   AGENT_SITE_PLAN_MAX_PURPOSE_CHARS,
   AGENT_SITE_PLAN_MAX_STEPS,
   AGENT_SITE_PLAN_MAX_STEP_CHARS,
@@ -133,6 +136,12 @@ export {
   transitionNoticeText,
   absolutePathSchema,
   promptWaitingFrameSchema,
+  TERMINAL_CONSENT_FEATURE,
+  PROMPT_CHOICES,
+  promptRaisedFrameSchema,
+  promptAnswerFrameSchema,
+  promptSettledFrameSchema,
+  WINDOW_MINIMIZED_HINT,
   agentBridgeRecordSchema,
   agentBridgeOwnerSchema,
   agentRefusalSchema,
@@ -221,6 +230,10 @@ export type {
   AgentConsentReason,
   Agent015Reason,
   PromptWaitingFrame,
+  PromptChoice,
+  PromptRaisedFrame,
+  PromptAnswerFrame,
+  PromptSettledFrame,
   AgentBridgeRecord,
   AgentBridgeOwner,
   AgentRefusal,

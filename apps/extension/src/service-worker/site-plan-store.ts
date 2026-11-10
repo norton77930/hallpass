@@ -68,6 +68,11 @@ export type SitePlanStore = {
   clearMany(sessionIds: readonly string[]): Promise<void>;
   /** The agent was unpaired: every plan recorded for it goes, whether or not its session is known. */
   clearAgent(agentId: string): Promise<void>;
+  /**
+   * The owner revoked the site (032 R-487, FR-491): exactly this origin leaves every session's plan,
+   * whoever it was approved for; the plans' other origins stay, and a plan left with none goes.
+   */
+  forgetSite(site: string): Promise<void>;
 };
 
 export type SitePlanStoreDeps = {
@@ -179,6 +184,21 @@ export function createSitePlanStore(deps: SitePlanStoreDeps = {}): SitePlanStore
         if (mine.length === 0) return;
         for (const sessionId of mine) delete plans[sessionId];
         await write(plans);
+      });
+    },
+    forgetSite(site) {
+      return serialised(async () => {
+        const plans = await read();
+        let dropped = false;
+        for (const [sessionId, plan] of Object.entries(plans)) {
+          // The comparison `covers` makes: exact origin.
+          if (!plan.origins.includes(site)) continue;
+          const kept = plan.origins.filter((origin) => origin !== site);
+          if (kept.length === 0) delete plans[sessionId];
+          else plan.origins = kept;
+          dropped = true;
+        }
+        if (dropped) await write(plans);
       });
     },
   };

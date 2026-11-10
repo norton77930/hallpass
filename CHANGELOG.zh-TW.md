@@ -3,6 +3,16 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.21.0 — 2026-11-10
+
+- **在 agent 自己的介面裡詢問**:只要 coding agent 的介面支援 MCP 表單問題(例如 Claude Code 的終端機),同意問題也會在那裡問，包括頁面操作、對話框、離開有未儲存內容的頁面、診斷、移到還沒決定過的網站，以及網站計畫。介面上只給短期的答案(一次、這個工作階段、拒絕);「永遠」、計畫卡和上傳資料夾卡仍然只在 Chrome。先回答的算數，Chrome 裡的卡片會收回。只要有問題在等，工具列就會顯示標記。
+- **每個問題都有完整的 120 秒**,從顯示時開始算，不是從呼叫開始算(#61)。
+- **診斷改成詢問，不再直接拒絕**:在沒有診斷授權的網站上用 `read_console`、`read_network`、`evaluate` 會詢問;卡片上也可以直接授權這個網站。
+- **撤銷網站會收回工作階段的允許**(#58):所有進行中的工作階段在這個網站的頁面操作和診斷允許、網站計畫，以及移到這個網站的允許都會清掉，下一個動作會重新詢問。
+- **活動紀錄寫出每個答案**(#59):網站、答案，以及在哪裡回答(終端機或 Chrome)。
+- **被蓋住或縮小的視窗也能截圖**,不會把視窗拉到前面。偵錯連線閒置 20 秒後會中斷，除非正在錄影、模擬視窗大小、有診斷授權或頁面有開著的對話框;截圖逾時也不會再讓連線一直掛著。
+- 主機和擴充功能要一起升級：重新安裝主機並重新載入擴充功能。
+
 ## 0.20.1 — 2026-11-08
 
 - **相依套件**:只做 patch 和 minor 更新:`@modelcontextprotocol/sdk` 1.32.2、koffi 3.3.6(它的 Windows 二進位檔在 release zip 釘住之前，先和 npm registry 的版本核對過)、hono 4.13.13、React 19.3.1、vite 8.3.5、vitest 5.1.0、axe-core 4.14.0、Testing Library 的修正版，以及側欄 Claude Code agent 用的 fast-uri 3.1.9。大版本更新(TypeScript 7、jsdom 30、agent 協定 SDK 2.x 等)不在這一版。

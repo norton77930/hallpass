@@ -16,6 +16,7 @@ import { siteOfUrl, type SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts } from "./context.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
+import type { DiagnosticsGrants } from "./page-action-grants.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { readTabAddress, siteMovedAnswer, stillOnOrigin, type ReadTabAddress } from "./site-recheck.js";
 import type { AgentToolRequest } from "./stop.js";
@@ -33,9 +34,9 @@ import { summariseToolCall } from "./summaries.js";
  *
  * The attachment is deliberately narrow in time. It happens on the first granted call for a tab,
  * never at startup, and it ends on every event that means the owner's yes has stopped applying: a
- * revoke, the tab closing, the session ending, or the tab moving to a site with no grant of its
- * own. The buffers go with it, because what one site logged is not something the next site's owner
- * agreed to show anybody.
+ * revoke, the tab closing, the session ending, the tab moving to a site with no grant of its own,
+ * or - for a call the owner allowed once (031 R-466) - that call returning. The buffers go with it,
+ * because what one site logged is not something the next site's owner agreed to show anybody.
  *
  * What is kept from the protocol is a deliberately small subset. A console message is a level, a
  * text and a time; a network record is a method, a url, a status, a kind and a time. Headers,
@@ -71,6 +72,16 @@ export type AgentDiagnosticsDeps = {
    * Injected as `effects.ts` injects it; the default is one `chrome.tabs.get`.
    */
   tabAddress?: ReadTabAddress;
+  /**
+   * 031 R-460: the session's own "This session" answers to the diagnostics question. A session that
+   * holds one for the site is not asked; absent, a session answer is the once it otherwise is.
+   */
+  diagnosticsGrants?: DiagnosticsGrants;
+  /**
+   * 031 R-461: the card's Always on this site - the same stored grant the checkbox sets. The runtime
+   * hands in its own setter so the panel hears about it; the default writes the site mode store.
+   */
+  grantDiagnostics?: (site: string) => Promise<void>;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -101,6 +112,17 @@ export type AgentDiagnosticsRunner = {
 const DIAGNOSTICS_TOOL_NAMES = ["read_console", "read_network", "evaluate"] as const;
 
 type DiagnosticsToolName = (typeof DIAGNOSTICS_TOOL_NAMES)[number];
+
+/**
+ * What the diagnostics question says the call wants (031 R-460): the worker's own words, never the
+ * call's arguments - the expression of an `evaluate` is not shown, as on its own card. The client's
+ * form reads "allow <agent> to <this> on <site>?" (contracts/terminal-consent.md).
+ */
+const GRANT_QUESTION: Record<DiagnosticsToolName, string> = {
+  read_console: "turn on diagnostics to read the console",
+  read_network: "turn on diagnostics to read network requests",
+  evaluate: "turn on diagnostics to run a script on the page",
+};
 
 /** How long one `evaluate` may take before the worker stops waiting for the page. */
 export const EVALUATE_TIMEOUT_MS = 10_000;
@@ -402,6 +424,77 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
     };
   }
 
+  /** Whether this session answered This session for the site (031 R-456). Unreadable is no. */
+  async function sessionGranted(sessionId: string, site: string): Promise<boolean> {
+    try {
+      return (await deps.diagnosticsGrants?.covers(sessionId, site)) === true;
+    } catch {
+      deps.reportDiagnostic?.("agent.session-grant.read-failed");
+      return false;
+    }
+  }
+
+  /**
+   * The diagnostics question (031 R-460, D-031-9): may the debugger be attached to this site for
+   * this call? Resolves `"recorded"` when the owner allowed it with This session or Always on this
+   * site and the answer was stored, `"once"` for any other yes - Allow once, or a lasting answer that
+   * could not be stored - and with the call's answer otherwise.
+   *
+   * Every ending that is not a yes lets go of whatever this tab held for diagnostics, as the refusal
+   * this question replaced did: what an earlier Allow once left buffering is not carried past a
+   * question nobody allowed. `busy` decided nothing, so it leaves the tab as it was.
+   */
+  async function askForGrant(
+    request: AgentToolRequest,
+    tool: DiagnosticsToolName,
+    tabId: number,
+    site: string,
+  ): Promise<AgentNativeResponse | "once" | "recorded"> {
+    const { callId } = request;
+    const asked = await deps.prompts.ask({
+      callId,
+      hostCallId: request.hostCallId,
+      stopped: request.stopped,
+      sessionId: request.sessionId,
+      site,
+      tool,
+      kind: "diagnostics",
+      promptKind: "diagnostics",
+      argsSummary: GRANT_QUESTION[tool],
+    });
+    if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
+    if (asked.decision !== "allow") await release(tabId);
+    if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
+    if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
+    if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
+    // US3 scenario 6: the owner's no is the refusal FR-049 always gave.
+    if (asked.decision === "deny") return answer(callId, "denied", "diagnostics-not-granted");
+    // 006 FR-087: the tab may have been handed back while the question stood (see effects.ts).
+    const held = await deps.tabOwnership(request.sessionId, tabId);
+    if (held.state !== "this") return ownershipRefusal(callId, held);
+    if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
+    try {
+      if (asked.grantDiagnostics === true) {
+        // R-461: the card's Always on this site is the checkbox, ticked from the card.
+        await (deps.grantDiagnostics ?? ((granted) => deps.siteModes.set(granted, { diagnosticsGranted: true })))(site);
+        return "recorded";
+      }
+      if (asked.session === true) {
+        if (deps.diagnosticsGrants === undefined) {
+          deps.reportDiagnostic?.("agent.session-grant.not-applicable");
+          return "once";
+        }
+        await deps.diagnosticsGrants.add(request.sessionId, site, asked.answeredFrom ?? "browser");
+        return "recorded";
+      }
+    } catch {
+      // The owner said yes to this call, which runs; only the part that outlives it is lost, and the
+      // next call asks again - the safe direction (as `recordSessionGrant`). So it is a once.
+      deps.reportDiagnostic?.("agent.diagnostics.grant-not-recorded");
+    }
+    return "once";
+  }
+
   async function run(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const { callId } = request;
     const tool = request.tool as DiagnosticsToolName;
@@ -420,11 +513,25 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       return answer(callId, "denied", "diagnostics-not-granted");
     }
     const record = await deps.siteModes.get(site);
-    if (!record.diagnosticsGranted) {
-      // FR-049: the refusal comes before anything attaches, so an ungranted call never puts the
-      // browser into its debugging state at all.
-      await release(tabId);
-      return answer(callId, "denied", "diagnostics-not-granted");
+    /**
+     * 031 R-460, FR-476: no grant is a question, not a refusal. It is asked before anything attaches,
+     * so an unanswered or refused call never puts the browser into its debugging state at all
+     * (FR-049); a session that already answered This session for the site is not asked again.
+     */
+    let askedForGrant = false;
+    /** Whether this call runs on a yes that stops applying when it returns (Allow once). */
+    let once = false;
+    if (!record.diagnosticsGranted && !(await sessionGranted(request.sessionId, site))) {
+      const allowed = await askForGrant(request, tool, tabId, site);
+      if (typeof allowed !== "string") return allowed;
+      askedForGrant = true;
+      once = allowed === "once";
+      // The tab may have left the site while the owner read the question: then the yes was for a
+      // page that is gone, and `evaluate` must not go on to ask a second question about it.
+      if (!(await stillOnOrigin(tabId, site, readAddress))) {
+        await refresh(tabId);
+        return siteMovedAnswer(callId);
+      }
     }
 
     if (tool === "evaluate") {
@@ -471,9 +578,10 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       }
     }
 
-    if (tool === "evaluate") {
+    if (tool === "evaluate" || askedForGrant) {
       /**
-       * The site, asked again at the last moment (security review 2026-11-05 S1).
+       * The site, asked again at the last moment (security review 2026-11-05 S1; 031 R-460 for the
+       * two reads, which only wait on the owner when they asked for the grant).
        *
        * `site` was read at the top of this call, and between there and here the call may have
        * stood on the owner's card for as long as the card's bound. A page that moved the tab to
@@ -493,6 +601,26 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       return answer(callId, "failed", "debugger-not-attached");
     }
 
+    if (!once) return serve(callId, tool, tabId, args);
+    /**
+     * 031 R-466, FR-476: an Allow once is a yes for this call and no other, so what it attached ends
+     * with the call - the buffers and the diagnostics holder, never another holder's lease - whether
+     * the read or the script returned or threw.
+     */
+    try {
+      return await serve(callId, tool, tabId, args);
+    } finally {
+      await release(tabId);
+    }
+  }
+
+  /** The call itself, on a tab the diagnostics holder is attached to. */
+  async function serve(
+    callId: string,
+    tool: DiagnosticsToolName,
+    tabId: number,
+    args: Record<string, unknown>,
+  ): Promise<AgentNativeResponse> {
     if (tool === "evaluate") {
       return evaluate(callId, tabId, String(args.expression));
     }

@@ -16,6 +16,8 @@ import {
   defaultScreenshotFileName,
   AGENT_BROWSER_CHOICE_BOUND_MS,
   promptWaitingFrameSchema,
+  promptRaisedFrameSchema,
+  promptSettledFrameSchema,
   AGENT_015_REASON_OUTCOMES,
   AGENT_LINK_PROTOCOL,
   AGENT_TOOL_DESCRIPTORS,
@@ -32,6 +34,7 @@ import {
   type AgentBrowserSummary,
   type AgentNativeResponse,
   type AgentToolName,
+  type PromptRaisedFrame,
   type PromptWaitingFrame,
 } from "@hallpass/contracts";
 import { dialRelay, DIAL_RETRY_MS, type BridgeRecord, type RelayDial } from "./bridge-link.js";
@@ -56,6 +59,7 @@ import { CallRouter, KEEP_ALIVE_CAP_MS } from "./router.js";
 import { createScreenshotCache, SCREENSHOT_UPLOAD_SENTENCES } from "./screenshot-cache.js";
 import { readUploadConfig, resolveUploadFiles, type UploadCandidate } from "./upload-policy.js";
 import { createUploadConfigStore } from "./upload-config-store.js";
+import { createTerminalConsent } from "./terminal-consent.js";
 
 /**
  * The MCP server the agent (Claude Code) spawns and talks to over stdio (T012, R-102).
@@ -1113,10 +1117,45 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     }
   }
 
+  /**
+   * 031 R-450: a consent question was raised for one of this session's calls. The router counts it
+   * as the first tick (R-453), and the client is asked the same question when it can be - but only
+   * for a call this link is carrying, so a frame on one browser's link can never ask about, or
+   * answer, a call running in another (018 R-272).
+   */
+  function onPromptRaised(link: BrowserLink, frame: PromptRaisedFrame): void {
+    if (frame.sessionId !== sessionId) {
+      log("agent.consent.other-session");
+      return;
+    }
+    link.router.noteRaised(frame);
+    if (callLinks.get(frame.callId) !== link) {
+      // The call was answered, or the backstop ended it, between the worker's raise and this.
+      log("agent.consent.unmatched");
+      return;
+    }
+    void terminalConsent.raised(frame, {
+      features: () => link.workerFeatures,
+      send: (answer) => link.dial?.send(answer) ?? false,
+    });
+  }
+
   function onRelayFrame(link: BrowserLink, value: unknown): void {
     const waiting = promptWaitingFrameSchema.safeParse(value);
     if (waiting.success) {
       onPromptWaiting(link, waiting.data);
+      return;
+    }
+    const raised = promptRaisedFrameSchema.safeParse(value);
+    if (raised.success) {
+      onPromptRaised(link, raised.data);
+      return;
+    }
+    const settled = promptSettledFrameSchema.safeParse(value);
+    if (settled.success) {
+      // The question left pending (the card answered, the bound passed, the call stopped): the
+      // client's request for it ends now, so a choice made there afterwards is never sent.
+      terminalConsent.settled(settled.data);
       return;
     }
     const response = agentNativeResponseSchema.safeParse(value);
@@ -1422,6 +1461,18 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
     { name: SERVER_NAME, version: SERVER_VERSION },
     panel === undefined ? undefined : { instructions: panelInstructions(panel.serverName) },
   );
+
+  /**
+   * 031 R-450..R-453: the client's half of a consent question. It asks only a client that advertised
+   * form elicitation at initialize (R-451) and only for a worker that advertised `terminal-consent`
+   * (R-459); the worker stays the judge of every answer it is sent.
+   */
+  const terminalConsent = createTerminalConsent({
+    sessionId,
+    server: server.server,
+    agentLabel: () => (sessionLabel === undefined ? displayName : `${displayName} (${sessionLabel})`),
+    log,
+  });
 
   /**
    * The one tool of the spike. Its argument list is empty on purpose: it proves the whole path -
@@ -2643,6 +2694,8 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
       return { response, link };
     } finally {
       callLinks.delete(callId);
+      // 031 R-453: a client question about a call that has its answer is a question about nothing.
+      terminalConsent.callEnded(callId);
       link.activeCalls -= 1;
       closeIfDrained(link);
     }
@@ -2782,6 +2835,7 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
         clearInterval(supervisor);
         // 018 FR-274: an open in-browser choice ends with the session; its cards are withdrawn.
         activeChoice?.supersede();
+        terminalConsent.closeAll();
         for (const link of links.values()) link.router.failAll("failed", "server-closing");
         for (const link of [...links.values()]) {
           link.closed = true;

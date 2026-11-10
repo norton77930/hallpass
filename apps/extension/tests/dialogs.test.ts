@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest, SiteMode } from "@hallpass/contracts";
 import { createAgentDialogs, type AgentDialogsDeps } from "../src/service-worker/agent-tools/dialogs.js";
+import { IDLE_DETACH_MS, createInputAttachments } from "../src/service-worker/agent-tools/input.js";
+import { scriptedDebugger } from "./helpers/scripted-debugger.js";
 
 /**
  * 008/T225 — the dialogs the page opens, and the one decision answering them can cost (US3,
@@ -416,5 +418,149 @@ describe("T225 dialogs", () => {
     await h.dialogs.run(dialogCall({ action: "accept" }));
 
     expect(setMode).toHaveBeenCalledWith(SITE, { mode: "skip-checks", session: SESSION });
+  });
+
+  /**
+   * 031 T916, R-457: the session grant covers pressing OK exactly as a 017 site plan does, because
+   * `dialog` is one of the covered page actions. And an Allow with `session` on a dialog's own card
+   * is what writes one, with where it was given.
+   */
+  it("presses OK unasked for a session holding a page-actions grant for the site (R-457)", async () => {
+    const covers = vi.fn(async (sessionId: string, site: string) => sessionId === SESSION && site === SITE);
+    const h = harness({ sessionGrants: { covers, add: async () => {} } });
+    h.dialogs.onDebuggerEvent(AGENT_TAB, "Page.javascriptDialogOpening", opening({}));
+
+    const response = await h.dialogs.run(dialogCall({ action: "accept" }));
+
+    expect(h.asked).toEqual([]);
+    expect(response.outcome).toBe("ok");
+    expect(handled(h.sent)?.params).toMatchObject({ accept: true });
+    expect(covers).toHaveBeenCalledWith(SESSION, SITE);
+  });
+
+  it("writes a page-actions grant for an Allow with This session on a dialog's card", async () => {
+    const add = vi.fn(async () => {});
+    const h = harness({ sessionGrants: { covers: async () => false, add } });
+    h.answerWith({ decision: "allow", session: true, answeredFrom: "client" } as never);
+    h.dialogs.onDebuggerEvent(AGENT_TAB, "Page.javascriptDialogOpening", opening({}));
+
+    await h.dialogs.run(dialogCall({ action: "accept" }));
+
+    expect(add).toHaveBeenCalledWith(SESSION, SITE, "client");
+  });
+});
+
+/**
+ * 031 slice C review I1 - a dialog outlives the call that raised it, so it is not left to the idle
+ * release (R-466).
+ *
+ * The click that opened a confirm ends, and with it the last call holding the tab; twenty seconds
+ * later the idle drop would take the attachment - the only wire the answer can go over, and the only
+ * one the owner's own "closed by hand" is heard on. So an open dialog holds the tab while it is
+ * open, and the `dialog` call holds it for its own length as every effect does.
+ */
+describe("031 dialogs and the idle release (R-466, slice C review I1)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The composition `agent-runtime.ts` makes: the real attachment store under the dialogs module. */
+  function attachedHarness(overrides: Partial<AgentDialogsDeps> & { mode?: SiteMode } = {}) {
+    const debug = scriptedDebugger();
+    const attachments = createInputAttachments({ debug: debug.adapter });
+    const h = harness({
+      send: (tabId, method, params) => attachments.send(tabId, method, params),
+      hold: (tabId) => attachments.hold(tabId),
+      ...overrides,
+    } as Partial<AgentDialogsDeps>);
+    attachments.onEvent((tabId, method, params) => h.dialogs.onDebuggerEvent(tabId, method, params));
+    const answered = () => debug.state.commands.filter((command) => command.method === "Page.handleJavaScriptDialog");
+    return { ...h, attachments, debug, answered };
+  }
+
+  it("keeps the tab attached while a confirm is open, answers it 20 s later, then lets go", async () => {
+    const h = attachedHarness();
+    const click = await h.attachments.hold(AGENT_TAB);
+    expect(h.debug.emit(AGENT_TAB, "Page.javascriptDialogOpening", opening({}))).toBe(true);
+    click.done();
+
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    // The confirm is still on screen, so the wire it is answered over is still there.
+    expect(h.debug.state.detached).toEqual([]);
+
+    const response = await h.dialogs.run(dialogCall({ action: "dismiss" }));
+
+    expect(response.outcome).toBe("ok");
+    expect(h.answered()).toEqual([
+      { tabId: AGENT_TAB, method: "Page.handleJavaScriptDialog", params: { accept: false } },
+    ]);
+    // Answered, nothing left holding the tab: the idle rule applies from here as after any call.
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(h.debug.state.detached).toEqual([AGENT_TAB]);
+  });
+
+  it("keeps the tab while the owner takes longer than 20 s to decide on the accept's card", async () => {
+    let decide!: () => void;
+    const h = attachedHarness({
+      prompts: {
+        ask: () =>
+          new Promise((resolve) => {
+            decide = () => resolve({ decision: "allow" } as never);
+          }),
+      },
+    });
+    const click = await h.attachments.hold(AGENT_TAB);
+    h.debug.emit(AGENT_TAB, "Page.javascriptDialogOpening", opening({}));
+    click.done();
+    // Not chained to an approval: the accept is a question of its own, and the card goes up.
+    const running = h.dialogs.run(dialogCall({ action: "accept" }));
+    await vi.advanceTimersByTimeAsync(3 * IDLE_DETACH_MS);
+    expect(h.debug.state.detached).toEqual([]);
+
+    decide();
+    const response = await running;
+
+    expect(response.outcome).toBe("ok");
+    expect(h.answered()).toEqual([
+      { tabId: AGENT_TAB, method: "Page.handleJavaScriptDialog", params: { accept: true } },
+    ]);
+  });
+
+  it("still hears the owner closing the dialog by hand after 20 s, and answers no-dialog honestly", async () => {
+    const h = attachedHarness();
+    const click = await h.attachments.hold(AGENT_TAB);
+    h.debug.emit(AGENT_TAB, "Page.javascriptDialogOpening", opening({}));
+    click.done();
+    await vi.advanceTimersByTimeAsync(5 * IDLE_DETACH_MS);
+
+    // The owner presses Cancel in their own browser: heard, because the attachment is still there.
+    expect(h.debug.emit(AGENT_TAB, "Page.javascriptDialogClosed", { result: false })).toBe(true);
+    expect(h.dialogs.current(AGENT_TAB)).toBeUndefined();
+    // Logged on the holder's card, which an event-driven outcome looks up first.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.activity.at(-1)?.item).toMatchObject({ outcome: "closed-by-owner" });
+
+    const response = await h.dialogs.run(dialogCall({ action: "dismiss" }));
+    expect(response).toMatchObject({ outcome: "failed", reason: "no-dialog" });
+    expect(h.answered()).toEqual([]);
+    // And the dialog's hold went with it: the tab is let go on the ordinary countdown.
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(h.debug.state.detached).toEqual([AGENT_TAB]);
+  });
+
+  it("lets go of an open dialog's hold when the tab is forgotten", async () => {
+    const h = attachedHarness();
+    const click = await h.attachments.hold(AGENT_TAB);
+    h.debug.emit(AGENT_TAB, "Page.javascriptDialogOpening", opening({}));
+    click.done();
+
+    h.dialogs.forget(AGENT_TAB);
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+
+    expect(h.debug.state.detached).toEqual([AGENT_TAB]);
   });
 });

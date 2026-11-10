@@ -232,8 +232,10 @@ describe("018 browser choice card in the worker", () => {
     });
 
     setVisible(true);
-    expect(marks.at(-1)).toBe(false);
+    // 031 D-031-6, FR-473: the mark follows the question, not the panel - it stays until answered.
+    expect(marks.at(-1)).toBe(true);
     runtime.decideBrowserChoice("req-1", true);
+    expect(marks.at(-1)).toBe(false);
     const heard = port.sent.length;
     await vi.advanceTimersByTimeAsync(15_000);
     expect(port.sent).toHaveLength(heard);

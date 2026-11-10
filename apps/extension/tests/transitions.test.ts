@@ -279,3 +279,31 @@ describe("T361 the transition store", () => {
     expect(await store.loopbackExempt()).toBe(false);
   });
 });
+
+/** 032/T964 - a revoke of a site on the settings page removes the moves into it (R-487, FR-492). */
+describe("T964 a site revoke forgets every session's moves into that site", () => {
+  it("removes the pairs whose destination is that site in every session, and leaves the always list alone", async () => {
+    const local = fakeArea();
+    const store = createTransitionStore({ session: fakeArea(), local });
+    await store.allowForSession("s1", A, B);
+    await store.allowForSession("s1", C, B);
+    await store.allowForSession("s1", B, C);
+    await store.allowForSession("s2", A, B);
+    await store.allowForSession("s2", A, C);
+    await store.allowForSession("s3", A, "https://www.b.test");
+    await store.remember(A, B);
+    const always = JSON.stringify(local.raw[AGENT_TRANSITION_ALLOWANCES_KEY]);
+
+    await store.forgetSessionPairsTo(B);
+
+    expect(await store.allowsForSession("s1", A, B)).toBe(false);
+    expect(await store.allowsForSession("s1", C, B)).toBe(false);
+    expect(await store.allowsForSession("s2", A, B)).toBe(false);
+    // A move out of the site, a move to another site and a similar name all stay.
+    expect(await store.allowsForSession("s1", B, C)).toBe(true);
+    expect(await store.allowsForSession("s2", A, C)).toBe(true);
+    expect(await store.allowsForSession("s3", A, "https://www.b.test")).toBe(true);
+    // The owner's always list is the panel's to clear, not a revoke's.
+    expect(JSON.stringify(local.raw[AGENT_TRANSITION_ALLOWANCES_KEY])).toBe(always);
+  });
+});

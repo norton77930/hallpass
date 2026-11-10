@@ -415,6 +415,67 @@ describe("T191 session card", () => {
   });
 
   /**
+   * 032/T972 — one sentence per settled consent question (FR-494, contracts/activity-consent.md):
+   * the question, the site, and where and how it was answered, from the panel's own keys.
+   */
+  it("says what was asked, about which site, where it was answered and what the answer was", () => {
+    const en = (key: string): string => lookup(key, "en-US");
+    const zh = (key: string): string => lookup(key, "zh-TW");
+    const WIKI = "https://www.wikipedia.org";
+    const consent = {
+      at: 1_700_000_007_000,
+      kind: "consent",
+      site: WIKI,
+      question: "effect",
+      channel: "client",
+      answer: "session",
+    } as const;
+
+    expect(activityText(consent, zh)).toBe(`頁面操作 · ${WIKI} · 允許這個工作階段（在終端機）`);
+    expect(activityText(consent, en)).toBe(`Page actions · ${WIKI} · Allowed for this session in the terminal`);
+    expect(
+      activityText({ ...consent, question: "transition", site: "https://zh.wikipedia.org", channel: "none", answer: "timed-out" }, zh),
+    ).toBe("換網站 · https://zh.wikipedia.org · 沒有回答（逾時）");
+    expect(activityText({ ...consent, channel: "none", answer: "timed-out" }, en)).toBe(
+      `Page actions · ${WIKI} · No answer (timed out)`,
+    );
+    expect(activityText({ ...consent, channel: "browser", answer: "deny" }, zh)).toBe(`頁面操作 · ${WIKI} · 拒絕（在 Chrome）`);
+    expect(activityText({ ...consent, channel: "browser", answer: "always", question: "site-plan" }, en)).toBe(
+      `Site plan · ${WIKI} · Always allowed in Chrome`,
+    );
+    for (const question of ["effect", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"] as const) {
+      for (const answer of ["once", "session", "always", "deny"] as const) {
+        for (const channel of ["client", "browser"] as const) {
+          const line = activityText({ ...consent, question, channel, answer }, en);
+          expect(line, `${question} ${channel} ${answer}`).not.toMatch(/[{}]/);
+          expect(line).toContain(WIKI);
+        }
+      }
+    }
+
+    renderShell("zh-TW");
+    project(port, {
+      ...IDLE,
+      sessions: [
+        { sessionId: "session-c", agentId: "agent-1", tabs: [], sites: [], state: "working", activity: [consent] },
+      ],
+    });
+    const item = within(card("session-c")).getAllByRole("listitem")[0];
+    expect(item?.textContent).toContain(`頁面操作 · ${WIKI} · 允許這個工作階段（在終端機）`);
+    // The answer is in the sentence; there is no outcome word to repeat it.
+    expect(item?.querySelector(".agent-activity-outcome")).toBeNull();
+  });
+
+  it("does not read a kind it has no sentence for as a dialog", () => {
+    const t = (key: string): string => lookup(key, "en-US");
+    const dialog = activityText({ at: 1, kind: "dialog", outcome: "accepted", site: "a.test", message: "Sure?" }, t);
+    expect(dialog).toBe("a.test says: Sure?");
+    const unknown = activityText({ at: 1, kind: "future-kind", outcome: "accepted", site: "a.test", message: "x" } as never, t);
+    expect(unknown).not.toBe(dialog);
+    expect(unknown).not.toContain("says");
+  });
+
+  /**
    * 013/T337 — the picture a session put into the owner's page, on the card (FR-174).
    *
    * FR-174 asks for it beside the consent card: an upload the owner waved through in `skip-checks`
@@ -843,5 +904,67 @@ describe("017 T484 session card site plan", () => {
       lookup("agent.session.sitePlan", "zh-TW").replace("{n}", "3"),
     );
     expect(within(only()).getByRole("button", { name: lookup("agent.session.sitePlanWithdraw", "zh-TW") })).toBeTruthy();
+  });
+});
+
+/**
+ * 031 T925 (FR-475, R-458) — the session card lists the "This session" answers the owner gave it,
+ * one line each: the site, what was allowed, that it lasts for this session, and where it was given.
+ */
+describe("031 T925 session card grants", () => {
+  let port: FakeAgentPort;
+  const SESSION = {
+    sessionId: "session-g",
+    agentId: "agent-1",
+    tabs: [],
+    sites: [],
+    state: "working" as const,
+    inFlight: 0,
+    lastActivityAt: "2026-09-13T00:00:02.000Z",
+  };
+  const only = (): HTMLElement => {
+    const node = document.querySelector("[data-session-id]");
+    if (!(node instanceof HTMLElement)) throw new Error("no card");
+    return node;
+  };
+  const GRANTS = [
+    { site: "https://shop.test", kind: "page-actions" as const, source: "client" as const },
+    { site: "https://docs.test:8443", kind: "diagnostics" as const, source: "browser" as const },
+  ];
+
+  beforeEach(() => {
+    port = installAgentPort();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it("renders no grants list when the session holds none", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [SESSION] });
+    expect(within(only()).queryByRole("list", { name: ui("agent.session.grants") })).toBeNull();
+  });
+
+  it("lists each grant on one line, in the order given, with its site, kind, scope and source", () => {
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...SESSION, grants: GRANTS }] });
+    const list = within(only()).getByRole("list", { name: ui("agent.session.grants") });
+    expect(within(list).getAllByRole("listitem").map((entry) => entry.textContent)).toEqual([
+      "https://shop.test · page actions · this session · from terminal",
+      "https://docs.test:8443 · diagnostics · this session · from Chrome",
+    ]);
+  });
+
+  it("says the same in zh-TW", () => {
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [{ ...SESSION, grants: GRANTS }] });
+    const list = within(only()).getByRole("list", { name: lookup("agent.session.grants", "zh-TW") });
+    const lines = within(list).getAllByRole("listitem").map((entry) => entry.textContent);
+    expect(lines[0]).toContain("來自終端機");
+    expect(lines[1]).toContain("來自 Chrome");
+    expect(lines[0]).toContain("https://shop.test");
+    expect(lines.join("")).not.toMatch(/terminal|this session|page actions/);
   });
 });

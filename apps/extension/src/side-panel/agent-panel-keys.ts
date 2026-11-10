@@ -54,6 +54,17 @@ export const UPLOAD_DELIVERY_SUMMARY_KEYS: Record<"input" | "drop", string> = {
   drop: "agent.summary.upload_image.drop",
 };
 
+/** 031 FR-475, R-458: what a session grant allows, and where it was given (the contract's own values). */
+export const SESSION_GRANT_KIND_KEYS: Record<"page-actions" | "diagnostics", string> = {
+  "page-actions": "agent.session.grantKind.page-actions",
+  diagnostics: "agent.session.grantKind.diagnostics",
+};
+
+export const SESSION_GRANT_SOURCE_KEYS: Record<"client" | "browser", string> = {
+  client: "agent.session.grantSource.client",
+  browser: "agent.session.grantSource.browser",
+};
+
 /**
  * One reviewed word per outcome an activity item can carry (008 FR-113).
  *
@@ -61,7 +72,7 @@ export const UPLOAD_DELIVERY_SUMMARY_KEYS: Record<"input" | "drop", string> = {
  * the projection cannot reach a card with no sentence for it: the compiler asks for the key, and
  * the locale contract test asks for the string in both languages.
  */
-export const ACTIVITY_OUTCOME_KEYS: Record<AgentActivityItem["outcome"], string> = {
+export const ACTIVITY_OUTCOME_KEYS: Record<NonNullable<AgentActivityItem["outcome"]>, string> = {
   accepted: "agent.activity.accepted",
   "accepted-chained": "agent.activity.accepted-chained",
   dismissed: "agent.activity.dismissed",
@@ -84,6 +95,36 @@ export const ACTIVITY_OUTCOME_KEYS: Record<AgentActivityItem["outcome"], string>
   replaced: "agent.activity.replaced",
   withdrawn: "agent.activity.withdrawn",
   ended: "agent.activity.ended",
+};
+
+/**
+ * 032 FR-494, R-488: the words of a consent activity line, keyed off the contract's own values so a
+ * question, a place or an answer added there cannot reach a card without a sentence (the compiler asks
+ * for the key and the locale test asks for the string in both languages).
+ */
+type ConsentItem = { [K in "question" | "channel" | "answer"]-?: NonNullable<AgentActivityItem[K]> };
+
+export const CONSENT_QUESTION_KEYS: Record<ConsentItem["question"], string> = {
+  effect: "agent.activity.consentQuestion.effect",
+  diagnostics: "agent.activity.consentQuestion.diagnostics",
+  transition: "agent.activity.consentQuestion.transition",
+  "site-plan": "agent.activity.consentQuestion.site-plan",
+  plan: "agent.activity.consentQuestion.plan",
+  "upload-directory": "agent.activity.consentQuestion.upload-directory",
+  dialog: "agent.activity.consentQuestion.dialog",
+};
+
+/** Where an answer was given; `none` is a timeout, which has a sentence of its own. */
+export const CONSENT_PLACE_KEYS: Record<Exclude<ConsentItem["channel"], "none">, string> = {
+  client: "agent.activity.consentPlace.client",
+  browser: "agent.activity.consentPlace.browser",
+};
+
+export const CONSENT_ANSWER_KEYS: Record<Exclude<ConsentItem["answer"], "timed-out">, string> = {
+  once: "agent.activity.consentAnswer.once",
+  session: "agent.activity.consentAnswer.session",
+  always: "agent.activity.consentAnswer.always",
+  deny: "agent.activity.consentAnswer.deny",
 };
 
 /**
@@ -161,6 +202,8 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // checkbox and the revoke, whose accessible names carry the site.
   "agent.diagnosticsLabel",
   "agent.diagnosticsText",
+  "agent.diagnosticsAlways",
+  "agent.diagnosticsEvaluateLabel",
   // The moves the owner remembered, listed in the same place and revoked the same way (014 FR-191).
   "agent.transitionsTitle",
   "agent.transitionRow",
@@ -192,6 +235,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.session.sitePlan",
   "agent.session.sitePlanOne",
   "agent.session.sitePlanWithdraw",
+  // 031 FR-475, R-458: the session's "this session" grants on the card.
+  "agent.session.grants",
+  "agent.session.grant",
   // The second control beside Stop, and what it says when nothing was running (014 FR-178).
   "agent.session.interrupt",
   "agent.session.nothingToInterrupt",
@@ -218,6 +264,12 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.activity.unknownSite",
   // The step the owner ended themselves (014 FR-182).
   "agent.activity.interrupt",
+  // 032 FR-494: the settled-question line and the sentence for a kind the panel has no words for.
+  // The question, place and answer words are expanded below from the contract's own values.
+  "agent.activity.consent",
+  "agent.activity.consentAnswered",
+  "agent.activity.consentTimedOut",
+  "agent.activity.other",
   // The dialog questions and the non-blocking notice (008 FR-114, FR-115).
   "agent.prompt.dialogAccept",
   "agent.prompt.dialogQuote",
@@ -249,6 +301,8 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.promptTarget",
   "agent.promptCropAlt",
   "agent.allowOnce",
+  // 031 FR-470, R-461: allow every covered page action of this session on this site.
+  "agent.allowSession",
   "agent.allowAlways",
   "agent.refuse",
   // 030 FR-457, FR-458: the card for an action inside an embedded frame.
@@ -434,6 +488,11 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   ...Object.values(TOOL_SUMMARY_KEYS),
   ...Object.values(UPLOAD_DELIVERY_SUMMARY_KEYS),
   ...Object.values(ACTIVITY_OUTCOME_KEYS),
+  ...Object.values(CONSENT_QUESTION_KEYS),
+  ...Object.values(CONSENT_PLACE_KEYS),
+  ...Object.values(CONSENT_ANSWER_KEYS),
+  ...Object.values(SESSION_GRANT_KIND_KEYS),
+  ...Object.values(SESSION_GRANT_SOURCE_KEYS),
   ...Object.values(WINDOW_STATE_KEYS),
   ...Object.values(CONVERSATION_NOTICE_KEYS),
 ];

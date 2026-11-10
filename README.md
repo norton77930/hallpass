@@ -124,7 +124,9 @@ the host needs no reinstall.
    waits up to two minutes for you to open the panel.
 3. The first action that **changes a page** (a click, typing, navigation) shows a **consent card**:
    "Claude Code wants to click on wikipedia.org". Choose *only this time*, *always on this site*, or
-   *refuse*.
+   *refuse*. If your agent's client can show a question (MCP form elicitation), the same question
+   also appears there — *allow once*, *allow on this site for this session*, *deny* — and either
+   answer settles it.
 4. Tabs the agent drives sit in a tab group named **Hallpass** in the session's own colour — `⌛`
    while it works, `🔔` while it waits for you — with a glow at the page edge. The session appears
    as a card in the panel, titled with the agent and its project folder, with **End session**,
@@ -162,7 +164,8 @@ the agent picker, or from *Extension options* at `chrome://extensions`. It has f
   pairing and consent cards work and does not retry what you declined. It is written only when you
   press Install, never into a project, and the uninstall removes it unless you changed it.
 - **Sites & permissions**: the paired agents with Unpair, every site's mode and diagnostics grant with
-  Revoke (and Undo), and the upload folders. A session card's *Manage this site's permissions ↗* opens
+  Revoke (and Undo), and the upload folders. Revoking a site also takes back what any running session
+  was allowed there for the session, so its next action on that site asks again. A session card's *Manage this site's permissions ↗* opens
   this section at its site.
 - **Browser tools**: which agents can use Hallpass's browser tools, and the switch that lets side-panel
   agents use them. Below it, **extra MCP servers for side-panel conversations**: servers you add here
@@ -258,9 +261,23 @@ external agent stays above both tabs.
   only, page actions on exactly those sites then run without a card, until the session ends, you
   unpair the agent, the browser closes, or you press **Withdraw site plan** on the session card. Page
   JavaScript, uploads and a move to an undecided site still ask, and unlisted sites are unchanged.
+- **Questions in the agent's own client.** When an action needs your yes and the agent's MCP client
+  supports form elicitation, the question is also asked there, with three choices: allow once, allow
+  on this site for this session, deny. A move to a site you have not decided about and a site plan
+  are asked there too, with *this session* or *deny*. Long-lived choices — always allow, skip checks, diagnostics
+  always on — can only be made in Chrome. An unanswered question waits up to 120 seconds and the
+  toolbar icon shows a badge while it waits; after that the agent is told nothing was done and to ask
+  you to answer in Chrome, then retry.
 - **Reads never ask.** Reading the page, finding elements, screenshots and waiting need no consent.
-- **Diagnostics** (console, network records, evaluating script) need a separate per-site grant you
-  tick on the settings page (*Sites & permissions*). Evaluating script also counts as an action.
+  A screenshot of the active tab of a covered or minimized window is taken without bringing the window
+  forward; a background tab is still brought forward briefly. Only when a minimized window cannot be
+  captured does the agent get `window-minimized`.
+- **Diagnostics** (console, network records, evaluating script) on a site without the diagnostics
+  grant ask you instead of being refused, through the same channels; Chrome's card also offers
+  *always on this site*, which is the diagnostics checkbox on the settings page (*Sites &
+  permissions*). Allow once covers that one call. Evaluating script also needs the site's action
+  consent. Chrome's debugger detaches 20 seconds after the last call unless something keeps it (a GIF
+  recording, an emulated viewport, the diagnostics grant, an open page dialog).
 - **Uploads** are limited to directories you list in `%LOCALAPPDATA%\hallpass\config.json` under
   `uploadRoots` (empty by default). A file outside them is not refused any more: the panel asks,
   and *this directory from now on* adds it to the list for you.
@@ -321,7 +338,7 @@ The agent sees these as `mcp__hallpass__<name>` in Claude Code.
 | `browser_batch` | Several steps on one tab in one call, approved once under follow-a-plan |
 | `wait` | Fixed time, a page condition, or the next download to finish |
 | `downloads_context` | The downloads this session caused, with file names and states |
-| `read_console` / `read_network` / `evaluate` | Diagnostics, behind the per-site grant |
+| `read_console` / `read_network` / `evaluate` | Diagnostics; on a site without the grant they ask you first |
 | `file_upload` | Put your files into a file input; one outside your allowed directories asks you (this file once / its directory from now on / decline) |
 | `upload_image` | Put a screenshot the session took into a file input or onto a drop target |
 | `propose_sites` | Propose the sites a task will use; the owner approves once in the side panel, for this session only |

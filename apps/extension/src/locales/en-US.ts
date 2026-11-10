@@ -162,6 +162,10 @@ export const messages = {
   // 016 FR-236: the visible text says what the grant allows; the accessible name adds the site.
   "agent.diagnosticsLabel": "Allow reading console and network logs on {site}",
   "agent.diagnosticsText": "Allow reading console and network logs",
+  // 031 FR-476: the diagnostics question's own "always" - it grants diagnostics, not the site's mode.
+  "agent.diagnosticsAlways": "Always on this site",
+  // 031 FR-477: the same question asked for `evaluate`, which runs a script rather than reading logs.
+  "agent.diagnosticsEvaluateLabel": "Allow running a script on {site}",
   "agent.promptTitle": "The agent wants to do something on a page",
   "agent.promptTarget": "{role}: {label}",
   "agent.promptCropAlt": "The spot on the page the agent would act on",
@@ -249,6 +253,13 @@ export const messages = {
   "agent.session.sitePlan": "Site plan: {n} sites",
   "agent.session.sitePlanOne": "Site plan: 1 site",
   "agent.session.sitePlanWithdraw": "Withdraw site plan",
+  // 031 FR-475, R-458: what the owner allowed this session, one line each: site, kind, scope, source.
+  "agent.session.grants": "Allowed for this session",
+  "agent.session.grant": "{site} · {kind} · this session · {source}",
+  "agent.session.grantKind.page-actions": "page actions",
+  "agent.session.grantKind.diagnostics": "diagnostics",
+  "agent.session.grantSource.client": "from terminal",
+  "agent.session.grantSource.browser": "from Chrome",
   // 014 FR-178: the second control, and the line for a press that found nothing running.
   "agent.session.interrupt": "Interrupt this step",
   "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",
@@ -272,6 +283,25 @@ export const messages = {
   "agent.activity.uploadDrop": "Screenshot dropped on {site}",
   "agent.activity.unknownSite": "the page",
   "agent.activity.interrupt": "You interrupted a step",
+  // 032 FR-494: one line per settled question - what was asked, which site, where and how it was answered.
+  "agent.activity.consent": "{question} · {site} · {answer}",
+  "agent.activity.consentAnswered": "{answer} {place}",
+  "agent.activity.consentTimedOut": "No answer (timed out)",
+  "agent.activity.consentQuestion.effect": "Page actions",
+  "agent.activity.consentQuestion.diagnostics": "Diagnostics",
+  "agent.activity.consentQuestion.transition": "Site change",
+  "agent.activity.consentQuestion.site-plan": "Site plan",
+  "agent.activity.consentQuestion.plan": "Batch plan",
+  "agent.activity.consentQuestion.upload-directory": "Upload folder",
+  "agent.activity.consentQuestion.dialog": "Page dialog",
+  "agent.activity.consentPlace.client": "in the terminal",
+  "agent.activity.consentPlace.browser": "in Chrome",
+  "agent.activity.consentAnswer.once": "Allowed once",
+  "agent.activity.consentAnswer.session": "Allowed for this session",
+  "agent.activity.consentAnswer.always": "Always allowed",
+  "agent.activity.consentAnswer.deny": "Refused",
+  // The sentence for an activity kind this panel has no words for (a newer worker): never a dialog's.
+  "agent.activity.other": "Something happened",
   "agent.activity.windowMaximized": "maximized",
   "agent.activity.windowFullscreen": "full screen",
   "agent.activity.accepted": "OK pressed",
@@ -303,6 +333,7 @@ export const messages = {
   "agent.ignore": "Ignore",
   "agent.consentBody": "{agent} wants to do this on {site}: {action}",
   "agent.allowOnce": "Allow once",
+  "agent.allowSession": "This session",
   "agent.allowAlways": "Always allow on this site",
   "agent.refuse": "Refuse",
   // 030 FR-457, FR-458: the action is inside an embedded frame, and whose answer it is.

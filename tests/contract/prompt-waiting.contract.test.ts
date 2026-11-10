@@ -66,6 +66,130 @@ describe("T283 prompt-waiting", () => {
     expectRejected(frame, waiting({ title: "Buy now" }), "a tick carrying an undeclared field");
   });
 
+  /**
+   * 031 T911 (contracts/terminal-consent.md, R-452, R-459): the three frames that let the owner answer
+   * a consent question in the agent's own client. Strict like every other link frame; the relay
+   * forwards them unchanged.
+   */
+  describe("031 terminal consent frames", () => {
+    const raised = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      type: "prompt-raised",
+      sessionId: SESSION,
+      callId: CALL,
+      promptId: "prompt-1",
+      kind: "effect",
+      site: "https://shop.test",
+      action: "click the Buy button",
+      choices: ["once", "session", "deny"],
+      boundMs: 120_000,
+      ...overrides,
+    });
+    const answer = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      type: "prompt-answer",
+      sessionId: SESSION,
+      callId: CALL,
+      promptId: "prompt-1",
+      choice: "once",
+      ...overrides,
+    });
+    const settled = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      type: "prompt-settled",
+      sessionId: SESSION,
+      callId: CALL,
+      promptId: "prompt-1",
+      answeredFrom: "client",
+      ...overrides,
+    });
+
+    it("accepts a raised question, an answer and a settlement", () => {
+      const frame = contractSchema("agentLinkFrameSchema");
+      expectAccepted(frame, raised(), "an effect question with all three choices");
+      expectAccepted(frame, raised({ kind: "diagnostics", choices: ["once", "deny"] }), "a diagnostics question");
+      expectAccepted(frame, raised({ action: "x".repeat(200) }), "an action at the bound");
+      for (const choice of ["once", "session", "deny"]) {
+        expectAccepted(frame, answer({ choice }), `an answer '${choice}'`);
+      }
+      for (const answeredFrom of ["client", "browser", "none"]) {
+        expectAccepted(frame, settled({ answeredFrom }), `a settlement answered from '${answeredFrom}'`);
+      }
+    });
+
+    it("refuses a field, a choice or a source nobody declared", () => {
+      const frame = contractSchema("agentLinkFrameSchema");
+      expectRejected(frame, raised({ title: "Buy now" }), "a raised frame with an undeclared field");
+      expectRejected(frame, answer({ title: "Buy now" }), "an answer with an undeclared field");
+      expectRejected(frame, settled({ title: "Buy now" }), "a settlement with an undeclared field");
+      expectRejected(frame, raised({ action: "x".repeat(201) }), "an action longer than 200 characters");
+      expectRejected(frame, raised({ kind: "ask" }), "a kind that is not effect or diagnostics");
+      expectRejected(frame, raised({ choices: ["once", "always"] }), "a raised choice outside the enum");
+      expectRejected(frame, raised({ boundMs: 0 }), "a question bounded by nothing");
+      expectRejected(frame, answer({ choice: "always" }), "an answer outside once|session|deny");
+      expectRejected(frame, answer({ choice: "" }), "an answer naming no choice");
+      expectRejected(frame, settled({ answeredFrom: "terminal" }), "a source outside client|browser|none");
+      const { callId: _callId, ...withoutCall } = answer();
+      expectRejected(frame, withoutCall, "an answer naming no call");
+      // T929 I1: every frame names the one question it is about, so an answer meant for one
+      // question of a call can never settle the next question of the same call.
+      for (const [name, build] of [["raised", raised], ["answer", answer], ["settled", settled]] as const) {
+        const { promptId: _promptId, ...withoutPrompt } = build();
+        expectRejected(frame, withoutPrompt, `a ${name} frame naming no question`);
+        expectRejected(frame, build({ promptId: "" }), `a ${name} frame naming an empty question`);
+      }
+    });
+
+    it("names the capability the worker advertises", () => {
+      expect(contractExport<string>("TERMINAL_CONSENT_FEATURE")).toBe("terminal-consent");
+    });
+
+    it("lets the panel answer for the session and grant diagnostics, and nothing more", () => {
+      const command = contractSchema("agentPanelCommandSchema");
+      const decide = (payload: Record<string, unknown>) => ({
+        type: "ui.agent.effect-decide",
+        payload: { promptId: "prompt-1", allow: true, ...payload },
+      });
+      expectAccepted(command, decide({ session: true }), "an allow for this site for the session");
+      expectAccepted(command, decide({ grantDiagnostics: true }), "an allow that also grants diagnostics");
+      expectRejected(command, decide({ session: false }), "a session flag that is not true");
+      expectRejected(command, decide({ grantDiagnostics: false }), "a diagnostics flag that is not true");
+      expectRejected(command, decide({ session: "yes" }), "a session flag that is text");
+    });
+
+    /** 031 R-455: the one sentence every expired consent question carries, to relay to the owner. */
+    it("tells the agent where the owner answers, in both languages, within the hint bound", () => {
+      const hint = contractExport<string>("CONSENT_TIMEOUT_HINT");
+      const lines = hint.split("\n");
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/Alt\+A/);
+      expect(lines[0]).toContain("side panel");
+      expect(lines[1]).toContain("Alt+A");
+      expect(lines[1]).toMatch(/[一-鿿]/);
+      expect(hint).not.toContain("{");
+      expectAccepted(
+        contractSchema("agentNativeResponseSchema"),
+        { callId: CALL, outcome: "timed-out", reason: "no-answer", hint },
+        "a timed-out answer carrying it",
+      );
+    });
+
+    /** 031 FR-475, R-458: the session card lists its grants with where each was given. */
+    it("lets a session card carry its grants with their source, and nothing more", () => {
+      const panel = contractSchema("agentPanelStateSchema");
+      const base = { paired: [], sessions: [], tabs: [], sites: [], bridge: "connected" };
+      const card = (grants: unknown) => ({ ...base, sessions: [{ sessionId: SESSION, agentId: "agent-0", tabs: [], grants }] });
+      const grant = { site: "https://shop.test", kind: "page-actions", source: "client" };
+      expectAccepted(panel, card([grant, { ...grant, kind: "diagnostics", source: "browser" }]), "two grants");
+      expectAccepted(panel, { ...base, sessions: [{ sessionId: SESSION, agentId: "agent-0", tabs: [] }] }, "a 0.20 card with none");
+      const max = contractExport<number>("AGENT_SESSION_GRANTS_SHOWN");
+      expectAccepted(panel, card(Array.from({ length: max }, () => grant)), "grants at the bound");
+      expectRejected(panel, card(Array.from({ length: max + 1 }, () => grant)), "grants past the bound");
+      expectRejected(panel, card([]), "an empty list, which is no grants and is sent as none");
+      expectRejected(panel, card([{ ...grant, grantedAt: 1 }]), "a grant with an undeclared field");
+      expectRejected(panel, card([{ ...grant, source: "terminal" }]), "a source outside client|browser");
+      expectRejected(panel, card([{ ...grant, kind: "always" }]), "a kind outside page-actions|diagnostics");
+      expectRejected(panel, card([{ ...grant, site: "https://shop.test/path" }]), "a site that is not an origin");
+    });
+  });
+
   it("leaves the link protocol where it is", () => {
     // The frame is optional and unknown types are dropped at both ends (relay: unaddressed; host:
     // `agent.frame.rejected`). The worker sends a tick only while no panel is connected (011 review

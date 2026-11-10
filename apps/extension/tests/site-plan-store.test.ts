@@ -251,3 +251,40 @@ describe("017 the store's failures and its writes in order", () => {
     expect(await store.covers("s2", B, AGENT)).toBe(true);
   });
 });
+
+/** 032/T964 - a revoke of a site on the settings page removes it from every plan (R-487, FR-491). */
+describe("T964 a site revoke takes that site out of every session plan", () => {
+  it("removes the exact origin from every plan, keeps the plans' other origins, and drops a plan left empty", async () => {
+    const session = fakeArea();
+    const store = createSitePlanStore({ session, now: () => STAMP });
+    await store.set("s1", [A, B], AGENT);
+    await store.set("s2", [A], "agent-2");
+    await store.set("s3", ["https://www.a.com", C], AGENT);
+
+    await store.forgetSite(A);
+
+    expect(await store.forSession("s1")).toEqual({ origins: [B], approvedAt: STAMP, agentId: AGENT });
+    expect(await store.covers("s1", A, AGENT)).toBe(false);
+    expect(await store.covers("s1", B, AGENT)).toBe(true);
+    expect(await store.forSession("s2")).toBeUndefined();
+    expect(await store.forSession("s3")).toEqual({ origins: ["https://www.a.com", C], approvedAt: STAMP, agentId: AGENT });
+    expect(Object.keys(session.raw[AGENT_SESSION_SITE_PLANS_KEY] as object).sort()).toEqual(["s1", "s3"]);
+  });
+
+  it("writes nothing when no plan names the site", async () => {
+    const session = fakeArea();
+    const store = createSitePlanStore({ session, now: () => STAMP });
+    await store.set("s1", [B], AGENT);
+    let writes = 0;
+    const realSet = session.set;
+    session.set = async (items) => {
+      writes += 1;
+      await realSet(items);
+    };
+
+    await store.forgetSite(A);
+
+    expect(writes).toBe(0);
+    expect(await store.covers("s1", B, AGENT)).toBe(true);
+  });
+});

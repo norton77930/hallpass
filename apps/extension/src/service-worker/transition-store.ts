@@ -62,6 +62,11 @@ export type TransitionStore = {
   forgetSession(sessionId: string): Promise<void>;
   allowsForSession(sessionId: string, from: string, to: string): Promise<boolean>;
   allowForSession(sessionId: string, from: string, to: string): Promise<void>;
+  /**
+   * The owner revoked the site (032 R-487, FR-492): every session's allowed pair into exactly this
+   * origin goes. The remembered pairs are the panel's own rows and are not touched.
+   */
+  forgetSessionPairsTo(site: string): Promise<void>;
   /** The owner's remembered pairs, for the panel's rows and for rule (d). */
   allowances(): Promise<TransitionAllowance[]>;
   remember(from: string, to: string): Promise<void>;
@@ -172,6 +177,20 @@ export function createTransitionStore(deps: TransitionStoreDeps): TransitionStor
       allowed[sessionId] = [...pairs, pair];
       await deps.session?.set({ [AGENT_TRANSITIONS_ALLOWED_KEY]: allowed });
     },
+    async forgetSessionPairsTo(site) {
+      const allowed = await readAllowed();
+      // `pairKey(from, site)` for any `from`: an origin never holds the separator.
+      const into = pairKey("", site);
+      let dropped = false;
+      for (const [sessionId, pairs] of Object.entries(allowed)) {
+        if (!Array.isArray(pairs)) continue;
+        const kept = pairs.filter((pair) => !(typeof pair === "string" && pair.endsWith(into)));
+        if (kept.length === pairs.length) continue;
+        allowed[sessionId] = kept;
+        dropped = true;
+      }
+      if (dropped) await deps.session?.set({ [AGENT_TRANSITIONS_ALLOWED_KEY]: allowed });
+    },
     allowances: readAllowances,
     async remember(from, to) {
       const records = await readAllowances();
@@ -215,6 +234,7 @@ export function chromeTransitionStore(): TransitionStore {
     forgetSession: (sessionId) => createTransitionStore(areas()).forgetSession(sessionId),
     allowsForSession: (sessionId, from, to) => createTransitionStore(areas()).allowsForSession(sessionId, from, to),
     allowForSession: (sessionId, from, to) => createTransitionStore(areas()).allowForSession(sessionId, from, to),
+    forgetSessionPairsTo: (site) => createTransitionStore(areas()).forgetSessionPairsTo(site),
     allowances: () => createTransitionStore(areas()).allowances(),
     remember: (from, to) => createTransitionStore(areas()).remember(from, to),
     touch: (from, to) => createTransitionStore(areas()).touch(from, to),

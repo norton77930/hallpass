@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentNativeRequest } from "@hallpass/contracts";
-import { captureTab } from "../src/chrome-adapters/capture.js";
+import { WINDOW_MINIMIZED_HINT, type AgentNativeRequest } from "@hallpass/contracts";
+import { captureTab, SURFACE_CAPTURE_TIMEOUT_MS } from "../src/chrome-adapters/capture.js";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
+import { scriptedDebugger } from "./helpers/scripted-debugger.js";
+import { createInputAttachments, IDLE_DETACH_MS } from "../src/service-worker/agent-tools/input.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads, SCREENSHOT_MAX_BASE64_CHARS } from "../src/service-worker/agent-tools/reads.js";
 import { toViewportPoint, toViewportRegion } from "../src/service-worker/agent-tools/coordinate-space.js";
@@ -48,6 +50,9 @@ function harness(input: {
   tabSize?: Parameters<typeof createAgentReads>[0]["tabSize"];
   ensureAttached?: Parameters<typeof createAgentReads>[0]["ensureAttached"];
   screenshotSpaces?: Parameters<typeof createAgentReads>[0]["screenshotSpaces"];
+  /** 031: the per-call hold on the tab's attachment, and the window's state. */
+  holdAttachment?: Parameters<typeof createAgentReads>[0]["holdAttachment"];
+  windowState?: Parameters<typeof createAgentReads>[0]["windowState"];
 }) {
   const listTabs = vi.fn(async () => tabs(input.agentActive ?? false));
   const diagnostics: string[] = [];
@@ -65,6 +70,8 @@ function harness(input: {
     ...(input.sendOverAttachment ? { sendOverAttachment: input.sendOverAttachment } : {}),
     ...(input.ensureAttached ? { ensureAttached: input.ensureAttached } : {}),
     ...(input.screenshotSpaces ? { screenshotSpaces: input.screenshotSpaces } : {}),
+    ...(input.holdAttachment ? { holdAttachment: input.holdAttachment } : {}),
+    ...(input.windowState ? { windowState: input.windowState } : {}),
   });
   return { runner, diagnostics };
 }
@@ -639,5 +646,269 @@ describe("a whole-viewport picture sets the tab's coordinate space", () => {
     ).toBe("ok");
     expect((await runner.run(request({ tabId: AGENT_TAB }))).reason).toMatch(/^screenshot-too-large/);
     expect(remembered).toEqual([]);
+  });
+});
+
+/**
+ * 031/T939, T941 - the screenshot tool photographs without fronting where T938 measured it fresh
+ * (D-031-10, D-031-11 as amended, FR-478..480, R-462..R-464).
+ *
+ * The capture holds the tab's attachment for its own duration (R-466), and only a capture that
+ * goes over the attachment does: a background tab in a visible window keeps today's
+ * activate-and-restore with `captureVisibleTab`, which attaches nothing.
+ */
+describe("031 a screenshot that does not bring the tab forward", () => {
+  beforeEach(() => {
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { getZoom: async () => 1 } };
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function callHolds(outcome: { ok: true } | { ok: false; unavailableReason: "devtools-open" } = { ok: true }) {
+    const log: string[] = [];
+    return {
+      log,
+      hold: async (tabId: number) => {
+        log.push(`hold ${tabId}`);
+        return { outcome, done: () => void log.push(`done ${tabId}`) };
+      },
+    };
+  }
+
+  const SURFACE = "U1VSRkFDRQ==";
+  const MINIMIZED = {
+    callId: "call-1",
+    outcome: "failed",
+    reason: "window-minimized",
+    refusal: { reason: "window-minimized" },
+    hint: WINDOW_MINIMIZED_HINT,
+  };
+
+  function recorder() {
+    const activated: number[] = [];
+    const visible: number[] = [];
+    const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    return {
+      activated,
+      visible,
+      sent,
+      captureDeps: {
+        captureVisibleTab: async (windowId: number) => (visible.push(windowId), PNG),
+        activateTab: async (tabId: number) => void activated.push(tabId),
+        measure: async () => FRAME,
+      },
+      send:
+        (answer: () => Promise<Record<string, unknown>>) =>
+        async (_tabId: number, method: string, params?: Record<string, unknown>) => {
+          sent.push({ method, ...(params === undefined ? {} : { params }) });
+          return method === "Page.captureScreenshot" ? answer() : {};
+        },
+    };
+  }
+
+  it("photographs the active tab of a covered window off its surface, holding the attachment and activating nothing", async () => {
+    const seen = recorder();
+    const held = callHolds();
+    const { runner } = harness({
+      agentActive: true,
+      holdAttachment: held.hold,
+      windowState: async () => "normal",
+      sendOverAttachment: seen.send(async () => ({ data: SURFACE })),
+      captureDeps: seen.captureDeps,
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response).toMatchObject({ outcome: "ok", result: { data: SURFACE, frame: FRAME, coverage: "viewport" } });
+    expect(seen.sent).toEqual([{ method: "Page.captureScreenshot", params: { format: "png", fromSurface: true } }]);
+    expect(seen.activated).toEqual([]);
+    expect(seen.visible).toEqual([]);
+    // Held for the capture, and let go once it is taken (R-466).
+    expect(held.log).toEqual([`hold ${AGENT_TAB}`, `done ${AGENT_TAB}`]);
+  });
+
+  it("keeps activate-and-restore for a background tab in a visible window, and attaches nothing for it", async () => {
+    const seen = recorder();
+    const held = callHolds();
+    const { runner } = harness({
+      agentActive: false,
+      holdAttachment: held.hold,
+      windowState: async () => "normal",
+      sendOverAttachment: seen.send(async () => ({ data: SURFACE })),
+      captureDeps: seen.captureDeps,
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.activated).toEqual([AGENT_TAB, OWNER_TAB]);
+    expect(seen.visible).toEqual([WINDOW]);
+    expect(seen.sent).toEqual([]);
+    expect(held.log).toEqual([]);
+  });
+
+  it("falls back to the visible tab when the attachment is refused, or the surface capture fails (R-464)", async () => {
+    for (const setup of [
+      { held: callHolds({ ok: false, unavailableReason: "devtools-open" }), answer: async () => ({ data: SURFACE }) },
+      {
+        held: callHolds(),
+        answer: async (): Promise<Record<string, unknown>> => {
+          throw new Error("Unable to capture screenshot");
+        },
+      },
+    ]) {
+      const seen = recorder();
+      const { runner } = harness({
+        agentActive: true,
+        holdAttachment: setup.held.hold,
+        windowState: async () => "normal",
+        sendOverAttachment: seen.send(setup.answer),
+        captureDeps: seen.captureDeps,
+      });
+
+      const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+      expect(response).toMatchObject({ outcome: "ok", result: { data: "iVBORw0KGgo=" } });
+      expect(seen.visible).toEqual([WINDOW]);
+      // The tab was already in front: the fallback costs the owner nothing either.
+      expect(seen.activated).toEqual([]);
+      expect(setup.held.log).toEqual([`hold ${AGENT_TAB}`, `done ${AGENT_TAB}`]);
+    }
+  });
+
+  it("keeps no fallback for an emulated tab: a failed protocol picture is refused, never taken off the window", async () => {
+    const seen = recorder();
+    const held = callHolds();
+    const { runner } = harness({
+      agentActive: true,
+      holdAttachment: held.hold,
+      windowState: async () => "normal",
+      currentViewport: async () => ({ width: 2560, height: 1440 }),
+      sendOverAttachment: seen.send(async () => {
+        throw new Error("Unable to capture screenshot");
+      }),
+      captureDeps: seen.captureDeps,
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response).toEqual({ callId: "call-1", outcome: "not-readable", reason: "capture-refused" });
+    expect(seen.visible).toEqual([]);
+    expect(held.log).toEqual([`hold ${AGENT_TAB}`, `done ${AGENT_TAB}`]);
+  });
+
+  it("photographs the active tab of a minimized window without restoring it", async () => {
+    const seen = recorder();
+    const held = callHolds();
+    const { runner } = harness({
+      agentActive: true,
+      holdAttachment: held.hold,
+      windowState: async () => "minimized",
+      sendOverAttachment: seen.send(async () => ({ data: SURFACE })),
+      captureDeps: seen.captureDeps,
+    });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response).toMatchObject({ outcome: "ok", result: { data: SURFACE } });
+    expect(seen.activated).toEqual([]);
+    expect(seen.visible).toEqual([]);
+  });
+
+  it("answers window-minimized with the hint when the minimized window's capture fails or cannot attach, restoring nothing", async () => {
+    for (const setup of [
+      {
+        held: callHolds(),
+        answer: async (): Promise<Record<string, unknown>> => {
+          throw new Error("surface-capture-timed-out");
+        },
+      },
+      { held: callHolds({ ok: false, unavailableReason: "devtools-open" }), answer: async () => ({ data: SURFACE }) },
+    ]) {
+      const seen = recorder();
+      const { runner } = harness({
+        agentActive: true,
+        holdAttachment: setup.held.hold,
+        windowState: async () => "minimized",
+        sendOverAttachment: seen.send(setup.answer),
+        captureDeps: seen.captureDeps,
+      });
+
+      const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+      expect(response).toEqual(MINIMIZED);
+      // Nothing activated, and no window-sized picture of a window that is not on screen.
+      expect(seen.activated).toEqual([]);
+      expect(seen.visible).toEqual([]);
+      expect(setup.held.log).toEqual([`hold ${AGENT_TAB}`, `done ${AGENT_TAB}`]);
+    }
+  });
+
+  it("brings a background tab forward inside a minimized window, puts the owner's tab back, and says so when that fails too", async () => {
+    const ok = recorder();
+    const okRun = harness({
+      agentActive: false,
+      holdAttachment: callHolds().hold,
+      windowState: async () => "minimized",
+      sendOverAttachment: ok.send(async () => ({ data: SURFACE })),
+      captureDeps: ok.captureDeps,
+    });
+    expect(await okRun.runner.run(request({ tabId: AGENT_TAB }))).toMatchObject({ outcome: "ok", result: { data: SURFACE } });
+    expect(ok.activated).toEqual([AGENT_TAB, OWNER_TAB]);
+    expect(ok.visible).toEqual([]);
+
+    const failed = recorder();
+    const failedRun = harness({
+      agentActive: false,
+      holdAttachment: callHolds().hold,
+      windowState: async () => "minimized",
+      sendOverAttachment: failed.send(async () => {
+        throw new Error("Unable to capture screenshot");
+      }),
+      captureDeps: failed.captureDeps,
+    });
+    expect(await failedRun.runner.run(request({ tabId: AGENT_TAB }))).toEqual(MINIMIZED);
+    expect(failed.activated).toEqual([AGENT_TAB, OWNER_TAB]);
+    expect(failed.visible).toEqual([]);
+  });
+
+  /**
+   * 032/T975 (R-490, FR-498): the hung kind of surface capture - the command never answers - ends the
+   * call's hold at its bound exactly as a capture that came back does. The browser-side command
+   * cannot be cancelled; what matters is that the tab is not kept for it, so the idle release that
+   * eventually ends it still comes.
+   */
+  it("ends the call's hold when the surface capture misses its bound, so the idle countdown arms (032/T975)", async () => {
+    vi.useFakeTimers();
+    try {
+      const debug = scriptedDebugger();
+      const attachments = createInputAttachments({ debug: debug.adapter });
+      const seen = recorder();
+      const { runner } = harness({
+        agentActive: true,
+        holdAttachment: (tabId) => attachments.hold(tabId),
+        windowState: async () => "minimized",
+        sendOverAttachment: seen.send(() => new Promise<never>(() => {})),
+        captureDeps: seen.captureDeps,
+      });
+
+      const running = runner.run(request({ tabId: AGENT_TAB }));
+      await vi.advanceTimersByTimeAsync(SURFACE_CAPTURE_TIMEOUT_MS - 1);
+      // The capture is still out: the call is in progress and the tab is held under it.
+      expect(attachments.holders(AGENT_TAB)).toEqual(["input"]);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await running).toEqual(MINIMIZED);
+      // The hold ended with the bound: from here the tab is idle and counts down as after any call.
+      await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS - 1);
+      expect(debug.state.detached).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(debug.state.detached).toEqual([AGENT_TAB]);
+      expect(attachments.holders(AGENT_TAB)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

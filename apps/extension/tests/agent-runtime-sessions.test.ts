@@ -253,7 +253,7 @@ describe("T095 several agent sessions in one worker", () => {
       // sessions name the same opaque id. Its value is nothing a test may assert.
       browserRunId: expect.any(String),
       // 014/R-187: and what this worker can be asked, on the same frame for the same reason.
-      features: ["upload-consent", "pair-withdraw", "site-plan"],
+      features: ["upload-consent", "pair-withdraw", "site-plan", "terminal-consent"],
     });
     expect((await runtime.pairing.state()).pending).toBeUndefined();
 
@@ -715,7 +715,7 @@ describe("T189 owner controls from the panel and the projection they read", () =
       // The same browser run as before the session was stopped (013/R-184): stopping a session is
       // not the browser going away, and the id lives in storage the worker did not lose.
       browserRunId: expect.any(String),
-      features: ["upload-consent", "pair-withdraw", "site-plan"],
+      features: ["upload-consent", "pair-withdraw", "site-plan", "terminal-consent"],
     });
     port.emit({ callId: "again-a", sessionId: "session-a", tool: "tabs_context", args: {} });
     await vi.waitFor(() => expect(port.sent).toHaveLength(5));
@@ -872,7 +872,11 @@ describe("T189 owner controls from the panel and the projection they read", () =
     // Any call of the session moves its activity, not only an effect (S1 review nit 11).
     await new Promise((resolve) => setTimeout(resolve, 5));
     port.emit({ callId: "ctx-a", sessionId: "session-a", tool: "tabs_context", args: {} });
-    await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+    // Its answer, not a count of the link's frames: the question above also put its tick and its
+    // client question on the link (032 R-486, 031 R-452).
+    await vi.waitFor(() =>
+      expect(port.sent.some((frame) => (frame as { callId?: string }).callId === "ctx-a" && "outcome" in (frame as object))).toBe(true),
+    );
     const moved = (await runtime.projection()).sessions.find((session) => session.sessionId === "session-a")?.lastActivityAt ?? "";
     expect(moved > (a?.lastActivityAt ?? "")).toBe(true);
 

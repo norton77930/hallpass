@@ -329,6 +329,11 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
               // 014 FR-193: the directory card's "from now on", which the *host* writes - the one
               // route by which its list of upload directories ever grows.
               command.payload.rememberDirectory,
+              // 031 R-456: "This session". The runner decides whether it may become a grant.
+              command.payload.session === true,
+              // 031 R-461: the diagnostics card's "Always on this site". The controller honours it
+              // only when the prompt it names is a diagnostics question.
+              command.payload.grantDiagnostics === true,
             );
             return;
           case "ui.agent.plan-decide":

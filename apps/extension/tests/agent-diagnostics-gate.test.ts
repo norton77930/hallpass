@@ -1,9 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentNativeRequest } from "@hallpass/contracts";
+import { CONSENT_TIMEOUT_HINT, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { createAgentDiagnostics } from "../src/service-worker/agent-tools/diagnostics.js";
 import { createInputAttachments } from "../src/service-worker/agent-tools/input.js";
-import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
+import { diagnosticsGrantsFrom } from "../src/service-worker/agent-tools/page-action-grants.js";
+import {
+  createAgentPromptController,
+  type AgentPromptController,
+  type PromptRaised,
+} from "../src/service-worker/agent-tools/prompts.js";
+import { createSessionGrantStore } from "../src/service-worker/session-grant-store.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 
 /**
@@ -139,24 +145,72 @@ function installChrome(): {
   return { fakeDebugger, url, pending, tabs };
 }
 
-function harness(overrides: Partial<Parameters<typeof createAgentDiagnostics>[0]> = {}) {
+const AGENT = "agent-1";
+
+/** `chrome.storage.session` as the session grant store reads it, one per harness. */
+function sessionArea() {
+  const area: Record<string, unknown> = {};
+  return {
+    async get(keys: string[]) {
+      const out: Record<string, unknown> = {};
+      for (const key of keys) if (key in area) out[key] = area[key];
+      return out;
+    },
+    async set(values: Record<string, unknown>) {
+      Object.assign(area, values);
+    },
+  };
+}
+
+function harness(
+  overrides: Partial<Parameters<typeof createAgentDiagnostics>[0]> = {},
+  promptOptions: { timeoutMs?: number } = {},
+) {
   const siteModes = createSiteModeStore();
-  const prompts = createAgentPromptController({ timeoutMs: 60 });
+  const raised: PromptRaised[] = [];
+  const prompts = createAgentPromptController({
+    timeoutMs: promptOptions.timeoutMs ?? 60,
+    onRaised: (question) => raised.push(question),
+  });
+  const store = createSessionGrantStore({ session: sessionArea() });
   const runner = createAgentDiagnostics({
     context: testSessionContexts(),
     siteModes,
     prompts,
     tabOwnership: async (_sessionId, tabId) =>
       tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" },
+    // 031 R-456: the sessions' "This session" answers; both test sessions belong to one agent.
+    diagnosticsGrants: diagnosticsGrantsFrom(store, (sessionId) =>
+      sessionId === "session-h1" || sessionId === "session-h2" ? AGENT : undefined,
+    ),
     ...overrides,
   });
-  return { runner, siteModes, prompts };
+  return { runner, siteModes, prompts, store, raised };
 }
 
-function request(tool: string, args: Record<string, unknown> = {}): AgentNativeRequest {
+/**
+ * 031 D-031-9: an ungranted diagnostics call asks, and the owner's refusal is the old answer. The
+ * cases that only care that a call is no longer served say so through this.
+ */
+async function refusedAfterAsking(
+  runner: ReturnType<typeof harness>["runner"],
+  prompts: AgentPromptController,
+  call: AgentNativeRequest,
+): Promise<AgentNativeResponse> {
+  const pending = runner.run(call);
+  await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+  prompts.decide(prompts.current()?.promptId ?? "", false);
+  return pending;
+}
+
+function request(
+  tool: string,
+  args: Record<string, unknown> = {},
+  call: { callId?: string; sessionId?: string } = {},
+): AgentNativeRequest {
   return {
-    callId: "call-1",
-    sessionId: "session-h1",
+    callId: call.callId ?? "call-1",
+    sessionId: call.sessionId ?? "session-h1",
     tool: tool as AgentNativeRequest["tool"],
     tabId: AGENT_TAB,
     args: { tabId: AGENT_TAB, ...args },
@@ -179,22 +233,292 @@ describe("T056 agent diagnostics gate", () => {
     delete (globalThis as { chrome?: unknown }).chrome;
   });
 
-  it("refuses all three tools on a site the owner has not granted, and attaches nothing", async () => {
-    const { runner } = harness();
+  /**
+   * 031 T931 (D-031-9, FR-476) - the grant is asked for, not refused. The question names the site
+   * and the tool, and the debugger stays off until the owner has answered it: a question asked
+   * after attaching would be asking about something that has already happened.
+   */
+  it("asks the owner on a site the owner has not granted, and attaches nothing before an answer", async () => {
+    const { runner, prompts } = harness();
 
     for (const tool of ["read_console", "read_network", "evaluate"]) {
-      const response = await runner.run(
-        request(tool, tool === "evaluate" ? { expression: "document.title" } : {}),
-      );
-      expect(response, tool).toEqual({
+      const pending = runner.run(request(tool, tool === "evaluate" ? { expression: "document.title" } : {}));
+      await vi.waitFor(() => expect(prompts.current(), tool).toBeDefined());
+      expect(prompts.current(), tool).toMatchObject({ kind: "diagnostics", site: SITE, tool });
+      // Not merely refused after the fact: nothing is attached while the question stands, so Chrome
+      // never tells the owner this extension is debugging their browser for a call not yet allowed.
+      expect(fake.fakeDebugger.attached, tool).toEqual([]);
+      expect(fake.fakeDebugger.commands, tool).toEqual([]);
+
+      // A refusal is the answer it always was (US3 scenario 6).
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending, tool).resolves.toEqual({
         callId: "call-1",
         outcome: "denied",
         reason: "diagnostics-not-granted",
       });
     }
-    // Not merely refused after the fact: the debugger was never attached, so Chrome never told the
-    // owner this extension was debugging their browser for a call they had not allowed.
     expect(fake.fakeDebugger.attached).toEqual([]);
+  });
+
+  it("runs the one call for Allow once, records nothing, and asks again on the next call", async () => {
+    const { runner, prompts, siteModes, store } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    await expect(first).resolves.toEqual({ callId: "call-1", outcome: "ok", result: { messages: [], truncated: false } });
+    // A once-yes stops applying when the call returns, and the debugger goes with it (R-466).
+    expect(fake.fakeDebugger.attached).toEqual([]);
+    expect(runner.attached()).toEqual([]);
+
+    expect((await siteModes.get(SITE)).diagnosticsGranted).toBe(false);
+    expect(await store.list("session-h1", AGENT)).toEqual([]);
+
+    // US3 scenario 2: the next diagnostics call on the site is asked about.
+    const second = runner.run(request("read_console", {}, { callId: "call-2" }));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics", site: SITE }));
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(second).resolves.toEqual({ callId: "call-2", outcome: "denied", reason: "diagnostics-not-granted" });
+  });
+
+  it("lets go of a once-allowed evaluate's debugger when the script returns", async () => {
+    const { runner, prompts, siteModes } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(request("evaluate", { expression: "document.title" }));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+
+    await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "ok", result: { value: "Form page", truncated: false } });
+    expect(fake.fakeDebugger.attached).toEqual([]);
+    expect(runner.attached()).toEqual([]);
+  });
+
+  it("treats a yes whose grant could not be recorded as once, and lets go after the call", async () => {
+    const { runner, prompts, siteModes } = harness({
+      grantDiagnostics: async () => {
+        throw new Error("storage refused");
+      },
+    });
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, undefined, true);
+
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+    expect((await siteModes.get(SITE)).diagnosticsGranted).toBe(false);
+    expect(fake.fakeDebugger.attached).toEqual([]);
+    expect(runner.attached()).toEqual([]);
+  });
+
+  it("keeps an attachment input still holds after a once, with the diagnostics domains off", async () => {
+    const attachments = createInputAttachments();
+    const { runner, prompts } = harness({ attachments });
+    await attachments.acquire(AGENT_TAB, "input");
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    // Input's lease is its own: only the diagnostics holder ends with the once.
+    expect(fake.fakeDebugger.detached).toEqual([]);
+    expect(attachments.holders(AGENT_TAB)).toEqual(["input"]);
+    expect(attachments.state(AGENT_TAB)?.diagnosticsEnabled).toBe(false);
+    expect(runner.attached()).toEqual([]);
+  });
+
+  it("carries nothing buffered under a once into a later granted call", async () => {
+    const { runner, prompts, siteModes } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+    fake.fakeDebugger.emit(AGENT_TAB, "Runtime.consoleAPICalled", logged("after the once"));
+
+    await siteModes.set(SITE, { diagnosticsGranted: true });
+    const later = await runner.run(request("read_console", {}, { callId: "call-2" }));
+    expect(later.result).toEqual({ messages: [], truncated: false });
+  });
+
+  it("leaves nothing attached when the call after a once is refused or goes unanswered", async () => {
+    const { runner, prompts } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    const refused = await refusedAfterAsking(runner, prompts, request("read_console", {}, { callId: "call-2" }));
+    expect(refused).toMatchObject({ outcome: "denied", reason: "diagnostics-not-granted" });
+    expect(fake.fakeDebugger.attached).toEqual([]);
+    expect(runner.attached()).toEqual([]);
+
+    const unanswered = await runner.run(request("read_network", {}, { callId: "call-3" }));
+    expect(unanswered).toMatchObject({ outcome: "timed-out", reason: "no-answer" });
+    expect(fake.fakeDebugger.attached).toEqual([]);
+    expect(runner.attached()).toEqual([]);
+  });
+
+  it("records a diagnostics grant for This session, runs later calls unasked, and leaves the checkbox off", async () => {
+    const { runner, prompts, siteModes, store } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+    // A recorded answer outlives the call, and so does the buffering it allowed.
+    expect(runner.attached()).toEqual([AGENT_TAB]);
+
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: SITE, kind: "diagnostics", source: "browser" }),
+    ]);
+    // US3 scenario 3: a session answer is not the site's grant.
+    expect((await siteModes.get(SITE)).diagnosticsGranted).toBe(false);
+    // And it covers diagnostics only, never a page action (data-model "Session grant").
+    expect(await store.covers("session-h1", AGENT, SITE, "page-actions")).toBe(false);
+
+    const second = await runner.run(request("read_network", {}, { callId: "call-2" }));
+    expect(second).toMatchObject({ callId: "call-2", outcome: "ok" });
+    expect(prompts.current()).toBeUndefined();
+
+    // Another session on the same site is asked as if nothing had been said.
+    const other = runner.run(request("read_console", {}, { callId: "call-3", sessionId: "session-h2" }));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(other).resolves.toMatchObject({ outcome: "denied", reason: "diagnostics-not-granted" });
+  });
+
+  it("offers the agent's client once, session and deny, and records the client as the source", async () => {
+    const { runner, prompts, raised, store, siteModes } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(raised).toHaveLength(1));
+    // T935: the client is asked a diagnostics question, with the three short-lived answers.
+    expect(raised[0]).toMatchObject({
+      callId: "call-1",
+      sessionId: "session-h1",
+      kind: "diagnostics",
+      site: SITE,
+      choices: ["once", "session", "deny"],
+      boundMs: 60,
+    });
+    expect(raised[0]?.action.length).toBeGreaterThan(0);
+
+    expect(prompts.decideByCall("call-1", raised[0]?.promptId ?? "", "session", "client", "session-h1")).toBe(true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: SITE, kind: "diagnostics", source: "client" }),
+    ]);
+    // The client can never give the site's grant (D-031-9: always is Chrome's alone).
+    expect((await siteModes.get(SITE)).diagnosticsGranted).toBe(false);
+  });
+
+  it("sets the site's diagnostics grant for Always on this site, as the checkbox does", async () => {
+    const { runner, prompts, siteModes, store } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, undefined, true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    expect(runner.attached()).toEqual([AGENT_TAB]);
+    // US3 scenario 4: the same stored grant the checkbox writes; the mode is untouched.
+    expect(await siteModes.get(SITE)).toMatchObject({ diagnosticsGranted: true, mode: "ask" });
+    expect(await store.list("session-h1", AGENT)).toEqual([]);
+
+    const second = await runner.run(request("read_console", {}, { callId: "call-2", sessionId: "session-h2" }));
+    expect(second).toMatchObject({ outcome: "ok" });
+    expect(prompts.current()).toBeUndefined();
+  });
+
+  it("never reads a remembered mode from an answer to the diagnostics question", async () => {
+    const { runner, prompts, siteModes } = harness();
+
+    const first = runner.run(request("read_console"));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    // The question was about debugging access, not about what the agent may do on the page.
+    expect(await siteModes.get(SITE)).toMatchObject({ mode: "ask", diagnosticsGranted: false });
+  });
+
+  it("refuses without attaching when the tab moved to another site while the question stood", async () => {
+    const { runner, prompts } = harness();
+
+    for (const tool of ["read_console", "read_network", "evaluate"]) {
+      fake.url.value = `${SITE}/form`;
+      const pending = runner.run(request(tool, tool === "evaluate" ? { expression: "document.title" } : {}));
+      await vi.waitFor(() => expect(prompts.current(), tool).toMatchObject({ kind: "diagnostics", site: SITE }));
+
+      // The page navigates itself away while the owner reads the question about `SITE`.
+      fake.url.value = `${OTHER_SITE}/landing`;
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+
+      await expect(pending, tool).resolves.toMatchObject({ callId: "call-1", outcome: "stale", reason: "stale-context" });
+      expect(fake.fakeDebugger.attached, tool).toEqual([]);
+      expect(fake.fakeDebugger.commands, tool).toEqual([]);
+      expect(runner.attached(), tool).toEqual([]);
+    }
+  });
+
+  it("answers an unanswered question with the timeout and its hint, and attaches nothing", async () => {
+    const { runner } = harness();
+
+    const response = await runner.run(request("read_console"));
+
+    expect(response).toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer", hint: CONSENT_TIMEOUT_HINT });
+    expect(fake.fakeDebugger.attached).toEqual([]);
+  });
+
+  /**
+   * FR-477: the diagnostics answer says the tool may run at all; the site's mode still decides
+   * whether this script may, so a site in `ask` mode asks a second, separate question - and that
+   * question's answer can never grant diagnostics.
+   */
+  it("still asks about the script itself after a diagnostics allow for evaluate", async () => {
+    const { runner, prompts, siteModes } = harness({}, { timeoutMs: 5_000 });
+
+    const pending = runner.run(request("evaluate", { expression: "document.title" }));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    const diagnosticsQuestion = prompts.current()?.promptId ?? "";
+    prompts.decide(diagnosticsQuestion, true);
+
+    await vi.waitFor(() => {
+      const current = prompts.current();
+      expect(current).toBeDefined();
+      expect(current?.promptId).not.toBe(diagnosticsQuestion);
+    });
+    expect(prompts.current()?.kind).toBeUndefined();
+    expect(prompts.current()).toMatchObject({ site: SITE, tool: "evaluate" });
+    expect(fake.fakeDebugger.commands.some((command) => command.method === "Runtime.evaluate")).toBe(false);
+
+    // An "always" flag on the script's question is not the diagnostics question's answer.
+    prompts.decide(prompts.current()?.promptId ?? "", false, undefined, undefined, undefined, undefined, true);
+    await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "denied", reason: "owner-denied" });
+    expect(fake.fakeDebugger.commands.some((command) => command.method === "Runtime.evaluate")).toBe(false);
+    expect((await siteModes.get(SITE)).diagnosticsGranted).toBe(false);
+  });
+
+  it("ignores Always on this site given to the script's question, even with a yes", async () => {
+    const { runner, prompts, siteModes } = harness({}, { timeoutMs: 5_000 });
+
+    const pending = runner.run(request("evaluate", { expression: "document.title" }));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    const diagnosticsQuestion = prompts.current()?.promptId ?? "";
+    prompts.decide(diagnosticsQuestion, true);
+    await vi.waitFor(() => {
+      const current = prompts.current();
+      expect(current).toMatchObject({ tool: "evaluate" });
+      expect(current?.promptId).not.toBe(diagnosticsQuestion);
+    });
+    prompts.decide(prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, undefined, true);
+
+    await expect(pending).resolves.toMatchObject({ outcome: "ok" });
+    expect((await siteModes.get(SITE)).diagnosticsGranted).toBe(false);
   });
 
   /**
@@ -469,7 +793,7 @@ describe("T056 agent diagnostics gate", () => {
    */
   it("disables the domains rather than detaching when input still holds the tab, and says so in its own state", async () => {
     const attachments = createInputAttachments();
-    const { runner, siteModes } = harness({ attachments });
+    const { runner, siteModes, prompts } = harness({ attachments });
     await siteModes.set(SITE, { diagnosticsGranted: true, mode: "skip-checks" });
     await attachments.acquire(AGENT_TAB, "input");
     await runner.run(request("read_console"));
@@ -483,7 +807,7 @@ describe("T056 agent diagnostics gate", () => {
     expect(attachments.attached()).toEqual([AGENT_TAB]);
     expect(attachments.state(AGENT_TAB)?.diagnosticsEnabled).toBe(false);
 
-    const response = await runner.run(request("read_console"));
+    const response = await refusedAfterAsking(runner, prompts, request("read_console"));
     expect(response).toEqual({ callId: "call-1", outcome: "denied", reason: "diagnostics-not-granted" });
   });
 
@@ -504,7 +828,7 @@ describe("T056 agent diagnostics gate", () => {
   });
 
   it("clears the buffers when the tab leaves the site, and detaches when the new one has no grant", async () => {
-    const { runner, siteModes } = harness();
+    const { runner, siteModes, prompts } = harness();
     await siteModes.set(SITE, { diagnosticsGranted: true });
     await runner.run(request("read_console"));
     fake.fakeDebugger.emit(AGENT_TAB, "Runtime.consoleAPICalled", logged("logged on the granted site"));
@@ -514,7 +838,7 @@ describe("T056 agent diagnostics gate", () => {
 
     // What one site logged is not something the next site's owner granted anyone a look at.
     expect(fake.fakeDebugger.detached).toEqual([AGENT_TAB]);
-    const response = await runner.run(request("read_console"));
+    const response = await refusedAfterAsking(runner, prompts, request("read_console"));
     expect(response).toEqual({ callId: "call-1", outcome: "denied", reason: "diagnostics-not-granted" });
   });
 
@@ -551,7 +875,7 @@ describe("T056 agent diagnostics gate", () => {
    * to a page the grant never covered - and Chrome's bar still naming this extension for it.
    */
   it("detaches on a navigation nobody asked it about, and forgets the granted site's buffers", async () => {
-    const { runner, siteModes } = harness();
+    const { runner, siteModes, prompts } = harness();
     await siteModes.set(SITE, { diagnosticsGranted: true });
     await runner.start();
     await runner.run(request("read_console"));
@@ -565,7 +889,7 @@ describe("T056 agent diagnostics gate", () => {
 
     expect(fake.fakeDebugger.detached).toEqual([AGENT_TAB]);
     expect(runner.attached()).toEqual([]);
-    const response = await runner.run(request("read_console"));
+    const response = await refusedAfterAsking(runner, prompts, request("read_console"));
     expect(response).toEqual({ callId: "call-1", outcome: "denied", reason: "diagnostics-not-granted" });
   });
 

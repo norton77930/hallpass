@@ -6,8 +6,12 @@ import {
   PAIRING_DECLINED_MARKER,
   type AgentBrowserKind,
   SITE_PLAN_FEATURE,
+  TERMINAL_CONSENT_FEATURE,
   type AgentNativeRequest,
   type AgentNativeResponse,
+  type PromptChoice,
+  type PromptRaisedFrame,
+  type PromptSettledFrame,
   type PromptWaitingFrame,
 } from "@hallpass/contracts";
 import type { PairingAnswer } from "./pairing-controller.js";
@@ -248,6 +252,13 @@ export type AgentBridgeDeps = {
    */
   sitePlans?: true;
   /**
+   * 031 R-452, R-459: the owner answered a consent question in the agent's own client. Its presence
+   * is what this worker advertises as `terminal-consent` on every pairing answer, as
+   * `onUploadConsentRequest` is for `upload-consent`: a host never asks its client anything for a
+   * worker that could not take the answer. The runtime decides whether the answer settles anything.
+   */
+  onPromptAnswer?: (answer: { sessionId: string; callId: string; promptId: string; choice: PromptChoice }) => void;
+  /**
    * A relay announced itself on a freshly opened native port. It starts the reconciliation: the
    * sessions whose servers dial back in and greet again survive, the rest are released. The path
    * is where that relay writes its record, when it said (006 FR-082, an optional field).
@@ -293,6 +304,12 @@ export type AgentBridge = {
    * arithmetic nobody chose. Composed by the runtime, which is where the question lives.
    */
   sendWaiting(frame: PromptWaitingFrame): void;
+  /**
+   * 031 R-452: a consent question was raised for a call from this host, and it has ended. Passed
+   * through untouched, like the tick; composed by the runtime. Lost with no link.
+   */
+  sendPromptRaised(frame: PromptRaisedFrame): void;
+  sendPromptSettled(frame: PromptSettledFrame): void;
   /**
    * The owner's answer to one directory question, by the call the host asked about (014).
    *
@@ -560,6 +577,18 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
           deps.reportDiagnostic?.("agent.bridge.browser-choice-withdraw");
           deps.onBrowserChoiceWithdraw?.({ sessionId: link.data.sessionId, requestId: link.data.requestId });
           return;
+        case "prompt-answer":
+          // 031 R-452: the owner's choice in the client. The code is logged, never the choice; the
+          // runtime settles only a question of the session the frame names (FR-468).
+          deps.reportDiagnostic?.("agent.bridge.prompt-answer");
+          // The question's id travels with it (T929 I1): the call alone does not say which question.
+          deps.onPromptAnswer?.({
+            sessionId: link.data.sessionId,
+            callId: link.data.callId,
+            promptId: link.data.promptId,
+            choice: link.data.choice,
+          });
+          return;
         case "session-ended":
           deps.reportDiagnostic?.("agent.bridge.session-ended");
           deps.onSessionEnded?.(link.data.sessionId);
@@ -729,6 +758,9 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
               ...(deps.onPairWithdraw === undefined ? [] : ["pair-withdraw"]),
               // 017 R-251: this worker raises the site-plan card for `propose_sites`.
               ...(deps.sitePlans === true ? [SITE_PLAN_FEATURE] : []),
+              // 031 R-459: this worker raises its consent questions to the agent's client as well
+              // and takes the answer back, derived from the handler as `upload-consent` is.
+              ...(deps.onPromptAnswer === undefined ? [] : [TERMINAL_CONSENT_FEATURE]),
               // 003 FR-032a: the owner declined this request, which is not an unpair. In
               // `features` because a new key would make a 0.6.0 host drop the whole frame; that
               // host ignores the member and answers the refusal as it always has.
@@ -860,6 +892,12 @@ export function createAgentBridge(deps: AgentBridgeDeps): AgentBridge {
     sendWaiting(frame: PromptWaitingFrame): void {
       // `send` is a no-op with no port: a tick that lands in the moment between the link going away
       // and the runtime cancelling the question it was about is lost, which is what it is.
+      send(frame);
+    },
+    sendPromptRaised(frame: PromptRaisedFrame): void {
+      send(frame);
+    },
+    sendPromptSettled(frame: PromptSettledFrame): void {
       send(frame);
     },
     sendUploadConsentResult(callId: string, decision: UploadConsentDecision, hint?: string): void {

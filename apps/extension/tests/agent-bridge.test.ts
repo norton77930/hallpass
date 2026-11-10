@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentControlFrameSchema, agentLinkFrameSchema, BROWSER_CHOICE_FEATURE, PAIRING_DECLINED_MARKER } from "@hallpass/contracts";
+import {
+  agentControlFrameSchema,
+  agentLinkFrameSchema,
+  BROWSER_CHOICE_FEATURE,
+  PAIRING_DECLINED_MARKER,
+  TERMINAL_CONSENT_FEATURE,
+} from "@hallpass/contracts";
 import {
   AGENT_ACK_IDENTITY_BOUND_MS,
   AGENT_ACK_RUN_ID_BOUND_MS,
@@ -514,6 +520,78 @@ describe("T013 agent bridge", () => {
 
     expect(port.sent).toEqual([frame]);
     expect(agentLinkFrameSchema.safeParse(port.sent[0]).success).toBe(true);
+  });
+
+  /**
+   * 031 T917, T922 (R-452, R-459) - the question the agent's own client is shown, and its answer.
+   *
+   * The bridge decides none of it: it advertises `terminal-consent` only with a handler for the
+   * answer (the `upload-consent` rule), passes the runtime's frames out untouched, and hands an
+   * incoming `prompt-answer` to the runtime with the session the frame names.
+   */
+  it("advertises terminal-consent beside site-plan, only with a handler for the answer (R-459)", async () => {
+    const able = bridgeWith({ onPromptAnswer: () => undefined, sitePlans: true, onUploadConsentRequest: () => undefined });
+    able.bridge.connect();
+    able.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+    await vi.waitFor(() => expect(able.port.sent).toHaveLength(1));
+    expect(able.port.sent[0]).toMatchObject({ features: ["upload-consent", "site-plan", TERMINAL_CONSENT_FEATURE] });
+    expect(agentControlFrameSchema.safeParse(able.port.sent[0]).success).toBe(true);
+
+    const unable = bridgeWith({ sitePlans: true });
+    unable.bridge.connect();
+    unable.port.emit({ type: "pair-request", agentId: "agent-1", displayName: "Claude Code", origin: "stdio:local", sessionId: "session-h1" });
+    await vi.waitFor(() => expect(unable.port.sent).toHaveLength(1));
+    expect(unable.port.sent[0]).toMatchObject({ features: ["site-plan"] });
+  });
+
+  it("sends prompt-raised and prompt-settled through the port exactly as they were given", () => {
+    const { bridge, port } = bridgeWith();
+    bridge.connect();
+    const raised = {
+      type: "prompt-raised" as const,
+      sessionId: "session-h1",
+      callId: "call-1",
+      promptId: "prompt-1",
+      kind: "effect" as const,
+      site: "https://fixtures.test:19443",
+      action: "click a page element",
+      choices: ["once" as const, "session" as const, "deny" as const],
+      boundMs: 120_000,
+    };
+    const settled = {
+      type: "prompt-settled" as const,
+      sessionId: "session-h1",
+      callId: "call-1",
+      promptId: "prompt-1",
+      answeredFrom: "client" as const,
+    };
+
+    bridge.sendPromptRaised(raised);
+    bridge.sendPromptSettled(settled);
+
+    expect(port.sent).toEqual([raised, settled]);
+    for (const frame of port.sent) expect(agentLinkFrameSchema.safeParse(frame).success).toBe(true);
+  });
+
+  it("hands a prompt-answer to the runtime with the session and the question the frame names", () => {
+    const onPromptAnswer = vi.fn();
+    const { bridge, port } = bridgeWith({ onPromptAnswer });
+    bridge.connect();
+
+    port.emit({ type: "prompt-answer", sessionId: "session-h1", callId: "call-1", promptId: "prompt-1", choice: "session" });
+    // A choice outside the closed set is no answer at all.
+    port.emit({ type: "prompt-answer", sessionId: "session-h1", callId: "call-1", promptId: "prompt-1", choice: "always" });
+    // T929 I1: nor is an answer that does not say which question it is for.
+    port.emit({ type: "prompt-answer", sessionId: "session-h1", callId: "call-1", choice: "once" });
+
+    expect(onPromptAnswer).toHaveBeenCalledTimes(1);
+    expect(onPromptAnswer).toHaveBeenCalledWith({
+      sessionId: "session-h1",
+      callId: "call-1",
+      promptId: "prompt-1",
+      choice: "session",
+    });
+    expect(port.sent).toEqual([]);
   });
 
   it("drops a tick raised while no host is there, without throwing at the caller", () => {

@@ -102,6 +102,26 @@ export type AttachmentHolder = "input" | "diagnostics" | "recording" | "viewport
 
 export type AttachmentOutcome = { ok: true } | { ok: false; unavailableReason: InputUnavailableReason };
 
+/**
+ * How long a tab keeps its debugger with no call in progress and only `input` holding it
+ * (031/T945, D-031-13, FR-482, R-466). `viewport` and `diagnostics` are lifetime holders and stop the
+ * countdown altogether: an emulated viewport and a diagnostics buffer each need the attachment for as
+ * long as they last, not for as long as a call does. `recording` is not one in practice: the recorder
+ * acquires it per captured frame and drops it again, so between frames a recording keeps the tab only
+ * as any call does, and a recording with no call on its tab for 20 s is let go and re-attached at its
+ * next frame. Any holder other than `input` stops the countdown while it is held.
+ */
+export const IDLE_DETACH_MS = 20_000;
+
+/**
+ * One call's use of a tab's attachment (031/T945, R-466).
+ *
+ * `done` is idempotent and safe in every state the tab can be in by then - detached by Chrome,
+ * released, closed: it ends this call and no other, so a call that finishes twice cannot end a
+ * second call's hold, and a lease that ended first has already let go of it.
+ */
+export type AttachmentCallHold = { outcome: AttachmentOutcome; done(): void };
+
 export type AgentInputAttachments = {
   /**
    * Attach if this tab is not attached yet, and record that `holder` wants it.
@@ -110,6 +130,18 @@ export type AgentInputAttachments = {
    * debugged" bar appears when the agent starts acting rather than when it pairs.
    */
   acquire(tabId: number, holder: AttachmentHolder): Promise<AttachmentOutcome>;
+  /**
+   * An effect or capture call is using the tab (031/T945, R-466): `input` is acquired, and the
+   * call counts as in progress until `done`.
+   *
+   * While any call is in progress nothing detaches. When the last one is done and `input` is the
+   * only holder left, the tab is let go of `IDLE_DETACH_MS` later by *dropping* `input` - never by
+   * `release`, whose before-release hook is the viewport clear. Any acquire, and any new call,
+   * cancels that countdown; the next call re-attaches as the first one did.
+   */
+  hold(tabId: number): Promise<AttachmentCallHold>;
+  /** Who holds the tab right now, read-only; empty when it is not attached (031/R-466). */
+  holders(tabId: number): readonly AttachmentHolder[];
   /** One holder is done. The attachment ends only when no holder is left. */
   drop(tabId: number, holder: AttachmentHolder): Promise<void>;
   /** The lease is over - release, tab close, unpair: every holder lets go and the debugger detaches. */
@@ -214,6 +246,28 @@ export function inputUnavailable(
   };
 }
 
+/**
+ * Tells the page it has focus, over a tab's new attachment (031/T943, D-031-12, FR-481, R-465).
+ *
+ * An agent tab is usually a background tab, and a page that pauses timers, animations or work when
+ * it loses focus would otherwise do so under the agent. Registered on `onAttached` because that hook
+ * runs once for every attachment - the first, and each re-attach after an idle release, a release
+ * or Chrome letting go - and never for a holder joining one that exists. A command, one answer to
+ * the caller that sent it, enabling nothing: the module's invariant is untouched. Its failure is
+ * reported and ignored, because a page that keeps its own focus rules still takes clicks.
+ */
+export async function enableFocusEmulation(
+  attachments: Pick<AgentInputAttachments, "send">,
+  tabId: number,
+  reportDiagnostic?: (code: string) => void,
+): Promise<void> {
+  try {
+    await attachments.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  } catch {
+    reportDiagnostic?.("agent.attachment.focus-emulation-failed");
+  }
+}
+
 type TabState = {
   holders: Set<AttachmentHolder>;
   diagnosticsEnabled: boolean;
@@ -252,6 +306,58 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
   /** 012/T306: what has to happen on either side of an attachment, registered at composition. */
   const attachedListeners: Array<(tabId: number) => Promise<void> | void> = [];
   const beforeReleaseListeners: Array<(tabId: number) => Promise<void> | void> = [];
+  /**
+   * The calls in progress per tab (031/T945, R-466), one token per `hold`.
+   *
+   * Tokens rather than a count, and kept apart from `tabs`: a token is removed only by the `done`
+   * that owns it, so a repeated `done` cannot end somebody else's call, and a call survives Chrome
+   * detaching under it - the tab's state goes, the call does not. The lease ending clears the
+   * tab's tokens, so a call that never finished cannot keep the next lease attached.
+   */
+  const inFlight = new Map<number, Set<object>>();
+  /** The armed idle countdowns (031/R-466); at most one per tab. */
+  const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  /**
+   * Detaches still on their way to Chrome (031/T945).
+   *
+   * An idle release is a detach nobody asked for at that moment, so a call arriving while its
+   * round trip is open is ordinary rather than rare - and an attach sent before Chrome has let go
+   * is refused as "already attached", which this module would report as developer tools open.
+   */
+  const detaching = new Map<number, Promise<void>>();
+
+  function disarm(tabId: number): void {
+    const timer = idleTimers.get(tabId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    idleTimers.delete(tabId);
+  }
+
+  /** No call in progress, and `input` the only holder: nothing needs the tab but the next call. */
+  function idle(tabId: number): boolean {
+    const state = tabs.get(tabId);
+    return (
+      (inFlight.get(tabId)?.size ?? 0) === 0 &&
+      state !== undefined &&
+      state.holders.size === 1 &&
+      state.holders.has("input")
+    );
+  }
+
+  function armIfIdle(tabId: number): void {
+    if (idleTimers.has(tabId) || !idle(tabId)) return;
+    idleTimers.set(
+      tabId,
+      setTimeout(() => {
+        idleTimers.delete(tabId);
+        // Asked again at the far end: anything that changed the answer meanwhile also disarmed
+        // this, but the check is what makes that a convenience rather than the guarantee.
+        if (!idle(tabId)) return;
+        // Dropped, never released: the before-release hook is the viewport clear (R-466).
+        void api.drop(tabId, "input").catch(() => deps.reportDiagnostic?.("agent.attachment.idle-detach-failed"));
+      }, IDLE_DETACH_MS),
+    );
+  }
 
   /**
    * Runs the hooks for one tab, and never lets one of them decide the caller's answer.
@@ -290,6 +396,8 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
       adapter.onDetach((tabId) => {
         tabs.delete(tabId);
         oopif.delete(tabId);
+        // 031/R-466: a countdown for an attachment that no longer exists has nothing to let go of.
+        disarm(tabId);
       });
       // The auto-attach table's only source (004/T129): a cross-site child frame announces itself
       // as its own target on the *tab's* session, never on a session of its own asking to be
@@ -356,22 +464,35 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
   async function detach(tabId: number): Promise<void> {
     tabs.delete(tabId);
     unavailable.delete(tabId);
+    disarm(tabId);
+    const round = (async () => {
+      try {
+        await debug().detach(tabId);
+      } catch {
+        // Already gone - the tab closed, or Chrome detached first. The attachment is over either
+        // way, which is the only thing this call was for.
+        deps.reportDiagnostic?.("agent.diagnostics.detach-noop");
+      }
+      // 004/T161: cleared after the round trip, not before it - an `Target.attachedToTarget` that
+      // lands while Chrome's own detach is still in flight would otherwise be recorded into a table
+      // this call had already decided was empty, and the entry would outlive the attachment it named
+      // a session on.
+      oopif.delete(tabId);
+    })();
+    detaching.set(tabId, round);
     try {
-      await debug().detach(tabId);
-    } catch {
-      // Already gone - the tab closed, or Chrome detached first. The attachment is over either
-      // way, which is the only thing this call was for.
-      deps.reportDiagnostic?.("agent.diagnostics.detach-noop");
+      await round;
+    } finally {
+      if (detaching.get(tabId) === round) detaching.delete(tabId);
     }
-    // 004/T161: cleared after the round trip, not before it - an `Target.attachedToTarget` that
-    // lands while Chrome's own detach is still in flight would otherwise be recorded into a table
-    // this call had already decided was empty, and the entry would outlive the attachment it named
-    // a session on.
-    oopif.delete(tabId);
   }
 
-  return {
+  const api: AgentInputAttachments = {
     async acquire(tabId, holder) {
+      // 031/R-466: whoever asks, the tab is wanted again - a countdown running now is moot.
+      disarm(tabId);
+      const pendingDetach = detaching.get(tabId);
+      if (pendingDetach !== undefined && !tabs.has(tabId)) await pendingDetach;
       const existing = tabs.get(tabId);
       if (existing) {
         existing.holders.add(holder);
@@ -442,9 +563,47 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
         state.diagnosticsEnabled = false;
         await domains(tabId, "disable");
       }
+      // 031/R-466: the last lifetime holder letting go is the same moment as the last call ending
+      // - nothing but the next call needs the tab - so the countdown starts here too.
+      armIfIdle(tabId);
+    },
+    async hold(tabId) {
+      const token = {};
+      let calls = inFlight.get(tabId);
+      if (calls === undefined) {
+        calls = new Set();
+        inFlight.set(tabId, calls);
+      }
+      // Counted before the acquire's first await, so a countdown cannot fire inside it.
+      calls.add(token);
+      disarm(tabId);
+      let finished = false;
+      const done = (): void => {
+        if (finished) return;
+        finished = true;
+        const current = inFlight.get(tabId);
+        // Not found means the lease ended first and took every call on the tab with it.
+        if (current === undefined || !current.delete(token)) return;
+        if (current.size > 0) return;
+        inFlight.delete(tabId);
+        armIfIdle(tabId);
+      };
+      try {
+        return { outcome: await api.acquire(tabId, "input"), done };
+      } catch (error) {
+        done();
+        throw error;
+      }
+    },
+    holders(tabId) {
+      return [...(tabs.get(tabId)?.holders ?? [])];
     },
     async release(tabId) {
       unavailable.delete(tabId);
+      // 031/R-466: first, because the hook below awaits and a countdown must not fire inside it.
+      // The lease is over, so are its calls: a hold never finished cannot outlive it.
+      disarm(tabId);
+      inFlight.delete(tabId);
       /**
        * 012/T306, FR-159, and 012/S2c F1: before the detach, and before this worker's own
        * bookkeeping gets a say.
@@ -462,6 +621,8 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
     },
     async releaseAll() {
       unavailable.clear();
+      for (const tabId of [...idleTimers.keys()]) disarm(tabId);
+      inFlight.clear();
       for (const tabId of [...tabs.keys()]) {
         await fanOut(beforeReleaseListeners, tabId);
         await detach(tabId);
@@ -511,6 +672,7 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
       await debug().detach(tabId);
     },
   };
+  return api;
 }
 
 /**

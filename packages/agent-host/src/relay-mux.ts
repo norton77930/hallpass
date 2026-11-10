@@ -132,6 +132,12 @@ function carriesBrokerField(frame: unknown): boolean {
   );
 }
 
+/**
+ * The worker frames that name a call without being its answer (011 R-162, 031 R-459): routed to the
+ * call's session and leaving its entry in place for the answer that follows.
+ */
+const CALL_KEEPING_TYPES: ReadonlySet<string> = new Set(["prompt-waiting", "prompt-raised", "prompt-settled"]);
+
 function frameField(frame: unknown, field: "callId" | "sessionId" | "type"): string | undefined {
   if (!frame || typeof frame !== "object") {
     return undefined;
@@ -293,6 +299,21 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
       }
 
       const callId = frameField(frame, "callId");
+      /**
+       * 031 R-459: a `prompt-answer` is the owner's choice for a call, not a call. It goes on only
+       * for a call this same session has in flight, and it never keys a route: keyed, an answer
+       * naming another session's call would take that call's answer over, and a late one would pin
+       * the drain count open for a call that is already over. Dropped rather than refused, because a
+       * call that ended while the owner was choosing is a race, not a misbehaving peer.
+       */
+      if (frameField(frame, "type") === "prompt-answer") {
+        if (callId === undefined || calls.get(callId) !== sessionId) {
+          log("relay.mux.dropped", "prompt-answer");
+          return "accepted";
+        }
+        options.toWorker(frame);
+        return "accepted";
+      }
       if (callId !== undefined) {
         calls.set(callId, sessionId);
       }
@@ -340,8 +361,12 @@ export function createRelayMux(options: RelayMuxOptions): RelayMux {
          * leave their eventual Allow with nowhere to go, dropped as unaddressed while the agent was
          * answered by a backstop. The keep-alive is named rather than inferred, so a frame type
          * nobody declared still spends the entry instead of pinning it open.
+         *
+         * 031 R-459 adds the two terminal-consent frames for the same reason: `prompt-raised` and
+         * `prompt-settled` are about the question the call is held on, and the call's own answer
+         * still follows them.
          */
-        if (frameField(frame, "type") !== "prompt-waiting") {
+        if (!CALL_KEEPING_TYPES.has(frameField(frame, "type") ?? "")) {
           calls.delete(callId);
         }
         deliver(frame, sessionId, "call");

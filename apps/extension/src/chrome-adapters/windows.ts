@@ -63,6 +63,22 @@ export async function getWindowFacts(
 }
 
 /**
+ * The window's state - "minimized" is the one a screenshot asks about (031/T942, R-463, FR-480) -
+ * or `undefined` when there is no such window or no way to ask.
+ *
+ * A read and nothing else: the window is the owner's, and a minimized one is never restored here.
+ * An unknown state is answered as unknown, which the capture treats as not minimized.
+ */
+export async function getWindowState(windowId: number): Promise<WindowState | undefined> {
+  try {
+    const window = await chrome.windows.get(windowId);
+    return window.state as WindowState | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * The owner's last-focused normal window, now and on every move (fix 2026-09-23, panel in another
  * window). The panel port compares it with the window each Hallpass panel is in, so the badge and
  * the question's bound follow the panel the owner can actually see.

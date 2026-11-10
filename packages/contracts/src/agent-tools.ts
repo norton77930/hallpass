@@ -2361,8 +2361,10 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Returns a picture of one of this session's tabs as an image - the whole viewport as a JPEG, a " +
       "`region` as a PNG. The browser can only photograph the tab that is " +
-      "active in its window, so if yours is not, it is brought to the front for the capture and the previously " +
-      "active tab is put back afterwards. The whole viewport comes back in the page's CSS pixels (`frame`), " +
+      "active in its window. A window that is covered or minimized is photographed without being brought " +
+      "forward; if your tab is not active in its window, it is brought to the front briefly for the capture " +
+      "and the previously active tab is put back afterwards. `window-minimized` is answered only when " +
+      "a minimized window could not be photographed. The whole viewport comes back in the page's CSS pixels (`frame`), " +
       "shrunk to fit when the page is large (at most 1568 pixels on the long edge and 1.15 million in all); " +
       "`width` and `height` say the size it came out at, and every point you then send to a tool on that tab " +
       "is read in this picture's pixels - so is `region`, a rectangle read off that picture which is cropped " +
@@ -2524,9 +2526,12 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Returns what the page logged - level, text and time - since diagnostics were granted for this site. " +
       "`pattern` is a regular expression matched against the text, `onlyErrors` keeps errors and uncaught " +
-      "exceptions, and `limit` bounds how many of the most recent messages come back. The owner must have " +
-      "granted diagnostics for the site the tab is on; without that this answers `denied`, and while it is " +
-      "granted the browser tells the owner an extension is debugging it. Messages logged before the grant, " +
+      "exceptions, and `limit` bounds how many of the most recent messages come back. On a site without the " +
+      "owner's diagnostics grant the owner is asked (in the side panel, and in your client when it supports " +
+      "that). Allow once covers this call and allow for this session covers this site until the session ends; " +
+      "`denied` means they declined, and a question left unanswered for 120 seconds times out with a hint to " +
+      "ask the owner to answer in Chrome. While " +
+      "diagnostics are on the browser tells the owner an extension is debugging it. Messages logged before the grant, " +
       "or on a page the tab has since left, are not kept.",
     inputShape: agentReadConsoleShape,
   },
@@ -2536,8 +2541,8 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     description:
       "Returns the requests the page made since diagnostics were granted for this site: method, url, status, " +
       "kind and time. Never headers, cookies or bodies - those are not recorded at all. `pattern` is a " +
-      "regular expression matched against the url. Needs the owner's diagnostics grant for the site, and " +
-      "records are dropped when the tab leaves it.",
+      "regular expression matched against the url. On a site without the owner's diagnostics grant the owner " +
+      "is asked, as for `read_console`; records are dropped when the tab leaves the site.",
     inputShape: agentReadNetworkShape,
   },
   {
@@ -2545,9 +2550,9 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Evaluate an expression in a tab",
     description:
       "Evaluates one expression in the page and returns its value as text, awaiting a promise if the " +
-      "expression produces one. Needs the owner's diagnostics grant for the site *and*, because a script " +
-      "can change the page like any other action, the site's own mode: on a site set to ask, the owner is " +
-      "asked before it runs. Long values are cut and the answer says so.",
+      "expression produces one. On a site without the owner's diagnostics grant the owner is asked, as " +
+      "for `read_console`, *and*, because a script can change the page like any other action, the site's own " +
+      "mode applies as well: on a site set to ask, the owner is asked before it runs. Long values are cut and the answer says so.",
     inputShape: agentEvaluateShape,
   },
   {
@@ -2830,6 +2835,12 @@ export const agentRefusalSchema = z.discriminatedUnion("reason", [
   z.strictObject({ reason: z.literal("tab-gone") }),
   z.strictObject({ reason: z.literal("restricted-page") }),
   /**
+   * 031 R-463 (contracts/capture.md): the window that holds the tab is minimized, so there is nothing
+   * to photograph. Nothing is activated or restored - that is the owner's call - and `hint` carries
+   * `WINDOW_MINIMIZED_HINT`.
+   */
+  z.strictObject({ reason: z.literal("window-minimized") }),
+  /**
    * 008 (contracts README §3). Every one of these is a refusal an agent can act on, which is why
    * the two that have somewhere to point carry it: a blocked call says *which* dialog is in the
    * way, so the next call is `dialog` rather than the same call again, and a page that asked to
@@ -2869,6 +2880,15 @@ export const agentRefusalSchema = z.discriminatedUnion("reason", [
 ]);
 
 export type AgentRefusal = z.infer<typeof agentRefusalSchema>;
+
+/**
+ * What a `window-minimized` refusal tells the agent (031 R-463, contracts/capture.md). One sentence,
+ * no hole to fill (FR-151), inside the response's 400-character `hint`: the agent relays it, and
+ * the person - not Hallpass - restores the window.
+ */
+export const WINDOW_MINIMIZED_HINT =
+  "The Chrome window that holds this tab is minimized, so it cannot be photographed. " +
+  "Hallpass does not restore it: ask the owner to restore the Chrome window, then retry.";
 
 /**
  * The two words the owner's own controls end a call with (014 data-model "Stop flag").
@@ -3450,21 +3470,39 @@ export const ATTENTION_SENTENCES = {
   pairing:
     "Hallpass is waiting for you to accept the pairing in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.\n" +
     "Hallpass 正在等你在 Chrome 側欄接受配對,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。",
+  /**
+   * 031 R-455: the same question may also be shown in the agent's own client (terminal consent),
+   * so the sentence says it can be answered there too - without claiming it is, since only the
+   * host knows whether its client could ask.
+   */
   consent:
-    "Hallpass is waiting for your answer to a consent card in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it.\n" +
-    "Hallpass 正在等你回答側欄裡的同意卡,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。",
+    "Hallpass is waiting for your answer to a consent card in Chrome's side panel, which is closed. Click the Hallpass icon in the toolbar or press Alt+A to open it. If this client shows the same question, you can answer it here instead.\n" +
+    "Hallpass 正在等你回答側欄裡的同意卡,但側欄沒有打開。請點工具列的 Hallpass 圖示或按 Alt+A 打開它。如果這個用戶端也顯示了同一個問題,也可以直接在這裡回答。",
   choice:
     "Hallpass is waiting for you to choose which browser to use, and the side panel that asks is closed. In the browser you want, click the Hallpass icon in the toolbar or press Alt+A, then confirm there.\n" +
     "Hallpass 正在等你選擇要用哪個瀏覽器,但詢問的側欄沒有打開。請在你要用的瀏覽器點工具列的 Hallpass 圖示或按 Alt+A,然後在那裡確認。",
 } as const;
 
 /**
+ * What a consent question that expired unanswered tells the agent (031 R-455, FR-474, D-031-6).
+ *
+ * Carried as the `hint` of every `timed-out` answer to a question the worker raised, whether or not
+ * a panel was visible: a visible panel is no evidence that anybody saw the card, and the owner may
+ * have been reading the question in the terminal. Addressed to the agent, which relays it: the owner
+ * answers in Chrome, and the agent retries. The same rules as `ATTENTION_SENTENCES` - English line
+ * then zh-TW line, nothing page-derived, nothing to fill in, inside the 400-character `hint`.
+ */
+export const CONSENT_TIMEOUT_HINT =
+  "Nobody answered Hallpass's consent question in time, so nothing was done. Ask the owner to answer it in Chrome's side panel (Hallpass icon in the toolbar, or Alt+A), then retry.\n" +
+  "Hallpass 的同意問題沒有在時限內得到回答,所以沒有執行任何動作。請使用者在 Chrome 側欄回答(點工具列的 Hallpass 圖示或按 Alt+A),然後再試一次。";
+
+/**
  * "This question is still waiting", sent every five seconds while one is (011 R-162, FR-148).
  *
- * It exists because three bounds are in play and only the worker knows the one that matters. The
- * worker fixes the question's bound when it raises it - 120 s when no panel is connected, the
- * ordinary 25 s / 45 s when one is - and the host's own per-call backstop is 30 s, so without this
- * the transport would give up on a call while the person was still walking to their browser. The
+ * It exists because two bounds are in play and only the worker knows the one that matters. The
+ * worker fixes the question's bound when it raises it - one 120 s bound, whether or not a panel is
+ * connected - and ticks from every raise, while the host's own per-call backstop is 30 s, so without
+ * this the transport would give up on a call while the person was still walking to their browser. The
  * tick carries the arithmetic rather than a command: `waitedMs` and `boundMs` let the router
  * re-arm its backstop statelessly, and `panelConnected` is what picks between the neutral progress
  * text and one of `ATTENTION_SENTENCES`.
@@ -3483,6 +3521,116 @@ export const promptWaitingFrameSchema = z.strictObject({
 });
 
 export type PromptWaitingFrame = z.infer<typeof promptWaitingFrameSchema>;
+
+/**
+ * 031 R-452, R-459 (contracts/terminal-consent.md): the capability a worker advertises in
+ * `pair-result.features` when it can raise a consent question to the agent's own client as well as
+ * to the side panel.
+ *
+ * A host never sends `prompt-answer` to a worker that did not say so, and never asks its client
+ * anything for a worker that cannot take the answer: an older worker would drop the frame as an
+ * unknown type and the owner's choice would vanish.
+ */
+export const TERMINAL_CONSENT_FEATURE = "terminal-consent";
+
+/** The owner's three possible answers to a consent question (031 contracts/terminal-consent.md). */
+export const PROMPT_CHOICES = ["once", "session", "deny"] as const;
+
+export type PromptChoice = (typeof PROMPT_CHOICES)[number];
+
+/**
+ * Which question a terminal-consent frame is about (031 T929 I1). A call can raise one question after
+ * another - every step of a `browser_batch` runs under the batch's call id - so the call alone does
+ * not name a question: a client answer that lost the race to the card for one step's question
+ * would settle the next step's, an answer the owner never gave. The worker mints it (the card's own
+ * `promptId`, random and never reused), the host echoes it unchanged, and an answer is honoured only
+ * for the question that is still open under that id.
+ */
+const promptIdSchema = z.string().min(1).max(128);
+
+/**
+ * Worker -> host: a question was raised for a call that came from this host (031 R-452).
+ *
+ * `action` is a short human-readable summary the host puts into the client's elicitation form; it
+ * is composed by the worker from the call's own arguments, never from page text, and bounded so a
+ * long selector cannot become a paragraph. `choices` always offers `deny`: a question the owner
+ * cannot decline in either place would be a trap.
+ *
+ * 032 R-485 (contracts/terminal-consent-032.md): a site change (`transition`) and a site plan
+ * (`site-plan`) are asked too. A transition names the site the tab came from in `from` (`site` is
+ * where it went); a site plan lists its proposed sites in `sites` (`site` is the first). Each field
+ * belongs to its kind alone. Both offer exactly `session` and `deny` - the card's Continue and its
+ * approval are session-bounded, and `once` would be a meaning the owner never chose (D-032-1);
+ * effect and diagnostics questions offer `once` and `deny` as in 031.
+ */
+export const promptRaisedFrameSchema = z
+  .strictObject({
+    type: z.literal("prompt-raised"),
+    sessionId: z.string().min(1).max(128),
+    callId: z.string().min(1).max(64),
+    promptId: promptIdSchema,
+    kind: z.enum(["effect", "diagnostics", "transition", "site-plan"]),
+    site: z.string().min(1).max(2048),
+    from: z.string().min(1).max(2048).optional(),
+    sites: z.array(z.string().min(1).max(2048)).min(1).max(AGENT_SITE_PLAN_MAX_ORIGINS).optional(),
+    action: z.string().min(1).max(200),
+    choices: z.array(z.enum(PROMPT_CHOICES)).min(2).max(3),
+    boundMs: z.number().int().positive(),
+  })
+  .superRefine((frame, context) => {
+    if ((frame.kind === "transition") !== (frame.from !== undefined)) {
+      context.addIssue({ code: "custom", path: ["from"], message: "from is required for a transition and only for one" });
+    }
+    if ((frame.kind === "site-plan") !== (frame.sites !== undefined)) {
+      context.addIssue({ code: "custom", path: ["sites"], message: "sites is required for a site plan and only for one" });
+    }
+    const { choices } = frame;
+    const sessionBounded = frame.kind === "transition" || frame.kind === "site-plan";
+    const fits = sessionBounded
+      ? choices.length === 2 && choices.includes("session") && choices.includes("deny")
+      : choices.includes("once") && choices.includes("deny");
+    if (!fits) {
+      context.addIssue({
+        code: "custom",
+        path: ["choices"],
+        message: sessionBounded
+          ? "a transition or site plan offers exactly session and deny"
+          : "a question offers at least once and deny",
+      });
+    }
+  });
+
+export type PromptRaisedFrame = z.infer<typeof promptRaisedFrameSchema>;
+
+/**
+ * Host -> worker: the owner chose an option in the client (031 R-452). Sent only for `accept` with a
+ * valid choice; a decline, a cancel or a form the client could not show sends nothing, and the card
+ * keeps waiting. The worker settles with `decideByCall`; an answer to a question already settled is
+ * logged as late and changes nothing.
+ */
+export const promptAnswerFrameSchema = z.strictObject({
+  type: z.literal("prompt-answer"),
+  sessionId: z.string().min(1).max(128),
+  callId: z.string().min(1).max(64),
+  promptId: promptIdSchema,
+  choice: z.enum(PROMPT_CHOICES),
+});
+
+export type PromptAnswerFrame = z.infer<typeof promptAnswerFrameSchema>;
+
+/**
+ * Worker -> host: the question left `pending` for any reason (031 R-452). The host aborts its open
+ * elicitation for that question (`promptId`) only. `answeredFrom` is `none` for a timeout, a stop or a release.
+ */
+export const promptSettledFrameSchema = z.strictObject({
+  type: z.literal("prompt-settled"),
+  sessionId: z.string().min(1).max(128),
+  callId: z.string().min(1).max(64),
+  promptId: promptIdSchema,
+  answeredFrom: z.enum(["client", "browser", "none"]),
+});
+
+export type PromptSettledFrame = z.infer<typeof promptSettledFrameSchema>;
 
 export const agentLinkFrameSchema = z.discriminatedUnion("type", [
   /**
@@ -3605,6 +3753,15 @@ export const agentLinkFrameSchema = z.discriminatedUnion("type", [
   // worker is refused at this union and dropped, which is all it needs.
   /** The worker's "still waiting" tick (011); see `promptWaitingFrameSchema` for why it is here. */
   promptWaitingFrameSchema,
+  /**
+   * 031 terminal consent (contracts/terminal-consent.md). `prompt-raised` and `prompt-settled` go
+   * worker -> host, `prompt-answer` host -> worker. New frame types, so the link protocol stays at
+   * 2: an old side drops them as unexpected, and the worker advertises `TERMINAL_CONSENT_FEATURE`
+   * so the host never depends on them.
+   */
+  promptRaisedFrameSchema,
+  promptAnswerFrameSchema,
+  promptSettledFrameSchema,
   /**
    * The worker asking what the owner's upload directories are (014/R-187 §4).
    *
@@ -3903,36 +4060,41 @@ export const AGENT_ACTIVITY_KEPT = 20;
  * in the owner's own language, as every other string there is. `message` is page-authored text and
  * is the same bounded field `CurrentDialog` carries it in - shown, never interpreted.
  */
-export const agentActivityItemSchema = z.strictObject({
+const agentActivityItemBaseSchema = z.strictObject({
   at: z.number().int().nonnegative(),
   /**
    * 012: `viewport` is the emulated size a session gave a tab, and gave back (FR-159).
    * 013: `upload` is a picture the session put into the owner's page (FR-174).
    * 017: `site-plan` is the owner's approval of a session site plan, its replacement, its withdrawal
    * and its end (FR-263); `message` is the number of sites, never the origins themselves.
+   * 032: `consent` is one settled owner question (FR-494, R-488); it carries `question`, `channel`
+   * and `answer` instead of an outcome.
    */
-  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt", "site-plan"]),
-  outcome: z.enum([
-    "accepted",
-    "accepted-chained",
-    "dismissed",
-    "refused",
-    "closed-by-owner",
-    "stayed",
-    "left",
-    "exported",
-    "restored",
-    "set",
-    "cleared",
-    "delivered",
-    /** 014 FR-182: the owner ended a step; one line per press, whatever it was in flight. */
-    "interrupted",
-    /** 017 FR-263: a session site plan was approved, replaced, withdrawn by the owner, or ended. */
-    "approved",
-    "replaced",
-    "withdrawn",
-    "ended",
-  ]),
+  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt", "site-plan", "consent"]),
+  /** Required on every kind but `consent`, which says what happened in `answer` (see the refinement). */
+  outcome: z
+    .enum([
+      "accepted",
+      "accepted-chained",
+      "dismissed",
+      "refused",
+      "closed-by-owner",
+      "stayed",
+      "left",
+      "exported",
+      "restored",
+      "set",
+      "cleared",
+      "delivered",
+      /** 014 FR-182: the owner ended a step; one line per press, whatever it was in flight. */
+      "interrupted",
+      /** 017 FR-263: a session site plan was approved, replaced, withdrawn by the owner, or ended. */
+      "approved",
+      "replaced",
+      "withdrawn",
+      "ended",
+    ])
+    .optional(),
   /** The host the dialog belonged to; absent when the item is not about a page. */
   site: z.string().max(256).optional(),
   /**
@@ -3941,6 +4103,35 @@ export const agentActivityItemSchema = z.strictObject({
    * thing that makes the owner's line a different sentence rather than a different word.
    */
   message: z.string().max(4000).optional(),
+  /** 032 FR-494: which question was settled (present exactly when the kind is `consent`). */
+  question: z.enum(["effect", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"]).optional(),
+  /** 032: where the answer came from - the agent's own client, the browser panel, or nowhere (a timeout). */
+  channel: z.enum(["client", "browser", "none"]).optional(),
+  /** 032: what the owner answered, or `timed-out` when nobody did in the time the question stays open. */
+  answer: z.enum(["once", "session", "always", "deny", "timed-out"]).optional(),
+});
+
+/**
+ * The consent fields belong to the kind `consent` and to no other, `consent` needs its site, and a
+ * channel of `none` only describes a question nobody answered (032 contracts/activity-consent.md).
+ */
+export const agentActivityItemSchema = agentActivityItemBaseSchema.superRefine((item, ctx) => {
+  const issue = (message: string): void => {
+    ctx.addIssue({ code: "custom", message });
+  };
+  if (item.kind === "consent") {
+    if (item.question === undefined || item.channel === undefined || item.answer === undefined) {
+      issue("a consent item carries question, channel and answer");
+    }
+    if (item.site === undefined) issue("a consent item names its site");
+    if (item.outcome !== undefined) issue("a consent item has an answer, not an outcome");
+    if (item.channel === "none" && item.answer !== "timed-out") issue("channel none is only for a timeout");
+    return;
+  }
+  if (item.outcome === undefined) issue("this kind of item carries an outcome");
+  if (item.question !== undefined || item.channel !== undefined || item.answer !== undefined) {
+    issue("question, channel and answer belong to a consent item");
+  }
 });
 
 export type AgentActivityItem = z.infer<typeof agentActivityItemSchema>;
@@ -3962,6 +4153,9 @@ const agentNoticeSchema = z.strictObject({
 });
 
 export type AgentNotice = z.infer<typeof agentNoticeSchema>;
+
+/** 031: how many of a session's grants its card is sent (FR-475); more than this is not a card. */
+export const AGENT_SESSION_GRANTS_SHOWN = 32;
 
 const agentSessionViewSchema = z.strictObject({
   sessionId: z.string().min(1).max(128),
@@ -4029,6 +4223,23 @@ const agentSessionViewSchema = z.strictObject({
    */
   sitePlan: z
     .strictObject({ origins: z.array(sitePlanOriginSchema).min(1).max(AGENT_SITE_PLAN_MAX_ORIGINS) })
+    .optional(),
+  /**
+   * 031 R-456, R-458, FR-475: the "This session" answers the owner gave this session, in the order
+   * given, with where each was given (`client` = the agent's own client, `browser` = the side panel).
+   * Absent from a 0.20 projection and whenever the session holds none; bounded so a long session
+   * cannot grow the frame without limit (the worker sends the first `AGENT_SESSION_GRANTS_SHOWN`).
+   */
+  grants: z
+    .array(
+      z.strictObject({
+        site: siteOriginSchema,
+        kind: z.enum(["page-actions", "diagnostics"]),
+        source: z.enum(["client", "browser"]),
+      }),
+    )
+    .min(1)
+    .max(AGENT_SESSION_GRANTS_SHOWN)
     .optional(),
   /**
    * 024 frames.md: the canonical origin the session acts on, when it acts on one, for the card's
@@ -4101,7 +4312,13 @@ export const agentEffectPromptSchema = z.strictObject({
    * (FR-187); an `upload-directory` card is about the owner's own files, raised by a `file_upload`
    * the host is holding (FR-192).
    */
-  kind: z.enum(["dialog-accept", "beforeunload-force", "transition", "upload-directory"]).optional(),
+  /**
+   * 031 R-460, D-031-9: a `diagnostics` card asks whether the debugger may be attached to `site` for
+   * `read_console`, `read_network` or `evaluate` (`tool`) - the site's diagnostics grant, not the
+   * action itself. Its answers are Allow once, This session (`session: true`), Always on this site
+   * (`grantDiagnostics: true`) and Refuse; a remembered mode is never read from it.
+   */
+  kind: z.enum(["dialog-accept", "beforeunload-force", "transition", "upload-directory", "diagnostics"]).optional(),
   /**
    * The move the owner is being asked about (014 FR-187): where the tab was, and where it is.
    *
@@ -4492,9 +4709,10 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
    * The owner's answer to one `ask` prompt (FR-042, FR-043).
    *
    * `rememberMode` is how FR-042's "set the site's mode from within an ask prompt" is expressed:
-   * one decision, optionally standing. It is a mode and only a mode - the diagnostics grant is a
-   * separate consent with its own control (US6), and letting it ride along here would grant it from
-   * a prompt that never mentioned it.
+   * one decision, optionally standing. It is a mode and only a mode: it never sets the diagnostics
+   * grant. Only `grantDiagnostics`, and only when the answered question is a diagnostics question,
+   * may set that grant (031 R-461) - the question names what it asks for, so a yes to it is a yes
+   * to exactly that, and no other prompt's answer can grant it.
    */
   z.strictObject({
     type: z.literal("ui.agent.effect-decide"),
@@ -4502,6 +4720,17 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
       promptId: z.string().min(1).max(128),
       allow: z.boolean(),
       rememberMode: siteModeSchema.optional(),
+      /**
+       * 031 R-456: "allow on this site for this session" - a grant that covers this origin and kind
+       * for the asking session only. `true` or absent, like the other flags: a `false` would be a
+       * second way to say "no", and `allow: false` already is.
+       */
+      session: z.literal(true).optional(),
+      /**
+       * 031 R-461: the diagnostics question's yes. The worker honours it only when `promptId` names a
+       * pending diagnostics question; on any other prompt it is ignored.
+       */
+      grantDiagnostics: z.literal(true).optional(),
       /**
        * 014 FR-191: the transition card's "always allow this pair". Its own flag rather than a
        * shared `remember`, because the three cards remember three different things - a site's
@@ -4511,6 +4740,21 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
       rememberTransition: z.boolean().optional(),
       /** 014 FR-193: the directory card's "these directories from now on". */
       rememberDirectory: z.boolean().optional(),
+    }).superRefine((payload, ctx) => {
+      // 031 R-461: `grantDiagnostics` is the diagnostics card's Always on this site and nothing else -
+      // a yes, alone. Beside a decline, another card's remembered mode, pair or directory, or the
+      // session answer (a different choice on the same card), it would be a second answer riding on
+      // the first, so the command is refused at the boundary rather than half-honoured.
+      if (payload.grantDiagnostics !== true) return;
+      if (
+        !payload.allow ||
+        payload.rememberMode !== undefined ||
+        payload.rememberTransition === true ||
+        payload.rememberDirectory === true ||
+        payload.session === true
+      ) {
+        ctx.addIssue({ code: "custom", path: ["grantDiagnostics"], message: "grantDiagnostics is the diagnostics card's yes alone" });
+      }
     }),
   }),
   /**

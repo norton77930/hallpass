@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   captureTab,
   captureThroughProtocol,
@@ -8,6 +8,7 @@ import {
   SCREENSHOT_MAX_AREA_PX,
   SCREENSHOT_MAX_BASE64_CHARS,
   SCREENSHOT_MAX_EDGE_PX,
+  SURFACE_CAPTURE_TIMEOUT_MS,
   viewportPictureSize,
   type CropRequest,
 } from "../src/chrome-adapters/capture.js";
@@ -566,5 +567,147 @@ describe("a whole-viewport picture is a JPEG, stepped down under the frame budge
 
     expect(qualities).toEqual([]);
     expect(image).toMatchObject({ data: "QUJD", mimeType: "image/png" });
+  });
+});
+
+/**
+ * 031/T939 - photographing without fronting (D-031-10, D-031-11, FR-478..480, R-462..R-464).
+ *
+ * T938 measured, on branded Chrome 156 and Playwright Chromium: the active tab of a covered window
+ * and the active tab of a minimized window come back fresh over `Page.captureScreenshot` with no
+ * activation (10/10, 4/4); a background tab's non-activated capture often never returns. So the
+ * active tab - whatever state its window is in - is photographed off its own surface, and a
+ * background tab keeps today's activate-and-restore, except in a minimized window, where the tab is
+ * brought forward inside that window (the window itself is never restored) and its surface taken.
+ * The surface picture is the same viewport `captureVisibleTab` hands back, so it goes through the
+ * same frame-pixel fitting, density and JPEG ladder as the visible-tab picture.
+ */
+describe("031 the surface path photographs a tab without bringing it forward", () => {
+  it("takes the surface for an active tab in any window state, and keeps the visible tab for a background one", () => {
+    for (const windowState of ["normal", "maximized", "minimized", undefined]) {
+      expect(decideCapturePath(undefined, REGION, 1, undefined, { active: true, windowState })).toEqual({ kind: "surface" });
+    }
+    // Background tabs: hung captures without activation (R-462), so today's path stays.
+    expect(decideCapturePath(undefined, REGION, 1, undefined, { active: false, windowState: "normal" })).toEqual({
+      kind: "visible-tab",
+    });
+    expect(decideCapturePath(undefined, undefined, 1, undefined, { active: false })).toEqual({ kind: "visible-tab" });
+    // In a minimized window the tab is activated inside it and its surface taken: captureVisibleTab
+    // has no window on screen to photograph.
+    expect(decideCapturePath(undefined, undefined, 1, undefined, { active: false, windowState: "minimized" })).toEqual({
+      kind: "surface",
+    });
+    // An emulated tab keeps its own clipped path, whatever the tab's state (012, R-166).
+    expect(decideCapturePath({ width: 2560, height: 1440 }, undefined, 1, undefined, { active: true })).toMatchObject({
+      kind: "protocol",
+    });
+  });
+
+  it("is bounded by a few seconds, above every measured surface capture and below the call's own bound", () => {
+    // Measured returns: 61-81 ms (active, covered), 210-606 ms branded / up to 4.1 s Chromium (minimized).
+    expect(SURFACE_CAPTURE_TIMEOUT_MS).toBeGreaterThan(4_100);
+    expect(SURFACE_CAPTURE_TIMEOUT_MS).toBeLessThanOrEqual(10_000);
+  });
+
+  it("photographs an active tab off its surface, activating nothing, at the frame's CSS size", async () => {
+    const activated: number[] = [];
+    const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    const crops: CropRequest[] = [];
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, restoreTabId: 1, frame: FRAME, path: { kind: "surface" } },
+      {
+        captureVisibleTab: async () => {
+          throw new Error("the surface path must not photograph the window");
+        },
+        activateTab: async (tabId) => void activated.push(tabId),
+        send: async (_tabId, method, params) => {
+          sent.push({ method, ...(params === undefined ? {} : { params }) });
+          return { data: "U1VSRkFDRQ==" };
+        },
+        measure: async () => IMAGE,
+        crop: async (dataUrl, request) => {
+          expect(dataUrl).toBe("data:image/png;base64,U1VSRkFDRQ==");
+          crops.push(request);
+          const rect = cropRect(request.frame, IMAGE, request.region, request.scale);
+          return { data: "UkVTSVpFRA==", width: rect.outWidth, height: rect.outHeight };
+        },
+        encodeJpeg: async () => "/9j/4AAQ",
+      },
+    );
+
+    // One unclipped capture of the viewport, the same picture captureVisibleTab would have taken.
+    expect(sent).toEqual([{ method: "Page.captureScreenshot", params: { format: "png", fromSurface: true } }]);
+    expect(activated).toEqual([]);
+    // DPR 1.25: fitted to the frame's CSS size exactly as the visible-tab path fits it (R-280), then JPEG.
+    expect(crops).toEqual([{ frame: FRAME, scale: 1 }]);
+    expect(image).toEqual({ data: "/9j/4AAQ", mimeType: "image/jpeg", cropped: false, scale: 1, width: 1187, height: 707 });
+  });
+
+  it("crops a region off the surface at the picture's own density", async () => {
+    const crops: CropRequest[] = [];
+    const image = await captureTab(
+      { tabId: 7, windowId: 9, isActive: true, region: REGION, frame: FRAME, scale: 1, path: { kind: "surface" } },
+      {
+        send: async () => ({ data: "U1VSRkFDRQ==" }),
+        crop: async (_dataUrl, request) => {
+          crops.push(request);
+          return { data: "cmVnaW9u", width: 375, height: 125 };
+        },
+      },
+    );
+
+    expect(crops).toEqual([{ frame: FRAME, region: REGION, scale: 1 }]);
+    expect(image).toEqual({ data: "cmVnaW9u", mimeType: "image/png", cropped: true, scale: 1, width: 375, height: 125 });
+  });
+
+  it("brings a background tab of a minimized window forward inside it, waits for a frame over the attachment, and puts the owner's tab back", async () => {
+    const steps: string[] = [];
+    await captureTab(
+      { tabId: 7, windowId: 9, isActive: false, restoreTabId: 1, path: { kind: "surface" } },
+      {
+        activateTab: async (tabId) => void steps.push(`activate ${tabId}`),
+        send: async (_tabId, method) => {
+          steps.push(method);
+          return method === "Page.captureScreenshot" ? { data: "QUJD" } : {};
+        },
+        measure: async () => undefined,
+        crop: async () => undefined,
+      },
+    );
+    expect(steps).toEqual(["activate 7", "Runtime.evaluate", "Page.captureScreenshot", "activate 1"]);
+  });
+
+  it("gives up on a surface capture that does not return, and still puts the owner's tab back", async () => {
+    vi.useFakeTimers();
+    try {
+      const activated: number[] = [];
+      const capturing = captureTab(
+        { tabId: 7, windowId: 9, isActive: false, restoreTabId: 1, path: { kind: "surface" } },
+        {
+          activateTab: async (tabId) => void activated.push(tabId),
+          awaitFrame: async () => undefined,
+          // R-462's failure mode: the command is sent and never answered.
+          send: () => new Promise(() => undefined),
+          measure: async () => undefined,
+        },
+      );
+      const settled = capturing.then(
+        () => "resolved",
+        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+      );
+      await vi.advanceTimersByTimeAsync(SURFACE_CAPTURE_TIMEOUT_MS - 1);
+      expect(activated).toEqual([7]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await settled).toBe("surface-capture-timed-out");
+      expect(activated).toEqual([7, 1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses an answer with no image rather than handing back an empty picture", async () => {
+    await expect(
+      captureTab({ tabId: 7, windowId: 9, isActive: true, path: { kind: "surface" } }, { send: async () => ({}) }),
+    ).rejects.toThrow();
   });
 });
