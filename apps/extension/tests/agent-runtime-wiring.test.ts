@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
-import { ASK_TIMEOUT_MS } from "../src/service-worker/agent-tools/prompts.js";
+import { agentPanelMessageSchema, CONSENT_TIMEOUT_HINT } from "@hallpass/contracts";
+import { CLOSED_PANEL_TIMEOUT_MS } from "../src/service-worker/agent-tools/prompts.js";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 import { oneDocumentAnswer } from "./helpers/point-site.js";
 
@@ -192,7 +193,7 @@ describe("T018 agent runtime wiring", () => {
       // 014/R-187: and what this worker can be asked - the host asks about an upload directory
       // only where a card can actually be raised.
       // 015 FR-219: and that it takes a withdrawal, which is what lets the host name its exchange.
-      features: ["upload-consent", "pair-withdraw", "site-plan"],
+      features: ["upload-consent", "pair-withdraw", "site-plan", "terminal-consent"],
     });
 
     await runtime.tabs.adopt("session-h1", 7);
@@ -406,10 +407,11 @@ describe("T018 agent runtime wiring", () => {
         boundMs: 120_000,
       });
 
-      // The person clicks the icon: the panel connects, and the card is now in front of them.
+      // The person clicks the icon: the panel connects. 031 D-031-6, FR-473: was `[false, true,
+      // false]` - the mark now stays until the question is answered, whoever can see the panel.
       connected = true;
       for (const listener of presenceListeners) listener(true);
-      expect(marks).toEqual([false, true, false]);
+      expect(marks).toEqual([false, true]);
 
       await runtime.pairing.decide("agent-1", true);
       await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ type: "pair-result", accepted: true }));
@@ -431,7 +433,10 @@ describe("T018 agent runtime wiring", () => {
    * mean the bounds they were written under, so the assumption is "somebody is looking" - the same
    * one `prompts.ts` and `pairing-controller.ts` make when they are handed no presence at all.
    */
-  it("raises a question on the open-panel bound until a panel presence is bound", async () => {
+  // 031 R-454: was "raises a question on the open-panel bound until a panel presence is bound",
+  // awaiting `ASK_TIMEOUT_MS` (25 s) with no hint. There is one bound now, whatever is known about
+  // the panel, and every expiry carries the sentence that says where to answer.
+  it("raises a question on the one 120 s bound even before a panel presence is bound", async () => {
     vi.useFakeTimers();
     try {
       const port = fakePort();
@@ -451,10 +456,11 @@ describe("T018 agent runtime wiring", () => {
       });
       await vi.waitFor(() => expect(runtime.prompts.current()).toBeDefined());
 
-      await vi.advanceTimersByTimeAsync(ASK_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(CLOSED_PANEL_TIMEOUT_MS - 1_000);
+      expect(runtime.prompts.current(), "the old 25 s bound took it down").toBeDefined();
+      await vi.advanceTimersByTimeAsync(1_000);
 
-      // The pre-011 bound, and no instruction to open a panel nobody said was closed.
-      await expect(asked).resolves.toEqual({ decision: "timed-out" });
+      await expect(asked).resolves.toEqual({ decision: "timed-out", hint: CONSENT_TIMEOUT_HINT });
     } finally {
       vi.useRealTimers();
     }
@@ -486,6 +492,184 @@ describe("T018 agent runtime wiring", () => {
 
     await expect(asked).resolves.toEqual({ decision: "timed-out" });
     expect(runtime.prompts.current()).toBeUndefined();
+  });
+
+  /**
+   * 031 T921, T922 - terminal consent and session grants in the composed runtime.
+   *
+   * The bridge only carries frames, so what is left to show here is the runtime's own routing: a
+   * client answer settles a question of the session the frame names and no other, the question and
+   * its end both reach the client, and a session's grants are on its card and go with it.
+   */
+  async function pairedRuntime() {
+    const port = fakePort();
+    const runtime = composeAgentRuntime({ connectNative: () => port });
+    runtime.start();
+    port.emit(HELLO);
+    port.emit(PAIR_REQUEST);
+    await vi.waitFor(async () => expect((await runtime.pairing.state()).pending).toBeDefined());
+    await runtime.pairing.decide("agent-1", true);
+    return { port, runtime };
+  }
+
+  it("settles a question from its own session's client answer, never from another session's (FR-468)", async () => {
+    const { port, runtime } = await pairedRuntime();
+    port.emit({ ...HELLO, sessionId: "session-h2" });
+
+    const asked = runtime.prompts.ask({
+      callId: "call-1",
+      sessionId: "session-h1",
+      site: "https://agent.test",
+      tool: "click",
+      argsSummary: "click a page element",
+    });
+    await vi.waitFor(() =>
+      expect(port.sent).toContainEqual({
+        type: "prompt-raised",
+        sessionId: "session-h1",
+        callId: "call-1",
+        promptId: expect.any(String),
+        kind: "effect",
+        site: "https://agent.test",
+        action: "click a page element",
+        choices: ["once", "session", "deny"],
+        boundMs: 120_000,
+      }),
+    );
+
+    const promptId = runtime.prompts.current()?.promptId ?? "";
+    port.emit({ type: "prompt-answer", sessionId: "session-h2", callId: "call-1", promptId, choice: "once" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(runtime.prompts.current(), "another session's answer settled this question").toBeDefined();
+
+    port.emit({ type: "prompt-answer", sessionId: "session-h1", callId: "call-1", promptId, choice: "once" });
+    await expect(asked).resolves.toEqual({ decision: "allow", answeredFrom: "client" });
+    expect(port.sent).toContainEqual({ type: "prompt-settled", sessionId: "session-h1", callId: "call-1", promptId, answeredFrom: "client" });
+  });
+
+  it("shows a session's grants on its card, with their source, and drops them when the session ends", async () => {
+    fake.session.agentSessionGrants = {
+      "session-h1": {
+        agentId: "agent-1",
+        grants: [{ site: "https://agent.test", kind: "page-actions", source: "client", grantedAt: 1 }],
+      },
+    };
+    const { port, runtime } = await pairedRuntime();
+
+    await vi.waitFor(async () =>
+      expect((await runtime.projection()).sessions[0]).toMatchObject({
+        sessionId: "session-h1",
+        grants: [{ site: "https://agent.test", kind: "page-actions", source: "client" }],
+      }),
+    );
+    expect(
+      agentPanelMessageSchema.safeParse({ type: "worker.agent.state", payload: await runtime.projection() }).success,
+    ).toBe(true);
+
+    port.emit({ type: "session-ended", sessionId: "session-h1" });
+    await vi.waitFor(() => expect(fake.session.agentSessionGrants).toEqual({}), { timeout: 3_000 });
+  });
+
+  /**
+   * 031 T935 (R-460, D-031-9): a diagnostics call on an ungranted site puts a diagnostics question to
+   * the agent's client, with the three short answers, and the client's This session becomes a
+   * diagnostics grant of that session - never the site's checkbox.
+   */
+  it("asks the client a diagnostics question for read_console, and records its session answer as a diagnostics grant", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await runtime.tabs.adopt("session-h1", 7);
+
+    port.emit({ callId: "call-d", sessionId: "session-h1", tool: "read_console", args: { tabId: 7 } });
+    await vi.waitFor(() =>
+      expect(port.sent).toContainEqual({
+        type: "prompt-raised",
+        sessionId: "session-h1",
+        callId: "call-d",
+        promptId: expect.any(String),
+        kind: "diagnostics",
+        site: "https://agent.test",
+        action: "turn on diagnostics to read the console",
+        choices: ["once", "session", "deny"],
+        boundMs: 120_000,
+      }),
+    );
+    // The card the panel shows is the diagnostics card, for the same site.
+    expect(runtime.prompts.current()).toMatchObject({ kind: "diagnostics", site: "https://agent.test", tool: "read_console" });
+
+    const promptId = runtime.prompts.current()?.promptId ?? "";
+    port.emit({ type: "prompt-answer", sessionId: "session-h1", callId: "call-d", promptId, choice: "session" });
+
+    await vi.waitFor(() =>
+      expect(fake.session.agentSessionGrants).toEqual({
+        "session-h1": {
+          agentId: "agent-1",
+          grants: [{ site: "https://agent.test", kind: "diagnostics", source: "client", grantedAt: expect.any(Number) }],
+        },
+      }),
+    );
+    expect(port.sent).toContainEqual({ type: "prompt-settled", sessionId: "session-h1", callId: "call-d", promptId, answeredFrom: "client" });
+    expect((await runtime.siteModes.get("https://agent.test")).diagnosticsGranted).toBe(false);
+  });
+
+  /**
+   * 031 R-461 (US3 scenario 4): the card's Always on this site is the site's diagnostics checkbox,
+   * ticked from the card - and the panel hears about it as it would about the checkbox itself.
+   */
+  it("ticks the site's diagnostics checkbox for the card's Always on this site, and tells the panel", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await runtime.tabs.adopt("session-h1", 7);
+
+    port.emit({ callId: "call-d", sessionId: "session-h1", tool: "read_console", args: { tabId: 7 } });
+    await vi.waitFor(() => expect(runtime.prompts.current()).toMatchObject({ kind: "diagnostics", site: "https://agent.test" }));
+
+    // Each notification before the call's answer, with what storage held at that very moment: the
+    // fake's `get` copies synchronously, so a later write cannot leak into an earlier snapshot.
+    const answered = (): boolean =>
+      port.sent.some((message) => (message as { callId?: string; outcome?: string }).callId === "call-d" && "outcome" in (message as object));
+    const local = (globalThis as { chrome: { storage: { local: { get(keys: string[]): Promise<Record<string, unknown>> } } } })
+      .chrome.storage.local;
+    const seen: Array<Promise<boolean>> = [];
+    runtime.subscribe(() => {
+      if (answered()) return;
+      seen.push(local.get(["agentSiteModes"]).then((raw) =>
+        (raw.agentSiteModes as Record<string, { diagnosticsGranted?: boolean }> | undefined)?.["https://agent.test"]
+          ?.diagnosticsGranted === true,
+      ));
+    });
+    runtime.prompts.decide(runtime.prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, undefined, true);
+
+    await vi.waitFor(() => expect(answered()).toBe(true));
+    expect((await runtime.siteModes.get("https://agent.test")).diagnosticsGranted).toBe(true);
+    expect(await Promise.all(seen), "a notification after the grant was written, before the call answered").toContain(true);
+    // The site's grant, not a session one.
+    expect(fake.session.agentSessionGrants ?? {}).toEqual({});
+  });
+
+  it("shows none of another agent's grants on the card of a session greeted under the same id after a restart", async () => {
+    // What a restarted worker finds: a grant recorded for this session id, under another agent.
+    fake.session.agentSessionGrants = {
+      "session-h1": {
+        agentId: "agent-2",
+        grants: [{ site: "https://agent.test", kind: "page-actions", source: "client", grantedAt: 1 }],
+      },
+    };
+    const { runtime } = await pairedRuntime();
+
+    await vi.waitFor(async () => expect((await runtime.projection()).sessions[0]).toMatchObject({ sessionId: "session-h1" }));
+    expect((await runtime.projection()).sessions[0]?.grants).toBeUndefined();
+  });
+
+  it("drops every grant of an agent the owner unpairs", async () => {
+    fake.session.agentSessionGrants = {
+      "session-h1": { agentId: "agent-1", grants: [{ site: "https://agent.test", kind: "page-actions", source: "browser", grantedAt: 1 }] },
+      // A session this worker does not know (it restarted): cleared by the agent id it recorded.
+      "session-old": { agentId: "agent-1", grants: [{ site: "https://agent.test", kind: "page-actions", source: "browser", grantedAt: 1 }] },
+    };
+    const { runtime } = await pairedRuntime();
+
+    await runtime.unpair("agent-1");
+
+    expect(fake.session.agentSessionGrants).toEqual({});
   });
 
   /**
@@ -588,15 +772,22 @@ describe("T018 agent runtime wiring", () => {
     runtime.prompts.decide(runtime.prompts.current()?.promptId ?? "", false);
     await asked;
     expect(writes.at(-1)).toEqual([groupId, { title: "Hallpass" }]);
+    // 031 R-452: the question also went to the agent's client, and its end with it - after the
+    // tick the question sends the moment it is armed (032 R-486).
+    expect(port.sent.slice(1).map((frame) => (frame as { type: string }).type)).toEqual([
+      "prompt-waiting",
+      "prompt-raised",
+      "prompt-settled",
+    ]);
 
     port.emit({ callId: "call-2", sessionId: "session-h1", tool: "tabs_context", args: {} });
-    await vi.waitFor(() => expect(port.sent).toHaveLength(2));
+    await vi.waitFor(() => expect(port.sent).toHaveLength(5));
     expect(writes.at(-1)).toEqual([groupId, { title: "⌛ Hallpass" }]);
     // The second after the call ends: the hourglass comes off.
     await vi.waitFor(() => expect(writes.at(-1)).toEqual([groupId, { title: "Hallpass" }]), { timeout: 3000 });
 
     port.emit({ callId: "call-3", sessionId: "session-h1", tool: "tabs_context", args: {} });
-    await vi.waitFor(() => expect(port.sent).toHaveLength(3));
+    await vi.waitFor(() => expect(port.sent).toHaveLength(6));
     port.emit({ type: "stop", sessionId: "session-h1" });
     // The ending path is not instant (recording, windows, attachments), hence the longer bound.
     await vi.waitFor(() => expect(writes.at(-1)).toEqual([groupId, { title: "", color: "grey" }]), {

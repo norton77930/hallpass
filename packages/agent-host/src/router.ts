@@ -4,6 +4,7 @@ import {
   type AgentNativeRequest,
   type AgentNativeResponse,
   type AgentToolOutcome,
+  type PromptRaisedFrame,
   type PromptWaitingFrame,
 } from "@hallpass/contracts";
 
@@ -24,9 +25,10 @@ import {
  * The host's backstop for a call the worker never answers.
  *
  * It is a backstop and nothing else (003 D-M3-1). Every deadline that means something to the owner
- * belongs to the worker: the `ask` prompt's own bound is 25 s there, strictly under this, so a
- * prompt nobody answers is reported as the worker's `timed-out` with the tool's own reason rather
- * than as the transport giving up. This one only exists because an MV3 worker torn down mid-call, a
+ * belongs to the worker: a question's own bound is 120 s there (031 R-453), and its raise and ticks
+ * hold this one off for that long, so a prompt nobody answers is reported as the worker's
+ * `timed-out` with the tool's own reason rather than as the transport giving up. This one only
+ * exists because an MV3 worker torn down mid-call, a
  * page that never settles, and a relay whose socket died without an EOF all look identical from
  * here, and a promise that never settles turns any of them into a hung agent session. When it does
  * fire, the host also sends a `stop` naming the call, so the worker cancels whatever it was still
@@ -50,13 +52,17 @@ export const CALL_TIMEOUT_MS = AGENT_CALL_TIMEOUT_MS;
 export const KEEP_ALIVE_SLACK_MS = 10_000;
 
 /**
- * The longest a call may be held by ticks, from the moment it was admitted (011 R-162).
+ * The longest a question may hold a call, from the moment it was raised (011 R-162, 031 R-453).
  *
- * The two-minute closed-panel bound plus the slack, and not a millisecond more. Without a cap the
- * ticks would be a way for the far side to hold a call open indefinitely - a worker with a stuck
- * prompt, or a frame from anywhere else - and the one promise this router makes is that every call
- * ends. A call whose own arguments asked for longer (`wait`, `browser_batch`) keeps what it asked
- * for: the cap bounds what a tick may *add*, never what the agent already stated.
+ * The one 120 s question bound plus the slack, and not a millisecond more. It is measured from when
+ * the call's latest question was shown - its `prompt-raised`, or a tick's `now - waitedMs` for a
+ * question only Chrome shows (032 R-486) - since a `browser_batch` asks one question per step, each
+ * with its own two minutes (T929 I2), and from the call's admission until a question is shown.
+ * Without a cap the ticks would be a way for the far side to hold a call open indefinitely - a
+ * worker with a stuck prompt, whose ticks' `waitedMs` grows with the clock and so never moves the
+ * point - and the one promise this router makes is that every call ends. A call whose own
+ * arguments asked for longer (`wait`, `browser_batch`) keeps what it asked for: the cap bounds what
+ * a tick may *add*, never what the agent already stated.
  */
 export const KEEP_ALIVE_CAP_MS = 130_000;
 
@@ -80,8 +86,12 @@ type PendingCall = {
   tabKey: number | undefined;
   settle: (response: AgentNativeResponse) => void;
   timer: ReturnType<typeof setTimeout>;
-  /** When the call was admitted, so a tick's cap is measured from one fixed point (011). */
-  admittedAt: number;
+  /**
+   * The cap's fixed point (011, 031 R-453, 032 R-486): the latest of the call's admission, each
+   * `prompt-raised`, and each tick's `now - waitedMs` - when the question it is about was shown. It
+   * only ever moves later.
+   */
+  shownAt: number;
   /** When the backstop is armed to fire, so a tick can only ever move it later. */
   deadline: number;
   /** Fires the backstop; held so a tick can re-arm the same ending rather than describe it twice. */
@@ -143,7 +153,7 @@ export class CallRouter {
         tabKey: tabId,
         settle: resolve,
         timer,
-        admittedAt,
+        shownAt: admittedAt,
         deadline: admittedAt + boundMs,
         expire,
       });
@@ -177,30 +187,64 @@ export class CallRouter {
    * The worker says one of its questions is still waiting, so the backstop steps back (011 FR-150).
    *
    * The only reason a call is held longer than the flat backstop is that a person is being asked
-   * something they cannot yet see - a pairing or consent card in a side panel Chrome will not let
-   * the worker open (R-160). The worker fixed that question's bound when it raised it and repeats
-   * the arithmetic in every tick, so nothing is remembered here between ticks: the new ending is
-   * "the rest of the bound, plus a round trip", and the worker's own `timed-out` is expected to
-   * arrive inside that slack.
+   * something - a consent card, or the same question in the agent's client - and every question has
+   * one 120 s bound from its raise (031 R-453). The worker fixed that bound when it raised it and
+   * repeats the arithmetic in every tick, so a tick needs nothing remembered here but the cap's
+   * fixed point: the new ending is "the rest of the bound, plus a round trip", and the worker's own
+   * `timed-out` is expected to arrive inside that slack.
    *
    * Three things it deliberately does not do. It never extends a call this router is not holding -
    * a tick naming another session's call, or the pairing tick that names no call at all, is not
    * this router's business. It never moves an ending *earlier*, so a `browser_batch` that asked for
    * five minutes and raised a prompt on the way does not end at two. And it never postpones past
-   * `KEEP_ALIVE_CAP_MS` from the moment the call was admitted, so a stuck prompt cannot hold a call
-   * open for as long as it likes.
+   * `KEEP_ALIVE_CAP_MS` from when the question was shown, so a stuck prompt cannot hold a call open
+   * for as long as it likes.
+   *
+   * 032 R-486 (#61): "when the question was shown" is the tick's own `now - waitedMs`, not only the
+   * latest `prompt-raised` - a question shown only in Chrome sends none, and a late one in a long call
+   * was cut at admission + cap, before its two minutes. A stuck question's ticks grow `waitedMs` with
+   * the clock, so its point stays where it was shown; the worker's tick at `waitedMs: 0` the moment a
+   * question is armed is what moves it.
    */
   noteWaiting(frame: PromptWaitingFrame): void {
     if (frame.callId === undefined) {
       return;
     }
-    const pending = this.#pending.get(frame.callId);
+    this.#shownAt(frame.callId, Date.now() - frame.waitedMs);
+    this.#holdFor(frame.callId, frame.boundMs - frame.waitedMs);
+  }
+
+  /**
+   * 031 R-453: a question was raised for one of this router's calls. It is the tick that has waited
+   * nothing yet - the same arithmetic, the same "never earlier" - so the backstop cannot fire between
+   * the raise and the worker's first `prompt-waiting`. It also moves the cap's fixed point to now: a
+   * batch's later step asks its own question, which gets its own whole bound (T929 I2).
+   */
+  noteRaised(frame: PromptRaisedFrame): void {
+    if (!this.#pending.has(frame.callId)) {
+      return;
+    }
+    this.#shownAt(frame.callId, Date.now());
+    this.#holdFor(frame.callId, frame.boundMs);
+  }
+
+  /** Moves the cap's fixed point to `at` when that is later than it is (032 R-486); never earlier. */
+  #shownAt(callId: string, at: number): void {
+    const pending = this.#pending.get(callId);
+    if (pending !== undefined && at > pending.shownAt) {
+      pending.shownAt = at;
+    }
+  }
+
+  #holdFor(callId: string, remainingMs: number): void {
+    const pending = this.#pending.get(callId);
     if (!pending) {
       return;
     }
     const now = Date.now();
-    const asked = now + Math.max(0, frame.boundMs - frame.waitedMs) + KEEP_ALIVE_SLACK_MS;
-    const deadline = Math.max(pending.deadline, Math.min(asked, pending.admittedAt + KEEP_ALIVE_CAP_MS));
+    const asked = now + Math.max(0, remainingMs) + KEEP_ALIVE_SLACK_MS;
+    const cap = pending.shownAt + KEEP_ALIVE_CAP_MS;
+    const deadline = Math.max(pending.deadline, Math.min(asked, cap));
     if (deadline <= pending.deadline) {
       return;
     }

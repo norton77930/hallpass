@@ -32,7 +32,13 @@ import type { AgentSessionContexts, AgentToolContext } from "./context.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
-import { captureFrameFacts, photographTab, screenshotTooLarge, type PhotographDeps } from "./photograph.js";
+import {
+  captureFrameFacts,
+  photographTab,
+  screenshotTooLarge,
+  windowMinimizedAnswer,
+  type PhotographDeps,
+} from "./photograph.js";
 import {
   spaceOfPicture,
   toViewportRegion,
@@ -96,6 +102,14 @@ export type AgentReadDeps = {
    * eviction the only thing missing is this worker's record of it.
    */
   ensureAttached?: PhotographDeps["ensureAttached"];
+  /**
+   * The screenshot's hold on the tab's attachment (031/T940, T945, D-031-10, R-466): with it, the
+   * active tab of a window - covered or minimized - is photographed off its own surface instead of
+   * being brought forward. Absent, the pre-031 paths are kept exactly.
+   */
+  holdAttachment?: PhotographDeps["hold"];
+  /** The window's state (031/T942); `chrome.windows.get` by default. */
+  windowState?: PhotographDeps["windowState"];
   /** Which documents a tab is made of (004/US4): the scripting API's all-frames execution. */
   enumerateFrames?: typeof enumerateTabFrames;
   /** 030/T902: the browser's sender for one message from a frame (R-440); the adapter by default. */
@@ -204,6 +218,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     ...(deps.sendOverAttachment ? { send: deps.sendOverAttachment } : {}),
     ...(deps.tabSize ? { tabSize: deps.tabSize } : {}),
     ...(deps.ensureAttached ? { ensureAttached: deps.ensureAttached } : {}),
+    ...(deps.holdAttachment ? { hold: deps.holdAttachment } : {}),
+    ...(deps.windowState ? { windowState: deps.windowState } : {}),
   };
 
   /** One document's own readable text; the same collection a 003 text read made, by frame. */
@@ -539,6 +555,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       if (photograph.reason === "input-unavailable") {
         return inputUnavailable(callId, photograph.unavailableReason);
       }
+      // 031 R-463: the window is minimized and its surface could not be taken; the owner restores it.
+      if (photograph.reason === "window-minimized") return windowMinimizedAnswer(callId);
       // A tab Chrome no longer has is stale; the restricted pages `captureVisibleTab` refuses are
       // the same ones FR-039 calls not readable, so that is that answer rather than a failure.
       return photograph.reason === "tab-gone"

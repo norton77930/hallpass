@@ -1,7 +1,15 @@
 import { useEffect, useState, type ReactElement } from "react";
 import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
-import { ACTIVITY_OUTCOME_KEYS, WINDOW_STATE_KEYS } from "../agent-panel-keys.js";
+import {
+  ACTIVITY_OUTCOME_KEYS,
+  CONSENT_ANSWER_KEYS,
+  CONSENT_PLACE_KEYS,
+  CONSENT_QUESTION_KEYS,
+  SESSION_GRANT_KIND_KEYS,
+  SESSION_GRANT_SOURCE_KEYS,
+  WINDOW_STATE_KEYS,
+} from "../agent-panel-keys.js";
 import { displayOrigin } from "./display-origin.js";
 
 /**
@@ -64,9 +72,30 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
       ? t("agent.activity.sitePlanOne")
       : t("agent.activity.sitePlan").replace("{n}", () => item.message ?? "");
   }
-  return t("agent.activity.dialog")
-    .replace("{site}", () => displayOrigin(item.site ?? ""))
-    .replace("{message}", () => item.message ?? "");
+  if (item.kind === "consent") {
+    // 032 FR-494, R-488: one sentence for a settled question, put together from the panel's own
+    // words: what was asked, the site, and where and how it was answered (or that nobody did).
+    const site = displayOrigin(item.site ?? "");
+    const question = item.question === undefined ? "" : t(CONSENT_QUESTION_KEYS[item.question]);
+    const { answer: given, channel } = item;
+    const answer =
+      given === undefined || given === "timed-out" || channel === undefined || channel === "none"
+        ? t("agent.activity.consentTimedOut")
+        : t("agent.activity.consentAnswered")
+            .replace("{answer}", () => t(CONSENT_ANSWER_KEYS[given]))
+            .replace("{place}", () => t(CONSENT_PLACE_KEYS[channel]));
+    return t("agent.activity.consent")
+      .replace("{question}", () => question)
+      .replace("{site}", () => site)
+      .replace("{answer}", () => answer);
+  }
+  if (item.kind === "dialog") {
+    return t("agent.activity.dialog")
+      .replace("{site}", () => displayOrigin(item.site ?? ""))
+      .replace("{message}", () => item.message ?? "");
+  }
+  // A kind a newer worker sends and this panel has no sentence for: said plainly, never as a dialog.
+  return t("agent.activity.other");
 }
 
 /**
@@ -280,6 +309,20 @@ export function SessionCard(props: {
             {t("agent.session.manageSite")}
           </button>
         )}
+        {/* 031 FR-475, R-458: what the owner allowed this session and where they said so, one line per
+            grant in the order given. Absent with none - an empty list is a fact about nothing. */}
+        {session.grants === undefined || session.grants.length === 0 ? null : (
+          <ul className="agent-session-grants" aria-label={t("agent.session.grants")}>
+            {session.grants.map((grant) => (
+              <li key={`${grant.site}-${grant.kind}-${grant.source}`}>
+                {t("agent.session.grant")
+                  .replace("{site}", () => displayOrigin(grant.site))
+                  .replace("{kind}", () => t(SESSION_GRANT_KIND_KEYS[grant.kind]))
+                  .replace("{source}", () => t(SESSION_GRANT_SOURCE_KEYS[grant.source]))}
+              </li>
+            ))}
+          </ul>
+        )}
         {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
             recording and none has been exported - a card that said "no recording" would be a fact
             about nothing on every card the owner ever sees. */}
@@ -301,9 +344,15 @@ export function SessionCard(props: {
               would make them one item as far as React is concerned.
             */}
             {activity.map((item, index) => (
-              <li key={`${item.at}-${item.outcome}-${index}`}>
-                <span className="agent-activity-text">{activityText(item, t)}</span>{" "}
-                <span className="agent-activity-outcome">{t(ACTIVITY_OUTCOME_KEYS[item.outcome])}</span>
+              <li key={`${item.at}-${item.outcome ?? item.answer}-${index}`}>
+                <span className="agent-activity-text">{activityText(item, t)}</span>
+                {/* 032: a consent line says its answer in the sentence, so it has no outcome word. */}
+                {item.outcome === undefined ? null : (
+                  <>
+                    {" "}
+                    <span className="agent-activity-outcome">{t(ACTIVITY_OUTCOME_KEYS[item.outcome])}</span>
+                  </>
+                )}
               </li>
             ))}
           </ul>

@@ -926,6 +926,22 @@ describe("030 a drop point is decided by the frame under it", () => {
     expect((await siteModes.get(PAY)).mode).toBe("skip-checks");
   });
 
+  /**
+   * 031/T945 (R-466): the walk before the gate and the walk again before the drop ride the same
+   * attachment, so the call holds it through the owner's answer, and lets go when it answers.
+   */
+  it("holds the attachment from the walk before the gate through the drop, and lets go when it answers", async () => {
+    const { runner, prompts, holds } = dropHarness([payFrame()]);
+
+    const pending = runner.run(dropAt(OVER_FRAME));
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(holds.filter((hold) => !hold.done)).toHaveLength(1);
+
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+    expect((await pending).outcome).toBe("ok");
+    expect(holds.every((hold) => hold.done)).toBe(true);
+  });
+
   it("is decided by the frame's own mode, and walks the point again right before the drop", async () => {
     const { runner, siteModes, prompts, deliverImage, page } = dropHarness([payFrame()]);
     await siteModes.set(PAY, { mode: "skip-checks" });

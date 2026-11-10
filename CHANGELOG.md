@@ -5,6 +5,27 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.21.0 — 2026-11-10
+
+- **Questions also come to the agent's own client.** A consent question is also asked in the coding
+  agent's client (for example Claude Code's terminal) when the client supports MCP form questions:
+  page actions, dialogs, leaving a page with unsaved work, diagnostics, a move to a site you have not
+  decided about, and a site plan. The client offers only short-lived answers (once, this session,
+  deny); "always" and the plan and upload-folder cards stay in Chrome. The first answer counts, and
+  the card in Chrome is withdrawn. The toolbar mark shows whenever a question is waiting.
+- **Every question gets its full 120 s** from when it is shown, not from when the call started (#61).
+- **Diagnostics ask instead of refusing.** `read_console`, `read_network` and `evaluate` on a site
+  without the diagnostics grant now ask; the card can also grant it for the site.
+- **Revoking a site takes back session allowances** (#58): every live session loses its page-action
+  and diagnostics allowances on that site, its site-plan entry and its allowed moves into it, so the
+  next action there asks again.
+- **The activity list names each answer** (#59): site, the answer, and where it was given
+  (terminal or Chrome).
+- **Screenshots of covered or minimized windows** are taken without bringing the window forward. The
+  debugger detaches after 20 s idle unless a recording, an emulated viewport, a diagnostics grant or an
+  open page dialog needs it, and a screenshot that times out no longer keeps it attached.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.20.1 — 2026-11-08
 
 - **Dependencies.** Patch and minor updates: `@modelcontextprotocol/sdk` 1.32.2, koffi 3.3.6 (its

@@ -9,7 +9,9 @@ import {
 } from "@hallpass/contracts";
 import type { TabOwnership } from "../agent-tab-manager.js";
 import { decideGate, type StatedPlan } from "./gate.js";
+import type { AttachmentCallHold } from "./input.js";
 import { ownershipRefusal } from "./ownership.js";
+import { pageActionsCovered, recordSessionGrant, type PageActionGrants } from "./page-action-grants.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import type { AgentToolRequest } from "./stop.js";
 
@@ -84,6 +86,15 @@ export type UnloadWatch = { settled: Promise<BeforeunloadOutcome>; end(): void }
 export type AgentDialogsDeps = {
   /** One protocol command on the tab's existing attachment (`input.ts`'s `send`). */
   send(tabId: number, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /**
+   * The tab's attachment, held for a use of it (`input.ts`'s `hold`, 031/R-466, slice C review I1).
+   *
+   * A dialog outlives the call that raised it, so the idle release must not take the attachment
+   * from under one: it is the only wire the answer goes over and the only one the owner's own
+   * "closed by hand" is heard on. Held while a dialog is open, and for the length of a `dialog`
+   * call. Absent holds nothing, which is a composition with no idle release under it.
+   */
+  hold?(tabId: number): Promise<AttachmentCallHold>;
   siteModes: {
     get(site: string): Promise<{ mode: SiteMode }>;
     // 019 R-328, T556: `session` names whose card it was; the store records that session's kind.
@@ -111,6 +122,8 @@ export type AgentDialogsDeps = {
    * current top-level origin from the browser's record. Absent is "not covered".
    */
   sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
+  /** 031 R-456, R-457: the session's page-actions grants, which cover pressing OK as a plan does. */
+  sessionGrants?: PageActionGrants;
   now?: () => number;
   livenessMs?: number;
   chainWindowMs?: number;
@@ -176,7 +189,33 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
    * too, and without this the owner's card would read "closed by hand" about the agent's own OK.
    */
   const answeredByUs = new Set<string>();
+  /**
+   * The attachment hold an open dialog keeps, per tab (031/R-466, slice C review I1).
+   *
+   * A promise because the event cannot wait for it; `hold` counts the call before its first await,
+   * so the idle countdown is cancelled the moment the dialog is heard. Let go of wherever the
+   * record goes - answered, closed by hand, forgotten - so nothing outlives the dialog it was for.
+   */
+  const openHolds = new Map<number, Promise<AttachmentCallHold | undefined>>();
   let counter = 0;
+
+  function holdWhileOpen(tabId: number): void {
+    if (deps.hold === undefined || openHolds.has(tabId)) return;
+    openHolds.set(
+      tabId,
+      deps.hold(tabId).catch(() => {
+        deps.reportDiagnostic?.("agent.dialog.hold-failed");
+        return undefined;
+      }),
+    );
+  }
+
+  function letGoOpen(tabId: number): void {
+    const pending = openHolds.get(tabId);
+    if (pending === undefined) return;
+    openHolds.delete(tabId);
+    void pending.then((held) => held?.done());
+  }
 
   function logActivity(tabId: number, item: Omit<AgentActivityItem, "at">, sessionId?: string): void {
     const at = now();
@@ -253,9 +292,12 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
       ...(last && openedAt - last.approvedAt <= chainWindowMs ? { chainedTo: last } : {}),
     };
     current.set(tabId, dialog);
+    holdWhileOpen(tabId);
   }
 
   function closed(tabId: number): void {
+    // Whoever closed it, the page is not blocked any more: nothing needs the tab for it.
+    letGoOpen(tabId);
     const dialog = current.get(tabId);
     if (!dialog) return;
     current.delete(tabId);
@@ -310,6 +352,8 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
   async function handle(dialog: CurrentDialog, accept: boolean, promptText?: string): Promise<boolean> {
     answeredByUs.add(dialog.id);
     current.delete(dialog.tabId);
+    // The record goes here, so its hold does too; the `dialog` call's own hold covers the answer.
+    letGoOpen(dialog.tabId);
     try {
       await deps.send(dialog.tabId, "Page.handleJavaScriptDialog", {
         accept,
@@ -333,7 +377,7 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
     const parsed = agentToolArgSchemas[DIALOG_TOOL].safeParse(request.args);
     if (!parsed.success) return { callId, outcome: "failed", reason: "invalid-arguments" };
     const args = parsed.data as { tabId: number; action: "accept" | "dismiss"; promptText?: string };
-    const { tabId, action } = args;
+    const { tabId } = args;
 
     const ownership = await deps.tabOwnership(request.sessionId, tabId);
     if (ownership.state !== "this") return ownershipRefusal(callId, ownership);
@@ -344,6 +388,25 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
       // while the agent was deciding (US3 scenario 9).
       return refusalAnswer(callId, "failed", { reason: "no-dialog" });
     }
+
+    // 031/R-466 (slice C review I1): held for the call, as every effect is - before the gate and the
+    // card, so an owner deciding for longer than the idle countdown does not decide over nothing.
+    // After the check above, so a call with no dialog to answer attaches nothing.
+    const call = await deps.hold?.(tabId).catch(() => undefined);
+    try {
+      return await answerDialog(request, args, dialog);
+    } finally {
+      call?.done();
+    }
+  }
+
+  async function answerDialog(
+    request: AgentToolRequest,
+    args: { tabId: number; action: "accept" | "dismiss"; promptText?: string },
+    dialog: CurrentDialog,
+  ): Promise<AgentNativeResponse> {
+    const { callId } = request;
+    const { tabId, action } = args;
 
     /**
      * Whether this costs the owner a decision (D-008-4, FR-112).
@@ -371,7 +434,8 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
         tool: DIALOG_TOOL,
         args: args as unknown as Record<string, unknown>,
         ...(deps.statedPlan ? { plan: deps.statedPlan(site) } : {}),
-        sitePlanCovers: (await deps.sitePlanCovers?.(request.sessionId, site)) === true,
+        // 017 site plan, or 031 R-456 page-actions grant: either covers pressing OK (R-457).
+        sitePlanCovers: await pageActionsCovered(deps, request.sessionId, site),
       });
       if (decision.decision === "refuse") return { callId, outcome: "failed", reason: decision.reason };
       if (decision.decision === "admit" && decision.step !== undefined) deps.onAdmitted?.(site, decision.step);
@@ -423,6 +487,8 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
         if (held.state !== "this") return ownershipRefusal(callId, held);
         if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
         if (asked.rememberMode) await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
+        // 031 R-456: "This session" on a dialog's card is a page-actions grant like any other.
+        await recordSessionGrant(deps.sessionGrants, request.sessionId, site, DIALOG_TOOL, asked, deps.reportDiagnostic);
         // The owner may have pressed the dialog's own button in their browser while the card was
         // up; answering a dialog that is no longer there would be a claim about nothing.
         if (current.get(tabId)?.id !== dialog.id) return refusalAnswer(callId, "failed", { reason: "no-dialog" });
@@ -511,6 +577,7 @@ export function createAgentDialogs(deps: AgentDialogsDeps): AgentDialogs {
       };
     },
     forget(tabId) {
+      letGoOpen(tabId);
       current.delete(tabId);
       policies.delete(tabId);
       unloadWaiters.delete(tabId);

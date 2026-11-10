@@ -34,16 +34,23 @@ how they fit together.
   for this session; page actions on them then run without a card.
 - **A site the user has not decided about**: when a step lands on one, the call says so and the user is
   asked at your next call on that tab.
-- **Diagnostics** (`read_console`, `read_network`, `evaluate`) need a separate per-site grant from the
-  user. **Uploads** outside the user's allowed folders are asked about.
-- Waiting for a card is normal, not an error.
+- **In your own client**: when your client supports form prompts, the same question is also asked there
+  with three choices - allow once, allow on this site for this session, deny. The user can answer in
+  either place. A move to an undecided site and a site plan are asked there too, with two choices -
+  this session or deny. Always allow, `skip-checks` and diagnostics always on can only be chosen in
+  Chrome.
+- **Diagnostics** (`read_console`, `read_network`, `evaluate`) on a site without the diagnostics grant
+  ask the user the same way instead of refusing; allow once covers that one call, and `evaluate` also
+  needs the site's own action consent. **Uploads** outside the user's allowed folders are asked about.
+- Waiting for a question is normal, not an error: an unanswered one waits up to 120 seconds, and the
+  toolbar icon shows a badge meanwhile.
 
 ## When the answer is no
 
 - **Declined card**: that is the user's answer. Tell the user which step was not done and ask how to
   continue. Do not send the same step again on your own.
-- **Card timed out**: the user did not answer. Report it the same way; repeat the step only if the user
-  asks you to.
+- **Card timed out**: the user did not answer. Report it the same way and ask them to answer in
+  Chrome's side panel (toolbar icon, or Alt+A); repeat the step only if the user asks you to.
 - **Session ended, tabs taken back, or the step interrupted**: stop your browser work and say so.
 - Never try to get around a card: no other tool, tab or route to do the same step. Never ask the user to
   switch a site to `skip-checks`; the site mode is the user's choice in the side panel.

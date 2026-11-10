@@ -47,6 +47,15 @@ function fakeAttachments(): {
         ? { ok: true as const }
         : { ok: false as const, unavailableReason: refuse.reason };
     },
+    async hold(tabId: number) {
+      acquired.push({ tabId, holder: "input" });
+      const outcome =
+        refuse.reason === undefined
+          ? { ok: true as const }
+          : { ok: false as const, unavailableReason: refuse.reason };
+      return { outcome, done() {} };
+    },
+    holders: () => [],
     async drop() {},
     async release() {},
     async releaseAll() {},

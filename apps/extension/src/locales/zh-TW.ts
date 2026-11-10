@@ -166,6 +166,10 @@ export const messages: Record<MessageKey, string> = {
   // 016 FR-236：畫面上寫它允許什麼；無障礙名稱再加上網站。
   "agent.diagnosticsLabel": "允許讀取 {site} 的 console 與網路紀錄",
   "agent.diagnosticsText": "允許讀取 console 與網路紀錄",
+  // 031 FR-476: the diagnostics question's own "always" - it grants diagnostics, not the site's mode.
+  "agent.diagnosticsAlways": "這個網站一律允許",
+  // 031 FR-477: the same question asked for `evaluate`, which runs a script rather than reading logs.
+  "agent.diagnosticsEvaluateLabel": "允許在 {site} 執行腳本",
   "agent.promptTitle": "agent 想在網頁上做一件事",
   "agent.promptTarget": "{role}：{label}",
   "agent.promptCropAlt": "agent 想操作的網頁位置",
@@ -237,6 +241,13 @@ export const messages: Record<MessageKey, string> = {
   "agent.session.sitePlan": "網站計畫：{n} 個網站",
   "agent.session.sitePlanOne": "網站計畫：1 個網站",
   "agent.session.sitePlanWithdraw": "撤回網站計畫",
+  // 031 FR-475、R-458：這個工作階段被允許的事，一行一項：網站、種類、期間、來源。
+  "agent.session.grants": "這個工作階段已允許",
+  "agent.session.grant": "{site} · {kind} · 這個工作階段 · {source}",
+  "agent.session.grantKind.page-actions": "頁面操作",
+  "agent.session.grantKind.diagnostics": "診斷",
+  "agent.session.grantSource.client": "來自終端機",
+  "agent.session.grantSource.browser": "來自 Chrome",
   // 014 FR-178：停止旁邊的第二個控制，以及按下時什麼都沒在跑的那一行。
   "agent.session.interrupt": "中斷這一步",
   "agent.session.nothingToInterrupt": "沒有進行中的動作",
@@ -257,6 +268,25 @@ export const messages: Record<MessageKey, string> = {
   "agent.activity.uploadDrop": "截圖已拖放到 {site}",
   "agent.activity.unknownSite": "這個頁面",
   "agent.activity.interrupt": "主人中斷了一步",
+  // 032 FR-494：每個已結案的提問一行 — 問了什麼、哪個網站、在哪裡怎麼回答。
+  "agent.activity.consent": "{question} · {site} · {answer}",
+  "agent.activity.consentAnswered": "{answer}（{place}）",
+  "agent.activity.consentTimedOut": "沒有回答（逾時）",
+  "agent.activity.consentQuestion.effect": "頁面操作",
+  "agent.activity.consentQuestion.diagnostics": "診斷",
+  "agent.activity.consentQuestion.transition": "換網站",
+  "agent.activity.consentQuestion.site-plan": "網站計畫",
+  "agent.activity.consentQuestion.plan": "批次計畫",
+  "agent.activity.consentQuestion.upload-directory": "上傳資料夾",
+  "agent.activity.consentQuestion.dialog": "網頁對話框",
+  "agent.activity.consentPlace.client": "在終端機",
+  "agent.activity.consentPlace.browser": "在 Chrome",
+  "agent.activity.consentAnswer.once": "允許一次",
+  "agent.activity.consentAnswer.session": "允許這個工作階段",
+  "agent.activity.consentAnswer.always": "一律允許",
+  "agent.activity.consentAnswer.deny": "拒絕",
+  // 面板沒有用語的活動種類（較新的 worker）：絕不當成對話框那一句。
+  "agent.activity.other": "發生了一件事",
   "agent.activity.windowMaximized": "最大化",
   "agent.activity.windowFullscreen": "全螢幕",
   "agent.activity.accepted": "已按 確定",
@@ -288,6 +318,7 @@ export const messages: Record<MessageKey, string> = {
   "agent.ignore": "忽略",
   "agent.consentBody": "{agent} 想在 {site} 上{action}",
   "agent.allowOnce": "只允許這一次",
+  "agent.allowSession": "這個工作階段",
   "agent.allowAlways": "這個網站以後都允許",
   "agent.refuse": "拒絕",
   // 030 FR-457、FR-458:動作發生在內嵌框架裡,以及這個答案是針對誰。

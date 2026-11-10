@@ -315,7 +315,8 @@ describe("T019 agent panel port", () => {
           sessionId: "session-h1",
           accepted: true,
           browserRunId: expect.any(String),
-          features: ["upload-consent", "pair-withdraw", "site-plan"],
+          // 031 R-459: and that it puts its consent questions to the agent's client too.
+          features: ["upload-consent", "pair-withdraw", "site-plan", "terminal-consent"],
         },
       ]));
     await vi.waitFor(() =>
@@ -354,8 +355,12 @@ describe("T019 agent panel port", () => {
     );
     // The waiting session is told at once, marked as a decline of this request (FR-032a) so the host
     // asks afresh on the next call rather than treating it as an unpair.
-    await vi.waitFor(() => expect(nativePort.sent).toHaveLength(3));
-    expect(nativePort.sent[2]).toMatchObject({
+    // 031 R-452: the consent question also went to the agent's client, one frame before it - and
+    // 032 R-486: its first "still waiting", having waited nothing, the moment it was armed.
+    await vi.waitFor(() => expect(nativePort.sent).toHaveLength(5));
+    expect(nativePort.sent[2]).toMatchObject({ type: "prompt-waiting", sessionId: "session-h1", callId: "c-1", waitedMs: 0 });
+    expect(nativePort.sent[3]).toMatchObject({ type: "prompt-raised", sessionId: "session-h1", callId: "c-1" });
+    expect(nativePort.sent[4]).toMatchObject({
       type: "pair-result",
       agentId: "agent-1",
       sessionId: "session-h1",
@@ -457,6 +462,20 @@ describe("T019 agent panel port", () => {
     expect(decidePlan).toHaveBeenCalledWith("plan-1", true, [1]);
   });
 
+  /** 031 T932 (R-461): the diagnostics card's Always on this site reaches the controller as its own flag. */
+  it("carries the diagnostics card's Always on this site and This session to the prompt controller", async () => {
+    const { panel, runtime } = setup();
+    const port = fakePanelPort();
+    panel.accept(port);
+    const decide = vi.spyOn(runtime.prompts, "decide");
+
+    port.emit({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-1", allow: true, grantDiagnostics: true } });
+    port.emit({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-2", allow: true, session: true } });
+
+    expect(decide).toHaveBeenNthCalledWith(1, "prompt-1", true, undefined, undefined, undefined, false, true);
+    expect(decide).toHaveBeenNthCalledWith(2, "prompt-2", true, undefined, undefined, undefined, true, false);
+  });
+
   /** 018/T509 — the owner's answer on the "Use this browser?" card reaches the runtime (FR-274). */
   it("carries the owner's answer to a browser choice, and says so when it settled nothing", () => {
     const diagnostics: string[] = [];
@@ -498,10 +517,11 @@ describe("T019 agent panel port", () => {
       });
       await vi.waitFor(() => expect(port.sent.at(-1)).toMatchObject({ payload: { sitePlan: { origins: [A, B] } } }));
       const proposalId = built.runtime.prompts.currentSitePlan()?.proposalId ?? "";
+      // The answer, not the 032 `prompt-raised` / armed `prompt-waiting` frames that name the call.
       const answered = () =>
-        built.nativePort.sent.find((frame) => (frame as { callId?: string }).callId === "call-sp") as
-          | { outcome?: string; result?: unknown }
-          | undefined;
+        built.nativePort.sent.find(
+          (frame) => (frame as { callId?: string }).callId === "call-sp" && "outcome" in (frame as object),
+        ) as { outcome?: string; result?: unknown } | undefined;
       return { ...built, port, proposalId, answered };
     }
 
@@ -880,7 +900,10 @@ describe("T019 agent panel port", () => {
       expect(JSON.stringify(other.sent.at(-1))).toContain("agent-1");
     });
 
-    it("turns the badge off when the owner moves to the window that has the panel", async () => {
+    // 031 D-031-6, FR-473, R-454: was "turns the badge off when the owner moves to the window that
+    // has the panel". A panel in the focused window is not the owner's eyes on the card, so the mark
+    // now follows the question alone.
+    it("keeps the badge on while the card waits, whichever window the owner moves to", async () => {
       const marks: boolean[] = [];
       const focus = fakeFocus(1);
       const { panel, runtime, nativePort } = setup({ focus, setAttention: (on) => marks.push(on) });
@@ -895,9 +918,8 @@ describe("T019 agent panel port", () => {
       focus.move(2);
 
       expect(panel.isVisible()).toBe(true);
-      expect(marks.at(-1), "the card is now in front of the owner").toBe(false);
+      expect(marks.at(-1), "a visible panel no longer switches the mark off").toBe(true);
 
-      // And back: the owner left the window with the panel, the question is out of sight again.
       focus.move(1);
       expect(marks.at(-1)).toBe(true);
     });
@@ -945,13 +967,20 @@ describe("T019 agent panel port", () => {
 
       await vi.advanceTimersByTimeAsync(10_000);
       const waiting = () => nativePort.sent.filter((frame) => (frame as { type?: string }).type === "prompt-waiting");
-      expect(waiting(), "nothing said while the card is in front of the owner").toEqual([]);
+      // 031 R-454: was "nothing said while the card is in front of the owner". The consent question
+      // now ticks from its raise on the one 120 s bound whoever can see it; the pairing card, which
+      // 031 does not change, still says nothing while it is in sight.
+      // 032 R-486: the first tick at the raise itself.
+      expect(waiting(), "the consent question ticks from its raise").toEqual([
+        expect.objectContaining({ kind: "ask", callId: "call-1", boundMs: 120_000, waitedMs: 0 }),
+        expect.objectContaining({ kind: "ask", callId: "call-1", boundMs: 120_000, waitedMs: 5_000 }),
+        expect.objectContaining({ kind: "ask", callId: "call-1", boundMs: 120_000, waitedMs: 10_000 }),
+      ]);
 
       focus.move(2);
       expect(waiting()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ kind: "pairing", boundMs: 120_000, waitedMs: 10_000, panelConnected: false }),
-          expect.objectContaining({ kind: "ask", callId: "call-1", boundMs: 120_000, waitedMs: 10_000, panelConnected: false }),
         ]),
       );
 

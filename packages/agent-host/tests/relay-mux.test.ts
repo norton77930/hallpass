@@ -253,6 +253,88 @@ describe("relay multiplexer", () => {
     expect(mux.pendingCallCount()).toBe(1);
   });
 
+  /**
+   * 031/T919 (R-459) - the two terminal-consent frames from the worker are about a call, not its
+   * answer. `prompt-raised` says a question was raised for it and `prompt-settled` says the question
+   * left pending; the call itself is still waiting on the gate. Spending its entry on either would
+   * drop the real answer as unaddressed, exactly the case `prompt-waiting` is already exempt for.
+   */
+  it("keeps a call routable across prompt-raised and prompt-settled", () => {
+    const { mux, logs } = createHarness();
+    const connection = fakeConnection();
+    mux.fromServer(connection, hello("s-1"));
+    mux.fromServer(connection, { callId: "c-1", sessionId: "s-1", tool: "click", args: {} });
+
+    const raised = {
+      type: "prompt-raised",
+      sessionId: "s-1",
+      callId: "c-1",
+      promptId: "p-1",
+      kind: "effect",
+      site: "https://example.test",
+      action: "click the Submit button",
+      choices: ["once", "session", "deny"],
+      boundMs: 120_000,
+    };
+    const settled = { type: "prompt-settled", sessionId: "s-1", callId: "c-1", promptId: "p-1", answeredFrom: "browser" };
+    mux.fromWorker(raised);
+    expect(mux.pendingCallCount()).toBe(1);
+    mux.fromWorker(settled);
+    expect(mux.pendingCallCount()).toBe(1);
+    mux.fromWorker({ callId: "c-1", outcome: "ok", result: { verdict: "acted" } });
+
+    expect(connection.sent).toEqual([
+      { type: "hello-ack", relayPid: RELAY_PID },
+      raised,
+      settled,
+      { callId: "c-1", outcome: "ok", result: { verdict: "acted" } },
+    ]);
+    expect(logs.filter((line) => line.startsWith("relay.mux.dropped"))).toEqual([]);
+    expect(mux.pendingCallCount()).toBe(0);
+  });
+
+  /**
+   * 031/T919 - a `prompt-answer` is the owner's choice for one call, so it may come only from the
+   * session that made that call. One naming another session is refused by the T099e rule; one
+   * naming a call this session is not holding (another session's, or one already answered) reaches
+   * nobody - and it never registers a route, or a late answer would pin the drain count open.
+   */
+  it("forwards a prompt-answer only for the sending session's own call in flight", () => {
+    const { mux, toWorker, logs } = createHarness();
+    const alice = fakeConnection();
+    const bob = fakeConnection();
+    mux.fromServer(alice, hello("s-alice"));
+    mux.fromServer(bob, hello("s-bob"));
+    mux.fromServer(alice, { callId: "c-alice", sessionId: "s-alice", tool: "click", args: {} });
+    mux.fromServer(bob, { callId: "c-bob", sessionId: "s-bob", tool: "click", args: {} });
+    toWorker.length = 0;
+
+    expect(
+      mux.fromServer(alice, { type: "prompt-answer", sessionId: "s-bob", callId: "c-bob", promptId: "p-bob", choice: "once" }),
+    ).toBe("rejected");
+    expect(logs).toContain("relay.mux.frame-refused foreign-session");
+
+    // Alice's own session, but Bob's call: reaches nobody and does not take Bob's route over.
+    mux.fromServer(alice, { type: "prompt-answer", sessionId: "s-alice", callId: "c-bob", promptId: "p-bob", choice: "session" });
+    // Alice's own session, a call that is not in flight: dropped, and nothing is keyed for it.
+    mux.fromServer(alice, { type: "prompt-answer", sessionId: "s-alice", callId: "c-gone", promptId: "p-gone", choice: "once" });
+    expect(toWorker).toEqual([]);
+    expect(logs.filter((line) => line === "relay.mux.dropped prompt-answer")).toHaveLength(2);
+    expect(mux.pendingCallCount()).toBe(2);
+
+    const answer = { type: "prompt-answer", sessionId: "s-alice", callId: "c-alice", promptId: "p-alice", choice: "deny" };
+    expect(mux.fromServer(alice, answer)).toBe("accepted");
+    expect(toWorker).toEqual([answer]);
+    expect(mux.pendingCallCount()).toBe(2);
+
+    mux.fromWorker({ callId: "c-bob", outcome: "ok", result: { verdict: "acted" } });
+    expect(bob.sent).toEqual([
+      { type: "hello-ack", relayPid: RELAY_PID },
+      { callId: "c-bob", outcome: "ok", result: { verdict: "acted" } },
+    ]);
+    expect(alice.sent).toEqual([{ type: "hello-ack", relayPid: RELAY_PID }]);
+  });
+
   it("drops a frame for an unknown callId or sessionId instead of broadcasting it", () => {
     const { mux, logs } = createHarness();
     const first = fakeConnection();

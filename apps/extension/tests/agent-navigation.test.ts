@@ -1,6 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentDownloadRecord, AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
+import { scriptedDebugger } from "./helpers/scripted-debugger.js";
+import { createAgentDialogs } from "../src/service-worker/agent-tools/dialogs.js";
+import { IDLE_DETACH_MS, createInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import { createAgentTabTools } from "../src/service-worker/agent-tools/tabs.js";
 import { createAgentTabManager } from "../src/service-worker/agent-tab-manager.js";
 import { ownershipRefusal } from "../src/service-worker/agent-tools/ownership.js";
@@ -1244,6 +1247,67 @@ describe("T041 agent tab tools", () => {
       expect(asked[0]).toMatchObject({ kind: "beforeunload-force", tool: "navigate" });
       expect(stub.armed).toEqual(["leave"]);
       expect(answer).toMatchObject({ outcome: "ok", result: { url: "https://example.test/two" } });
+    });
+
+    it("still hears the page's leave-site prompt 20 s after the last effect: the navigation holds the tab (031 slice C P1)", async () => {
+      // The composition `agent-runtime.ts` makes: the real attachment store and dialogs module.
+      const debug = scriptedDebugger();
+      const attachments = createInputAttachments({ debug: debug.adapter });
+      const dialogs = createAgentDialogs({
+        send: (tabId, method, params) => attachments.send(tabId, method, params),
+        siteModes: { get: async () => ({ mode: "ask" as const }), set: async () => undefined },
+        prompts: { ask: async () => ({ decision: "deny" }) as never },
+        tabOwnership: async () => ({ state: "this" }) as never,
+        siteOfTab: async () => "https://example.test",
+        holderOf: async () => SESSION,
+        onActivity() {},
+        onNotice() {},
+      });
+      attachments.onEvent((tabId, method, params) => dialogs.onDebuggerEvent(tabId, method, params));
+      const tools = build(60, {
+        dialogs: { beginUnload: (tabId, policy) => dialogs.beginUnload(tabId, policy) },
+        holdAttachment: (tabId) => attachments.hold(tabId),
+      } as Partial<Parameters<typeof createAgentTabTools>[0]>);
+      const created = await tools.run(call("tabs_create", { url: "https://example.test/one" }));
+      const { tabId } = created.result as { tabId: number };
+
+      // An effect on the tab, then twenty quiet seconds: the idle release lets the tab go.
+      vi.useFakeTimers();
+      try {
+        (await attachments.hold(tabId)).done();
+        await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(debug.state.detached).toEqual([tabId]);
+
+      // The page has unsaved work: leaving it raises "leave site?", which is announced only over an
+      // attachment. Unheard, it is the owner's own prompt and the navigation simply never happens.
+      const chromeTabs = (globalThis as { chrome: { tabs: { update: (id: number, props: unknown) => Promise<unknown> } } })
+        .chrome.tabs;
+      chromeTabs.update = async (id) => {
+        debug.emit(id, "Page.javascriptDialogOpening", {
+          type: "beforeunload",
+          url: "https://example.test/one",
+          message: "",
+          hasBrowserHandler: true,
+        });
+        return fake.tabs.find((candidate) => candidate.id === id);
+      };
+
+      const answer = await tools.run(call("navigate", { tabId, url: "https://example.test/two" }));
+
+      expect(answer).toMatchObject({
+        outcome: "failed",
+        reason: "blocked-by-beforeunload",
+        refusal: { reason: "blocked-by-beforeunload", url: "https://example.test/one" },
+      });
+      expect(debug.state.commands).toContainEqual({
+        tabId,
+        method: "Page.handleJavaScriptDialog",
+        params: { accept: false },
+      });
+      await attachments.releaseAll();
     });
 
     it("runs nothing when the owner refuses the forced leave", async () => {

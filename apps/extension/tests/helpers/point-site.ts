@@ -275,11 +275,20 @@ export async function oneDocumentFocus(): Promise<Array<{ frameId: number; docum
 export function pointSiteAttachments(page?: ReturnType<typeof fakePointPage>) {
   const commands: Array<{ tabId: number; method: string; sessionId?: string }> = [];
   const acquired: Array<{ tabId: number; holder: string }> = [];
+  /** 031/T945: each call's hold, and whether its `done` has run. */
+  const holds: Array<{ tabId: number; done: boolean }> = [];
+  async function acquire(tabId: number, holder: string) {
+    acquired.push({ tabId, holder });
+    return { ok: true as const };
+  }
   const attachments = {
-    async acquire(tabId: number, holder: string) {
-      acquired.push({ tabId, holder });
-      return { ok: true as const };
+    acquire,
+    async hold(tabId: number) {
+      const entry = { tabId, done: false };
+      holds.push(entry);
+      return { outcome: await acquire(tabId, "input"), done: () => void (entry.done = true) };
     },
+    holders: () => [],
     async drop() {},
     async release() {},
     async releaseAll() {},
@@ -295,5 +304,5 @@ export function pointSiteAttachments(page?: ReturnType<typeof fakePointPage>) {
     onDetach() {},
     onAttached() {},
   };
-  return { attachments, commands, acquired };
+  return { attachments, commands, acquired, holds };
 }

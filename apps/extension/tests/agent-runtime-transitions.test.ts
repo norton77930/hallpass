@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { transitionNoticeText } from "@hallpass/contracts";
+import { promptRaisedFrameSchema, transitionNoticeText } from "@hallpass/contracts";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 import { composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import { AGENT_TRANSITIONS_KEY } from "../src/service-worker/transition-store.js";
@@ -184,8 +184,14 @@ async function knownOn(fake: Harness, tabId: number, url: string): Promise<void>
   await fake.moveTab(tabId, url);
 }
 
+/**
+ * The call's answer, not the other frames that name it (032: `prompt-raised` for the client's
+ * question about a move, and the `prompt-waiting` tick sent the moment a question is armed).
+ */
 function answerFor(port: FakePort, callId: string): Record<string, unknown> | undefined {
-  return port.sent.find((sent) => (sent as { callId?: string }).callId === callId) as Record<string, unknown> | undefined;
+  return port.sent.find(
+    (sent) => (sent as { callId?: string }).callId === callId && "outcome" in (sent as object),
+  ) as Record<string, unknown> | undefined;
 }
 
 /** What the worker has written down about the tabs it holds, as the store keeps it. */
@@ -243,6 +249,23 @@ describe("T362 a tab that moved, and the call that meets it", () => {
     port.emit({ callId: "call-2", sessionId: SESSION, tool: "wait", args: { tabId: TAB, forMs: 10 } });
     await vi.waitFor(() => expect(answerFor(port, "call-2")).toBeDefined());
     expect(runtime.prompts.current(), "a second A→B in the same session raised a card").toBeUndefined();
+  });
+
+  it("puts the move to the agent's client in a frame the host accepts, naming both sites (032 FR-484, R-485)", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await knownOn(fake, TAB, `${A}/one`);
+    await fake.moveTab(TAB, `${B}/landing`);
+
+    port.emit({ callId: "call-raise", sessionId: SESSION, tool: "get_page_text", args: { tabId: TAB } });
+    await transitionCard(runtime);
+    const raised = await vi.waitFor(() => {
+      const frame = port.sent.find((sent) => (sent as { type?: string }).type === "prompt-raised");
+      expect(frame).toBeDefined();
+      return frame;
+    });
+    const parsed = promptRaisedFrameSchema.safeParse(raised);
+    expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+    expect(raised).toMatchObject({ kind: "transition", from: A, site: B, choices: ["session", "deny"] });
   });
 
   /**

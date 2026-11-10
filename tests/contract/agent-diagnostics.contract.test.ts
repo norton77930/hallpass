@@ -148,6 +148,74 @@ describe("T054 agent diagnostics contracts", () => {
     );
   });
 
+  /**
+   * 031 T933 (R-460, R-461, D-031-9): the grant is asked for on a card of its own kind, and only that
+   * card's yes carries `grantDiagnostics`. The contract cannot see which card a `promptId` names - the
+   * worker honours the flag only for a pending diagnostics question - but it can refuse the flag on
+   * any answer that is shaped like another card's: a decline, a remembered mode, a remembered pair or
+   * directory, or the session answer, which is a different choice on the same card.
+   */
+  it("projects a diagnostics question as its own card kind, and asks the client with the three short answers", () => {
+    const prompt = contractSchema("agentEffectPromptSchema");
+    const card = {
+      promptId: "prompt-1",
+      raisedAt: "2026-11-08T00:00:00.000Z",
+      site: SITE,
+      tool: "read_console",
+      argsSummary: "turn on diagnostics to read the console",
+    };
+    expectAccepted(prompt, { ...card, kind: "diagnostics" }, "a diagnostics card");
+    expectRejected(prompt, { ...card, kind: "diagnostics-always" }, "a card kind nobody declared");
+
+    const raised = contractSchema("promptRaisedFrameSchema");
+    const frame = {
+      type: "prompt-raised",
+      sessionId: "session-h1",
+      callId: "call-1",
+      promptId: "prompt-1",
+      kind: "diagnostics",
+      site: SITE,
+      action: "turn on diagnostics to read the console",
+      choices: ["once", "session", "deny"],
+      boundMs: 120_000,
+    };
+    expectAccepted(raised, frame, "a diagnostics question for the client");
+    // Always on this site is Chrome's alone (D-031-9): the client's choices have no word for it.
+    expectRejected(raised, { ...frame, choices: ["once", "session", "always", "deny"] }, "an always for the client");
+  });
+
+  it("accepts grantDiagnostics only as the diagnostics card's own yes", () => {
+    const command = contractSchema("agentPanelCommandSchema");
+    const decide = (payload: Record<string, unknown>) => ({ type: "ui.agent.effect-decide", payload });
+    expectAccepted(command, decide({ promptId: "prompt-1", allow: true, grantDiagnostics: true }), "Always on this site");
+    expectAccepted(command, decide({ promptId: "prompt-1", allow: true, session: true }), "This session");
+    expectAccepted(command, decide({ promptId: "prompt-1", allow: true }), "Allow once");
+    expectAccepted(command, decide({ promptId: "prompt-1", allow: false }), "Refuse");
+
+    expectRejected(command, decide({ promptId: "prompt-1", allow: false, grantDiagnostics: true }), "a refusal that grants");
+    expectRejected(
+      command,
+      decide({ promptId: "prompt-1", allow: true, grantDiagnostics: true, rememberMode: "skip-checks" }),
+      "a mode riding on the grant",
+    );
+    expectRejected(
+      command,
+      decide({ promptId: "prompt-1", allow: true, grantDiagnostics: true, rememberTransition: true }),
+      "a transition card's always carrying the grant",
+    );
+    expectRejected(
+      command,
+      decide({ promptId: "prompt-1", allow: true, grantDiagnostics: true, rememberDirectory: true }),
+      "a directory card's always carrying the grant",
+    );
+    expectRejected(
+      command,
+      decide({ promptId: "prompt-1", allow: true, grantDiagnostics: true, session: true }),
+      "two answers to one question",
+    );
+    expectRejected(command, decide({ promptId: "prompt-1", allow: true, grantDiagnostics: false }), "a grant flag that says no");
+  });
+
   it("refuses an ungranted diagnostics call in the closed vocabulary", () => {
     const response = contractSchema("agentNativeResponseSchema");
     expectAccepted(

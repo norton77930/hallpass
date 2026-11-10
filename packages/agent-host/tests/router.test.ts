@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentNativeRequest, PromptWaitingFrame } from "@hallpass/contracts";
+import type { AgentNativeRequest, PromptRaisedFrame, PromptWaitingFrame } from "@hallpass/contracts";
 import {
   AGENT_CALL_TIMEOUT_SLACK_MS as SLACK_MS,
   AGENT_MAX_CALL_TIMEOUT_MS as MAX_CALL_TIMEOUT_MS,
@@ -229,6 +229,146 @@ describe("call router", () => {
       // What the tick asked for, measured from the call's admission and stopped at the cap: the
       // rest of the two minutes plus a round trip is 130 s, which is exactly the cap.
       await vi.advanceTimersByTimeAsync(KEEP_ALIVE_CAP_MS - CALL_TIMEOUT_MS - SLACK_MS - 1);
+      expect(router.inFlight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer" });
+    });
+
+    /**
+     * 031 R-453 - `prompt-raised` is the first word that a question is holding the call, so it
+     * counts as a tick that has waited nothing: the backstop steps out to the question's bound plus
+     * the slack, inside the same cap, for a call this router holds and no other.
+     */
+    it("treats a prompt-raised frame as a tick at the start of the question's bound", async () => {
+      const router = new CallRouter({ send: () => undefined });
+      const raised = (callId: string): PromptRaisedFrame => ({
+        type: "prompt-raised",
+        sessionId: "session-1",
+        callId,
+        promptId: "prompt-1",
+        kind: "effect",
+        site: "https://example.test",
+        action: "click the Submit button",
+        choices: ["once", "session", "deny"],
+        boundMs: 60_000,
+      });
+
+      const pending = router.call(request("call-1", { tabId: 7 }));
+      const other = router.call(request("call-2", { tabId: 8 }));
+      await vi.advanceTimersByTimeAsync(5_000);
+      router.noteRaised(raised("call-1"));
+      router.noteRaised(raised("call-other"));
+
+      await vi.advanceTimersByTimeAsync(CALL_TIMEOUT_MS - 5_000);
+      // The call nobody raised a question for ends at the flat backstop; the raised one does not.
+      await expect(other).resolves.toEqual({ callId: "call-2", outcome: "timed-out", reason: "no-answer" });
+      expect(router.inFlight).toBe(1);
+
+      const rearmed = 5_000 + 60_000 + KEEP_ALIVE_SLACK_MS;
+      await vi.advanceTimersByTimeAsync(rearmed - CALL_TIMEOUT_MS - 1);
+      expect(router.inFlight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer" });
+    });
+
+    /**
+     * 031 T929 I2 - a batch's later step raises its own question, and that question gets its whole
+     * bound from its own raise. Anchoring the cap at admission cut it short: the agent got the
+     * transport's bare `timed-out` instead of the worker's, which carries the consent hint.
+     */
+    it("holds a later step's question for its full bound from its own raise", async () => {
+      const router = new CallRouter({ send: () => undefined });
+      const raised: PromptRaisedFrame = {
+        type: "prompt-raised",
+        sessionId: "session-1",
+        callId: "call-1",
+        promptId: "prompt-1",
+        kind: "effect",
+        site: "https://example.test",
+        action: "click the Submit button",
+        choices: ["once", "session", "deny"],
+        boundMs: 120_000,
+      };
+
+      const steps = [{ tool: "click", args: { target: { ref: "t_one" } } }];
+      const pending = router.call(request("call-1", { tool: "browser_batch", tabId: 7, args: { tabId: 7, steps } }));
+      await vi.advanceTimersByTimeAsync(5_000);
+      router.noteRaised(raised);
+      // Step 1's question was answered; step 2 asks its own at 40 s.
+      await vi.advanceTimersByTimeAsync(35_000);
+      router.noteRaised({ ...raised, promptId: "prompt-2" });
+
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(router.inFlight, "cut before the second question's own bound").toBe(1);
+      await vi.advanceTimersByTimeAsync(120_000 + KEEP_ALIVE_SLACK_MS - 90_000 - 1);
+      expect(router.inFlight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer" });
+    });
+
+    /**
+     * 032 T960 (R-486, FR-488, #61) - a question shown only in Chrome sends no `prompt-raised`, so
+     * until 032 its cap counted from the call's admission and a question raised late in a long call
+     * was cut before its two minutes. Each tick now says when its own question was shown
+     * (`now - waitedMs`), and the worker's first tick (`waitedMs: 0`) comes the moment it is armed.
+     */
+    it("holds a card-only question raised late in a call for its full bound from when it was shown", async () => {
+      const router = new CallRouter({ send: () => undefined });
+      const pending = router.call(request("call-1", { tabId: 7 }));
+
+      // The first question, shown at 5 s and answered on its card at 100 s; its ticks kept the call.
+      await vi.advanceTimersByTimeAsync(5_000);
+      router.noteWaiting(tick({ waitedMs: 0, boundMs: 120_000 }));
+      for (let waited = 5_000; waited < 95_000; waited += 5_000) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        router.noteWaiting(tick({ waitedMs: waited, boundMs: 120_000 }));
+      }
+      await vi.advanceTimersByTimeAsync(5_000);
+      // The second question (a second site change, a plan card) is armed at 100 s.
+      router.noteWaiting(tick({ waitedMs: 0, boundMs: 120_000 }));
+      for (let waited = 5_000; waited < 120_000; waited += 5_000) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        router.noteWaiting(tick({ waitedMs: waited, boundMs: 120_000 }));
+      }
+
+      // 215 s now. The question is withdrawn at 220 s; the slack lets its own answer arrive first.
+      await vi.advanceTimersByTimeAsync(225_000 - 215_000);
+      expect(router.inFlight, "cut before the second question's 120 s").toBe(1);
+      await vi.advanceTimersByTimeAsync(230_000 - 225_000 - 1);
+      expect(router.inFlight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer" });
+    });
+
+    it("never holds a stuck question past its own raise plus the cap, however its ticks grow", async () => {
+      const router = new CallRouter({ send: () => undefined });
+      const pending = router.call(request("call-1", { tabId: 7 }));
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      // A question shown at 20 s whose worker claims ten minutes and keeps ticking: every tick's
+      // `now - waitedMs` is still 20 s, so its fixed point never moves.
+      router.noteWaiting(tick({ waitedMs: 0, boundMs: 600_000 }));
+      for (let waited = 5_000; waited < KEEP_ALIVE_CAP_MS; waited += 5_000) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        router.noteWaiting(tick({ waitedMs: waited, boundMs: 600_000 }));
+      }
+
+      // 145 s now; the question's own raise plus the cap is 150 s.
+      await vi.advanceTimersByTimeAsync(5_000 - 1);
+      expect(router.inFlight).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer" });
+    });
+
+    it("moves the fixed point only later: a tick claiming a wait from before admission adds nothing", async () => {
+      const router = new CallRouter({ send: () => undefined });
+      const pending = router.call(request("call-1", { tabId: 7 }));
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      // Shown "100 s ago", before this call existed: the cap stays measured from admission.
+      router.noteWaiting(tick({ waitedMs: 100_000, boundMs: 600_000 }));
+
+      await vi.advanceTimersByTimeAsync(KEEP_ALIVE_CAP_MS - 5_000 - 1);
       expect(router.inFlight).toBe(1);
       await vi.advanceTimersByTimeAsync(1);
       await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "timed-out", reason: "no-answer" });

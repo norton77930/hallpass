@@ -615,6 +615,7 @@ describe("030 frame card", () => {
         ui("agent.consentBody").replace("{agent}", "Claude Code").replace("{action}", ui("agent.summary.click")).replace("{site}", PAGE),
         ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Pay"),
         ui("agent.allowOnce"),
+        ui("agent.allowSession"),
         ui("agent.allowAlways"),
         ui("agent.refuse"),
       ].join(""),
@@ -627,10 +628,156 @@ describe("030 frame card", () => {
     const dialog = screen.getByRole("dialog");
     expect(dialog.textContent).toContain(ui("agent.prompt.frameUnknown").replace("{site}", PAGE));
     expect(screen.queryByRole("button", { name: ui("agent.allowAlways") })).toBeNull();
+    // Nor a session grant: it is stored under an exact origin, and this frame has none (FR-464).
+    expect(screen.queryByRole("button", { name: ui("agent.allowSession") })).toBeNull();
     expect(screen.getByRole("button", { name: ui("agent.refuse") })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
     expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true } }]);
+  });
+});
+
+/** 031 T925 (US1, FR-470, R-457, R-461): the consent card's *This session* button. */
+describe("031 This session button", () => {
+  let port: FakeAgentPort;
+  const SITE = "https://fixtures.test:19443";
+  const PROMPT = { promptId: "prompt-s", site: SITE, tool: "click" as const, argsSummary: "click a page element", targetLabel: "Save", targetRole: "button" };
+  const labels = (): string[] =>
+    Array.from(screen.getByRole("dialog").querySelectorAll("button")).map((button) => button.textContent ?? "");
+
+  beforeEach(() => {
+    port = installAgentPort();
+    renderShell();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it("sits between Allow once and Allow always, and sends allow with session and no rememberMode", () => {
+    project(port, { ...IDLE, prompt: PROMPT });
+    expect(labels()).toEqual([ui("agent.allowOnce"), ui("agent.allowSession"), ui("agent.allowAlways"), ui("agent.refuse")]);
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowSession") }));
+    expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-s", allow: true, session: true } }]);
+    for (const sent of port.sent) expect(agentPanelCommandSchema.safeParse(sent).success).toBe(true);
+  });
+
+  it("is on the card of a dialog accept, which a session grant covers (R-457)", () => {
+    project(port, {
+      ...IDLE,
+      prompt: { promptId: "prompt-d", site: SITE, tool: "dialog" as const, argsSummary: "dialog accept", kind: "dialog-accept" as const, dialogText: "Delete?" },
+    });
+    expect(screen.getByRole("button", { name: ui("agent.allowSession") })).toBeTruthy();
+  });
+
+  it("is not offered for the tools a session grant does not cover", () => {
+    const uncovered = [
+      { tool: "evaluate" as const },
+      { tool: "file_upload" as const },
+      { tool: "upload_image" as const },
+      { tool: "navigate" as const, kind: "beforeunload-force" as const },
+      { tool: "tabs_close" as const },
+    ];
+    for (const extra of uncovered) {
+      project(port, { ...IDLE, prompt: { promptId: `prompt-${extra.tool}`, site: SITE, argsSummary: "x", ...extra } });
+      expect(labels(), extra.tool).not.toContain(ui("agent.allowSession"));
+      expect(screen.getByRole("button", { name: ui("agent.allowOnce") }), extra.tool).toBeTruthy();
+    }
+  });
+
+  it("leaves the transition and upload-directory cards as they were", () => {
+    project(port, {
+      ...IDLE,
+      prompt: { promptId: "prompt-t", site: SITE, tool: "get_page_text" as const, argsSummary: "x", kind: "transition" as const, transition: { from: "https://a.test", to: SITE } },
+    });
+    expect(labels()).toEqual([ui("agent.transitionContinue"), ui("agent.transitionAlways"), ui("agent.transitionDecline")]);
+
+    project(port, {
+      ...IDLE,
+      prompt: { promptId: "prompt-u", site: SITE, tool: "file_upload" as const, argsSummary: "x", kind: "upload-directory" as const, files: [{ path: "D:\\a.png", directory: "D:\\" }] },
+    });
+    expect(labels()).toEqual([ui("agent.uploadOnce"), ui("agent.uploadAlways"), ui("agent.uploadDecline")]);
+  });
+});
+
+/** 031 T934 (US3, FR-476, R-461): the diagnostics question's card. */
+describe("031 diagnostics card", () => {
+  let port: FakeAgentPort;
+  const SITE = "https://fixtures.test:19443";
+  const PROMPT = {
+    promptId: "prompt-g",
+    site: SITE,
+    tool: "read_console" as const,
+    argsSummary: "turn on diagnostics to read the console",
+    kind: "diagnostics" as const,
+  };
+  const labels = (): string[] =>
+    Array.from(screen.getByRole("dialog").querySelectorAll("button")).map((button) => button.textContent ?? "");
+
+  beforeEach(() => {
+    port = installAgentPort();
+    renderShell();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it("names the site and offers the four answers", () => {
+    project(port, { ...IDLE, prompt: PROMPT });
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.diagnosticsLabel").replace("{site}", SITE),
+    );
+    expect(labels()).toEqual([
+      ui("agent.allowOnce"),
+      ui("agent.allowSession"),
+      ui("agent.diagnosticsAlways"),
+      ui("agent.refuse"),
+    ]);
+  });
+
+  it("says what the call wants: reading logs for read_network, running a script for evaluate", () => {
+    project(port, { ...IDLE, prompt: { ...PROMPT, tool: "read_network" as const } });
+    expect(screen.getByRole("dialog").textContent).toContain(
+      ui("agent.diagnosticsLabel").replace("{site}", SITE),
+    );
+    cleanup();
+    renderShell();
+
+    project(port, {
+      ...IDLE,
+      prompt: { ...PROMPT, tool: "evaluate" as const, argsSummary: "turn on diagnostics to run a script on the page" },
+    });
+    const text = screen.getByRole("dialog").textContent ?? "";
+    expect(text).toContain(ui("agent.diagnosticsEvaluateLabel").replace("{site}", SITE));
+    expect(text).not.toContain(ui("agent.diagnosticsText"));
+    expect(labels()).toContain(ui("agent.diagnosticsAlways"));
+  });
+
+  it("keeps the words the packaged spec finds the read_console card by", () => {
+    project(port, { ...IDLE, prompt: PROMPT });
+    expect(screen.getByRole("dialog").textContent).toContain(ui("agent.diagnosticsText"));
+  });
+
+  it.each([
+    ["agent.allowOnce", { allow: true }],
+    ["agent.allowSession", { allow: true, session: true }],
+    ["agent.diagnosticsAlways", { allow: true, grantDiagnostics: true }],
+    ["agent.refuse", { allow: false }],
+  ])("%s sends exactly its own flags", (key, flags) => {
+    project(port, { ...IDLE, prompt: PROMPT });
+    fireEvent.click(screen.getByRole("button", { name: ui(key) }));
+    expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-g", ...flags } }]);
+    for (const sent of port.sent) expect(agentPanelCommandSchema.safeParse(sent).success).toBe(true);
+  });
+
+  it("an ordinary effect card has no diagnostics button", () => {
+    project(port, { ...IDLE, prompt: { promptId: "prompt-e", site: SITE, tool: "evaluate" as const, argsSummary: "x" } });
+    expect(labels()).not.toContain(ui("agent.diagnosticsAlways"));
+    expect(labels()).toContain(ui("agent.allowAlways"));
   });
 });
 

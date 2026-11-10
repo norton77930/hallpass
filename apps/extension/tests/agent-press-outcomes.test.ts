@@ -67,6 +67,10 @@ function fakeBrowser() {
     async acquire() {
       return { ok: true as const };
     },
+    async hold() {
+      return { outcome: { ok: true as const }, done() {} };
+    },
+    holders: () => [],
     async drop() {},
     async release() {},
     async releaseAll() {},

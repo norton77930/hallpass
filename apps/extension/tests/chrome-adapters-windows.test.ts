@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { resizeWindow, watchLastFocusedWindow } from "../src/chrome-adapters/windows.js";
+import { getWindowState, resizeWindow, watchLastFocusedWindow } from "../src/chrome-adapters/windows.js";
 
 /**
  * resize_window on a window that is not in the "normal" state (found 2026-09-16 on the owner's
@@ -148,5 +148,38 @@ describe("watchLastFocusedWindow", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(seen).toEqual([2]);
+  });
+});
+
+/**
+ * 031/T941 (R-463, FR-480): a screenshot reads the window's state before it decides how to take the
+ * picture, and reading is all it does - nothing is updated, so a minimized window stays minimized.
+ */
+describe("getWindowState", () => {
+  afterEach(() => {
+    Reflect.deleteProperty(globalThis, "chrome");
+  });
+
+  it("answers the window's state without touching the window, and nothing for a window or API that is not there", async () => {
+    const updates: unknown[] = [];
+    (globalThis as { chrome?: unknown }).chrome = {
+      windows: {
+        async get(windowId: number) {
+          if (windowId !== 900) throw new Error(`No window with id: ${windowId}.`);
+          return { id: 900, state: "minimized" };
+        },
+        async update(...args: unknown[]) {
+          updates.push(args);
+          return {};
+        },
+      },
+    };
+
+    expect(await getWindowState(900)).toBe("minimized");
+    expect(await getWindowState(901)).toBeUndefined();
+    expect(updates).toEqual([]);
+
+    (globalThis as { chrome?: unknown }).chrome = {};
+    expect(await getWindowState(900)).toBeUndefined();
   });
 });

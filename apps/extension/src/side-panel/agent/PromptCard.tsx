@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
-import type { AgentPanelState } from "@hallpass/contracts";
+import { AGENT_SITE_PLAN_COVERED_TOOLS, type AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
 import { TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
@@ -386,10 +386,63 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     );
   }
 
+  /**
+   * 031 FR-476, R-461: the agent asked to read the console or network of a site whose diagnostics
+   * the owner has not granted - or, for `evaluate`, to run a script there, which the card says instead. Its own card because its "always" is a different grant: it sets the
+   * site's diagnostics permission, never its mode, so no `rememberMode` travels from here, and a
+   * refusal carries nothing else. Each answer sends only its own flag (the contract refuses mixes).
+   */
+  if (prompt && onTop === "consent" && prompt.kind === "diagnostics") {
+    const answer = (flags: { session: true } | { grantDiagnostics: true } | undefined, allow = true): void => {
+      props.send({
+        type: "ui.agent.effect-decide",
+        payload: { promptId: prompt.promptId, allow, ...(flags ?? {}) },
+      });
+    };
+    return (
+      <section
+        ref={cardRef}
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="agent-prompt-title"
+        className="agent-prompt"
+        data-prompt="diagnostics"
+      >
+        <h2 id="agent-prompt-title">{t("agent.promptTitle")}</h2>
+        <p>
+          {t(prompt.tool === "evaluate" ? "agent.diagnosticsEvaluateLabel" : "agent.diagnosticsLabel").replace(
+            "{site}",
+            () => displayOrigin(prompt.site),
+          )}
+        </p>
+        <div className="agent-prompt-actions">
+          <button type="button" className="agent-primary" onClick={() => answer(undefined)}>
+            {t("agent.allowOnce")}
+          </button>
+          <button type="button" onClick={() => answer({ session: true })}>
+            {t("agent.allowSession")}
+          </button>
+          <button type="button" onClick={() => answer({ grantDiagnostics: true })}>
+            {t("agent.diagnosticsAlways")}
+          </button>
+          <button type="button" onClick={() => answer(undefined, false)}>
+            {t("agent.refuse")}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   if (prompt && onTop === "consent") {
     // 030: where the action is, when it is inside an embedded frame (`site` stays the page's).
     const frameUnknown = prompt.frame !== undefined && "unknown" in prompt.frame;
-    const answer =(allow: boolean, always = false): void => {
+    // 031 FR-470, R-457: "This session" is offered for exactly the tools a session grant covers -
+    // the set a 017 site plan admits, `dialog` included. Page JavaScript, uploads, a forced leave
+    // and closing a tab are asked each time, so their card has no such button. An unknown frame site
+    // has no origin to store a grant under (FR-464), as it has none for "always".
+    const sessionCovered =
+      !frameUnknown && (AGENT_SITE_PLAN_COVERED_TOOLS as readonly string[]).includes(prompt.tool);
+    const answer = (allow: boolean, scope: "once" | "session" | "always" = "once"): void => {
       props.send({
         type: "ui.agent.effect-decide",
         payload: {
@@ -397,7 +450,9 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
           allow,
           // "Always on this site" is an allow that also sets the site's mode (FR-085); it never
           // travels with a refusal, which would be saying no to one thing and yes to everything else.
-          ...(allow && always ? { rememberMode: "skip-checks" as const } : {}),
+          ...(allow && scope === "always" ? { rememberMode: "skip-checks" as const } : {}),
+          // "This session" is an allow too, and only an allow; it never sets the site's mode.
+          ...(allow && scope === "session" ? { session: true as const } : {}),
         },
       });
     };
@@ -473,9 +528,14 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
           <button type="button" className="agent-primary" onClick={() => answer(true)}>
             {t("agent.allowOnce")}
           </button>
+          {sessionCovered ? (
+            <button type="button" onClick={() => answer(true, "session")}>
+              {t("agent.allowSession")}
+            </button>
+          ) : null}
           {/* FR-458: an unknown frame site has nothing to remember, so no "always". */}
           {frameUnknown ? null : (
-            <button type="button" onClick={() => answer(true, true)}>
+            <button type="button" onClick={() => answer(true, "always")}>
               {t("agent.allowAlways")}
             </button>
           )}

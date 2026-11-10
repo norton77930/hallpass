@@ -5,6 +5,9 @@ import type { AgentInputAttachments } from "../src/service-worker/agent-tools/in
 import { AGENT_RECONCILE_ALARM, composeAgentRuntime } from "../src/service-worker/agent-runtime.js";
 import type { AgentRecorder } from "../src/service-worker/recording/recorder.js";
 import { AGENT_SESSION_SITE_PLANS_KEY } from "../src/service-worker/site-plan-store.js";
+import { runOwnerCommand } from "../src/service-worker/owner-commands.js";
+import { createSessionGrantStore } from "../src/service-worker/session-grant-store.js";
+import { chromeTransitionStore } from "../src/service-worker/transition-store.js";
 import { oneDocumentAnswer } from "./helpers/point-site.js";
 
 /**
@@ -267,11 +270,13 @@ async function pairedRuntime(): Promise<{
     port.emit({ callId, sessionId, tool, tabId, args });
     return callId;
   };
+  // The call's answer, not the other frames that name it (032: `prompt-raised` for the client's
+  // question, and the `prompt-waiting` tick sent the moment a question is armed).
+  const isAnswer = (sent: unknown, callId: string): boolean =>
+    (sent as { callId?: string }).callId === callId && "outcome" in (sent as object);
   const answer = async (callId: string): Promise<Answer> => {
-    await vi.waitFor(() =>
-      expect(port.sent.some((sent) => (sent as { callId?: string }).callId === callId)).toBe(true),
-    );
-    return port.sent.find((sent) => (sent as { callId?: string }).callId === callId) as Answer;
+    await vi.waitFor(() => expect(port.sent.some((sent) => isAnswer(sent, callId))).toBe(true));
+    return port.sent.find((sent) => isAnswer(sent, callId)) as Answer;
   };
   return { runtime, port, attachments: built[0] as AgentInputAttachments, send, answer };
 }
@@ -861,6 +866,24 @@ describe("T475/T477 propose_sites in the composed worker", () => {
     expect(await linesOf(runtime)).toEqual([expect.objectContaining({ kind: "site-plan", outcome: "approved", message: "1" })]);
   });
 
+  /** 032 T970/T971 (FR-494): every settled question leaves one consent line, next to the plan's own. */
+  it("notes the answered proposal as a consent line naming the site, the place and the answer", async () => {
+    const { runtime, send, answer } = await pairedRuntime();
+
+    const callId = send("propose_sites", { origins: [A, B], purpose: "Compare two sites" });
+    const asked = await question(runtime);
+    runtime.prompts.decideSitePlan(asked.proposalId, true, [A, B]);
+    await answer(callId);
+
+    const card = (await runtime.projection()).sessions.find((session) => session.sessionId === S1);
+    const consent = ((card as { activity?: Array<Record<string, unknown>> } | undefined)?.activity ?? []).filter(
+      (line) => line.kind === "consent",
+    );
+    expect(consent).toEqual([
+      { at: expect.any(Number), kind: "consent", site: A, question: "site-plan", channel: "browser", answer: "session" },
+    ]);
+  });
+
   it("marks the active plan on the next proposal, and notes a replacement and a withdrawal", async () => {
     const { runtime, send, answer } = await pairedRuntime();
     await runtime.sitePlans.approve(S1, [A]);
@@ -943,5 +966,168 @@ describe("T475/T477 propose_sites in the composed worker", () => {
     await restarted.unpair("agent-1");
 
     expect(storedPlans(fake)).toEqual({});
+  });
+});
+
+/**
+ * 032/T966 (US4, FR-490..FR-493, R-487) - a revoke on the settings page reaches every live session.
+ *
+ * The settings page's own command, through the one router both pages use: after it, nothing a live
+ * session was allowed "for this session" on the site admits its next page action, diagnostics call
+ * or move into it - in either session - while what the owner allowed elsewhere, and the owner's own
+ * "always" moves, still do. A question already up about the site is the owner's to answer.
+ */
+describe("T966 a site revoke takes back every session admission on that site", () => {
+  let fake: Fake;
+  const B_TAB = 9;
+  const B_TAB_2 = 10;
+
+  beforeEach(() => {
+    fake = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  function addTab(id: number, url: string): void {
+    fake.tabs.push({ id, url, title: `tab ${id}`, groupId: -1, active: false, windowId: 900 });
+  }
+
+  const revoke = (runtime: Runtime, site: string) => runOwnerCommand(runtime, { type: "ui.agent.site-clear", payload: { site } });
+
+  /** The call's own answer - not the `prompt-raised` frame that names the same call. */
+  const settled = (port: FakePort, callId: string): Promise<Answer> =>
+    vi.waitFor(() => {
+      const found = port.sent.find((sent) => (sent as { callId?: string }).callId === callId && "outcome" in (sent as object));
+      expect(found).toBeDefined();
+      return found as Answer;
+    });
+
+  it("asks again about a page action and a diagnostics call in both sessions, and other sites still admit", async () => {
+    const { runtime, port, send, answer } = await pairedRuntime();
+    addTab(B_TAB, `${B}/one`);
+    addTab(B_TAB_2, `${B}/two`);
+    await runtime.tabs.adopt(S1, B_TAB);
+    await runtime.tabs.adopt(S2, B_TAB_2);
+    // What the owner answered "this session" to, in the agent's client, in each session.
+    const grants = createSessionGrantStore();
+    for (const session of [S1, S2]) {
+      await grants.add(session, "agent-1", { site: A, kind: "page-actions", source: "client" });
+      await grants.add(session, "agent-1", { site: A, kind: "diagnostics", source: "client" });
+    }
+    await grants.add(S1, "agent-1", { site: B, kind: "page-actions", source: "client" });
+    // S1's plan is the revoked site alone; S2's names another site too.
+    await runtime.sitePlans.approve(S1, [A]);
+    await runtime.sitePlans.approve(S2, [A, B]);
+    for (const [session, tab] of [[S1, TAB], [S2, OTHER_TAB]] as const) {
+      await answeredWithoutCard(runtime, answer, send("click", { tabId: tab, target: { ref: "t_one" } }, session));
+      await answeredWithoutCard(runtime, answer, send("read_console", { tabId: tab }, session));
+    }
+
+    await revoke(runtime, A);
+
+    for (const [session, tab] of [[S1, TAB], [S2, OTHER_TAB]] as const) {
+      const click = send("click", { tabId: tab, target: { ref: "t_one" } }, session);
+      const asked = await card(runtime);
+      expect(asked).toMatchObject({ site: A, tool: "click" });
+      expect(runtime.prompts.currentSession()).toBe(session);
+      runtime.prompts.decide(asked.promptId, false);
+      await settled(port, click);
+
+      const read = send("read_console", { tabId: tab }, session);
+      const diagnostics = await card(runtime);
+      expect(diagnostics).toMatchObject({ site: A, kind: "diagnostics" });
+      expect(runtime.prompts.currentSession()).toBe(session);
+      runtime.prompts.decide(diagnostics.promptId, false);
+      await settled(port, read);
+    }
+    // Another site: S1's grant there, and the other site S2's plan names, still admit.
+    await answeredWithoutCard(runtime, answer, send("click", { tabId: B_TAB, target: { ref: "t_one" } }, S1));
+    await answeredWithoutCard(runtime, answer, send("click", { tabId: B_TAB_2, target: { ref: "t_one" } }, S2));
+    expect(storedPlans(fake)).toEqual({ [S2]: expect.objectContaining({ origins: [B] }) });
+  });
+
+  it("asks again about a move into the site in both sessions, and an always pair still admits its move", async () => {
+    const C = "https://c.test";
+    const { runtime, port, send, answer } = await pairedRuntime();
+    const BEFORE_TAB = 11;
+    const C_TAB = 12;
+    addTab(B_TAB, `${B}/one`);
+    addTab(B_TAB_2, `${B}/two`);
+    addTab(BEFORE_TAB, `${B}/three`);
+    addTab(C_TAB, `${C}/one`);
+    await runtime.tabs.adopt(S1, B_TAB);
+    await runtime.tabs.adopt(S2, B_TAB_2);
+    await runtime.tabs.adopt(S1, BEFORE_TAB);
+    await runtime.tabs.adopt(S1, C_TAB);
+    // Each session was told "continue" about B → A; the owner said "always" about C → A.
+    const transitions = chromeTransitionStore();
+    await transitions.allowForSession(S1, B, A);
+    await transitions.allowForSession(S2, B, A);
+    await transitions.remember(C, A);
+    /** The tab is seen where it is, then moves into A by nothing of ours; a call on it meets the move. */
+    const moveIntoA = async (tab: number, from: string, session: string): Promise<string> => {
+      fake.fire(tab, `${from}/start`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      fake.fire(tab, `${A}/landing`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return send("wait", { tabId: tab, forMs: 10 }, session);
+    };
+    await answeredWithoutCard(runtime, answer, await moveIntoA(BEFORE_TAB, B, S1));
+
+    await revoke(runtime, A);
+
+    for (const [session, tab] of [[S1, B_TAB], [S2, B_TAB_2]] as const) {
+      const call = await moveIntoA(tab, B, session);
+      const asked = (await card(runtime)) as { promptId: string; kind?: string; transition?: unknown };
+      expect(asked).toMatchObject({ kind: "transition", transition: { from: B, to: A } });
+      expect(runtime.prompts.currentSession()).toBe(session);
+      runtime.prompts.decide(asked.promptId, false);
+      await settled(port, call);
+    }
+    await answeredWithoutCard(runtime, answer, await moveIntoA(C_TAB, C, S1));
+    expect((await transitions.allowances()).map(({ from, to }) => ({ from, to }))).toEqual([{ from: C, to: A }]);
+  });
+
+  it("neither answers nor withdraws a question about the site that is up when it is revoked", async () => {
+    const { runtime, port, send } = await pairedRuntime();
+    const call = send("click", CLICK);
+    const asked = await card(runtime);
+
+    await revoke(runtime, A);
+
+    expect(runtime.prompts.current()?.promptId).toBe(asked.promptId);
+    // The call is not answered: the question about it is still the owner's.
+    expect(port.sent.some((sent) => (sent as { callId?: string }).callId === call && "outcome" in (sent as object))).toBe(false);
+    runtime.prompts.decide(asked.promptId, true);
+    expect((await settled(port, call)).reason).not.toBe("owner-denied");
+  });
+
+  it("still takes back the other admissions when one store cannot be written, and reports the failure (032 review N1)", async () => {
+    const { runtime } = await pairedRuntime();
+    const grants = createSessionGrantStore();
+    await grants.add(S1, "agent-1", { site: A, kind: "page-actions", source: "client" });
+    await runtime.sitePlans.approve(S1, [A]);
+    const transitions = chromeTransitionStore();
+    await transitions.allowForSession(S1, B, A);
+    // The site-plan write fails once; every other write goes through.
+    const area = (globalThis as { chrome: { storage: { session: { set(values: Record<string, unknown>): Promise<void> } } } })
+      .chrome.storage.session;
+    const realSet = area.set.bind(area);
+    let failedOnce = false;
+    area.set = async (values) => {
+      if (!failedOnce && AGENT_SESSION_SITE_PLANS_KEY in values) {
+        failedOnce = true;
+        throw new Error("quota");
+      }
+      await realSet(values);
+    };
+
+    await expect(runtime.clearSiteMode(A)).rejects.toThrow("quota");
+
+    expect(failedOnce).toBe(true);
+    expect(await grants.covers(S1, "agent-1", A, "page-actions")).toBe(false);
+    expect(await transitions.allowsForSession(S1, B, A)).toBe(false);
   });
 });

@@ -13,6 +13,7 @@ import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import { batchStepCallId, type AgentStopSignals, type AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
+import { pageActionsCovered, type PageActionGrants } from "./page-action-grants.js";
 
 /**
  * `browser_batch` (003/T048, US5, FR-046, FR-047).
@@ -71,6 +72,11 @@ export type AgentBatchDeps = {
    * the session plan as its input, exactly as a single call does. Absent is "not covered".
    */
   sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
+  /**
+   * 031 R-456: a page-actions grant for the site covers it the way the session plan does - no plan
+   * card, and each step meets the gate with the grant as its input.
+   */
+  sessionGrants?: PageActionGrants;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -129,7 +135,7 @@ export function createAgentBatch(deps: AgentBatchDeps): AgentBatchRunner {
      * after a navigation away from the approved site is not carried by this answer.
      */
     const coveredByPlan =
-      site !== undefined && mode === "follow-a-plan" && (await deps.sitePlanCovers?.(request.sessionId, site)) === true;
+      site !== undefined && mode === "follow-a-plan" && (await pageActionsCovered(deps, request.sessionId, site));
     if (site !== undefined && mode === "follow-a-plan" && !coveredByPlan) {
       const asked = await deps.prompts.askPlan({
         callId,

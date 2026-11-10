@@ -2,6 +2,7 @@ import {
   AGENT_ACTIVITY_KEPT,
   AGENT_EFFECT_TOOL_NAMES,
   AGENT_SESSION_COLOURS,
+  AGENT_SESSION_GRANTS_SHOWN,
   INTERRUPT_HINTS,
   isRootDirectory,
   type AgentActivityItem,
@@ -63,7 +64,7 @@ import {
 import { createAgentDiagnostics } from "./agent-tools/diagnostics.js";
 import { createAgentDialogs } from "./agent-tools/dialogs.js";
 import { createAgentDownloadTools } from "./agent-tools/downloads.js";
-import { createInputAttachments } from "./agent-tools/input.js";
+import { createInputAttachments, enableFocusEmulation } from "./agent-tools/input.js";
 import {
   createAgentIndicator,
   isAgentAnnounceMessage,
@@ -109,6 +110,13 @@ import { createAgentUpload } from "./agent-tools/upload.js";
 import { createAgentWait } from "./agent-tools/wait.js";
 import { createAgentSitePlanRunner, type AgentSitePlanApproval } from "./agent-tools/site-plan.js";
 import { createSitePlanStore, SITE_PLAN_NOT_RECORDED, type SessionSitePlan } from "./site-plan-store.js";
+import { createSessionGrantStore } from "./session-grant-store.js";
+import {
+  diagnosticsGrantsFrom,
+  pageActionGrantsFrom,
+  type DiagnosticsGrants,
+  type PageActionGrants,
+} from "./agent-tools/page-action-grants.js";
 import { createScreenshotSpaceStore } from "./screenshot-space-store.js";
 import { shownText } from "./shown-text.js";
 
@@ -369,15 +377,19 @@ export type AgentRuntimeOptions = {
  * Derived, never stored: the badge is a picture of two facts the worker already holds, and a
  * remembered badge is how a worker that was evicted mid-question comes back with a mark on an icon
  * nothing is waiting behind. Both kinds of question count - a pairing card and a consent card are
- * the same situation to the person - and a panel that is open needs no badge, because the card is
- * already in front of them.
+ * the same situation to the person.
+ *
+ * 031 D-031-6, FR-473, R-454: whenever a question is pending, whoever can see a panel. A visible
+ * panel used to switch the mark off; but "visible" is a panel in the focused window, not the
+ * owner's eyes on it, and the owner may be answering in the terminal. `panelConnected` stays in
+ * the input because the callers have it, and it no longer decides anything here.
  */
 export function deriveAttention(input: {
   pairingPending: boolean;
   promptPending: boolean;
   panelConnected: boolean;
 }): boolean {
-  return (input.pairingPending || input.promptPending) && !input.panelConnected;
+  return input.pairingPending || input.promptPending;
 }
 
 /**
@@ -734,7 +746,59 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     reportDiagnostic: reportTestDiagnostic,
     panelPresence: panelConnected,
     onWaiting: sendWaiting,
+    // 031 R-452: the same question, put to the agent's own client too - and its end, so the client
+    // stops asking. Never for a panel conversation: its MCP client is the agent itself, and the
+    // owner is already in the panel (FR-467).
+    onRaised(question) {
+      if (!outsideSession(question.sessionId)) return;
+      raisedToClient.add(question.promptId);
+      bridge.sendPromptRaised({
+        type: "prompt-raised",
+        sessionId: question.sessionId,
+        callId: question.callId,
+        promptId: question.promptId,
+        kind: question.kind,
+        site: question.site,
+        // 032 R-485: a move names where it came from, a site plan every site it asks about.
+        ...(question.from === undefined ? {} : { from: question.from }),
+        ...(question.sites === undefined ? {} : { sites: [...question.sites] }),
+        action: question.action,
+        choices: [...question.choices],
+        boundMs: question.boundMs,
+      });
+    },
+    // 032 R-488, FR-494: one line on the session's card for every question the owner answered or
+    // that ran out its own time. The card keeps the latest 20 (`noteActivity`), as for every kind.
+    onConcluded(conclusion) {
+      noteActivity(conclusion.sessionId, {
+        at: Date.now(),
+        kind: "consent",
+        // The schema bounds a site at 256; an origin is not meant to be longer, and one that is
+        // must not make the whole projection unparseable.
+        site: conclusion.site.slice(0, 256),
+        question: conclusion.question,
+        channel: conclusion.channel,
+        answer: conclusion.answer,
+      });
+    },
+    onSettled(settlement) {
+      if (!raisedToClient.delete(settlement.promptId)) return;
+      bridge.sendPromptSettled({
+        type: "prompt-settled",
+        sessionId: settlement.sessionId,
+        callId: settlement.callId,
+        promptId: settlement.promptId,
+        answeredFrom: settlement.answeredFrom,
+      });
+    },
   });
+  /** 031: the questions this worker put to an agent's client, so only those are said to have ended. */
+  const raisedToClient = new Set<string>();
+  /** 031 FR-467: a live session greeted by an outside agent - never a panel conversation. */
+  function outsideSession(sessionId: string): boolean {
+    const live = sessions.get(sessionId);
+    return live !== undefined && live.kind !== "panel";
+  }
   /**
    * 018 FR-274, R-273: the "Use this browser?" card, beside the pairing card rather than in the
    * prompt slot - it holds no tool call, so it never makes another question `busy`; the panel puts
@@ -856,6 +920,63 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * writes nowhere. Its writes are serialised inside it; this runtime is its only writer.
    */
   const sitePlanStore = createSitePlanStore();
+  /**
+   * 031 R-456: the owner's "This session" answers, one entry per site and kind, in
+   * `chrome.storage.session` like the site plans and cleared on the same end paths. This runtime is
+   * its only writer.
+   */
+  const sessionGrantStore = createSessionGrantStore();
+  /**
+   * The runners' view of it: a session this worker does not know holds nothing and is granted
+   * nothing, a grant recorded for another agent under the same session id covers nothing, and a
+   * grant that cannot be read covers nothing.
+   * The write is queued in the same tick as the liveness check, so a session's end - whose second
+   * clear runs after `sessions.delete` - always lands after it (the 017 R-246 ordering).
+   */
+  const sessionGrants: PageActionGrants = (() => {
+    const view = pageActionGrantsFrom(sessionGrantStore, (sessionId) => sessions.get(sessionId)?.agentId);
+    return {
+      async covers(sessionId, site) {
+        try {
+          return await view.covers(sessionId, site);
+        } catch {
+          reportTestDiagnostic("agent.session-grant.read-failed");
+          return false;
+        }
+      },
+      async add(sessionId, site, source) {
+        await view.add(sessionId, site, source);
+        notify();
+      },
+    };
+  })();
+  /**
+   * 031 R-460: the same store's `diagnostics` grants, for the diagnostics runner, under the same
+   * rules. Cleared with the page-actions ones: the end paths clear a session's whole record.
+   */
+  const diagnosticsSessionGrants: DiagnosticsGrants = (() => {
+    const view = diagnosticsGrantsFrom(sessionGrantStore, (sessionId) => sessions.get(sessionId)?.agentId);
+    return {
+      async covers(sessionId, site) {
+        try {
+          return await view.covers(sessionId, site);
+        } catch {
+          reportTestDiagnostic("agent.session-grant.read-failed");
+          return false;
+        }
+      },
+      async add(sessionId, site, source) {
+        await view.add(sessionId, site, source);
+        notify();
+      },
+    };
+  })();
+  /** A session's grants are over (it ended, or its agent was unpaired). Never throws. */
+  async function endSessionGrants(sessionIds: readonly string[]): Promise<void> {
+    for (const sessionId of sessionIds) {
+      await sessionGrantStore.clearSession(sessionId).catch(() => reportTestDiagnostic("agent.session-grant.clear-failed"));
+    }
+  }
   /**
    * Each tab's latest whole-viewport picture space (012 change log 2026-10-17, R-280): written by
    * the two screenshots, read by every runner that takes a point, so a point read off a fitted
@@ -1181,6 +1302,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // 008/FR-115: a page with unsaved work is not left unless the owner said so. The policy is
     // armed per call by the dialogs module, and `force` is decided by the site's own mode.
     dialogs: { beginUnload: (tabId, policy) => dialogs.beginUnload(tabId, policy) },
+    // 031 slice C P1: held for the navigation, so the "leave site?" it raises is heard (R-466).
+    holdAttachment: (tabId) => attachments.hold(tabId),
     siteModes,
     prompts,
     statedPlan: (site) => plans.get(site),
@@ -1208,6 +1331,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // And the attachment itself when an eviction took this worker's record of it (012/S2c F2): the
     // holder claimed is the emulation's own, which is the one that is already owed to this tab.
     ensureAttached: (tabId) => attachments.acquire(tabId, "viewport"),
+    // 031/T940: the screenshot tool photographs an active tab through the attachment without bringing
+    // it forward, held for the call like every effect (R-466).
+    holdAttachment: (tabId) => attachments.hold(tabId),
     screenshotSpaces,
     reportDiagnostic: reportTestDiagnostic,
   });
@@ -1288,6 +1414,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   // clears it while there is still an attachment to send the clear over.
   attachments.onAttached((tabId) => viewportEmulation.onAttached(tabId));
   attachments.onBeforeRelease((tabId) => viewportEmulation.onBeforeRelease(tabId));
+  // 031/T943, R-465: the page is told it has focus on every attachment, including each re-attach
+  // after an idle release - which is why it rides the per-attach hook and not a call site.
+  attachments.onAttached((tabId) => enableFocusEmulation(attachments, tabId, reportTestDiagnostic));
 
   /**
    * The dialogs the page opens (008/US3, R-138..R-140).
@@ -1298,6 +1427,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    */
   const dialogs = createAgentDialogs({
     send: (tabId, method, params) => attachments.send(tabId, method, params),
+    // 031 slice C I1: an open dialog and a `dialog` call each hold the tab against the idle release.
+    hold: (tabId) => attachments.hold(tabId),
     siteModes,
     prompts,
     tabOwnership: (session, tabId) => tabs.ownership(session, tabId),
@@ -1317,6 +1448,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     onAdmitted: (site, step) => plans.admit(site, step),
     // 017 FR-254: accepting a dialog on a site this session's plan names is a covered page action.
     sitePlanCovers,
+    // 031 R-457: and so it is on a site the session holds a page-actions grant for.
+    sessionGrants,
     reportDiagnostic: reportTestDiagnostic,
   });
   /**
@@ -1401,6 +1534,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
      * `evaluate`, the uploads and a forced leave are decided by runners that are not handed it.
      */
     sitePlanCovers,
+    // 031 R-456: the session's page-actions grants, under exactly the same rule - and not handed to
+    // those other runners either, so they keep asking under a grant (R-457).
+    sessionGrants,
     // The two halves of 008/US3 an effect owns: what the owner just consented to on this tab, and
     // what the page put on the screen because of it (R-139, FR-111).
     onApproved: (tabId, tool) => dialogs.noteApprovedEffect(tabId, tool),
@@ -1441,6 +1577,12 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     statedPlan: (site) => plans.get(site),
     onAdmitted: (site, step) => plans.admit(site, step),
     attachments,
+    // 031 R-460, R-461: the diagnostics question's This session and Always on this site.
+    diagnosticsGrants: diagnosticsSessionGrants,
+    async grantDiagnostics(site) {
+      await siteModes.set(site, { diagnosticsGranted: true });
+      notify();
+    },
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -2073,6 +2215,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     pendingTransition: (sessionId, tabId) => pendingTransitionOf(sessionId, tabId),
     // 017 D-017-9: a `follow-a-plan` site this session's plan covers raises no batch plan card.
     sitePlanCovers,
+    // 031 R-456: nor does one it holds a page-actions grant for.
+    sessionGrants,
     reportDiagnostic: reportTestDiagnostic,
   });
 
@@ -2157,6 +2301,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // 017 FR-258: the site plan ends with the session, whatever ended it - and first, so nothing
     // this session still has in flight while the rest is let go is admitted by it.
     await endSitePlans([ending]);
+    // 031 R-456: and the session's grants, on the same path and for the same reason.
+    await endSessionGrants([ending]);
     // And the batch plans it stated (S6): the batch's own `finally` is not reached by a session that
     // ended mid-batch, and a plan that outlived its session would be standing consent nobody gave.
     plans.clearSession(ending);
@@ -2198,6 +2344,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
      * before this one, and one checked from here on is refused as `session-ended` (017 R-246).
      */
     await endSitePlans([ending]);
+    // 031 R-456: the same second clear for a grant whose write was queued while the session lived.
+    await endSessionGrants([ending]);
     // The binding goes with the session: a later session reusing the id would otherwise inherit its
     // channel nonce and speak into a conversation it never had.
     contexts.delete(ending);
@@ -2698,6 +2846,18 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // 017 R-248, R-251: `propose_sites` is dispatched to `sitePlanRunner` above, so the host may send it.
     sitePlans: true,
     /**
+     * 031 R-452, FR-468: the owner's answer in the agent's client. It settles only a question of the
+     * session the frame names, from an outside agent, that this worker put to that client; the
+     * controller refuses anything else (late, another session's, a choice not offered) and logs it.
+     */
+    onPromptAnswer({ sessionId, callId, promptId, choice }) {
+      if (!outsideSession(sessionId)) {
+        reportTestDiagnostic("agent.prompt.other-session");
+        return;
+      }
+      prompts.decideByCall(callId, promptId, choice, "client", sessionId);
+    },
+    /**
      * Which run of the browser is answering (013/R-184, FR-168).
      *
      * One instance for this worker, so the id is read or minted once and the same one travels on
@@ -2935,6 +3095,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         startedAt?: string;
         colour?: (typeof AGENT_SESSION_COLOURS)[number];
         sitePlan?: { origins: string[] };
+        grants?: Array<{ site: string; kind: "page-actions" | "diagnostics"; source: "client" | "browser" }>;
         site?: string;
       }> = [];
       for (const [id, session] of sessions) {
@@ -2945,6 +3106,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         const identity = await tabs.identity(id).catch(() => undefined);
         // 017 FR-259: the plan the card shows is the one the gate reads, from the same store.
         const sitePlan = await planOf(id).catch(() => undefined);
+        // 031 FR-475, R-458: and the grants it shows are the ones the gate reads, with their source -
+        // for this session's agent only, as the gate reads them.
+        const grants = (await sessionGrantStore.list(id, session.agentId).catch(() => []))
+          .slice(0, AGENT_SESSION_GRANTS_SHOWN)
+          .map((grant) => ({ site: grant.site, kind: grant.kind, source: grant.source }));
         const sessionTabs = (await tabs.context(id)).tabs;
         /**
          * 024 FR-393 (frames.md "Session card: `site`"): the site the session is acting on - its main
@@ -2974,6 +3140,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           ...(sitePlan === undefined || sitePlan.origins.length === 0
             ? {}
             : { sitePlan: { origins: sitePlan.origins } }),
+          ...(grants.length === 0 ? {} : { grants }),
         });
       }
       /**
@@ -3257,6 +3424,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       }
       await endSitePlans(mine);
       await sitePlanStore.clearAgent(agentId).catch(() => reportTestDiagnostic("agent.site-plan.clear-failed"));
+      // 031 R-456: a session grant is an authorization too, and goes the same two ways.
+      await endSessionGrants(mine);
+      await sessionGrantStore.clearAgent(agentId).catch(() => reportTestDiagnostic("agent.session-grant.clear-failed"));
       // FR-263: the end of each active plan, on the card the session keeps if it is paired again.
       for (const [sessionId, count] of ending) noteSitePlan(sessionId, "ended", count);
       // The badge goes when the permission does (FR-062): the session may still hold its leases
@@ -3296,7 +3466,19 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       // nothing about, and a debugger attached under the old grant has no grant left to sit on.
       await diagnostics.revoke(site);
       await siteModes.clear(site);
+      // 032 R-487 (FR-490..FR-493): and every live session's admissions there - its "this session"
+      // grants, the site in its plan, its allowed moves into it - so its next call there asks again.
+      // The owner's "always" moves are their own rows and stay; a question already up stays theirs.
+      // All three are attempted even if one fails (032 review N1): a storage write that throws for
+      // one must not leave the others' admissions standing; the first failure is still reported.
+      const removals = await Promise.allSettled([
+        sessionGrantStore.forgetSite(site),
+        sitePlanStore.forgetSite(site),
+        queueTransition(() => transitionStore.forgetSessionPairsTo(site)),
+      ]);
       notify();
+      const failed = removals.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed !== undefined) throw failed.reason;
     },
     /**
      * 014 FR-192: the row is gone and the next such move asks again, in every session.

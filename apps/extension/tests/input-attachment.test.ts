@@ -1,9 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
+import { scriptedDebugger } from "./helpers/scripted-debugger.js";
 import {
+  IDLE_DETACH_MS,
   createInputAttachments,
+  enableFocusEmulation,
   inputUnavailable,
+  type AttachmentHolder,
 } from "../src/service-worker/agent-tools/input.js";
 import { createAgentDiagnostics } from "../src/service-worker/agent-tools/diagnostics.js";
 import { createAgentDialogs } from "../src/service-worker/agent-tools/dialogs.js";
@@ -117,7 +121,9 @@ function harness() {
   const diagnostics = createAgentDiagnostics({
     context: testSessionContexts(),
     siteModes,
-    prompts: createAgentPromptController({ timeoutMs: 60 }),
+    // 031 D-031-9: an ungranted diagnostics call asks the owner; here the owner always says no, so
+    // a call without the grant answers `diagnostics-not-granted` as it did before the question.
+    prompts: { ...createAgentPromptController({ timeoutMs: 60 }), async ask() { return { decision: "deny" as const }; } },
     tabOwnership: async (_sessionId, tabId) =>
       tabId === AGENT_TAB || tabId === OTHER_TAB ? { state: "this" } : { state: "not-yours" },
     attachments,
@@ -649,5 +655,255 @@ describe("T118 the input attachment", () => {
     await releasing;
 
     expect(attachments.oopifSessions(AGENT_TAB)).toEqual([]);
+  });
+});
+
+/** The composition `agent-runtime.ts` makes: the focus listener on the per-attach hook. */
+function idleHarness() {
+  const debug = scriptedDebugger();
+  const reported: string[] = [];
+  const reportDiagnostic = (code: string) => reported.push(code);
+  const attachments = createInputAttachments({ debug: debug.adapter, reportDiagnostic });
+  attachments.onAttached((tabId) => enableFocusEmulation(attachments, tabId, reportDiagnostic));
+  const beforeRelease: number[] = [];
+  attachments.onBeforeRelease((tabId) => {
+    beforeRelease.push(tabId);
+  });
+  return { attachments, debug, reported, beforeRelease };
+}
+
+describe("T943 focus while attached (R-465, FR-481)", () => {
+  it("tells the page it has focus on every attach and every re-attach, once per attachment", async () => {
+    const { attachments, debug } = idleHarness();
+
+    await attachments.acquire(AGENT_TAB, "input");
+    // A second holder joins the attachment that exists; nothing per-attachment is sent again.
+    await attachments.acquire(AGENT_TAB, "recording");
+    expect(debug.focusSends(AGENT_TAB)).toEqual([
+      { tabId: AGENT_TAB, method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } },
+    ]);
+
+    // Released and re-acquired, then detached by Chrome and re-acquired: each new attachment hears it.
+    await attachments.release(AGENT_TAB);
+    await attachments.acquire(AGENT_TAB, "input");
+    debug.externalDetach(AGENT_TAB);
+    await attachments.acquire(AGENT_TAB, "input");
+
+    expect(debug.state.attaches).toEqual([AGENT_TAB, AGENT_TAB, AGENT_TAB]);
+    expect(debug.focusSends(AGENT_TAB)).toHaveLength(3);
+  });
+
+  it("reports a refused focus emulation and still attaches", async () => {
+    const { attachments, debug, reported } = idleHarness();
+    debug.state.failMethod = "Emulation.setFocusEmulationEnabled";
+
+    expect(await attachments.acquire(AGENT_TAB, "input")).toEqual({ ok: true });
+
+    expect(attachments.state(AGENT_TAB)?.attached).toBe(true);
+    expect(reported).toContain("agent.attachment.focus-emulation-failed");
+    // Its own failure, named as such - not the generic hook failure the fan-out would have reported.
+    expect(reported).not.toContain("agent.attachment.hook-failed");
+  });
+});
+
+describe("T944 letting go when idle (R-466, FR-482, D-031-13)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is twenty seconds", () => {
+    expect(IDLE_DETACH_MS).toBe(20_000);
+  });
+
+  it("keeps the tab while a call is in progress, drops input 20 s after the last one, and re-attaches on the next", async () => {
+    const { attachments, debug, beforeRelease } = idleHarness();
+
+    const call = await attachments.hold(AGENT_TAB);
+    expect(call.outcome).toEqual({ ok: true });
+    expect(attachments.holders(AGENT_TAB)).toEqual(["input"]);
+
+    // A call that takes a minute is still a call in progress: nothing counts down under it.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(debug.state.attached.has(AGENT_TAB)).toBe(true);
+
+    call.done();
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS - 1);
+    expect(debug.state.detached).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(debug.state.detached).toEqual([AGENT_TAB]);
+    expect(attachments.attached()).toEqual([]);
+    expect(attachments.holders(AGENT_TAB)).toEqual([]);
+    // Dropped, not released: the before-release hook is the viewport clear, and it must not run.
+    expect(beforeRelease).toEqual([]);
+
+    const next = await attachments.hold(AGENT_TAB);
+    expect(next.outcome).toEqual({ ok: true });
+    expect(debug.state.attaches).toEqual([AGENT_TAB, AGENT_TAB]);
+    expect(debug.focusSends(AGENT_TAB)).toHaveLength(2);
+    next.done();
+  });
+
+  it.each<AttachmentHolder>(["recording", "viewport", "diagnostics"])(
+    "never counts down while %s holds the tab, and counts down once it lets go",
+    async (lifetime) => {
+      const { attachments, debug } = idleHarness();
+      await attachments.acquire(AGENT_TAB, lifetime);
+      const call = await attachments.hold(AGENT_TAB);
+      call.done();
+
+      await vi.advanceTimersByTimeAsync(5 * IDLE_DETACH_MS);
+      expect(debug.state.detached).toEqual([]);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Only input is left and no call is in progress: the idle rule applies from here.
+      await attachments.drop(AGENT_TAB, lifetime);
+      expect(attachments.holders(AGENT_TAB)).toEqual(["input"]);
+      await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+      expect(debug.state.detached).toEqual([AGENT_TAB]);
+    },
+  );
+
+  it("cancels the countdown for a call that starts during it, and for a lifetime holder", async () => {
+    const { attachments, debug } = idleHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    await vi.advanceTimersByTimeAsync(15_000);
+
+    const during = await attachments.hold(AGENT_TAB);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(debug.state.detached).toEqual([]);
+
+    // The countdown restarts in full from the end of that call, not from where it was.
+    during.done();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(debug.state.detached).toEqual([]);
+
+    await attachments.acquire(AGENT_TAB, "recording");
+    await vi.advanceTimersByTimeAsync(5 * IDLE_DETACH_MS);
+    expect(debug.state.detached).toEqual([]);
+    expect(attachments.holders(AGENT_TAB)).toEqual(["input", "recording"]);
+  });
+
+  it("counts calls, not done() calls: a repeated done ends nobody else's call", async () => {
+    const { attachments, debug } = idleHarness();
+    const first = await attachments.hold(AGENT_TAB);
+    const second = await attachments.hold(AGENT_TAB);
+
+    first.done();
+    first.done();
+    await vi.advanceTimersByTimeAsync(5 * IDLE_DETACH_MS);
+    expect(debug.state.detached).toEqual([]);
+
+    second.done();
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(debug.state.detached).toEqual([AGENT_TAB]);
+  });
+
+  it("clears the countdown on release and releaseAll", async () => {
+    const { attachments, debug } = idleHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    (await attachments.hold(OTHER_TAB)).done();
+    expect(vi.getTimerCount()).toBe(2);
+
+    await attachments.release(AGENT_TAB);
+    expect(vi.getTimerCount()).toBe(1);
+    await attachments.releaseAll();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(debug.state.detached).toEqual([AGENT_TAB, OTHER_TAB]);
+  });
+
+  it("ends a call that was never finished with the lease, so it cannot keep the next lease attached", async () => {
+    const { attachments, debug } = idleHarness();
+    const leaked = await attachments.hold(AGENT_TAB);
+    await attachments.release(AGENT_TAB);
+
+    const next = await attachments.hold(AGENT_TAB);
+    next.done();
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(debug.state.detached).toEqual([AGENT_TAB, AGENT_TAB]);
+
+    // And the late done of the old call is a no-op: nothing throws, nothing is armed.
+    leaked.done();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaves nothing behind when Chrome detaches on its own, during a countdown or during a call", async () => {
+    const { attachments, debug } = idleHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    expect(vi.getTimerCount()).toBe(1);
+
+    debug.externalDetach(AGENT_TAB);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(attachments.attached()).toEqual([]);
+    expect(attachments.holders(AGENT_TAB)).toEqual([]);
+
+    const call = await attachments.hold(AGENT_TAB);
+    expect(call.outcome).toEqual({ ok: true });
+    debug.externalDetach(AGENT_TAB);
+    call.done();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // And the next call attaches afresh, with focus, as after any other detach.
+    const after = await attachments.hold(AGENT_TAB);
+    expect(after.outcome).toEqual({ ok: true });
+    expect(debug.focusSends(AGENT_TAB)).toHaveLength(3);
+    after.done();
+  });
+
+  it("lets a call that arrives during release's before-release hook fail cleanly, leaving nothing armed (slice C review N2)", async () => {
+    const { attachments, debug } = idleHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    let finishHook!: () => void;
+    const hookOpen = new Promise<void>((resolve) => {
+      finishHook = resolve;
+    });
+    attachments.onBeforeRelease(() => hookOpen);
+
+    const releasing = attachments.release(AGENT_TAB);
+    // The viewport clear is still on its way; a call arrives on the tab whose lease is ending.
+    const late = await attachments.hold(AGENT_TAB);
+    // Pinned, not endorsed: the attachment still exists at this instant, so the hold is granted -
+    // there is no honest refusal reason for "the lease is ending" in the contract today.
+    expect(late.outcome).toEqual({ ok: true });
+    finishHook();
+    await releasing;
+
+    // The release went through regardless, and what the late call sends fails as on any detached tab.
+    expect(debug.state.detached).toEqual([AGENT_TAB]);
+    expect(attachments.attached()).toEqual([]);
+    await expect(attachments.send(AGENT_TAB, "Input.dispatchMouseEvent", {})).rejects.toThrow("input-not-attached");
+    late.done();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // And the late call's token did not outlive it: the next lease's first call counts down as usual.
+    const next = await attachments.hold(AGENT_TAB);
+    next.done();
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(debug.state.detached).toEqual([AGENT_TAB, AGENT_TAB]);
+  });
+
+  it("waits for an idle detach still on its way to Chrome before attaching for the next call", async () => {
+    const { attachments, debug } = idleHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    let open!: () => void;
+    debug.state.detachGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+
+    // The idle detach has been sent and Chrome has not answered yet; a call arrives.
+    const arriving = attachments.hold(AGENT_TAB);
+    open();
+    const call = await arriving;
+
+    expect(call.outcome).toEqual({ ok: true });
+    expect(debug.state.attached.has(AGENT_TAB)).toBe(true);
+    expect(attachments.holders(AGENT_TAB)).toEqual(["input"]);
+    call.done();
   });
 });

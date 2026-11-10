@@ -122,6 +122,17 @@ describe("T207 the 008 tool contracts", () => {
     expectRejected(refusal, { reason: "no-dialog", dialog: DIALOG }, "a dialog on a refusal that has none");
   });
 
+  /** 031 T942 (contracts/capture.md, R-463): a minimized window is reported, never restored. */
+  it("refuses a capture in a minimized window with a hint that says who restores it", () => {
+    const refusal = contractSchema("agentRefusalSchema");
+    expectAccepted(refusal, { reason: "window-minimized" }, "a tab in a minimized window");
+    expectRejected(refusal, { reason: "window-minimized", windowId: 3 }, "a field the refusal does not carry");
+    const hint = contractExport<string>("WINDOW_MINIMIZED_HINT");
+    expect(hint).toContain("ask the owner to restore the Chrome window");
+    expect(hint.length).toBeLessThanOrEqual(400);
+    expect(hint).not.toContain("{");
+  });
+
   it("describes the dialog the page opened, and what it followed", () => {
     const dialog = contractSchema("currentDialogSchema");
     expectAccepted(dialog, DIALOG, "an unchained confirm");
@@ -215,7 +226,7 @@ describe("T208 the agent artefact's permission and version", () => {
   });
 
   it("writes the agent artefact's version once, and the host answers with the same one", () => {
-    expect(AGENT_EXTENSION_VERSION).toBe("0.20.1");
+    expect(AGENT_EXTENSION_VERSION).toBe("0.21.0");
     const agent = createManifest(resolveBuildConfig("agent"));
     expect(agent.version).toBe(AGENT_EXTENSION_VERSION);
     // FR-122: the extension and the host it talks to are one release. Two literals that may not

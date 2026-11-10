@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentBatchStepResultSchema, agentToolArgSchemas, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
+import { agentBatchStepResultSchema, agentToolArgSchemas, CONSENT_TIMEOUT_HINT, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
 import { createAgentBatch } from "../src/service-worker/agent-tools/batch.js";
 import { decideGate } from "../src/service-worker/agent-tools/gate.js";
 import { createStatedPlans } from "../src/service-worker/agent-tools/plans.js";
@@ -385,6 +385,8 @@ describe("T047 browser_batch", () => {
       callId: "call-1",
       outcome: "timed-out",
       reason: "no-answer",
+      // 031 R-455: every expiry tells the agent to have the owner answer in Chrome.
+      hint: CONSENT_TIMEOUT_HINT,
     });
     expect(dispatch).not.toHaveBeenCalled();
     expect(plans.get(SITE)).toBeUndefined();
@@ -619,6 +621,22 @@ describe("017", () => {
         { index: 1, outcome: "ok" },
       ],
     });
+  });
+
+  it("raises no plan card on a follow-a-plan site this session holds a page-actions grant for (031 R-456)", async () => {
+    const { runner, siteModes, prompts } = harness({
+      sitePlanCovers: async () => false,
+      sessionGrants: {
+        covers: async (sessionId, site) => sessionId === "session-h1" && site === SITE,
+        add: async () => {},
+      },
+    });
+    await siteModes.set(SITE, { mode: "follow-a-plan" });
+
+    const response = await runner.run(batchRequest([CLICK]));
+
+    expect(prompts.currentPlan(), "a plan card was raised on a site the owner allowed for the session").toBeUndefined();
+    expect(response.result).toMatchObject({ results: [{ index: 0, outcome: "ok" }] });
   });
 
   it("asks the plan store nothing on an ask or skip-checks site, where no plan card is raised anyway", async () => {

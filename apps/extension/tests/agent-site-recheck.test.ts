@@ -47,6 +47,11 @@ function fakeBrowser(onAcquire?: (address: Address) => void) {
       onAcquire?.(address);
       return { ok: true as const };
     },
+    async hold() {
+      onAcquire?.(address);
+      return { outcome: { ok: true as const }, done() {} };
+    },
+    holders: () => [],
     async drop() {},
     async release() {},
     async releaseAll() {},

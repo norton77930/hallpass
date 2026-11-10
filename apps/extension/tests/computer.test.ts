@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentNativeRequest } from "@hallpass/contracts";
+import { WINDOW_MINIMIZED_HINT, type AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { captureTab, SCREENSHOT_MAX_BASE64_CHARS } from "../src/chrome-adapters/capture.js";
 import { createAgentEffects } from "../src/service-worker/agent-tools/effects.js";
@@ -41,12 +41,24 @@ const POINT_WALK_METHODS = new Set([
   "Runtime.releaseObject",
 ]);
 
-function fakeAttachments(page?: ReturnType<typeof fakePointPage>): { attachments: AgentInputAttachments; commands: Command[] } {
+function fakeAttachments(page?: ReturnType<typeof fakePointPage>): {
+  attachments: AgentInputAttachments;
+  commands: Command[];
+  holds: Array<{ tabId: number; done: boolean }>;
+} {
   const commands: Command[] = [];
+  /** 031/T945: each call's hold on the attachment, and whether its `done` has run. */
+  const holds: Array<{ tabId: number; done: boolean }> = [];
   const attachments = {
     async acquire() {
       return { ok: true as const };
     },
+    async hold(tabId: number) {
+      const entry = { tabId, done: false };
+      holds.push(entry);
+      return { outcome: { ok: true as const }, done: () => void (entry.done = true) };
+    },
+    holders: () => [],
     async drop() {},
     async release() {},
     async releaseAll() {},
@@ -75,7 +87,7 @@ function fakeAttachments(page?: ReturnType<typeof fakePointPage>): { attachments
     },
     async detachStray() {},
   } as unknown as AgentInputAttachments;
-  return { attachments, commands };
+  return { attachments, commands, holds };
 }
 
 function installChrome(): void {
@@ -440,6 +452,59 @@ describe("T138 acting by position", () => {
     expect(prompts.decide(prompt!.promptId, false)).toBe(true);
     expect((await pending).outcome).toBe("denied");
     expect(mouse(commands)).toEqual([]);
+  });
+
+  /**
+   * 031/T945 (R-466): the preflight's attachment is the one the delivery leaves by, so it is held
+   * through the owner's answer - an answer slower than the 20 s idle release must not find the tab
+   * let go - and it ends when the call answers.
+   */
+  it("holds the attachment from the preflight through the owner's answer, and lets go when it answers", async () => {
+    let raised: () => void = () => {};
+    const shown = new Promise<void>((resolve) => {
+      raised = resolve;
+    });
+    const prompts = createAgentPromptController({ timeoutMs: 500, onChange: () => raised() });
+    const { runner, commands, holds } = harness({ prompts });
+
+    const pending = runner.run(request({ action: "left_click", x: 400, y: 300 }));
+    await shown;
+    // The preflight's hold is still open while the owner is being asked.
+    expect(holds.filter((hold) => !hold.done)).toHaveLength(1);
+
+    expect(prompts.decide(prompts.current()!.promptId, true)).toBe(true);
+    expect((await pending).outcome).toBe("ok");
+    expect(mouse(commands).map((event) => event.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+    expect(holds.every((hold) => hold.done)).toBe(true);
+  });
+
+  it("answers a minimized window it could not photograph in the screenshot tool's words (031 R-463)", async () => {
+    const chrome = (globalThis as { chrome: Record<string, unknown> }).chrome;
+    const updates: unknown[] = [];
+    chrome.windows = {
+      get: async () => ({ id: 1, state: "minimized" }),
+      update: async (...args: unknown[]) => void updates.push(args),
+    };
+    const { runner, siteModes, holds } = harness({
+      capture: vi.fn(async () => {
+        throw new Error("surface-capture-timed-out");
+      }),
+    });
+    await allowed(siteModes);
+
+    const response = await runner.run(request({ action: "screenshot" }));
+
+    expect(response).toEqual({
+      callId: "call-computer",
+      outcome: "failed",
+      reason: "window-minimized",
+      refusal: { reason: "window-minimized" },
+      hint: WINDOW_MINIMIZED_HINT,
+    });
+    // Never restored, and the capture's hold ended with it.
+    expect(updates).toEqual([]);
+    expect(holds.length).toBeGreaterThan(0);
+    expect(holds.every((hold) => hold.done)).toBe(true);
   });
 });
 

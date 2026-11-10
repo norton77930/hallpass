@@ -29,7 +29,7 @@ import {
   withFrameAnswer,
 } from "./frame-consent.js";
 import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
-import type { AgentInputAttachments } from "./input.js";
+import type { AgentInputAttachments, AttachmentCallHold } from "./input.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
@@ -83,7 +83,7 @@ export type AgentUploadDeps = {
    * the effects use. Absent, the site under a drop point cannot be established and every drop asks
    * as an unknown site (FR-464) - never the page's mode by default.
    */
-  attachments?: Pick<AgentInputAttachments, "acquire" | "send" | "oopifSessions">;
+  attachments?: Pick<AgentInputAttachments, "hold" | "send" | "oopifSessions">;
   /** Every frame's main-world value of the coordinate walk's nonce (030 R-442); the adapter by default. */
   readFrameMarks?: typeof readMainWorldMarks;
   /**
@@ -220,9 +220,18 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
    * The walk rides the input attachment, so it is acquired here, before the owner is asked; it
    * reads the page and moves nothing. An attachment that cannot be had leaves the walk unanswered,
    * which is an unknown site: the drop is still possible, with the owner's yes and no Allow always.
+   *
+   * 031/T945 (R-466): it is held, not just acquired - the walk again right before the drop rides the
+   * same attachment after the owner's answer, which can take longer than the idle release - and the
+   * call lets go of it when it answers (`run`).
    */
-  async function claimPointBeforeGate(binding: AgentPageBinding, at: ViewportPoint): Promise<UploadClaim> {
-    await attachments?.acquire(binding.tabId, "input").catch(() => undefined);
+  async function claimPointBeforeGate(
+    binding: AgentPageBinding,
+    at: ViewportPoint,
+    holds: AttachmentCallHold[],
+  ): Promise<UploadClaim> {
+    const held = await attachments?.hold(binding.tabId).catch(() => undefined);
+    if (held !== undefined) holds.push(held);
     const decided = await pointSiteOf(binding, at);
     // A point in the top document is the page's, exactly as a ref there is (FR-465).
     const top = decided.kind === "page" && decided.frameId === undefined;
@@ -261,6 +270,8 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
      * is walked to before the gate.
      */
     target?: { ref: string } | { point: () => ViewportPoint },
+    /** The call's attachment holds (031/T945), ended when the call answers. */
+    holds: AttachmentCallHold[] = [],
   ): Promise<Admitted | NotAdmitted> {
     const { callId } = request;
     const ownership = await deps.tabOwnership(request.sessionId, tabId);
@@ -280,7 +291,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
         ? { frame: undefined }
         : "ref" in target
           ? await claimBeforeGate(context, binding, target.ref)
-          : await claimPointBeforeGate(binding, target.point());
+          : await claimPointBeforeGate(binding, target.point(), holds);
     const gateSite = gateSiteOf(claim.deciding, binding.site);
     // The card names the frame only when the frame, not the page, is what is being decided (R-445).
     const promptFrame = promptFrameOf(claim.deciding);
@@ -415,7 +426,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     return { callId, outcome: "ok", result: { files: result.files } };
   }
 
-  async function runUploadImage(request: AgentToolRequest): Promise<AgentNativeResponse> {
+  async function runUploadImage(request: AgentToolRequest, holds: AttachmentCallHold[]): Promise<AgentNativeResponse> {
     const { callId } = request;
     const parsed = agentToolArgSchemas.upload_image.safeParse(request.args);
     if (!parsed.success) {
@@ -451,6 +462,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       // The drop point in the frame's pixels, once `readSpace` has read the picture's space: the
       // point the walk is asked about is the point delivered.
       "ref" in named ? { ref: named.ref } : { point: () => toViewportPoint(named.coordinate, space) },
+      holds,
     );
     if (!admitted.ok) return admitted.response;
     const { context, binding, claim } = admitted;
@@ -524,8 +536,13 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     handles(tool) {
       return tool === "file_upload" || tool === "upload_image";
     },
-    run(request) {
-      return request.tool === "upload_image" ? runUploadImage(request) : runFileUpload(request);
+    async run(request) {
+      const holds: AttachmentCallHold[] = [];
+      try {
+        return request.tool === "upload_image" ? await runUploadImage(request, holds) : await runFileUpload(request);
+      } finally {
+        for (const held of holds) held.done();
+      }
     },
   };
 }

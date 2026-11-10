@@ -95,13 +95,14 @@ describe("T287 prompt-waiting on the server", () => {
       kind: "ask",
       panelConnected: true,
       waitedMs: 5_000,
-      boundMs: 25_000,
+      // 031 R-454: was 25_000. A worker ticks every question on the one 120 s bound now, panel or not.
+      boundMs: 120_000,
     });
     await waitFor(() => seen.length >= 1, 5_000, "a progress notification");
 
     // The card is in front of them: telling them to open a panel they are looking at would be
     // noise, and FR-151 keeps the neutral text as free of the question's content as the sentence is.
-    expect(seen[0]).toEqual({ progress: 5_000, total: 25_000, message: PROMPT_PROGRESS_MESSAGE });
+    expect(seen[0]).toEqual({ progress: 5_000, total: 120_000, message: PROMPT_PROGRESS_MESSAGE });
     expect(seen[0]?.message).not.toContain("Alt+A");
 
     worker.send({ callId: held.callId, outcome: "ok", result: [] });

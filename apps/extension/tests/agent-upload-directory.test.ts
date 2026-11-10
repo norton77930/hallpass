@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ATTENTION_SENTENCES } from "@hallpass/contracts";
+import { CONSENT_TIMEOUT_HINT } from "@hallpass/contracts";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
 import { CLOSED_PANEL_TIMEOUT_MS } from "../src/service-worker/agent-tools/prompts.js";
 import { composeAgentRuntime, UPLOAD_ROOTS_RECORD_WAIT_MS } from "../src/service-worker/agent-runtime.js";
@@ -168,7 +168,8 @@ describe("T378 the owner's answer about a directory", () => {
         agentId: "agent-1",
         sessionId: SESSION,
         accepted: true,
-        features: ["upload-consent", "pair-withdraw", "site-plan"],
+        // 031 R-459: and that it puts its consent questions to the agent's client as well.
+        features: ["upload-consent", "pair-withdraw", "site-plan", "terminal-consent"],
       }),
     ]);
   });
@@ -304,7 +305,8 @@ describe("T378 the owner's answer about a directory", () => {
 
       await vi.waitFor(() =>
         expect(sentOfType(port, "upload-consent-result")).toEqual([
-          { type: "upload-consent-result", callId: CALL, decision: "timed-out", hint: ATTENTION_SENTENCES.consent },
+          // 031 R-455: the one timeout sentence every expiry carries now.
+          { type: "upload-consent-result", callId: CALL, decision: "timed-out", hint: CONSENT_TIMEOUT_HINT },
         ]),
       );
     } finally {

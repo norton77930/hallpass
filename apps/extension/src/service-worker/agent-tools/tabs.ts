@@ -27,7 +27,7 @@ import type { AgentSessionContexts } from "./context.js";
 import type { ScreenshotSpaces } from "./coordinate-space.js";
 import type { BeforeunloadOutcome } from "./dialogs.js";
 import { decideGate, type StatedPlan } from "./gate.js";
-import { inputUnavailable } from "./input.js";
+import { inputUnavailable, type AttachmentCallHold } from "./input.js";
 import { captureFrameFacts } from "./photograph.js";
 import { nothingClosed, ownershipRefusal, tabsContextHint } from "./ownership.js";
 import type { AgentPageBindings } from "./page-binding.js";
@@ -113,6 +113,16 @@ export type AgentTabToolDeps = {
   dialogs?: {
     beginUnload(tabId: number, policy: "stay" | "leave"): { settled: Promise<BeforeunloadOutcome>; end(): void };
   };
+  /**
+   * The tab's debugger attachment, held for the length of a `navigate` (031/R-466, slice C review P1).
+   *
+   * The "leave site?" prompt is announced only over an attachment, and 20 s after the last effect
+   * the idle release has let the tab go - so a navigation with nothing holding it would never hear
+   * the prompt its own move raised, and the owner would be left to answer it. Held before the move
+   * and let go when the call answers. A refused attachment does not stop the navigation: it runs
+   * unheard, and a prompt it raises is the owner's. Absent holds nothing.
+   */
+  holdAttachment?: (tabId: number) => Promise<AttachmentCallHold>;
   /**
    * The owner's decision about discarding unsaved work (FR-115, D-008-4).
    *
@@ -592,11 +602,14 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
         const decided = await decideForce(request, tool, tabId, args);
         if (decided) return decided;
       }
+      // Attached before the move, so the "leave site?" it may raise is heard (031 slice C P1).
+      const held = await deps.holdAttachment?.(tabId).catch(() => undefined);
       const watch = deps.dialogs?.beginUnload(tabId, force ? "leave" : "stay");
       try {
         return await navigateTabTool(request, tabId, args, watch);
       } finally {
         watch?.end();
+        held?.done();
       }
     }
 

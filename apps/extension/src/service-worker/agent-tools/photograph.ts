@@ -1,15 +1,18 @@
+import { WINDOW_MINIMIZED_HINT, type AgentNativeResponse } from "@hallpass/contracts";
 import {
   captureTab,
   decideCapturePath,
   SCREENSHOT_MAX_BASE64_CHARS,
   type CaptureDeps,
   type CaptureFrame,
+  type CapturePath,
   type CaptureRegion,
   type CaptureSend,
   type CapturedImage,
 } from "../../chrome-adapters/capture.js";
 import { queryTabSnapshots, tabContentSize, tabZoomFactor } from "../../chrome-adapters/tabs.js";
-import type { AttachmentOutcome, InputUnavailableReason } from "./input.js";
+import { getWindowState } from "../../chrome-adapters/windows.js";
+import type { AttachmentCallHold, AttachmentOutcome, InputUnavailableReason } from "./input.js";
 
 /**
  * Photographing one tab by id (003/T036, 004/T139, 012/T311).
@@ -59,6 +62,16 @@ export type PhotographDeps = {
   tabSize?: (tabId: number) => Promise<CaptureFrame | undefined>;
   /** The tab's page zoom (R-282); unknown is no frame, never 100 % (2026-10-18). */
   tabZoom?: (tabId: number) => Promise<number | undefined>;
+  /**
+   * This capture's hold on the tab's attachment (031/T940, T945, R-466): acquired before a picture
+   * that goes over the attachment and done once it is taken, so no idle release lands inside it.
+   *
+   * It is also what turns on photographing without fronting (D-031-10): a caller that cannot hold
+   * the attachment - the recorder's fallback frame - keeps the pre-031 paths exactly.
+   */
+  hold?: (tabId: number) => Promise<AttachmentCallHold>;
+  /** The window's state (031/T942, R-463); `chrome.windows.get` by default. */
+  windowState?: (windowId: number) => Promise<string | undefined>;
 };
 
 /** What the picture will be of, and therefore which capture takes it. */
@@ -87,7 +100,23 @@ export type PhotographOutcome =
   | { ok: false; reason: "tab-gone" | "capture-refused" }
   /** The pre-capture check said the tab is no longer on the call's site; nothing was captured. */
   | { ok: false; reason: "site-moved" }
-  | { ok: false; reason: "input-unavailable"; unavailableReason: InputUnavailableReason };
+  | { ok: false; reason: "input-unavailable"; unavailableReason: InputUnavailableReason }
+  /** 031 R-463, FR-480: the tab's window is minimized and its surface could not be photographed. */
+  | { ok: false; reason: "window-minimized" };
+
+/**
+ * The answer both picture tools give a `window-minimized` outcome (031, contracts/capture.md): the
+ * refusal and the sentence the agent relays, so the person - not Hallpass - restores the window.
+ */
+export function windowMinimizedAnswer(callId: string): AgentNativeResponse {
+  return {
+    callId,
+    outcome: "failed",
+    reason: "window-minimized",
+    refusal: { reason: "window-minimized" },
+    hint: WINDOW_MINIMIZED_HINT,
+  };
+}
 
 /**
  * The scale that would have fitted, for the refusal to name (012/FR-162, R-171).
@@ -193,34 +222,90 @@ export async function photographTab(
       return { ok: false, reason: "input-unavailable", unavailableReason: attached.unavailableReason };
     }
   }
-  if (input.beforeCapture && !(await input.beforeCapture())) return { ok: false, reason: "site-moved" };
-  // Whoever the window is showing right now, so it is showing them again afterwards.
   // A region is asked in the frame's CSS pixels; a protocol clip is in the capture's units.
   const clipRegion =
     facts.emulated && facts.zoom !== undefined && input.region
       ? scaleRegion(input.region, facts.zoom)
       : input.region;
-  const displaced = tabs.find((candidate) => candidate.windowId === tab.windowId && candidate.active);
+  /**
+   * 031 (T940, T942, R-462..R-464): which picture, by what the tab and its window are. Only a caller
+   * that can hold the attachment photographs without fronting, and the window's state is read for
+   * it - never changed: a minimized window is photographed where it is, or reported.
+   */
+  const canHold = !facts.emulated && deps.hold !== undefined && deps.send !== undefined;
+  const windowState = canHold
+    ? await (deps.windowState ?? getWindowState)(tab.windowId).catch(() => undefined)
+    : undefined;
+  const minimized = windowState === "minimized";
+  let path: CapturePath = decideCapturePath(
+    facts.emulated ? facts.capture : undefined,
+    clipRegion,
+    scale,
+    facts.zoom,
+    canHold ? { active: tab.active, windowState } : undefined,
+  );
+  // R-466: a picture taken over the attachment holds it for exactly as long as it takes, so an
+  // idle release cannot land inside it. The visible-tab picture attaches nothing and holds nothing.
+  const held =
+    path.kind !== "visible-tab" && deps.hold
+      ? await deps.hold(input.tabId).catch(
+          (): AttachmentCallHold => ({ outcome: { ok: false, unavailableReason: "detached" }, done: () => undefined }),
+        )
+      : undefined;
   try {
-    const image = await capture(
-      {
-        tabId: input.tabId,
-        windowId: tab.windowId,
-        isActive: tab.active,
-        ...(displaced && displaced.id !== input.tabId ? { restoreTabId: displaced.id } : {}),
-        ...(input.region === undefined ? {} : { region: input.region }),
-        ...(facts.frame === undefined ? {} : { frame: facts.frame }),
-        scale,
-        path: decideCapturePath(facts.emulated ? facts.capture : undefined, clipRegion, scale, facts.zoom),
-        ...(input.lossless ? { lossless: true } : {}),
-      },
-      {
-        ...(deps.captureDeps ?? {}),
-        ...(deps.send ? { send: deps.send } : {}),
-      },
-    );
-    return { ok: true, image, ...(facts.frame === undefined ? {} : { frame: facts.frame }) };
-  } catch {
-    return { ok: false, reason: "capture-refused" };
+    if (held && !held.outcome.ok) {
+      // An emulated viewport has no other honest picture: the attachment's refusal, in its words.
+      if (path.kind === "protocol") {
+        return { ok: false, reason: "input-unavailable", unavailableReason: held.outcome.unavailableReason };
+      }
+      // R-464: no attachment means the pre-031 picture - except of a window that is not on screen.
+      if (minimized) return { ok: false, reason: "window-minimized" };
+      path = { kind: "visible-tab" };
+    }
+    if (input.beforeCapture && !(await input.beforeCapture())) return { ok: false, reason: "site-moved" };
+    // Whoever the window is showing right now, so it is showing them again afterwards.
+    const displaced = tabs.find((candidate) => candidate.windowId === tab.windowId && candidate.active);
+    const shoot = (chosen: CapturePath) =>
+      capture(
+        {
+          tabId: input.tabId,
+          windowId: tab.windowId,
+          isActive: tab.active,
+          ...(displaced && displaced.id !== input.tabId ? { restoreTabId: displaced.id } : {}),
+          ...(input.region === undefined ? {} : { region: input.region }),
+          ...(facts.frame === undefined ? {} : { frame: facts.frame }),
+          scale,
+          path: chosen,
+          ...(input.lossless ? { lossless: true } : {}),
+        },
+        {
+          ...(deps.captureDeps ?? {}),
+          ...(deps.send ? { send: deps.send } : {}),
+        },
+      );
+    const taken = (image: CapturedImage): PhotographOutcome => ({
+      ok: true,
+      image,
+      ...(facts.frame === undefined ? {} : { frame: facts.frame }),
+    });
+    try {
+      return taken(await shoot(path));
+    } catch {
+      // The protocol and visible-tab pictures have no second route: under emulation the window's
+      // picture is not of the viewport (012), and the visible tab *is* the fallback.
+      if (path.kind !== "surface") return { ok: false, reason: "capture-refused" };
+    }
+    // D-031-11 as amended: a minimized window's surface failed or did not answer in time. The
+    // owner restores the window; Hallpass does not.
+    if (minimized) return { ok: false, reason: "window-minimized" };
+    // R-464: the surface failed on a window that is on screen - the tab was already in front, so
+    // the pre-031 picture of it costs the owner nothing.
+    try {
+      return taken(await shoot({ kind: "visible-tab" }));
+    } catch {
+      return { ok: false, reason: "capture-refused" };
+    }
+  } finally {
+    held?.done();
   }
 }

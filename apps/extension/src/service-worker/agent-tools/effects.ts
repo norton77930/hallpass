@@ -40,6 +40,8 @@ import {
   inputUnavailable,
   isInputDispatchDeadline,
   type AgentInputAttachments,
+  type AttachmentCallHold,
+  type AttachmentOutcome,
   type AgentKeyboardInput,
   type AgentPointerInput,
   type CursorSender,
@@ -79,7 +81,13 @@ import {
   type Viewport,
 } from "./computer.js";
 import { bindingFailureResponse, INPUT_NOT_ANSWERED_HINT, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
-import { captureFrameFacts, photographTab, screenshotTooLarge, type PhotographDeps } from "./photograph.js";
+import {
+  captureFrameFacts,
+  photographTab,
+  screenshotTooLarge,
+  windowMinimizedAnswer,
+  type PhotographDeps,
+} from "./photograph.js";
 import {
   carriesPoint,
   spaceOfPicture,
@@ -93,6 +101,7 @@ import { discoverRefFrame, findOnTab, resolveRef, type AgentTarget, type RefFram
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
+import { pageActionsCovered, recordSessionGrant, type PageActionGrants } from "./page-action-grants.js";
 import {
   FrameMovedBeforeDispatch,
   isFrameMovedBeforeDispatch,
@@ -219,6 +228,11 @@ export type AgentEffectDeps = {
    */
   sitePlanCovers?: (sessionId: string, site: string) => Promise<boolean>;
   /**
+   * 031 R-456: the session's page-actions grants. Covered = site plan covers OR grant covers, and an
+   * Allow the owner gave with `session` writes one for the site the gate decided. Absent: no grants.
+   */
+  sessionGrants?: PageActionGrants;
+  /**
    * Photographing the tab (004/T139, US7, FR-069).
    *
    * An effect runner had no use for a camera until `computer` arrived, and it now has two: the
@@ -329,6 +343,9 @@ export type AgentEffectRunner = {
 /** How a call ends the download observer's window for its own page action (FR-077, #36 follow-up). */
 type PageActionWindow = { close?: (() => void) | undefined };
 
+/** The holds one call has taken on the tab's attachment (031/T945, R-466); ended when it answers. */
+type CallHolds = AttachmentCallHold[];
+
 /** The 002 settle window, reused: the same page needs the same time whoever asked. */
 const DEFAULT_SETTLE_MS = 400;
 
@@ -360,13 +377,13 @@ const INPUT_CALL_BUDGET_MS = AGENT_CALL_TIMEOUT_MS - AGENT_CALL_TIMEOUT_SLACK_MS
 /**
  * What the first dispatch of a call is always given, however much of the budget went before it.
  *
- * A consent prompt can hold a call for its 25 s bound (or two minutes behind a closed panel, the host
- * extending its own wait meanwhile), and resolving the target may take a content deadline or two.
- * Input that reaches the renderer at all is then bounded from its first dispatch by this much, and is
- * never "spent" before anything was sent - an input that never left is not one that "may have taken
- * effect". It is the room the host's 30 s leaves past the budget's own end, not a promise to answer
- * first: an owner who answers in the last moments of the 25 s prompt bound, plus resolving the target
- * and the cursor's 250 ms arrival, can put the first dispatch past `receivedAt` + 25 s, and a renderer
+ * A consent prompt can hold a call for its one 120 s bound (031 D-031-6, `CLOSED_PANEL_TIMEOUT_MS`,
+ * the host extending its own wait meanwhile), and resolving the target may take a content deadline or
+ * two. Input that reaches the renderer at all is then bounded from its first dispatch by this much,
+ * and is never "spent" before anything was sent - an input that never left is not one that "may have
+ * taken effect". It is the room the host's 30 s leaves past the budget's own end, not a promise to
+ * answer first: an owner who answers late in the prompt's bound, plus resolving the target and the
+ * cursor's 250 ms arrival, can put the first dispatch past `receivedAt` + 25 s, and a renderer
  * that then hangs may still meet the host's `timed-out / no-answer` - the answer every call gave
  * before F4, not a new one. The same holds for the in-page effects bounded the same way.
  */
@@ -1683,6 +1700,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         // 012/S2c F2: after an eviction the record says "emulated" while this worker holds no
         // attachment; the emulation's own holder is claimed rather than the picture being refused.
         ensureAttached: (id) => deps.attachments.acquire(id, "viewport"),
+        // 031/T940, T945: the capture's own hold, which also lets the active tab be photographed
+        // off its surface without being brought forward - the `screenshot` tool's paths exactly.
+        hold: (id) => deps.attachments.hold(id),
       },
     );
   }
@@ -2002,8 +2022,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     binding: AgentPageBinding,
     callId: string,
     claim: PreGateClaim,
+    holds: CallHolds,
   ): Promise<AgentNativeResponse> {
-    const acquired = await deps.attachments.acquire(binding.tabId, "input");
+    const acquired = await holdInput(binding.tabId, holds);
     if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
 
     // This delivery's locator, and with it this delivery's frame geometry: it goes out of scope
@@ -2220,8 +2241,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     binding: AgentPageBinding,
     callId: string,
     claim: PreGateClaim,
+    holds: CallHolds,
   ): Promise<AgentNativeResponse> {
-    const acquired = await deps.attachments.acquire(binding.tabId, "input");
+    const acquired = await holdInput(binding.tabId, holds);
     if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
 
     const named = args.target as AgentTarget | undefined;
@@ -2422,6 +2444,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     callId: string,
     /** The latest picture's space: a refusal names *its* size, the one the agent aims in (R-280). */
     space: ScreenshotSpace | undefined,
+    /** The call's holds (031/T945): this one lasts through the gate to the delivery. */
+    holds: CallHolds,
   ): Promise<
     | { ok: true; point?: PositionPoint; viewport?: Viewport }
     | { ok: false; response: AgentNativeResponse }
@@ -2429,7 +2453,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     const action = String(args.action);
     if (action === "screenshot" || action === "wait") return { ok: true };
 
-    const acquired = await deps.attachments.acquire(binding.tabId, "input");
+    const acquired = await holdInput(binding.tabId, holds);
     if (!acquired.ok) return { ok: false, response: inputUnavailable(callId, acquired.unavailableReason) };
 
     const viewport = await measureViewport(binding.tabId, (tabId, method, params) =>
@@ -2495,6 +2519,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         // The attachment's refusal in the attachment's own words (012/S2c F2), exactly as every
         // other action in this file answers one.
         if (photo.reason === "input-unavailable") return inputUnavailable(callId, photo.unavailableReason);
+        // 031 R-463: the `screenshot` tool's own answer for a minimized window it could not photograph.
+        if (photo.reason === "window-minimized") return windowMinimizedAnswer(callId);
         return answer(callId, photo.reason === "tab-gone" ? "stale" : "not-readable", photo.reason);
       }
       // Still over the frame budget at the lowest JPEG quality (R-281): the `screenshot` tool's own
@@ -2619,14 +2645,34 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
    */
   async function runCall(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const pageAction: PageActionWindow = {};
+    const holds: CallHolds = [];
     try {
-      return await runEffect(request, pageAction);
+      return await runEffect(request, pageAction, holds);
     } finally {
       pageAction.close?.();
+      // 031/T945, R-466: however the call answered, its holds on the attachment end with it.
+      for (const held of holds) held.done();
     }
   }
 
-  async function runEffect(request: AgentToolRequest, pageAction: PageActionWindow): Promise<AgentNativeResponse> {
+  /**
+   * `input` for this call, held until the call answers (031/T945, R-466): `runCall` ends every hold.
+   *
+   * Held rather than acquired, so the call counts as in progress for the idle release: a recording
+   * or viewport that lets go mid-call does not start the 20 s countdown under it, and a `computer`
+   * action's attachment from its preflight lasts through the owner's answer to the delivery.
+   */
+  async function holdInput(tabId: number, holds: CallHolds): Promise<AttachmentOutcome> {
+    const held = await deps.attachments.hold(tabId);
+    holds.push(held);
+    return held.outcome;
+  }
+
+  async function runEffect(
+    request: AgentToolRequest,
+    pageAction: PageActionWindow,
+    holds: CallHolds,
+  ): Promise<AgentNativeResponse> {
     const { callId, tool } = request;
     // Where this call's input budget is measured from (015 review F4): as near the host's own start
     // of its per-call wait as this runner can see.
@@ -2683,7 +2729,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     // Acting by position settles its address before anybody is asked about it (004/T139).
     let position: { point?: PositionPoint; viewport?: Viewport } = {};
     if (tool === "computer") {
-      const preflight = await preflightPosition(acting, binding, callId, space);
+      const preflight = await preflightPosition(acting, binding, callId, space, holds);
       if (!preflight.ok) return preflight.response;
       position = preflight;
     }
@@ -2699,7 +2745,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * tool attaches for it now rather than after the gate; `computer`'s preflight already has.
      */
     if (tool !== "computer" && namedPoints(tool, acting).length > 0) {
-      const acquired = await deps.attachments.acquire(binding.tabId, "input");
+      const acquired = await holdInput(binding.tabId, holds);
       if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
     }
     const claim = await claimBeforeGate(tool, args, acting, context, binding, position.point);
@@ -2715,8 +2761,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       tool,
       args,
       ...(deps.statedPlan && gateSite !== null ? { plan: deps.statedPlan(gateSite) } : {}),
-      // 017: the calling session's own plan, for the site this decision is about.
-      sitePlanCovers: gateSite !== null && (await deps.sitePlanCovers?.(request.sessionId, gateSite)) === true,
+      // 017: the calling session's own plan, for the site this decision is about - or, 031 R-456,
+      // its page-actions grant for that site.
+      sitePlanCovers: gateSite !== null && (await pageActionsCovered(deps, request.sessionId, gateSite)),
     });
     if (decision.decision === "refuse") {
       return answer(callId, "failed", decision.reason);
@@ -2788,6 +2835,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         // (030 FR-457). A frame whose site is unknown has no site to store anything under (FR-458).
         await deps.siteModes.set(gateSite, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
       }
+      // 031 R-456: "This session" - the gate's site, for this session only, with where it was given.
+      await recordSessionGrant(deps.sessionGrants, request.sessionId, gateSite, tool, asked, deps.reportDiagnostic);
       // The owner's own yes, which is the other half of "approved" (008/R-139).
       noteApproval(tabId, tool, args);
     }
@@ -2817,8 +2866,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // is the same one whichever way the input is delivered.
       const delivered = await answeringInputDeadline(callId, binding.tabId, receivedAt, () =>
         isPointerTool(tool)
-          ? deliverPointer(tool, acting, context, binding, callId, claim)
-          : deliverKeyboard(tool, acting, context, binding, callId, claim),
+          ? deliverPointer(tool, acting, context, binding, callId, claim, holds)
+          : deliverKeyboard(tool, acting, context, binding, callId, claim, holds),
       );
       if (delivered.outcome === "ok") deps.onEffect?.(request.sessionId, binding.tabId);
       return delivered;
