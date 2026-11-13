@@ -9,7 +9,7 @@ import {
   type FrameFocusAnswer,
   type FrameSiteReply,
 } from "../src/service-worker/agent-tools/frame-site.js";
-import { fakePointPage, type FakeFrame } from "./helpers/point-site.js";
+import { fakePointPage, TOP_CDP_FRAME_ID, type FakeFrame } from "./helpers/point-site.js";
 
 /**
  * 030/T889 - which site decides an action inside a frame (FR-451, FR-452, FR-453, R-440, R-441).
@@ -315,6 +315,112 @@ describe("030 resolvePointSite hit-test walk", () => {
     ]);
   });
 
+  // #67, measured 2026-11-14: the hit-test takes document coordinates (scroll included), the box
+  // model answers viewport coordinates. Each session's own scroll is added for its hit-test only.
+  const hitTests = (calls: Array<{ method: string; params: Record<string, unknown>; sessionId?: string }>) =>
+    calls
+      .filter((call) => call.method === "DOM.getNodeForLocation")
+      .map((call) => ({ x: call.params.x, y: call.params.y, sessionId: call.sessionId }));
+
+  it("asks the hit-test at the point plus the top document's scroll on a scrolled page (#67)", async () => {
+    const page = fakePointPage([second()], { pageSite: PAGE, scroll: { [TOP_CDP_FRAME_ID]: { x: 40, y: 150 } } });
+
+    // In the viewport this is just below the frame, on the top document; taken as a document point
+    // it would be one scroll offset up and left, on the frame's holder.
+    const decided = await resolvePointSite({ x: 200.5, y: 250.7 }, PAGE, page);
+
+    expect(decided).toEqual({ kind: "page", site: PAGE, pageSite: PAGE });
+    expect(hitTests(page.calls)).toEqual([{ x: 240, y: 400, sessionId: undefined }]);
+    expect(page.calls.filter((call) => call.method === "Page.getLayoutMetrics").map((call) => call.sessionId)).toEqual([
+      undefined,
+    ]);
+  });
+
+  it("decides a frame under a point on a scrolled page in a scrolled frame by each session's own scroll (#67)", async () => {
+    const page = fakePointPage([second()], {
+      pageSite: PAGE,
+      scroll: { [TOP_CDP_FRAME_ID]: { x: 0, y: 300 }, "T-SECOND": { x: 0, y: 80 } },
+    });
+
+    const decided = await resolvePointSite({ x: 160, y: 90 }, PAGE, page);
+
+    expect(decided).toEqual({ kind: "frame", site: SECOND, pageSite: PAGE, frameId: 5, documentId: "bdoc-5" });
+    expect(hitTests(page.calls)).toEqual([
+      { x: 160, y: 390, sessionId: undefined },
+      // The holder's box is viewport: the child point is (160, 90) - (100, 50), plus the child's scroll.
+      { x: 60, y: 120, sessionId: "session-T-SECOND" },
+    ]);
+    expect(page.calls.filter((call) => call.method === "Page.getLayoutMetrics").map((call) => call.sessionId)).toEqual([
+      undefined,
+      "session-T-SECOND",
+    ]);
+  });
+
+  it("finds the innermost frame through a scrolled out-of-process frame (#67)", async () => {
+    const inner: FakeFrame = {
+      cdpFrameId: "T-INNER",
+      box: { x: 20, y: 30, width: 100, height: 80 },
+      outOfProcess: true,
+      frameId: 9,
+      documentId: "bdoc-9",
+      sender: THIRD,
+    };
+    const page = fakePointPage([second({ children: [inner] })], { pageSite: PAGE, scroll: { "T-SECOND": { x: 0, y: 80 } } });
+
+    expect(await resolvePointSite({ x: 125, y: 85 }, PAGE, page)).toEqual({
+      kind: "frame",
+      site: THIRD,
+      pageSite: PAGE,
+      frameId: 9,
+      documentId: "bdoc-9",
+    });
+  });
+
+  it("gives page for a point on a scrolled holder's border, outside its content box (#67)", async () => {
+    const page = fakePointPage([second()], { pageSite: PAGE, scroll: { [TOP_CDP_FRAME_ID]: { x: 0, y: 300 } } });
+    // In the viewport (99, 100) is just left of the content box; in the document it is (99, 400).
+    const holderHit = await page.send("DOM.getNodeForLocation", { x: 150, y: 400 });
+    page.calls.length = 0;
+    const send: typeof page.send = async (method, params, sessionId) =>
+      method === "DOM.getNodeForLocation" && sessionId === undefined ? holderHit : page.send(method, params, sessionId);
+
+    expect(await resolvePointSite({ x: 99, y: 100 }, PAGE, { ...page, send })).toEqual({ kind: "page", site: PAGE, pageSite: PAGE });
+    expect(page.marksRead).toEqual([]);
+  });
+
+  it("gives unknown, never the unscrolled point, when a session's scroll cannot be read (#67, FR-464)", async () => {
+    const answers: Array<Record<string, unknown>> = [
+      {},
+      { cssLayoutViewport: {} },
+      { cssLayoutViewport: { pageX: 0 } },
+      { cssLayoutViewport: { pageY: 0 } },
+      { cssLayoutViewport: { pageX: "0", pageY: 0 } },
+      { cssLayoutViewport: { pageX: 0, pageY: Number.NaN } },
+      // The visual viewport is not the document scroll.
+      { cssVisualViewport: { pageX: 0, pageY: 0 } },
+    ];
+    for (const sessionAsked of [undefined, "session-T-SECOND"]) {
+      for (const answer of answers) {
+        const page = fakePointPage([second()], { pageSite: PAGE });
+        const send: typeof page.send = async (method, params, sessionId) =>
+          method === "Page.getLayoutMetrics" && sessionId === sessionAsked ? answer : page.send(method, params, sessionId);
+        const name = `${String(sessionAsked)} ${JSON.stringify(answer)}`;
+        expect(await resolvePointSite({ x: 160, y: 90 }, PAGE, { ...page, send }), name).toEqual({ kind: "unknown", pageSite: PAGE });
+        expect(hitTests(page.calls).map((call) => call.sessionId), name).not.toContain(sessionAsked);
+      }
+      const failing = fakePointPage([second()], { pageSite: PAGE });
+      const rejects: typeof failing.send = async (method, params, sessionId) =>
+        method === "Page.getLayoutMetrics" && sessionId === sessionAsked
+          ? Promise.reject(new Error("the page went away"))
+          : failing.send(method, params, sessionId);
+      expect(await resolvePointSite({ x: 160, y: 90 }, PAGE, { ...failing, send: rejects }), String(sessionAsked)).toEqual({
+        kind: "unknown",
+        pageSite: PAGE,
+      });
+      expect(failing.probed).toEqual([]);
+    }
+  });
+
   it("names the frame by a nonce written through the debugger, read back across all frames, then cleared", async () => {
     const page = fakePointPage([second()], { pageSite: PAGE });
     let seenDuringRead: Array<{ frame: string; key: string }> = [];
@@ -359,6 +465,7 @@ describe("030 resolvePointSite hit-test walk", () => {
   it("gives unknown when any step fails", async () => {
     const cases: Array<[string, ReturnType<typeof fakePointPage>]> = [
       ["frame tree", fakePointPage([second()], { pageSite: PAGE, failing: ["Page.getFrameTree"] })],
+      ["layout metrics", fakePointPage([second()], { pageSite: PAGE, failing: ["Page.getLayoutMetrics"] })],
       ["hit-test", fakePointPage([second()], { pageSite: PAGE, failing: ["DOM.getNodeForLocation"] })],
       ["describe", fakePointPage([second()], { pageSite: PAGE, failing: ["DOM.describeNode"] })],
       ["box", fakePointPage([second()], { pageSite: PAGE, failing: ["DOM.getBoxModel"] })],

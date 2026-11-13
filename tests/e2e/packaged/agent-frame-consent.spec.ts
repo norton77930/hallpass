@@ -215,6 +215,70 @@ test.describe("agent frame consent", () => {
     }
   });
 
+  // #67: the frame under a point is found by a hit-test that takes document coordinates, so the same
+  // decision has to hold when the page and the out-of-process frame are both scrolled (FR-455).
+  test("Story 2 (#67): the same decision on a scrolled page and a scrolled frame", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+    const { panel, settings } = await ownerSurfaces(extensionContext, extensionId, extensionWorker);
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const live = client;
+      const call = callerFor(() => client);
+      await panel.clickIfPresent(ui("agent.retry"));
+      await pairWithFirstCall(live, panel, { locale });
+
+      const tabId = await openTab(call, `${SITE}/frame-consent`);
+      const page = await agentPage(extensionContext, `${SITE}/frame-consent`);
+      const frame = page.frameLocator("#consent-frame");
+      await expect(frame.locator("#frame-button")).toBeVisible();
+      await settings.setSiteMode(SITE, "skip-checks");
+
+      // Both documents scrolled, each by its own amount, with the button and the heading still in view.
+      await page.evaluate(() => {
+        document.body.style.marginTop = "500px";
+        document.body.style.paddingBottom = "2000px";
+        window.scrollTo(0, 300);
+      });
+      const child = page.frames().find((candidate) => candidate.url().includes("frame-consent-child"));
+      expect(child, page.frames().map((candidate) => candidate.url()).join("\n")).toBeTruthy();
+      await child!.evaluate(() => {
+        document.body.style.paddingTop = "120px";
+        document.body.style.paddingBottom = "1000px";
+        window.scrollTo(0, 80);
+      });
+      await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(300);
+      await expect.poll(() => child!.evaluate(() => window.scrollY)).toBe(80);
+
+      const over = await centreOf(frame.locator("#frame-button"));
+      const clicking = live.callTool("computer", { tabId, action: "left_click", x: over.x, y: over.y });
+      await waitForPrompt(panel, "consent");
+      const line = await frameLine(panel);
+      expect.soft(line.kind, `point ${JSON.stringify(over)}\n${await panel.panelText()}`).toBe("site");
+      expect.soft(line.text).toContain(SECOND);
+      expect(await frame.locator("#frame-status").textContent(), "the click landed before the owner answered").toBe(
+        "not clicked",
+      );
+      await clickInPrompt(panel, "consent", ui("agent.allowOnce"));
+      const clicked = await clicking;
+      expect(clicked.isError, `computer: ${clicked.text}\nstderr:\n${live.stderr()}`).toBe(false);
+      await expect(frame.locator("#frame-status")).toHaveText("clicked");
+
+      // The heading on the scrolled page: the page's own skip-checks decides, no card.
+      const outside = await centreOf(page.locator("#top-heading"));
+      await actWithoutCard(panel, live, "computer", { tabId, action: "left_click", x: outside.x, y: outside.y });
+
+      await closeTab(extensionWorker, tabId);
+    } finally {
+      await forgetSites(settings, [SITE, SECOND]);
+      await client?.close();
+    }
+  });
+
   test("Story 3: a sandboxed frame is an unknown site without Allow always; srcdoc and about:blank follow the page", async ({
     extensionContext,
     extensionId,

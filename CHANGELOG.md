@@ -5,6 +5,18 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.22.1 — 2026-11-14
+
+- **Fix: the right site decides a click on a scrolled page (#67).** Before an action at a screen
+  point (`computer` clicks, a ref's point, an `upload_image` drop), Hallpass looks up which frame is
+  under the point so that frame's own site decides whether to ask. Since 0.20.0 that lookup ignored
+  how far the page was scrolled. On a scrolled page it could find nothing and ask with a frame card
+  where none was needed (in #67 the card went unanswered and the call looked hung), or look at the
+  spot one scroll distance higher. In the second case, a click over another site's frame could be
+  decided by the page's own site mode instead of the frame's. The lookup now accounts for the scroll
+  of the page and of each frame it passes through, and when the scroll cannot be read it asks.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.22.0 — 2026-11-14
 
 - **The page pointer says what the agent is doing.** A short caption next to the agent's pointer

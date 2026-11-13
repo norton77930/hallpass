@@ -990,6 +990,10 @@ function captionRows(): RowSpec[] {
     // above scrolled the page down to the Far button, so the Go button is no longer at (370, 220).
     // `key` Home is not used: it would put the "Pressing Home" caption between two rows of its own.
     { id: "scroll-back-to-go", tool: "scroll", args: (c) => ({ target: ref(c, "Go button") }), words: Words.scrollToElement, mode: "stay" },
+    // #67's order: End scrolls the page to the bottom, then the computer clicks land on a scrolled
+    // page (none of them checks what it lands on). It hung while the frame-site walk hit-tested the
+    // viewport point as a document point.
+    { id: "computer-key", tool: "computer", args: () => ({ action: "key", key: "End" }), words: Words.keyEnd, mode: "stay" },
     { id: "computer-left_click", tool: "computer", args: () => ({ action: "left_click", x: GO.x, y: GO.y }), words: Words.click, mode: "travel" },
     { id: "computer-double_click", tool: "computer", args: () => ({ action: "double_click", x: 500, y: 300 }), words: Words.doubleClick, mode: "travel" },
     { id: "computer-type", tool: "computer", args: () => ({ action: "type", text: "x" }), words: Words.type, mode: "stay" },
@@ -997,7 +1001,6 @@ function captionRows(): RowSpec[] {
     { id: "computer-scroll-up", tool: "computer", args: () => ({ action: "scroll", x: 400, y: 300, amount: -2 }), words: Words.scrollUp, mode: "travel" },
     { id: "computer-right_click", tool: "computer", args: () => ({ action: "right_click", x: 540, y: 340 }), words: Words.rightClick, mode: "travel" },
     { id: "computer-scroll-down", tool: "computer", args: () => ({ action: "scroll", x: 400, y: 300, amount: 2 }), words: Words.scrollDown, mode: "travel" },
-    { id: "computer-key", tool: "computer", args: () => ({ action: "key", key: "End" }), words: Words.keyEnd, mode: "stay" },
     { id: "computer-wait", tool: "computer", args: () => ({ action: "wait", ms: 2000 }), words: Words.wait("2"), mode: "stay" },
     { id: "scroll-to-go", tool: "scroll", args: (c) => ({ target: ref(c, "Go button") }), words: Words.scrollToElement, mode: "stay" },
     {

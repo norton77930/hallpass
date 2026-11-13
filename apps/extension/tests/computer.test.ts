@@ -67,13 +67,13 @@ function fakeAttachments(page?: ReturnType<typeof fakePointPage>): {
       // 030: which frame is under a point is asked of the page model when a test has one, and is
       // otherwise a page of one document.
       if (page !== undefined && POINT_WALK_METHODS.has(method)) return page.send(method, params ?? {}, sessionId);
+      // The one geometry query the position tool makes: the tab's own viewport, which is what a
+      // refusal has to be able to name. Unscrolled, for the walk's hit-test (#67).
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: VIEWPORT.width, clientHeight: VIEWPORT.height, pageX: 0, pageY: 0 } };
+      }
       const oneDocument = oneDocumentAnswer(method);
       if (oneDocument !== undefined) return oneDocument;
-      // The one geometry query the position tool makes: the tab's own viewport, which is what a
-      // refusal has to be able to name.
-      if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: VIEWPORT.width, clientHeight: VIEWPORT.height } };
-      }
       // 012/T311: the picture of an emulated tab comes over this attachment, not off the window.
       return method === "Page.captureScreenshot" ? { data: "cHJvdG9jb2w=" } : {};
     },

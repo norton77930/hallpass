@@ -78,7 +78,7 @@ function fakeBrowser() {
       sent.push(method);
       const held = hooks.hold?.(method, params);
       if (held) return held;
-      if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } };
       if (method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased") hooks.onRelease?.();
       // 030: the frame under a point is asked of the debugger; this page is one document.
       return oneDocumentAnswer(method) ?? {};
