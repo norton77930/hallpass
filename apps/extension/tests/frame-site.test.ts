@@ -372,6 +372,18 @@ describe("030 resolvePointSite hit-test walk", () => {
     }
   });
 
+  it("gives unknown when the marks read-back rejects, and still clears the nonce", async () => {
+    // eb221c1 review nit: the read-back is the call the all-frames bound can reject (a lazy frame).
+    const page = fakePointPage([second()], { pageSite: PAGE });
+    const readMarks: typeof page.readMarks = async () => {
+      throw new Error("the read-back gave no answer");
+    };
+
+    expect(await resolvePointSite({ x: 160, y: 90 }, PAGE, { ...page, readMarks })).toEqual({ kind: "unknown", pageSite: PAGE });
+    expect(page.leftovers()).toEqual([]);
+    expect(page.probed).toEqual([]);
+  });
+
   it("gives unknown for a malformed hit-test answer, even over the top document", async () => {
     for (const answer of [{}, { backendNodeId: 1 }, { frameId: "top-frame" }]) {
       const page = fakePointPage([], { pageSite: PAGE });

@@ -259,8 +259,37 @@ describe("T120 pointer delivery", () => {
       await pointer.click(AGENT_TAB, CENTRE, { button: "left", clickCount: 1 });
 
       // The pointer persists between gestures now; it leaves with the tab's lease, not with the click.
-      expect(cursor.map((entry) => entry.message)).toEqual([{ type: "cursor", x: 140, y: 50 }]);
+      // 033 R-492: a click's move asks the page for the press ripple when it lands.
+      expect(cursor.map((entry) => entry.message)).toEqual([{ type: "cursor", x: 140, y: 50, press: true }]);
       expect(cursor.every((entry) => entry.tabId === AGENT_TAB)).toBe(true);
+    });
+
+    it("asks for the press ripple on every member of the click family, and on no other gesture", async () => {
+      const fake = fakeAttachments();
+      const cursor: CursorMessage[] = [];
+      const pointer = createPointerInput({
+        attachments: fake.attachments,
+        cursor: (tabId, message) => {
+          cursor.push({ tabId, message: message as Record<string, unknown> });
+        },
+      });
+
+      await pointer.click(AGENT_TAB, CENTRE, { button: "right", clickCount: 1 });
+      await pointer.click(AGENT_TAB, CENTRE, { button: "left", clickCount: 2 });
+      await pointer.click(AGENT_TAB, CENTRE, { button: "left", clickCount: 3 });
+      expect(cursor.map((entry) => entry.message)).toEqual([
+        { type: "cursor", x: 140, y: 50, press: true },
+        { type: "cursor", x: 140, y: 50, press: true },
+        { type: "cursor", x: 140, y: 50, press: true },
+      ]);
+
+      cursor.length = 0;
+      await pointer.hover(AGENT_TAB, CENTRE);
+      await pointer.scroll(AGENT_TAB, CENTRE, { deltaX: 0, deltaY: 300 });
+      expect(cursor.map((entry) => entry.message)).toEqual([
+        { type: "cursor", x: 140, y: 50 },
+        { type: "cursor", x: 140, y: 50 },
+      ]);
     });
 
     it("dispatches nothing until the page says the pointer has arrived", async () => {
@@ -295,7 +324,8 @@ describe("T120 pointer delivery", () => {
         });
 
         const click = pointer.click(AGENT_TAB, CENTRE, { button: "left", clickCount: 1 });
-        await vi.advanceTimersByTimeAsync(249);
+        // 033 R-496, FR-508: the longest travel (380 ms) plus slack, no more than 450 ms.
+        await vi.advanceTimersByTimeAsync(419);
         expect(fake.commands).toEqual([]);
 
         await vi.advanceTimersByTimeAsync(1);
@@ -320,7 +350,8 @@ describe("T120 pointer delivery", () => {
       await pointer.drag(AGENT_TAB, { x: 10, y: 20 }, { x: 90, y: 120 });
 
       expect(cursor.map((entry) => entry.message)).toEqual([
-        { type: "cursor", x: 10, y: 20 },
+        // The drag's press move asks for the ripple; its end does not (nothing is pressed there).
+        { type: "cursor", x: 10, y: 20, press: true },
         { type: "cursor", x: 90, y: 120 },
       ]);
       expect(mouse(fake.commands)).toEqual([

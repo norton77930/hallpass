@@ -523,6 +523,13 @@ type ChromeContentRuntime = {
   };
 };
 
+/** Every message of `contentRuntimeMessageSchema` has a type starting with `content.`; nothing else is answered. */
+function ownsContentMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+  const type = (message as { type?: unknown }).type;
+  return typeof type === "string" && type.startsWith("content.");
+}
+
 const chromeRuntime = (globalThis as { chrome?: { runtime?: ChromeContentRuntime } }).chrome?.runtime;
 type ChromeContentListener = Parameters<NonNullable<ChromeContentRuntime["onMessage"]>["addListener"]>[0];
 const globalGuard = globalThis as typeof globalThis & {
@@ -535,6 +542,10 @@ if (chromeRuntime?.id && chromeRuntime.onMessage) {
   }
   const listener: ChromeContentListener = (message, sender, sendResponse) => {
     if (sender.id !== chromeRuntime.id) return false;
+    // Only `content.*` messages are this script's (033 review I1). The agent entry shares frame 0's
+    // isolated world and answers its own awaited messages (marks, cursor) later; the first reply
+    // wins, so an `invalid-message` answered here would settle those waits at once.
+    if (!ownsContentMessage(message)) return false;
     sendResponse(handleContentMessage(message));
     return false;
   };

@@ -1,3 +1,4 @@
+import { executeInAllFrames } from "../../chrome-adapters/all-frames.js";
 import { FOCUS_WALK_MAX_DEPTH, type FrameFocusAnswer } from "./frame-site.js";
 
 /**
@@ -73,9 +74,12 @@ export function focusOfFrame(maxDepth: number): { path: number[] | null; focused
   }
 }
 
-/** Every frame's focus answer for tab `tabId`, with the browser's frame and document ids. */
+/**
+ * Every frame's focus answer for tab `tabId`, with the browser's frame and document ids. Rejects past
+ * the all-frames bound (`executeInAllFrames`); `resolveFocusSite` answers that as unknown.
+ */
 export async function readFrameFocus(tabId: number): Promise<FrameFocusAnswer[]> {
-  const results = (await chrome.scripting.executeScript({
+  const results = (await executeInAllFrames({
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: focusOfFrame,
