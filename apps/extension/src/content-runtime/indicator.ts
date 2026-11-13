@@ -1,4 +1,5 @@
 import { INDICATOR_MARKER_ATTRIBUTE } from "./indicator-marker.js";
+import { adoptMark } from "./marks.js";
 
 export { INDICATOR_MARKER_ATTRIBUTE } from "./indicator-marker.js";
 
@@ -103,6 +104,8 @@ function drawGlow(doc: Document): void {
       easing: "ease-in-out",
     });
   }
+  // Drawn while a capture has the marks hidden: hidden at birth (033/R-499).
+  adoptMark(doc, layer);
   doc.body?.appendChild(layer);
 }
 
@@ -234,6 +237,7 @@ export function applyIndicator(message: unknown, host: IndicatorHost): boolean {
   });
   element.appendChild(button);
 
+  adoptMark(doc, element);
   doc.body.appendChild(element);
   return true;
 }

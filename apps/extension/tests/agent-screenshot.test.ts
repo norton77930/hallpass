@@ -53,6 +53,8 @@ function harness(input: {
   /** 031: the per-call hold on the tab's attachment, and the window's state. */
   holdAttachment?: Parameters<typeof createAgentReads>[0]["holdAttachment"];
   windowState?: Parameters<typeof createAgentReads>[0]["windowState"];
+  /** 033/T997: where the page is told to hide its marks around the capture. */
+  marks?: Parameters<typeof createAgentReads>[0]["marks"];
 }) {
   const listTabs = vi.fn(async () => tabs(input.agentActive ?? false));
   const diagnostics: string[] = [];
@@ -72,6 +74,7 @@ function harness(input: {
     ...(input.screenshotSpaces ? { screenshotSpaces: input.screenshotSpaces } : {}),
     ...(input.holdAttachment ? { holdAttachment: input.holdAttachment } : {}),
     ...(input.windowState ? { windowState: input.windowState } : {}),
+    ...(input.marks ? { marks: input.marks } : {}),
   });
   return { runner, diagnostics };
 }
@@ -910,5 +913,216 @@ describe("031 a screenshot that does not bring the tab forward", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/**
+ * 033/T997, FR-509, R-499, D-033-5 - a picture returned to the agent has none of the Hallpass marks
+ * (pointer, caption, ring, pill, glow) in it. The page is told to hide them, the capture waits for the
+ * page to say it has painted that (bounded: a page that never answers costs 250 ms), and the page is told to
+ * show them again whatever became of the capture. Only these two agent paths do this - the GIF frames
+ * keep the marks (`frame-capture.test.ts`).
+ */
+describe("033/T997 the marks are hidden around an agent screenshot", () => {
+  type Marks = NonNullable<Parameters<typeof createAgentReads>[0]["marks"]>;
+
+  beforeEach(() => {
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { getZoom: async () => 1 } };
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  /** What happened, in order: the page was told to hide, the browser was asked for a picture, the page was told to show. */
+  function watched(options: { hide?: () => unknown; show?: () => unknown; capture?: () => Promise<string> } = {}) {
+    const log: string[] = [];
+    const sent: Array<{ tabId: number; message: unknown }> = [];
+    const marks: Marks = async (tabId, message) => {
+      sent.push({ tabId, message });
+      const hidden = message.hidden;
+      log.push(hidden ? "hide" : "show");
+      if (hidden && options.hide) return options.hide();
+      if (!hidden && options.show) return options.show();
+      return { painted: true };
+    };
+    const captureDeps = {
+      captureVisibleTab: async () => {
+        log.push("capture");
+        return options.capture ? options.capture() : PNG;
+      },
+      activateTab: async () => undefined,
+      measure: async () => FRAME,
+      crop: async () => ({ data: "cmVnaW9u", width: 125, height: 63 }),
+      encodeJpeg: async () => "/9j/4AAQ",
+    };
+    return { log, sent, marks, captureDeps };
+  }
+
+  it("hides, then captures, then shows - for a whole-viewport screenshot", async () => {
+    const seen = watched();
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+    expect(seen.sent).toEqual([
+      { tabId: AGENT_TAB, message: { type: "marks", hidden: true } },
+      { tabId: AGENT_TAB, message: { type: "marks", hidden: false } },
+    ]);
+  });
+
+  it("hides, then captures, then shows - for a region", async () => {
+    const seen = watched();
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB, region: { x: 4, y: 8, width: 100, height: 50 } }));
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+  });
+
+  it("does not capture until the page has answered that the marks are painted away", async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    const seen = watched({ hide: () => new Promise((resolve) => void (answer = resolve)) });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const running = runner.run(request({ tabId: AGENT_TAB }));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seen.log, "the picture waits for the page").toEqual(["hide"]);
+
+    answer({ painted: true });
+    await running;
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+  });
+
+  it("a page that never answers costs at most 250 ms, then the picture is taken and the marks come back", async () => {
+    const seen = watched({ hide: () => new Promise(() => {}) });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const started = Date.now();
+    const running = runner.run(request({ tabId: AGENT_TAB }));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(seen.log, "still inside the wait").toEqual(["hide"]);
+    const response = await running;
+    const waited = Date.now() - started;
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+    expect(waited).toBeGreaterThanOrEqual(240);
+    expect(waited).toBeLessThan(1500);
+  });
+
+  it.each([
+    ["rejects", () => Promise.reject(new Error("Could not establish connection. Receiving end does not exist."))],
+    ["throws", () => { throw new Error("no such tab"); }],
+  ])("a hide message that %s does not fail the screenshot", async (_name, hide) => {
+    const seen = watched({ hide });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+  });
+
+  // 033 review I2: the recorder takes its frame as soon as the screenshot returns, so the marks must be
+  // painted back by then - the call does not finish until the page has answered the show.
+  it("does not return until the page has answered the show", async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    const seen = watched({ show: () => new Promise((resolve) => void (answer = resolve)) });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    let done = false;
+    const running = runner.run(request({ tabId: AGENT_TAB })).then((response) => {
+      done = true;
+      return response;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+    expect(done, "the screenshot waits for the marks to be painted back").toBe(false);
+
+    answer({ painted: true });
+    expect((await running).outcome).toBe("ok");
+  });
+
+  it("a page that never answers the show costs at most 250 ms more, and the screenshot still succeeds", async () => {
+    const seen = watched({ show: () => new Promise(() => {}) });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const started = Date.now();
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+    const waited = Date.now() - started;
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+    expect(waited).toBeGreaterThanOrEqual(240);
+    expect(waited).toBeLessThan(1500);
+  });
+
+  it.each([
+    ["rejects", () => Promise.reject(new Error("Could not establish connection. Receiving end does not exist."))],
+    ["throws", () => { throw new Error("no such tab"); }],
+  ])("a show message that %s does not fail the screenshot", async (_name, show) => {
+    const seen = watched({ show });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response.outcome).toBe("ok");
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+  });
+
+  it("shows the marks again when the capture throws", async () => {
+    const seen = watched({
+      capture: async () => {
+        throw new Error("Cannot access contents of the page");
+      },
+    });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB }));
+
+    expect(response).toEqual({ callId: "call-1", outcome: "not-readable", reason: "capture-refused" });
+    expect(seen.log).toEqual(["hide", "capture", "show"]);
+  });
+
+  it("leaves the marks alone when the call is refused before any picture (region outside the viewport)", async () => {
+    const seen = watched();
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const response = await runner.run(request({ tabId: AGENT_TAB, region: { x: 5000, y: 8, width: 100, height: 50 } }));
+
+    expect(response.outcome).toBe("failed");
+    // Nothing was photographed, so the page was never asked to hide anything.
+    expect(seen.log).toEqual([]);
+  });
+
+  it("two screenshots of one tab at once hide once and show once, after both pictures", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => void (release = resolve));
+    let first = true;
+    const seen = watched({
+      capture: async () => {
+        if (first) {
+          first = false;
+          await gate;
+        }
+        return PNG;
+      },
+    });
+    const { runner } = harness({ marks: seen.marks, captureDeps: seen.captureDeps });
+
+    const one = runner.run(request({ tabId: AGENT_TAB }));
+    const two = runner.run(request({ tabId: AGENT_TAB }));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(seen.log.filter((entry) => entry === "show"), "the marks stay hidden while a picture is out").toEqual([]);
+    release();
+    await Promise.all([one, two]);
+
+    expect(seen.log.filter((entry) => entry === "hide")).toHaveLength(1);
+    expect(seen.log.filter((entry) => entry === "show")).toHaveLength(1);
+    expect(seen.log.at(-1)).toBe("show");
   });
 });

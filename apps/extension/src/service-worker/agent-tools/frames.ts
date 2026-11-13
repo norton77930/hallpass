@@ -4,6 +4,7 @@ import {
   DEFAULT_BOUNDS,
   type AgentReadPageResult,
 } from "@hallpass/contracts";
+import { ALL_FRAMES_BOUND_MS, AllFramesTimeoutError } from "../../chrome-adapters/all-frames.js";
 import { decideFrameSite, type FrameSiteSender } from "./frame-site.js";
 
 /**
@@ -99,7 +100,7 @@ export type FrameEnumerator = (tabId: number) => Promise<BrowserFrame[]>;
  * loaded document takes to walk itself and short enough that an agent is not left waiting on a
  * frame that was never going to speak.
  */
-export const FRAME_ANSWER_BOUND_MS = 2_000;
+export const FRAME_ANSWER_BOUND_MS = ALL_FRAMES_BOUND_MS;
 
 /**
  * Where each frame's site comes from in a read (030 R-448, FR-462).
@@ -385,13 +386,33 @@ export async function tabFrames(
   fallbackUrl: string,
   enumerate: FrameEnumerator,
 ): Promise<BrowserFrame[]> {
+  return (await tabFramesChecked(tabId, fallbackUrl, enumerate)).frames;
+}
+
+/**
+ * `tabFrames`, and whether the enumeration timed out (eb221c1 review I1).
+ *
+ * A timed-out enumeration (`AllFramesTimeoutError`: a lazy, unloaded iframe kept the call pending)
+ * still falls back to the top document, but it is not the same answer as a page that has no frames:
+ * loaded child frames were left out. A read that reports the fallback as the whole page - `truncated:
+ * false` - is the "empty/partial page reported as whole" this module exists to avoid, so the reads
+ * ask here and say `truncated: true`. Any other failure keeps the answer it always had, and callers
+ * that do not care use `tabFrames`.
+ */
+export async function tabFramesChecked(
+  tabId: number,
+  fallbackUrl: string,
+  enumerate: FrameEnumerator,
+): Promise<{ frames: BrowserFrame[]; timedOut: boolean }> {
+  let timedOut = false;
   try {
     const frames = await enumerate(tabId);
-    if (frames.length > 0) return frames;
-  } catch {
+    if (frames.length > 0) return { frames, timedOut };
+  } catch (error) {
     // Falls through to the top document, which is there whether or not it was enumerated.
+    timedOut = error instanceof AllFramesTimeoutError;
   }
-  return [{ frameId: 0, parentFrameId: -1, url: fallbackUrl }];
+  return { frames: [{ frameId: 0, parentFrameId: -1, url: fallbackUrl }], timedOut };
 }
 
 /** How a frame is listed once it has been asked: the label, where it sits, and whether it spoke. */

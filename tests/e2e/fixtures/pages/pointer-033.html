@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pointer 033 fixture</title>
+<style>
+  /* 033 - the page the pointer-caption live checks stand on.
+
+     Everything is absolutely positioned at a fixed coordinate so "click here" means the same thing on
+     every run, and everything lives in the top-left 700 x 460 corner: the rest of the first screen is
+     plain white, which is what the capture check (live-6) compares the agent's screenshots against.
+     There is no scrollbar (it would sit inside the glow's strip), and the page is tall (2400 px) only
+     so a scroll has somewhere to go.
+
+     The visible words avoid every caption word on purpose (clicking, typing, reading, finding,
+     pressing, opening, scrolling, waiting, pointing, dragging, resizing, running, filling, uploading,
+     going): the not-text check (live-5) looks for a caption's words in the page's text, and a page that
+     already says them would make "not found" impossible to read. */
+  html { scrollbar-width: none; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { height: 2400px; font: 16px/1.4 system-ui, sans-serif; color: #222; }
+  .at { position: absolute; margin: 0; box-sizing: border-box; }
+  h1 { font-size: 20px; margin: 0; }
+  button, input, select { font: inherit; }
+  /*  go      (300,200)-(440,240)   centre (370,220)
+      name    (300,280)-(500,308)
+      plan    (300,330)-(420,358)
+      hover   (300,380)-(440,420)
+      list    (520,200)    attach  (520,300)
+      far     (300,1800)-(440,1840)                                                                  */
+  #title { left: 100px; top: 20px; }
+  #go { left: 300px; top: 200px; width: 140px; height: 40px; }
+  #name { left: 300px; top: 280px; width: 200px; height: 28px; }
+  #plan { left: 300px; top: 330px; width: 120px; height: 28px; }
+  #hover { left: 300px; top: 380px; width: 140px; height: 40px; }
+  #list { left: 520px; top: 200px; list-style: none; padding: 0; }
+  #list li { margin-bottom: 8px; }
+  #attach { left: 520px; top: 300px; }
+  #far { left: 300px; top: 1800px; width: 140px; height: 40px; }
+</style>
+</head>
+<body>
+<h1 id="title" class="at">Pointer fixture</h1>
+<button type="button" id="go" class="at" aria-label="Go button">Go button</button>
+<input type="text" id="name" class="at" aria-label="Name field">
+<select id="plan" class="at" aria-label="Plan">
+  <option value="free" selected>Free</option>
+  <option value="pro">Pro</option>
+</select>
+<button type="button" id="hover" class="at" aria-label="Hover target">Hover target</button>
+<ul id="list" class="at">
+  <li id="alpha"><button type="button" draggable="true" aria-label="Alpha">Alpha</button></li>
+  <li id="beta"><button type="button" draggable="true" aria-label="Beta">Beta</button></li>
+</ul>
+<input type="file" id="attach" class="at" aria-label="Attachment">
+<button type="button" id="far" class="at" aria-label="Far button">Far button</button>
+<script>
+  (function () {
+    // The same reorder the gestures fixture has, so a drag has something to move.
+    var list = document.getElementById('list');
+    var dragged = null;
+    list.addEventListener('dragstart', function (event) { dragged = event.target.closest('li'); });
+    list.addEventListener('dragover', function (event) { event.preventDefault(); });
+    list.addEventListener('drop', function (event) {
+      var row = event.target.closest('li');
+      if (dragged && row && row !== dragged) row.after(dragged);
+    });
+    // A press the page can see: the live checks read their own click timestamps from the probe they
+    // inject, so this only keeps a count a person can read in the console.
+    document.getElementById('go').addEventListener('click', function () {
+      document.body.dataset.goCount = String(Number(document.body.dataset.goCount || 0) + 1);
+    });
+  })();
+</script>
+</body>
+</html>

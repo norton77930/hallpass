@@ -762,8 +762,12 @@ export type PointerButton = "left" | "right" | "middle";
  * ordinary content-script channel and its failure is never an effect's failure. One move per
  * gesture; the pointer stays on the page between them and leaves with the tab's lease (the
  * indicator's `show: false`), so `hide` is kept for the protocol and no longer sent per gesture.
+ *
+ * `press` (033 FR-505, R-492) says a press will land at this point: the page spreads one ring from
+ * the arrow's tip when the move arrives. Only the click family and a drag's press move send it; a
+ * hover, a scroll and a drag's end are moves without a press.
  */
-export type CursorMessage = { type: "cursor"; x?: number; y?: number; hide?: true };
+export type CursorMessage = { type: "cursor"; x?: number; y?: number; hide?: true; press?: true };
 
 /**
  * Sends the page one cursor message. A returned promise settles when the page reports the pointer
@@ -775,8 +779,11 @@ export type CursorSender = (tabId: number, message: CursorMessage) => Promise<vo
 /**
  * How long a gesture waits for the page's "arrived" before the move is dispatched anyway: the
  * page's own glide plus slack. A page with no listener rejects at once and waits nothing.
+ *
+ * 033 FR-506, FR-508, R-496: the glide now takes 140-380 ms by distance, so the cap is the longest
+ * glide plus slack and stays under the 450 ms the spec allows a gesture to wait.
  */
-const CURSOR_ARRIVAL_CAP_MS = 250;
+const CURSOR_ARRIVAL_CAP_MS = 420;
 
 /** The shorter wait inside a drag, between the press and the move to the end of it. */
 const DRAG_TRAVEL_CAP_MS = 60;
@@ -907,10 +914,12 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
    * arrow stop on the target and *then* the page react, never the other way round. The cap keeps a
    * page that cannot answer (no listener, hidden, mid-navigation) from holding the input.
    */
-  async function arrive(tabId: number, at: PointerPoint, capMs: number): Promise<void> {
+  async function arrive(tabId: number, at: PointerPoint, capMs: number, press = false): Promise<void> {
     let ack: Promise<void>;
     try {
-      ack = Promise.resolve(cursor(tabId, { type: "cursor", x: at.x, y: at.y })).catch(() => undefined);
+      ack = Promise.resolve(
+        cursor(tabId, { type: "cursor", x: at.x, y: at.y, ...(press ? { press: true as const } : {}) }),
+      ).catch(() => undefined);
     } catch {
       return;
     }
@@ -932,8 +941,9 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
     at: PointerPoint,
     check: PointerDispatchCheck,
     run: () => Promise<void>,
+    press = false,
   ): Promise<void> {
-    await arrive(tabId, at, CURSOR_ARRIVAL_CAP_MS);
+    await arrive(tabId, at, CURSOR_ARRIVAL_CAP_MS, press);
     // After the glide, before the first event (014 change log 2026-10-11): the wait above is the
     // window a page can leave the site in, so the question is asked at its far end.
     if (check.beforeDispatch && !(await check.beforeDispatch())) throw new SiteMovedBeforeDispatch();
@@ -952,7 +962,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
         await move(tabId, point, undefined, sessionId);
         await mouse(tabId, { type: "mousePressed", x: point.x, y: point.y, button, clickCount }, sessionId);
         await mouse(tabId, { type: "mouseReleased", x: point.x, y: point.y, button, clickCount }, sessionId);
-      });
+      }, true);
     },
     async scroll(tabId, point, delta, destination = {}) {
       const sessionId = destination.sessionId;
@@ -990,7 +1000,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
           { type: "mouseReleased", x: to.x, y: to.y, button: "left", clickCount: 1 },
           sessionId,
         );
-      });
+      }, true);
     },
   };
 }

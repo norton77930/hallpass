@@ -164,9 +164,22 @@ const PAGE_FILES = [
   "frame-nested-mid",
   "frame-navigating",
   "frame-navigated",
+  /**
+   * 033: the pointer-caption live checks. `pointer-033` is a page of controls at fixed coordinates with
+   * a plain white remainder (what a capture is compared against); `pointer-033-csp` is a bare page
+   * served with a style policy that blocks an injected <style> element (see `PAGE_HEADERS`).
+   */
+  "pointer-033",
+  "pointer-033-csp",
 ] as const;
 
 type PageFileName = (typeof PAGE_FILES)[number];
+
+/** Extra response headers for the page files that need them; every other page is served with none. */
+const PAGE_HEADERS: Partial<Record<PageFileName, Record<string, string>>> = {
+  // 033: no inline styles and no foreign style sources, so the pointer's injected stylesheet is refused.
+  "pointer-033-csp": { "content-security-policy": "default-src 'self'; style-src 'self'" },
+};
 
 const pagesDirectory = resolve(repoRoot, "tests", "e2e", "fixtures", "pages");
 
@@ -958,9 +971,20 @@ export function handle(port: number, request: IncomingMessage, response: ServerR
     return;
   }
 
+  // 033: the strict-policy page's one same-origin stylesheet (`style-src 'self'` admits it).
+  if (path === "/pointer-033-csp.css") {
+    response.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "no-store" });
+    response.end(readFileSync(resolve(pagesDirectory, "pointer-033-csp.css"), "utf8"));
+    return;
+  }
+
   const file = PAGE_FILES.find((candidate) => path === `/${candidate}`);
   if (file) {
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      ...PAGE_HEADERS[file],
+    });
     response.end(pageFile(file, port));
     return;
   }

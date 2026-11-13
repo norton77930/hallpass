@@ -70,6 +70,69 @@ describe("content runtime reinjection after extension reload", () => {
     expect(active).toEqual(new Set([added[1]!]));
   });
 
+  /**
+   * 033 review I1: agent-entry shares frame 0's isolated world and answers the worker's awaited
+   * `marks` and `cursor` messages itself, later. This listener must stay silent for anything that is
+   * not a `content.*` message, or its immediate `invalid-message` reply settles those waits at once.
+   */
+  describe("which messages the listener answers", () => {
+    const runtimeId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    async function boundListener(): Promise<RuntimeListener> {
+      const listeners: RuntimeListener[] = [];
+      (globalThis as { chrome?: unknown }).chrome = {
+        runtime: {
+          id: runtimeId,
+          onMessage: {
+            addListener(listener: RuntimeListener) {
+              listeners.push(listener);
+            },
+          },
+        },
+      };
+      vi.resetModules();
+      await import("../src/content-runtime/index.js");
+      return listeners[0]!;
+    }
+
+    it.each([
+      ["marks", { type: "marks", hidden: true }],
+      ["cursor", { type: "cursor", x: 1, y: 2 }],
+      ["pointer-step", { type: "pointer-step", words: "Clicking", mode: "travel" }],
+      ["indicator", { type: "indicator", show: true, label: "Agent", action: "Back" }],
+      ["a string", "marks"],
+      ["null", null],
+      ["an array", ["content.probe"]],
+      ["a non-string type", { type: 7 }],
+    ])("does not answer %s, so the message's real owner can", async (_name, message) => {
+      const listener = await boundListener();
+      const sendResponse = vi.fn();
+
+      expect(listener(message, { id: runtimeId }, sendResponse)).toBe(false);
+
+      expect(sendResponse).not.toHaveBeenCalled();
+    });
+
+    it("still answers a malformed content.* message with the invalid-message reply", async () => {
+      const listener = await boundListener();
+      const sendResponse = vi.fn();
+
+      listener({ type: "content.probe", unexpected: true }, { id: runtimeId }, sendResponse);
+
+      expect(sendResponse).toHaveBeenCalledTimes(1);
+      expect(sendResponse.mock.calls[0]![0]).toMatchObject({ ok: false, reason: "invalid-message" });
+    });
+
+    it("does not answer a message from another sender", async () => {
+      const listener = await boundListener();
+      const sendResponse = vi.fn();
+
+      expect(listener({ type: "content.probe" }, { id: "someone-else" }, sendResponse)).toBe(false);
+
+      expect(sendResponse).not.toHaveBeenCalled();
+    });
+  });
+
   it("reinjects, probes, and collects from an existing page whose old listener was invalidated", async () => {
     const active = new Set<RuntimeListener>();
     const runtimeId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

@@ -5,6 +5,28 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.22.0 — 2026-11-14
+
+- **The page pointer says what the agent is doing.** A short caption next to the agent's pointer
+  names the current step (click, type, scroll, key, read the page, find "…", open a site, wait…) in
+  your language (English or Traditional Chinese). It stays inside the window, flipping to the other
+  side near an edge, and fades shortly after the step unless the pointer is resting.
+- **A rest spot for steps that do not point.** Navigating, opening tabs, filling a form by value or
+  uploading moves the pointer to the bottom-left corner with its caption; reading tools change the
+  caption without moving the pointer.
+- **Clearer motion.** The pointer's travel time grows with distance on a slightly curved path, a
+  short ring shows where a press lands after the pointer arrives, and reduced-motion settings make
+  it jump.
+- **Not part of the page.** The caption is not found by the page's own search or by `get_page_text`,
+  `read_page` and `find`, and the pointer, caption, status label and page-edge glow are hidden from the agent's
+  screenshots.
+- **Fix: reads no longer hang on pages with a lazy frame.** On a page holding an
+  `<iframe loading="lazy">` that has not loaded yet (for example a comments frame at the bottom of a
+  blog post), `get_page_text`, `find` and `read_page` waited 30 s and then timed out. They now answer
+  within about 2 s with the page's own content. Actions that look up the frame under the pointer on
+  such a page are bounded the same way and ask when the frame's site cannot be told.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.21.0 — 2026-11-10
 
 - **Questions also come to the agent's own client.** A consent question is also asked in the coding

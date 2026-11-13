@@ -101,6 +101,7 @@ import { discoverRefFrame, findOnTab, resolveRef, type AgentTarget, type RefFram
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
+import { withMarksHidden, type MarksSender } from "./capture-marks.js";
 import { pageActionsCovered, recordSessionGrant, type PageActionGrants } from "./page-action-grants.js";
 import {
   FrameMovedBeforeDispatch,
@@ -159,6 +160,11 @@ export type AgentEffectDeps = {
   attachments: AgentInputAttachments;
   /** Where the page is told the pointer is; absent means the ordinary content-script channel. */
   cursor?: CursorSender;
+  /**
+   * Where the page is told to hide and show its marks around the `computer` screenshot (033/T997);
+   * the content channel to the top frame by default.
+   */
+  marks?: MarksSender;
   /** Where an element is, in its own frame's viewport. The frame offsets are T124/T125. */
   locate?: TargetLocator;
   /**
@@ -383,7 +389,7 @@ const INPUT_CALL_BUDGET_MS = AGENT_CALL_TIMEOUT_MS - AGENT_CALL_TIMEOUT_SLACK_MS
  * and is never "spent" before anything was sent - an input that never left is not one that "may have
  * taken effect". It is the room the host's 30 s leaves past the budget's own end, not a promise to
  * answer first: an owner who answers late in the prompt's bound, plus resolving the target and the
- * cursor's 250 ms arrival, can put the first dispatch past `receivedAt` + 25 s, and a renderer
+ * cursor's arrival (up to 420 ms), can put the first dispatch past `receivedAt` + 25 s, and a renderer
  * that then hangs may still meet the host's `timed-out / no-answer` - the answer every call gave
  * before F4, not a new one. The same holds for the in-page effects bounded the same way.
  */
@@ -2513,7 +2519,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     const action = String(args.action);
 
     if (action === "screenshot") {
-      const photo = await photograph(binding.tabId, undefined, onGatedSite(binding));
+      // This picture is handed to the agent, so the page's marks are hidden for it (033 FR-509,
+      // R-499). The consent card's crop (`promptCrop`) is the owner's and keeps them.
+      const photo = await withMarksHidden(
+        binding.tabId,
+        () => photograph(binding.tabId, undefined, onGatedSite(binding)),
+        deps.marks,
+      );
       if (!photo.ok) {
         if (photo.reason === "site-moved") return siteMovedAnswer(callId);
         // The attachment's refusal in the attachment's own words (012/S2c F2), exactly as every

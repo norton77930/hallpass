@@ -105,6 +105,7 @@ import { createBrowserChoiceController, type BrowserChoiceWaitingTick } from "./
 import { normalizeBrowserName } from "../browser-name.js";
 import { defaultBrowserNames } from "@hallpass/domain";
 import { createAgentStopSignals, STEP_SEPARATOR, type AgentToolRequest } from "./agent-tools/stop.js";
+import { pointerCaption, type PointerStepMessage } from "./agent-tools/pointer-captions.js";
 import { createAgentTabTools } from "./agent-tools/tabs.js";
 import { createAgentUpload } from "./agent-tools/upload.js";
 import { createAgentWait } from "./agent-tools/wait.js";
@@ -369,6 +370,12 @@ export type AgentRuntimeOptions = {
    * Nothing consumes them before S5; injected by tests, which is how the filtering is observable.
    */
   onConversationFrame?: (frame: ConversationLinkFrame) => void;
+  /**
+   * 033 T984: injected by tests; the real one sends the step to the tab's top frame. Never awaited:
+   * the caption is a mark on the page, and a page that rejects it or never answers costs the call
+   * nothing (R-491).
+   */
+  sendPointerStep?: (tabId: number, step: PointerStepMessage) => Promise<unknown> | void;
 };
 
 /**
@@ -655,6 +662,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     },
   });
   /**
+   * The owner's browser decides the language; the worker has no other opinion about it. The pill
+   * and the pointer's captions (033 D-033-3) both speak it.
+   */
+  const ownerLocale = (): string => chrome.i18n?.getUILanguage?.() ?? "en-US";
+  /**
    * The in-page indicator, sent (004/T107b, FR-062).
    *
    * Addressed to the top frame of the tab: the declared content script runs in every frame, and an
@@ -670,8 +682,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     inject: injectAgentContent,
     reportDiagnostic: reportTestDiagnostic,
     holderOf: async (tabId) => (await tabs.leases()).find((lease) => lease.tabId === tabId)?.sessionId,
-    // The owner's browser decides the language; the worker has no other opinion about it.
-    locale: () => chrome.i18n?.getUILanguage?.() ?? "en-US",
+    locale: ownerLocale,
   });
   const tabs = createAgentTabManager({
     onTabJoined: (_sessionId, tabId) => indicator.raise(tabId),
@@ -1714,6 +1725,74 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
   }
 
   /**
+   * Tells the page what the agent is about to do (033 FR-499, FR-510, R-491, D-033-4).
+   *
+   * Here, at the one point every call meets - a top-level call from any agent, a side-panel
+   * conversation's, and each step of a `browser_batch` - rather than in each runner. Only a tab this
+   * session holds is told: a caption on a page the agent was refused is a mark nobody should see.
+   * The send is fire-and-forget and swallowed; nothing about the call depends on the page hearing it.
+   */
+  async function showPointerStep(
+    request: AgentToolRequest,
+  ): Promise<{ tabId: number; step: PointerStepMessage } | undefined> {
+    try {
+      const tabId = namedTabOf(request) ?? request.tabId;
+      if (tabId === undefined) return undefined;
+      const caption = pointerCaption(request.tool, request.args, ownerLocale());
+      if (!caption) return undefined;
+      if (!(await holdsTab(request.sessionId, tabId))) return undefined;
+      const step: PointerStepMessage = { type: "pointer-step", ...caption };
+      deliverPointerStep(tabId, step, false);
+      return { tabId, step };
+    } catch {
+      // A mark on the page is never a reason for the call to fail.
+      return undefined;
+    }
+  }
+
+  async function holdsTab(sessionId: string, tabId: number): Promise<boolean> {
+    return (await tabs.leases()).some((lease) => lease.tabId === tabId && lease.sessionId === sessionId);
+  }
+
+  /**
+   * One send to the tab's top frame, fire-and-forget. With `inject`, a page that has no content script
+   * to hear it is given the declared one (the indicator's own send-or-inject path, `indicator.raise`)
+   * and the step is sent once more; the announcement that script makes is answered by the indicator as
+   * ever, and nothing here loops.
+   */
+  function deliverPointerStep(tabId: number, step: PointerStepMessage, inject: boolean): void {
+    const sent = options.sendPointerStep
+      ? options.sendPointerStep(tabId, step)
+      : chrome.tabs?.sendMessage?.(tabId, step, { frameId: 0 });
+    void Promise.resolve(sent).catch(() => {
+      if (!inject) return undefined;
+      return injectAgentContent(tabId)
+        .then(() => deliverPointerStep(tabId, step, false))
+        .catch(() => undefined);
+    });
+  }
+
+  /**
+   * A `rest` step is sent again after its call (033 live run 2026-11-13).
+   *
+   * The step goes out before the runner acts, so a `navigate` that replaces the document sends it to
+   * the document being left, and the new one shows no pointer and no caption. Sent again once the call
+   * has finished it reaches the tab's new top document, where "Opening {host}" is to stay (US2). The
+   * lease is read again: a call that released or lost the tab leaves nothing to mark. Same-document
+   * rest calls (`evaluate`, `form_input`, ...) get the same second send, which puts the pointer at the
+   * same rest spot with the same words.
+   */
+  async function replayRestStep(request: AgentToolRequest, shown: { tabId: number; step: PointerStepMessage }): Promise<void> {
+    try {
+      if (shown.step.mode !== "rest") return;
+      if (!(await holdsTab(request.sessionId, shown.tabId))) return;
+      deliverPointerStep(shown.tabId, shown.step, true);
+    } catch {
+      // As for the first send: never a reason for the call to fail.
+    }
+  }
+
+  /**
    * The owner's question about where the tab went, asked before the call runs (FR-187).
    *
    * Answered here rather than in each runner because the claim is "any tool, reads included": a
@@ -1934,12 +2013,17 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       ]);
       if (held === interruption) return interruptedAnswer(callId);
       if (held) return await withTransitionNotice(request, held as AgentNativeResponse);
+      // 033 R-491: after the transition check (a held call has not started) and before the runner.
+      const shown = await showPointerStep(watched);
       const running = runTool(watched);
       if (request.tool === "browser_batch") {
         return await withTransitionNotice(request, await recordAfter(request, await running));
       }
       const finished = await Promise.race([running, handle.interrupted().then(() => interruption)]);
       if (finished !== interruption) {
+        // Before the recording frame and the rest: a navigation's new document should show the pointer
+        // as soon as the call ends (033 US2). Not awaited past the lease read; it never fails the call.
+        if (shown) await replayRestStep(watched, shown);
         const answered = await recordAfter(request, finished as AgentNativeResponse);
         // A tab the session has just taken is known to be where it is, before its next call can
         // mistake that for a move (FR-185).

@@ -1,5 +1,6 @@
-import { moveCursor, removeCursor, type CursorHost } from "./cursor.js";
+import { applyPointerStep, moveCursor, removeCursor, type CursorHost } from "./cursor.js";
 import { applyIndicator, isIndicatorHide, type IndicatorHost } from "./indicator.js";
+import { applyMarks } from "./marks.js";
 
 /**
  * The agent build's declared content script (004 T107, FR-062).
@@ -72,11 +73,27 @@ export function bindAgentContentRuntime(runtime: ChromeAgentRuntime, doc: Docume
       if (isIndicatorHide(message)) removeCursor(doc);
       return false;
     }
+    // The pointer's words and rest spot (033/R-491). Fire-and-forget: the worker never waits on a
+    // step, so there is no reply and the channel is not kept open. A malformed step is not owned
+    // here and falls through to the cursor check, which does not own it either.
+    if (applyPointerStep(message, cursorHost(doc))) return false;
+    // Hide the marks for a capture the agent will see, and bring them back (033/R-499). A hide is
+    // answered once the hidden state has been painted, a show once the marks are painted back, so the
+    // channel stays open for either. A channel the worker has let go of (its 250 ms cap) throws on reply.
+    const reply = (): void => {
+      try {
+        sendResponse({ painted: true });
+      } catch {
+        /* the worker stopped waiting */
+      }
+    };
+    const marks = applyMarks(message, doc, reply);
+    if (marks !== "not-mine") return marks === "answering";
     // The pointer mark (T127). The browser's own answer decides which document draws it, never the
     // page's - `window.top` is the one fact a frame cannot lie about itself.
     const arrival = moveCursor(message, cursorHost(doc));
     if (arrival === undefined) return false;
-    // Answered when the glide has ended, so the worker's press lands where the owner watched the
+    // Answered when the travel has ended, so the worker's press lands where the owner watched the
     // pointer stop. `true` keeps the channel open for that reply; a channel the worker has already
     // let go of (its own arrival cap ran out first) throws here, and that is nothing to report.
     void arrival.then(() => {

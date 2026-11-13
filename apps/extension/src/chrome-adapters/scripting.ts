@@ -1,3 +1,5 @@
+import { executeInAllFrames } from "./all-frames.js";
+
 /**
  * How the worker reaches a document: injecting the page runtime, and finding out which documents
  * this tab is made of at all (004/T115, R-114).
@@ -105,7 +107,7 @@ function frameOffsetToTop(): { x: number; y: number; complete: boolean } {
  * two that can see across the boundary at all.
  */
 export async function enumerateFrameOffsets(tabId: number): Promise<Map<number, { x: number; y: number }>> {
-  const results = (await chrome.scripting.executeScript({
+  const results = (await executeInAllFrames({
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: frameOffsetToTop,
@@ -181,7 +183,7 @@ export async function clearFrameNonce(tabId: number, frameId: number): Promise<v
 }
 
 export async function enumerateTabFrames(tabId: number): Promise<EnumeratedFrame[]> {
-  const results = (await chrome.scripting.executeScript({
+  const results = (await executeInAllFrames({
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: framePath,

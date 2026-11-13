@@ -1,0 +1,5 @@
+/* 033 - the one stylesheet the strict-policy page may have (style-src 'self'). It only keeps the page's
+   own content 200 px away from all four edges of the viewport, so the capture check (live-6) finds the
+   places the glow, the pill and the pointer are drawn plain white; nothing here is the pointer's. */
+html, body { margin: 0; background: #fff; }
+body { padding: 200px; }

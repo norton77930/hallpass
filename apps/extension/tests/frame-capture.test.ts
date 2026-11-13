@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { captureFrame, type FrameCaptureDeps } from "../src/service-worker/recording/frame-capture.js";
 
 /**
@@ -136,6 +136,28 @@ describe("captureFrame", () => {
       viewportHeight: 768,
       fallback: true,
     });
+  });
+
+  /**
+   * 033/T997, D-033-5: a recording is made for people, so its frames keep the pointer and its words.
+   * Hiding belongs to the two agent-facing captures, not to `photographTab`, which this fallback
+   * shares; nothing here may tell the page anything.
+   */
+  it("never tells the page to hide its marks, on either path", async () => {
+    const sendMessage = vi.fn(async () => ({ painted: true }));
+    (globalThis as { chrome?: unknown }).chrome = { tabs: { sendMessage } };
+    try {
+      await captureFrame(7, fakeDeps({ viewport: { width: 1024, height: 768 } }));
+      await captureFrame(7, fakeDeps({ attach: false, photograph: "ok", lastViewport: { width: 640, height: 480 } }));
+      await captureFrame(
+        7,
+        fakeDeps({ viewport: { width: 1024, height: 768 }, screenshot: new Error("target closed"), photograph: "ok" }),
+      );
+    } finally {
+      delete (globalThis as { chrome?: unknown }).chrome;
+    }
+
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("refuses the fallback when no viewport was ever measured for the tab", async () => {

@@ -1,3 +1,5 @@
+import { executeInAllFrames } from "./all-frames.js";
+
 /**
  * Reads one global out of every frame's main world (030 R-442 as settled by T886).
  *
@@ -21,7 +23,7 @@ function readMark(key: string): string | null {
 }
 
 export async function readMainWorldMarks(tabId: number, key: string): Promise<MainWorldMark[]> {
-  const results = (await chrome.scripting.executeScript({
+  const results = (await executeInAllFrames({
     target: { tabId, allFrames: true },
     world: "MAIN",
     func: readMark,

@@ -291,6 +291,161 @@ describe("T138 acting by position", () => {
     });
   });
 
+  /**
+   * 033/T997, FR-509, R-499: the picture handed to the agent has none of the Hallpass marks in it.
+   * The page is told to hide them, the capture waits for the page's answer (at most 250 ms), and
+   * the page is told to show them again whatever became of the capture.
+   */
+  describe("033/T997 the marks are hidden around the picture", () => {
+    function watched(options: { hide?: () => unknown; show?: () => unknown; capture?: () => Promise<unknown> } = {}) {
+      const log: string[] = [];
+      const sent: Array<{ tabId: number; message: unknown }> = [];
+      const marks: NonNullable<Parameters<typeof createAgentEffects>[0]["marks"]> = async (tabId, message) => {
+        sent.push({ tabId, message });
+        log.push(message.hidden ? "hide" : "show");
+        if (message.hidden && options.hide) return options.hide();
+        if (!message.hidden && options.show) return options.show();
+        return { painted: true };
+      };
+      const capture = vi.fn(async () => {
+        log.push("capture");
+        if (options.capture) await options.capture();
+        return { data: "UE5H", mimeType: "image/png" as const, cropped: true, scale: 1 };
+      });
+      return { log, sent, marks, capture };
+    }
+
+    it("hides, then captures, then shows", async () => {
+      const seen = watched();
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      const response = await runner.run(request({ action: "screenshot" }));
+
+      expect(response.outcome).toBe("ok");
+      expect(seen.log).toEqual(["hide", "capture", "show"]);
+      expect(seen.sent).toEqual([
+        { tabId: AGENT_TAB, message: { type: "marks", hidden: true } },
+        { tabId: AGENT_TAB, message: { type: "marks", hidden: false } },
+      ]);
+    });
+
+    it("does not capture until the page has answered", async () => {
+      let answer: (value: unknown) => void = () => undefined;
+      const seen = watched({ hide: () => new Promise((resolve) => void (answer = resolve)) });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      const running = runner.run(request({ action: "screenshot" }));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(seen.log).toEqual(["hide"]);
+
+      answer({ painted: true });
+      await running;
+      expect(seen.log).toEqual(["hide", "capture", "show"]);
+    });
+
+    it("a page that never answers costs at most 250 ms, then the picture is taken", async () => {
+      const seen = watched({ hide: () => new Promise(() => {}) });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      const started = Date.now();
+      const response = await runner.run(request({ action: "screenshot" }));
+      const waited = Date.now() - started;
+
+      expect(response.outcome).toBe("ok");
+      expect(seen.log).toEqual(["hide", "capture", "show"]);
+      expect(waited).toBeGreaterThanOrEqual(240);
+      expect(waited).toBeLessThan(1500);
+    });
+
+    it("a hide message that is rejected does not fail the screenshot", async () => {
+      const seen = watched({ hide: () => Promise.reject(new Error("Receiving end does not exist.")) });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      const response = await runner.run(request({ action: "screenshot" }));
+
+      expect(response.outcome).toBe("ok");
+      expect(seen.log).toEqual(["hide", "capture", "show"]);
+    });
+
+    // 033 review I2: the recorder's frame follows the call at once, so the call waits for the show's answer.
+    it("does not return until the page has answered the show", async () => {
+      let answer: (value: unknown) => void = () => undefined;
+      const seen = watched({ show: () => new Promise((resolve) => void (answer = resolve)) });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      let done = false;
+      const running = runner.run(request({ action: "screenshot" })).then((response) => {
+        done = true;
+        return response;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(seen.log).toEqual(["hide", "capture", "show"]);
+      expect(done, "the call waits for the marks to be painted back").toBe(false);
+
+      answer({ painted: true });
+      expect((await running).outcome).toBe("ok");
+    });
+
+    it("a page that never answers the show costs at most 250 ms more, and the call still succeeds", async () => {
+      const seen = watched({ show: () => new Promise(() => {}) });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      const started = Date.now();
+      const response = await runner.run(request({ action: "screenshot" }));
+      const waited = Date.now() - started;
+
+      expect(response.outcome).toBe("ok");
+      expect(waited).toBeGreaterThanOrEqual(240);
+      expect(waited).toBeLessThan(1500);
+    });
+
+    it("a show message that is rejected does not fail the screenshot", async () => {
+      const seen = watched({ show: () => Promise.reject(new Error("Receiving end does not exist.")) });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      const response = await runner.run(request({ action: "screenshot" }));
+
+      expect(response.outcome).toBe("ok");
+      expect(seen.log).toEqual(["hide", "capture", "show"]);
+    });
+
+    it("shows the marks again when the capture throws", async () => {
+      const seen = watched({
+        capture: async () => {
+          throw new Error("capture blew up");
+        },
+      });
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      await runner.run(request({ action: "screenshot" })).catch(() => undefined);
+
+      // The picture function may try more than once; the claim is one hide first and one show last.
+      expect(seen.log.filter((entry) => entry === "capture").length).toBeGreaterThan(0);
+      expect(seen.log[0]).toBe("hide");
+      expect(seen.log.at(-1)).toBe("show");
+      expect(seen.log.filter((entry) => entry === "hide")).toHaveLength(1);
+      expect(seen.log.filter((entry) => entry === "show")).toHaveLength(1);
+    });
+
+    it("leaves the marks alone for every action that takes no picture", async () => {
+      const seen = watched();
+      const { runner, siteModes } = harness({ marks: seen.marks, capture: seen.capture });
+      await allowed(siteModes);
+
+      await runner.run(request({ action: "left_click", x: 400, y: 300 }));
+
+      expect(seen.log).toEqual([]);
+    });
+  });
+
   it("refuses a picture still too large to send, in the screenshot tool's own words", async () => {
     // R-281: the lowest JPEG quality can still be over the frame budget; the `screenshot` tool's
     // refusal, scale hint included, is the one answer - never a frame that breaks the link.

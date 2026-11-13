@@ -32,3 +32,6 @@ Thumbs.db
 .vitest/
 *.stackdump
 nul
+
+# session working state (Claude Code acceptance gates)
+.claude/acceptance/

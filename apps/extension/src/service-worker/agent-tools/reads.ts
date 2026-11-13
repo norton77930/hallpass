@@ -25,10 +25,11 @@ import {
   mergePageFrames,
   mergePageText,
   senderFrameSites,
-  tabFrames,
+  tabFramesChecked,
   type FrameSubtreeNode,
 } from "./frames.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
+import { withMarksHidden, type MarksSender } from "./capture-marks.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { inputUnavailable } from "./input.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
@@ -112,6 +113,11 @@ export type AgentReadDeps = {
   windowState?: PhotographDeps["windowState"];
   /** Which documents a tab is made of (004/US4): the scripting API's all-frames execution. */
   enumerateFrames?: typeof enumerateTabFrames;
+  /**
+   * Where the page is told to hide and show its marks around a picture (033/T997); the content
+   * channel to the top frame by default. Tests inject it like the other senders.
+   */
+  marks?: MarksSender;
   /** 030/T902: the browser's sender for one message from a frame (R-440); the adapter by default. */
   probeFrameSender?: typeof probeFrameSender;
   /**
@@ -266,13 +272,21 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     binding: AgentPageBinding,
     maxChars: number,
   ): Promise<{ ok: true; text: string; truncated: boolean; truncatedBy?: "chars" } | { ok: false }> {
-    const frames = await tabFrames(binding.tabId, binding.canonicalOrigin, enumerateFrames);
+    const { frames, timedOut } = await tabFramesChecked(binding.tabId, binding.canonicalOrigin, enumerateFrames);
     if (frames.length <= 1) {
       try {
         const only = await collectText(context, binding, undefined, maxChars);
         // One document has one bound, so a cut here is always the character ceiling - and naming
         // it is what tells the agent the next call may raise it.
-        return { ok: true, ...only, ...(only.truncated ? { truncatedBy: "chars" as const } : {}) };
+        // eb221c1 review I1: a timed-out enumeration left loaded child frames out, so this top
+        // document is part of the page. `truncated` says so; with no ceiling to raise it names none
+        // (the same `truncated` without `truncatedBy` the filter cut uses).
+        return {
+          ok: true,
+          ...only,
+          truncated: only.truncated || timedOut,
+          ...(only.truncated ? { truncatedBy: "chars" as const } : {}),
+        };
       } catch {
         return { ok: false };
       }
@@ -441,8 +455,10 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     // A read rooted at a ref stays in the document that minted it: the handle names an element of
     // one document, and asking the *other* frames for it would either find nothing or - worse -
     // hand back their whole contents under a root they never had.
-    const frames =
-      root === undefined ? await tabFrames(binding.tabId, binding.canonicalOrigin, enumerateFrames) : [];
+    const { frames, timedOut } =
+      root === undefined
+        ? await tabFramesChecked(binding.tabId, binding.canonicalOrigin, enumerateFrames)
+        : { frames: [], timedOut: false };
     if (frames.length <= 1) {
       let collected: Awaited<ReturnType<typeof collectFromActiveTab>>;
       try {
@@ -465,7 +481,9 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
           nodes: capped.nodes,
           // Three different cuts, one honest word: the collection ran out, a page ceiling ran out,
           // or this filter left something out. Either way the agent has not seen the whole page.
-          truncated: collected.truncated === true || dropped() || capped.truncatedBy !== undefined,
+          // eb221c1 review I1: a timed-out frame enumeration is a fourth cut - loaded child frames
+          // were left out - and names no limit, because there is none to raise.
+          truncated: collected.truncated === true || dropped() || capped.truncatedBy !== undefined || timedOut,
           ...(nameLimit(capped.truncatedBy) === undefined ? {} : { truncatedBy: nameLimit(capped.truncatedBy) }),
         },
       };
@@ -537,15 +555,22 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       const size = space ? `screenshot ${space.image.width}x${space.image.height}` : `frame ${facts.frame.width}x${facts.frame.height}`;
       return answer(callId, "failed", `region-outside-viewport (${size})`);
     }
-    const photograph = await photographTab(
-      {
-        tabId,
-        scale,
-        facts,
-        ...(framed === undefined ? {} : { region: framed }),
-        ...(startedOn === undefined ? {} : { beforeCapture: () => stillOnOrigin(tabId, startedOn, readAddress) }),
-      },
-      photographDeps,
+    // The marks Hallpass draws on the page (pointer, caption, ring, pill, glow) are hidden for the
+    // picture and always shown again (033 FR-509, R-499); the checks above ran without touching them.
+    const photograph = await withMarksHidden(
+      tabId,
+      () =>
+        photographTab(
+          {
+            tabId,
+            scale,
+            facts,
+            ...(framed === undefined ? {} : { region: framed }),
+            ...(startedOn === undefined ? {} : { beforeCapture: () => stillOnOrigin(tabId, startedOn, readAddress) }),
+          },
+          photographDeps,
+        ),
+      deps.marks,
     );
     if (!photograph.ok) {
       if (photograph.reason === "site-moved") return siteMovedAnswer(callId);

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pointer 033 strict policy fixture</title>
+<link rel="stylesheet" href="/pointer-033-csp.css">
+</head>
+<body>
+<!--
+  033 - served with `Content-Security-Policy: default-src 'self'; style-src 'self'` (see
+  tests/harness/page-fixtures.ts), so a <style> element that is not from this origin is blocked. This
+  page therefore has no inline style, no style attribute and no script of its own: it stays plain white,
+  its content kept 200 px from every edge by the one same-origin stylesheet it links (a 'self' source is
+  allowed). The live capture check (live-6) uses it to ask what the pointer, its caption and the press
+  ring look like when the injected stylesheet cannot apply, and whether hiding the marks for a capture
+  still works; the page's own text must stay out of the places that check probes along the edges.
+-->
+<h1>Strict policy page</h1>
+<p>This page forbids styles it did not serve itself.</p>
+<button type="button" id="go" aria-label="Go button">Go button</button>
+</body>
+</html>
