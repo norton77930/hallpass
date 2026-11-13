@@ -2169,6 +2169,7 @@ describe("030 pre-gate claim", () => {
     });
     const WALK = new Set([
       "Page.getFrameTree",
+      "Page.getLayoutMetrics",
       "DOM.enable",
       "DOM.getNodeForLocation",
       "DOM.describeNode",
@@ -2319,7 +2320,7 @@ describe("030 pre-gate claim", () => {
       const recorded = recorder.attachments.send.bind(recorder.attachments);
       recorder.attachments.send = async (tabId, method, params, sessionId) => {
         const answered = await recorded(tabId, method, params, sessionId);
-        return method === "Page.getLayoutMetrics" ? { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } } : answered;
+        return method === "Page.getLayoutMetrics" ? { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 } } : answered;
       };
       const { runner, siteModes, prompts } = framedHarness({
         attachments: recorder.attachments,

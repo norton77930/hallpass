@@ -142,12 +142,22 @@ function contentBox(answer: Record<string, unknown>): { x: number; y: number; ri
   return { x: Math.min(...xs), y: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
 }
 
+/** A session's document scroll, from a `Page.getLayoutMetrics` answer (#67). */
+function documentScroll(answer: Record<string, unknown>): { x: number; y: number } | undefined {
+  const layout = (answer as { cssLayoutViewport?: { pageX?: unknown; pageY?: unknown } }).cssLayoutViewport;
+  const x = layout?.pageX;
+  const y = layout?.pageY;
+  if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+  return { x, y };
+}
+
 /**
  * The site under a point in the top-level viewport (030 FR-455, R-442 as settled by T886).
  *
  * The debugger finds **which** frame is under the point, and nothing else:
- * 1. `DOM.getNodeForLocation` in the tab's session. Over a frame in the same process the browser
- *    already answers the node inside it, with that frame's id.
+ * 1. `DOM.getNodeForLocation` in the tab's session, at the point plus that session's own document
+ *    scroll (#67). Over a frame in the same process the browser already answers the node inside
+ *    it, with that frame's id.
  * 2. Over a frame in its own process it answers the holder `IFRAME`. When the point is inside the
  *    holder's content box, the walk continues in that frame's own session - the holder's child
  *    frame id is the frame's target id - at the point shifted by the content box's origin.
@@ -199,10 +209,21 @@ async function walkToPointSite(point: ViewportPoint, pageSite: string, ports: Po
     // The DOM agent answers nothing before it is enabled (`frames.ts`); it is not a diagnostics
     // domain, and nothing here listens to its events.
     await ports.send("DOM.enable", {}, sessionId);
+    // #67 (FR-455): the hit-test takes a point in its session's *document*, scroll included, while
+    // the agent's point and the holder's box model are both in that session's viewport (measured
+    // 2026-11-14). So each session's own scroll is added for the hit-test alone; the box check and
+    // the shift into a child stay in viewport coordinates. A scroll that cannot be read is unknown,
+    // never the unscrolled point, which would find a node one scroll offset away (FR-464).
+    const scroll = documentScroll(await ports.send("Page.getLayoutMetrics", {}, sessionId));
+    if (scroll === undefined) return unknown;
     // The hit-test takes whole pixels only (measured, 030 T905): an element's centre and a point
     // shifted by a holder at a fractional offset are both refused. Rounding down keeps a shifted
     // point inside the frame's own viewport.
-    const hit = await ports.send("DOM.getNodeForLocation", { x: Math.floor(at.x), y: Math.floor(at.y) }, sessionId);
+    const hit = await ports.send(
+      "DOM.getNodeForLocation",
+      { x: Math.floor(at.x + scroll.x), y: Math.floor(at.y + scroll.y) },
+      sessionId,
+    );
     const backendNodeId = (hit as { backendNodeId?: unknown }).backendNodeId;
     const hitFrameId = (hit as { frameId?: unknown }).frameId;
     if (typeof backendNodeId !== "number" || typeof hitFrameId !== "string" || hitFrameId === "") return unknown;

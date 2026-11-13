@@ -57,7 +57,7 @@ function fakeBrowser(onAcquire?: (address: Address) => void) {
     async releaseAll() {},
     async send(_tabId: number, method: string, params?: Record<string, unknown>) {
       sent.push({ method, ...(params === undefined ? {} : { params }) });
-      if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } };
       // 030: the frame under a point is asked of the debugger; this page is one document.
       return oneDocumentAnswer(method) ?? {};
     },

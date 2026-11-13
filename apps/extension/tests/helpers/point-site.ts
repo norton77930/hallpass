@@ -3,8 +3,9 @@
  * T886, `resolvePointSite`).
  *
  * The model follows what was measured on 2026-11-07:
- * - `DOM.getNodeForLocation` in a session answers the node under the point in that session's own
- *   viewport. Over a frame in the same process it answers the node *inside* that frame, with the
+ * - `DOM.getNodeForLocation` in a session answers the node under a point in that session's own
+ *   *document* coordinates - its viewport point plus its own scroll (measured 2026-11-14, #67) - while
+ *   `DOM.getBoxModel` and every box here are viewport coordinates. Over a frame in the same process it answers the node *inside* that frame, with the
  *   frame's id; over a frame in its own process it answers the holder `IFRAME`, with the holder's
  *   document's frame id, and `DOM.describeNode` gives the holder's child frame id, which is that
  *   frame's target id.
@@ -41,6 +42,11 @@ export type FakePointPageOptions = {
   unscriptable?: number[];
   /** Methods that reject, as a detached or refusing debugger would. */
   failing?: string[];
+  /**
+   * How far each session's document is scrolled (#67), keyed by the CDP frame id of the session's
+   * root (`TOP_CDP_FRAME_ID` for the tab's own session). Unscrolled when absent.
+   */
+  scroll?: Record<string, { x: number; y: number }>;
 };
 
 export const TOP_CDP_FRAME_ID = "top-frame";
@@ -139,6 +145,10 @@ export function fakePointPage(frames: FakeFrame[], options: FakePointPageOptions
       }
       case "DOM.enable":
         return {};
+      case "Page.getLayoutMetrics": {
+        const scrolled = options.scroll?.[root] ?? { x: 0, y: 0 };
+        return { cssLayoutViewport: { pageX: scrolled.x, pageY: scrolled.y, clientWidth: 1280, clientHeight: 720 } };
+      }
       case "DOM.getNodeForLocation": {
         // As Chrome answers it (measured 030 T905): the point is two int32s, and a fractional one -
         // a box's centre, or a point shifted by a holder at a fractional offset - is refused.
@@ -147,8 +157,9 @@ export function fakePointPage(frames: FakeFrame[], options: FakePointPageOptions
             '{"code":-32602,"data":"Failed to deserialize params.x - BINDINGS: int32 value expected","message":"Invalid parameters"}',
           );
         }
-        const local = { x: Number(params.x), y: Number(params.y) };
-        return hit(root, local);
+        // Document coordinates in, viewport coordinates for the model.
+        const scrolled = options.scroll?.[root] ?? { x: 0, y: 0 };
+        return hit(root, { x: Number(params.x) - scrolled.x, y: Number(params.y) - scrolled.y });
       }
       case "DOM.describeNode": {
         const node = nodes.get(Number(params.backendNodeId));
@@ -250,10 +261,12 @@ export function fakePointPage(frames: FakeFrame[], options: FakePointPageOptions
 
 /**
  * A page of one document, in the debugger's words: the few answers the walk needs to find that a
- * point is in the top document. For the suites whose fake debugger answers `{}` to everything else.
+ * point is in the top document (an unscrolled one, #67). For the suites whose fake debugger answers
+ * `{}` to everything else.
  */
 export function oneDocumentAnswer(method: string): Record<string, unknown> | undefined {
   if (method === "Page.getFrameTree") return { frameTree: { frame: { id: TOP_CDP_FRAME_ID } } };
+  if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { pageX: 0, pageY: 0 } };
   if (method === "DOM.getNodeForLocation") return { backendNodeId: 1, frameId: TOP_CDP_FRAME_ID };
   if (method === "DOM.describeNode") return { node: { backendNodeId: 1, nodeName: "BODY" } };
   return undefined;

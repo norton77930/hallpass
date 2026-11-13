@@ -707,7 +707,7 @@ describe("017 review: the plan is bound to its agent", () => {
     const debuggerApi = (globalThis as { chrome: { debugger: { sendCommand: unknown } } }).chrome.debugger;
     debuggerApi.sendCommand = async (_target: unknown, method: string) =>
       method === "Page.getLayoutMetrics"
-        ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } }
+        ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } }
         : (oneDocumentAnswer(method) ?? {});
 
     send("computer", PRESS);
@@ -771,7 +771,7 @@ describe("T486 everything outside the plan behaves as before", () => {
     const debuggerApi = (globalThis as { chrome: { debugger: { sendCommand: unknown } } }).chrome.debugger;
     debuggerApi.sendCommand = async (_target: unknown, method: string) =>
       method === "Page.getLayoutMetrics"
-        ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } }
+        ? { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } }
         : (oneDocumentAnswer(method) ?? {});
 
     send("upload_image", { tabId: TAB, target: { coordinate: { x: 40, y: 30 } }, file: FILE });

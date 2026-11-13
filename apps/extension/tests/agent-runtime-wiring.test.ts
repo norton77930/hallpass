@@ -867,7 +867,7 @@ describe("T018 agent runtime wiring", () => {
       async attach() {},
       async detach() {},
       async sendCommand(_target: unknown, method: string) {
-        if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: 0 } };
         return oneDocumentAnswer(method) ?? {};
       },
       onEvent: { addListener() {} },
