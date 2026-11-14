@@ -117,7 +117,8 @@ function installChrome(
         // the frame's own id and the chain it reports for itself.
         return Object.entries(DOCUMENTS).map(([id, document]) => ({
           frameId: Number(id),
-          result: { url: document.url, path: PATHS[Number(id)] },
+          // #71: each document has loaded, as `framePath` reports it to the read enumeration.
+          result: { url: document.url, path: PATHS[Number(id)], loaded: true },
         }));
       },
     },

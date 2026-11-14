@@ -48,7 +48,18 @@ export type BrowserFrame = {
   /** `-1` for the top document, which is how the browser says "this one has no parent". */
   parentFrameId: number;
   url: string;
+  /**
+   * #71: the frame's real document has not loaded yet (only the read enumeration says so). A child
+   * frame so marked is listed unread without being asked: there is nothing of it to read, and an
+   * injection into it could wait for its load until the page's bound.
+   */
+  unloaded?: true;
 };
+
+/** #71: whether any frame of an enumeration had not loaded, which makes a read of it partial. */
+export function anyFrameUnloaded(frames: readonly BrowserFrame[]): boolean {
+  return frames.some((frame) => frame.unloaded === true);
+}
 
 /**
  * One node of a single frame's own document, before it is part of a page.
@@ -328,7 +339,7 @@ async function askEveryFrame<T>(
       pending.site = lookup.pageSite;
       return;
     }
-    if (isForbiddenFrame(pending.frame.url)) {
+    if (isForbiddenFrame(pending.frame.url) || pending.frame.unloaded === true) {
       pending.site = "unknown";
       return;
     }
@@ -347,6 +358,15 @@ async function askEveryFrame<T>(
       if (isForbiddenFrame(pending.frame.url)) {
         pending.readable = false;
         pending.reason = "not-allowed";
+        await site;
+        return;
+      }
+      if (pending !== root && pending.frame.unloaded === true) {
+        // #71: a child whose real document has not loaded has said nothing yet, and asking it
+        // would only spend the page's bound waiting for a load that may never come (a lazy frame
+        // below the fold). The top document is always asked: it is the page.
+        pending.readable = false;
+        pending.reason = "no-answer";
         await site;
         return;
       }

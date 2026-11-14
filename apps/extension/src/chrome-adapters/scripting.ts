@@ -5,8 +5,14 @@ import { executeInAllFrames } from "./all-frames.js";
  * this tab is made of at all (004/T115, R-114).
  */
 
-/** One frame as the merge needs it: the frame, its parent, and the url the browser has for it. */
-export type EnumeratedFrame = { frameId: number; parentFrameId: number; url: string };
+/**
+ * One frame as the merge needs it: the frame, its parent, and the url the browser has for it.
+ *
+ * `unloaded` (#71) is set only by the read enumeration (`enumerateTabFramesForRead`), on a frame
+ * whose real document is not there yet: a reader must not take what it answered as the frame's
+ * content, and must say the page was not read whole.
+ */
+export type EnumeratedFrame = { frameId: number; parentFrameId: number; url: string; unloaded?: true };
 
 /**
  * The page runtime, in one named frame.
@@ -48,7 +54,7 @@ export async function injectAgentContent(tabId: number): Promise<void> {
  * cross-origin child can still say where it hangs - which is the whole point, since those are
  * exactly the frames the top document cannot describe.
  */
-function framePath(): { url: string; path: number[] } {
+function framePath(): { url: string; path: number[]; loaded: boolean } {
   const path: number[] = [];
   let current: Window = window;
   let steps = 0;
@@ -65,7 +71,43 @@ function framePath(): { url: string; path: number[] } {
     current = parent;
     steps += 1;
   }
-  return { url: location.href, path };
+  /*
+   * #71: whether this is the frame's real document. Injected without waiting for loads (the read
+   * enumeration), a frame that has not loaded - a lazy iframe below the fold, or one injected just
+   * after its navigation committed - answers as its *initial* empty `about:blank` document, which
+   * even says `readyState` "complete". Fail-honest: "not loaded" whenever the frame is about:blank
+   * while its holder names a real source (a `src`/`data` that is not about:blank, or a `srcdoc`
+   * that has not replaced it with `about:srcdoc` yet), whenever it is about:blank and its holder
+   * cannot be reached to tell (a sandboxed frame), and whenever its document is still loading. A
+   * holder with no source, or `src="about:blank"`, is a frame that is blank on purpose.
+   */
+  let loaded = document.readyState === "complete";
+  if (loaded && location.href.startsWith("about:blank")) {
+    if (window === window.parent) {
+      // The top document still blank while its tab is at a real address: its document is to come.
+      loaded = false;
+    } else {
+      let holder: Element | null = null;
+      try {
+        holder = window.frameElement;
+      } catch {
+        holder = null;
+      }
+      if (!holder || holder.hasAttribute("srcdoc")) {
+        loaded = false;
+      } else {
+        const source = (holder.getAttribute("src") ?? holder.getAttribute("data") ?? "").trim();
+        if (source !== "") {
+          try {
+            loaded = new URL(source, document.baseURI).href.startsWith("about:blank");
+          } catch {
+            loaded = false;
+          }
+        }
+      }
+    }
+  }
+  return { url: location.href, path, loaded };
 }
 
 /**
@@ -182,12 +224,17 @@ export async function clearFrameNonce(tabId: number, frameId: number): Promise<v
   });
 }
 
-export async function enumerateTabFrames(tabId: number): Promise<EnumeratedFrame[]> {
+export async function enumerateTabFrames(
+  tabId: number,
+  options: { injectImmediately?: boolean } = {},
+): Promise<EnumeratedFrame[]> {
+  const immediate = options.injectImmediately === true;
   const results = (await executeInAllFrames({
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: framePath,
-  })) as Array<{ frameId?: number; result?: { url?: string; path?: number[] } | null }>;
+    ...(immediate ? { injectImmediately: true } : {}),
+  })) as Array<{ frameId?: number; result?: { url?: string; path?: number[]; loaded?: boolean } | null }>;
   const described = results.flatMap((entry) => {
     const result = entry.result;
     if (entry.frameId === undefined || !result || typeof result.url !== "string" || !Array.isArray(result.path)) {
@@ -196,13 +243,17 @@ export async function enumerateTabFrames(tabId: number): Promise<EnumeratedFrame
       // covers every frame that did answer.
       return [];
     }
-    return [{ frameId: entry.frameId, url: result.url, path: result.path }];
+    // #71: only an immediate injection can catch a frame before its document; the waiting one
+    // answers from loaded frames only and keeps its answer exactly as it was.
+    const unloaded = immediate && result.loaded !== true;
+    return [{ frameId: entry.frameId, url: result.url, path: result.path, unloaded }];
   });
   const byPath = new Map(described.map((frame) => [frame.path.join("."), frame.frameId]));
   return described
     .sort((left, right) => left.path.length - right.path.length || left.path.join(".").localeCompare(right.path.join(".")))
     .map((frame) => {
-      if (frame.path.length === 0) return { frameId: frame.frameId, parentFrameId: -1, url: frame.url };
+      const unloaded = frame.unloaded ? { unloaded: true as const } : {};
+      if (frame.path.length === 0) return { frameId: frame.frameId, parentFrameId: -1, url: frame.url, ...unloaded };
       const parentFrameId = byPath.get(frame.path.slice(0, -1).join("."));
       // 004/T153 (S4 review): a frame whose parent never answered - sandboxed, CSP-blocked, or
       // simply not yet injectable when this enumeration ran - is not the top document, and `-1`
@@ -211,6 +262,25 @@ export async function enumerateTabFrames(tabId: number): Promise<EnumeratedFrame
       // honest unknown: never a valid ancestor (no frame is its own parent), so the chain walk
       // that reads it stops and answers `undefined` rather than a click delivered somewhere
       // arbitrary on the page.
-      return { frameId: frame.frameId, parentFrameId: parentFrameId ?? frame.frameId, url: frame.url };
+      return { frameId: frame.frameId, parentFrameId: parentFrameId ?? frame.frameId, url: frame.url, ...unloaded };
     });
+}
+
+/**
+ * The frame enumeration the read tools use (#71, owner option A): injected without waiting for the
+ * tab's frames to load.
+ *
+ * Waiting is what an all-frames injection does by default, and a lazy iframe below the fold never
+ * loads until the page is scrolled to it, so a read enumerated that way gave no answer at all - in
+ * the measurement, nothing within 10 s, three times out of three. Injected immediately, the same
+ * page answered within a few milliseconds with every frame, the unloaded lazy ones as their initial
+ * about:blank document. Those are flagged `unloaded` so the read leaves them out and says
+ * `truncated`. The all-frames bound stays as a safety net.
+ *
+ * Reads only. A not-yet-loaded cross-site frame answers as an about:blank document of its parent's
+ * origin, so the click ref locator, the frame offsets and the frame consent lookups
+ * (`readMainWorldMarks`, `readFrameFocus`) keep the waiting `enumerateTabFrames`.
+ */
+export function enumerateTabFramesForRead(tabId: number): Promise<EnumeratedFrame[]> {
+  return enumerateTabFrames(tabId, { injectImmediately: true });
 }

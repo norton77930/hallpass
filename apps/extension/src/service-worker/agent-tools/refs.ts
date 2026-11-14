@@ -1,5 +1,5 @@
 import { AGENT_READ_PAGE_MAX_NODES, createBounds, type AgentFindResult } from "@hallpass/contracts";
-import { enumerateTabFrames } from "../../chrome-adapters/scripting.js";
+import { enumerateTabFrames, enumerateTabFramesForRead } from "../../chrome-adapters/scripting.js";
 import { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
 import { collectFromActiveTab, resolveHandleOnTab, resolveOnActiveTab } from "../content-broker.js";
 import type { AgentToolContext } from "./context.js";
@@ -273,7 +273,12 @@ export async function findOnTab(
   binding: AgentPageBinding,
   query: string,
   maxCandidates: number,
-  enumerateFrames: typeof enumerateTabFrames = enumerateTabFrames,
+  /**
+   * #71: a read, so it enumerates without waiting for frame loads. An unloaded child is listed unread
+   * without being asked (`askPageFrames`); `find` has no `truncated` field to say so, and a match it
+   * cannot see is the same "not found" it was before, when the waiting enumeration timed out.
+   */
+  enumerateFrames: typeof enumerateTabFrames = enumerateTabFramesForRead,
   /** 030/T902: the browser's sender for one message from a frame (R-440), for each match's site. */
   probe: typeof probeFrameSender = probeFrameSender,
 ): Promise<{ ok: true; result: AgentFindResult } | { ok: false; reason: FrameFailure }> {

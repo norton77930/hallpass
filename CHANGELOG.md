@@ -5,6 +5,16 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.22.2 — 2026-11-15
+
+- **Reads are fast on pages with a frame that has not loaded (#71).** On a page holding an
+  `<iframe loading="lazy">` below the fold, `get_page_text`, `read_page` and `find` waited 2 s
+  for that frame before answering. They now answer at once (measured: well under a second). A frame
+  that has not loaded its page yet is listed as not readable and the read says `truncated: true`;
+  once the frame has loaded (for example after scrolling to it), its content is read as usual.
+  Actions that decide which site a frame belongs to still wait for the frame, as before.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.22.1 — 2026-11-14
 
 - **Fix: the right site decides a click on a scrolled page (#67).** Before an action at a screen

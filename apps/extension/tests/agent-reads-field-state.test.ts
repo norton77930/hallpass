@@ -76,7 +76,8 @@ function installChrome(framed: boolean): void {
         }
         return Object.entries(documents).map(([id, document]) => ({
           frameId: Number(id),
-          result: { url: document.url, path: PATHS[Number(id)] },
+          // #71: each document has loaded, as `framePath` reports it to the read enumeration.
+          result: { url: document.url, path: PATHS[Number(id)], loaded: true },
         }));
       },
     },

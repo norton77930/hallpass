@@ -16,11 +16,12 @@ import {
   type CaptureSend,
 } from "../../chrome-adapters/capture.js";
 import { queryTabSnapshots } from "../../chrome-adapters/tabs.js";
-import { enumerateTabFrames } from "../../chrome-adapters/scripting.js";
+import { enumerateTabFramesForRead } from "../../chrome-adapters/scripting.js";
 import { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
 import { collectFromActiveTab } from "../content-broker.js";
 import {
   capPageNodes,
+  anyFrameUnloaded,
   carriedFieldState,
   mergePageFrames,
   mergePageText,
@@ -111,8 +112,11 @@ export type AgentReadDeps = {
   holdAttachment?: PhotographDeps["hold"];
   /** The window's state (031/T942); `chrome.windows.get` by default. */
   windowState?: PhotographDeps["windowState"];
-  /** Which documents a tab is made of (004/US4): the scripting API's all-frames execution. */
-  enumerateFrames?: typeof enumerateTabFrames;
+  /**
+   * Which documents a tab is made of (004/US4): the scripting API's all-frames execution, injected
+   * without waiting for frame loads (#71) - frames that had not loaded come back `unloaded`.
+   */
+  enumerateFrames?: typeof enumerateTabFramesForRead;
   /**
    * Where the page is told to hide and show its marks around a picture (033/T997); the content
    * channel to the top frame by default. Tests inject it like the other senders.
@@ -213,7 +217,7 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
   const collect = deps.collect ?? collectFromActiveTab;
   const capture = deps.capture ?? captureTab;
   const listTabs = deps.listTabs ?? queryTabSnapshots;
-  const enumerateFrames = deps.enumerateFrames ?? enumerateTabFrames;
+  const enumerateFrames = deps.enumerateFrames ?? enumerateTabFramesForRead;
   const probeSender = deps.probeFrameSender ?? probeFrameSender;
   /** One set of deps for both halves of a screenshot: the frame it is judged in, and the picture. */
   const photographDeps: PhotographDeps = {
@@ -273,6 +277,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
     maxChars: number,
   ): Promise<{ ok: true; text: string; truncated: boolean; truncatedBy?: "chars" } | { ok: false }> {
     const { frames, timedOut } = await tabFramesChecked(binding.tabId, binding.canonicalOrigin, enumerateFrames);
+    // #71: a frame whose real document had not loaded was read as nothing; the page is partial.
+    const unloaded = anyFrameUnloaded(frames);
     if (frames.length <= 1) {
       try {
         const only = await collectText(context, binding, undefined, maxChars);
@@ -284,7 +290,7 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
         return {
           ok: true,
           ...only,
-          truncated: only.truncated || timedOut,
+          truncated: only.truncated || timedOut || unloaded,
           ...(only.truncated ? { truncatedBy: "chars" as const } : {}),
         };
       } catch {
@@ -304,7 +310,9 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       },
       maxChars,
     });
-    return topAnswered ? { ok: true, ...merged } : { ok: false };
+    // An unloaded child is already a frame that did not answer (and so `truncated`); an unloaded
+    // top document answered, but not with its real content.
+    return topAnswered ? { ok: true, ...merged, truncated: merged.truncated || unloaded } : { ok: false };
   }
 
   /**
@@ -459,6 +467,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       root === undefined
         ? await tabFramesChecked(binding.tabId, binding.canonicalOrigin, enumerateFrames)
         : { frames: [], timedOut: false };
+    // #71: a frame whose real document had not loaded is not in this answer; it is not the page.
+    const unloaded = anyFrameUnloaded(frames);
     if (frames.length <= 1) {
       let collected: Awaited<ReturnType<typeof collectFromActiveTab>>;
       try {
@@ -483,7 +493,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
           // or this filter left something out. Either way the agent has not seen the whole page.
           // eb221c1 review I1: a timed-out frame enumeration is a fourth cut - loaded child frames
           // were left out - and names no limit, because there is none to raise.
-          truncated: collected.truncated === true || dropped() || capped.truncatedBy !== undefined || timedOut,
+          truncated:
+            collected.truncated === true || dropped() || capped.truncatedBy !== undefined || timedOut || unloaded,
           ...(nameLimit(capped.truncatedBy) === undefined ? {} : { truncatedBy: nameLimit(capped.truncatedBy) }),
         },
       };
@@ -512,7 +523,8 @@ export function createAgentReads(deps: AgentReadDeps): AgentReadRunner {
       result: {
         frames: merged.frames,
         nodes: merged.nodes,
-        truncated: merged.truncated || dropped() || truncatedByCollector,
+        // #71: the frames list already shows an unloaded child as unread; `truncated` says it too.
+        truncated: merged.truncated || dropped() || truncatedByCollector || unloaded,
         // Which ceiling ran out, when one did. A filter or a collection cut says `truncated` and
         // nothing more: there was no limit to name, and naming one anyway would be a wrong answer
         // to "what would I raise to see the rest".
