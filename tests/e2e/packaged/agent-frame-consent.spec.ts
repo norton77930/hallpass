@@ -661,6 +661,64 @@ test.describe("agent frame consent", () => {
       await client?.close();
     }
   });
+
+  // #55: a point target the page can never hit is refused before its frame is looked for, so the owner
+  // is never asked about it; the answer is the one the page gave it after the card (`no-match`).
+  test("Story 8 (#55): a point target outside the viewport is refused with no card; one inside still asks", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+    const { panel, settings } = await ownerSurfaces(extensionContext, extensionId, extensionWorker);
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const live = client;
+      const call = callerFor(() => client);
+      await panel.clickIfPresent(ui("agent.retry"));
+      await pairWithFirstCall(live, panel, { locale });
+
+      const tabId = await openTab(call, `${SITE}/frame-consent`);
+      const page = await agentPage(extensionContext, `${SITE}/frame-consent`);
+      await expect(page.locator("#top-heading")).toBeVisible();
+      await expect(page.frameLocator("#consent-frame").locator("#frame-button")).toBeVisible();
+      // The page's site is left at ask: any decision about a point would be a card.
+      await forgetSites(settings, [SITE, SECOND]);
+
+      // ===== 8.1: below the viewport - refused, no card, nothing clicked =====
+      const height = await page.evaluate(() => window.innerHeight);
+      const below = { x: 20, y: height + 200 };
+      const refused = await answerWithoutCard(panel, live, "click", { tabId, target: below });
+      expect(refused.isError, refused.text).toBe(true);
+      expect(answerOf(refused), refused.text).toMatchObject({ outcome: "failed", reason: "no-match" });
+      await expectNoPrompt(panel, "a card came up for a point outside the viewport");
+
+      // ===== 8.2: the same tool with a point inside the viewport is asked about as before =====
+      const inside = await centreOf(page.locator("#top-heading"));
+      const asking = live.callTool("click", { tabId, target: inside });
+      await waitForPrompt(panel, "consent");
+      await clickInPrompt(panel, "consent", ui("agent.refuse"));
+      const denied = await asking;
+      expect(answerOf(denied), denied.text).toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      // The card leaves the panel a moment after the call answers; 8.3 must not find this one.
+      await expect.poll(() => promptKinds(panel), { timeout: 10_000, message: "the card stayed up after Refuse" }).toEqual([]);
+
+      // ===== 8.3: half a pixel past the edge is still asked (the page rounds points), and once allowed
+      // the page itself answers it with the same refusal 8.1 got before the card =====
+      const width = await page.evaluate(() => document.documentElement.clientWidth);
+      const edge = live.callTool("click", { tabId, target: { x: width + 0.5, y: 20 } });
+      await waitForPrompt(panel, "consent");
+      await clickInPrompt(panel, "consent", ui("agent.allowOnce"));
+      const edged = await edge;
+      expect(answerOf(edged), edged.text).toMatchObject({ outcome: "failed", reason: "no-match" });
+
+      await closeTab(extensionWorker, tabId);
+    } finally {
+      await forgetSites(settings, [SITE, SECOND]);
+      await client?.close();
+    }
+  });
 });
 
 type ReadNode ={ ref?: string; role?: string; name?: string; frame?: string; site?: string };
@@ -799,10 +857,22 @@ async function clickInPrompt(panel: SidePanelDriver, kind: string, label: string
 }
 
 /**
- * Runs one call that must not raise any card, and fails the moment one appears (a card would hold the
- * call, turning the failure into a timeout that says nothing).
+ * Runs one call that must not raise any card and must answer `ok`, failing the moment a card appears
+ * (a card would hold the call, turning the failure into a timeout that says nothing).
  */
 async function actWithoutCard(
+  panel: SidePanelDriver,
+  client: McpHarnessClient,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ isError: boolean; text: string; json: unknown }> {
+  const result = await answerWithoutCard(panel, client, tool, args);
+  expect(result.isError, `${tool} ${JSON.stringify(args)}: ${result.text}\nstderr:\n${client.stderr()}`).toBe(false);
+  return result;
+}
+
+/** Runs one call that must not raise any card, whatever it answers; a card that appears fails it at once. */
+async function answerWithoutCard(
   panel: SidePanelDriver,
   client: McpHarnessClient,
   tool: string,
@@ -822,9 +892,7 @@ async function actWithoutCard(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const result = await pending;
-  expect(result.isError, `${tool} ${JSON.stringify(args)}: ${result.text}\nstderr:\n${client.stderr()}`).toBe(false);
-  return result;
+  return pending;
 }
 
 /** The panel as the owner sees it, from its own CDP session, into the run's output directory (SC-207). */

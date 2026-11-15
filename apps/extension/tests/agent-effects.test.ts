@@ -2252,6 +2252,60 @@ describe("030 pre-gate claim", () => {
       expect(page.marksRead).toEqual([]);
     });
 
+    /**
+     * #55: a point the page could never hit is refused before its frame is looked for, with the
+     * answer the page gave it after the card (`elementFromPoint` finds nothing: `no-match`). The
+     * viewport here is the fake debugger's 1280 x 720.
+     */
+    async function answeredWithoutCard(
+      pending: Promise<Awaited<ReturnType<ReturnType<typeof createAgentEffects>["run"]>>>,
+      prompts: { current(): { promptId: string } | undefined; decide(promptId: string, allow: boolean): unknown },
+    ) {
+      let answered: Awaited<typeof pending> | undefined;
+      void pending.then((response) => {
+        answered = response;
+      });
+      await vi.waitFor(() => expect(answered ?? prompts.current()).toBeDefined());
+      const card = prompts.current();
+      if (card !== undefined) prompts.decide(card.promptId, false);
+      expect(card, "a card was raised for a point that can never be delivered").toBeUndefined();
+      return answered;
+    }
+    const walked = (page: ReturnType<typeof fakePointPage>) =>
+      page.calls.filter((call) => call.method === "DOM.getNodeForLocation");
+
+    it.each([
+      ["click", { target: { x: 160, y: 900 } }],
+      ["hover", { target: { x: 1400, y: 90 } }],
+      ["type", { target: { x: -5, y: 90 }, text: "x" }],
+      ["drag", { from: { x: 160, y: 900 }, to: { x: 300, y: 200 } }],
+      ["drag", { from: { x: 120, y: 60 }, to: { x: 300, y: 2000 } }],
+    ] as const)("refuses %s with a point outside the viewport as the page would, with no card and no frame lookup (#55)", async (tool, args) => {
+      const { runner, prompts, page, input } = pointed(payFrame());
+
+      const response = await answeredWithoutCard(
+        runner.run(clickRequest({ tool, args: { tabId: AGENT_TAB, ...args } })),
+        prompts,
+      );
+
+      expect(response).toEqual({ callId: "call-1", outcome: "failed", reason: "no-match" });
+      expect(walked(page)).toEqual([]);
+      expect(page.probed).toEqual([]);
+      expect(inputEvents(input.commands)).toEqual([]);
+      expect(input.holds.every((hold) => hold.done)).toBe(true);
+    });
+
+    it("decides a point less than a pixel past the edge as before: the page may still round it in (#55)", async () => {
+      const { runner, prompts, page } = pointed(payFrame());
+
+      const pending = runner.run(pointClick(1280.4, 90));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+
+      expect(walked(page)).not.toEqual([]);
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    });
+
     it("cancels with the frame-moved answer when the frame under the delivery point changed after the answer (T901)", async () => {
       const frame = payFrame();
       const { runner, prompts, input } = pointed(frame);

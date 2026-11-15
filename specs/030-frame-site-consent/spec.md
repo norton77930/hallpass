@@ -347,3 +347,12 @@ Confirm that step one runs without a card, and step two raises a card for the fr
   FR-458), the first line names the frame's site as the action's site, the frame line says which page holds
   the frame, and the remember button names the frame's site ("Always allow on {site}"). Cards without a
   frame, unknown-frame cards and the drag two-sites case are unchanged.
+- 2026-11-15 (#52): the focus read (FR-465, T908) answers unknown, so the owner is asked, when focus is on
+  a `<fencedframe>` and when `chrome.dom.openOrClosedShadowRoot` is not available (a closed shadow root
+  could hide where focus is). Every other answer is unchanged.
+- 2026-11-15 (#55): a point target of an element tool (including both ends of a drag) or an `upload_image`
+  drop point that lies outside the top viewport is refused before its frame site is looked up, with no
+  card, and with the same answer the tool gave before after the gate: `no-match` for element tools,
+  `point-outside-viewport (...)` for the drop. Element tools refuse early only a point a whole pixel past
+  an edge, so rounding cannot refuse a point the page would hit. A viewport that cannot be measured is
+  decided as before. `computer` already refused such points before the gate (004/T139).

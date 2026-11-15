@@ -6,6 +6,7 @@ import { createAgentPromptController } from "../src/service-worker/agent-tools/p
 import { createAgentUpload } from "../src/service-worker/agent-tools/upload.js";
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 import { frameAnswerText } from "../src/service-worker/agent-tools/site-recheck.js";
+import { FRAME_ANSWER_BOUND_MS } from "../src/service-worker/agent-tools/frames.js";
 import { fakePointPage, pointSiteAttachments, type FakeFrame } from "./helpers/point-site.js";
 
 /**
@@ -865,7 +866,7 @@ describe("030 a drop point is decided by the frame under it", () => {
     securityOrigin: SITE,
   });
 
-  function dropHarness(frames: FakeFrame[], pageOptions: { missingSessions?: string[] } = {}) {
+  function dropHarness(frames: FakeFrame[], pageOptions: { missingSessions?: string[] } = {}, deps: Partial<Deps> = {}) {
     const page = fakePointPage(frames, { pageSite: SITE, ...pageOptions });
     const fake = pointSiteAttachments(page);
     const deliverImage = vi.fn(async () => ({
@@ -887,6 +888,7 @@ describe("030 a drop point is decided by the frame under it", () => {
       attachments: fake.attachments as unknown as NonNullable<Deps["attachments"]>,
       readFrameMarks: (_tabId: number, key: string) => page.readMarks(key),
       probeFrameSender: (_tabId: number, frameId: number) => page.probeSender(frameId),
+      ...deps,
     });
     return { runner, deliverImage, siteModes, prompts, page, ...fake };
   }
@@ -991,6 +993,166 @@ describe("030 a drop point is decided by the frame under it", () => {
     refused.prompts.decide(refused.prompts.current()?.promptId ?? "", false);
     await expect(denied).resolves.toMatchObject({ outcome: "denied", hint: frameAnswerText("unknown", "unknown-site") });
     expect(refused.deliverImage).not.toHaveBeenCalled();
+  });
+
+  /**
+   * #55: a drop point off the top document's viewport is refused before its frame is looked for and
+   * before anybody is asked, with the answer the page gives it after the card (`files.ts`: off the
+   * window's inner size, the viewport the agent named in the reason). The viewport here is 1280 x 720.
+   */
+  describe("#55 a drop point outside the viewport", () => {
+    const VIEWPORT = { width: 1280, height: 720 };
+    const walked = (page: ReturnType<typeof fakePointPage>) =>
+      page.calls.filter((call) => call.method === "DOM.getNodeForLocation");
+
+    it.each([
+      [{ x: 160, y: 900 }],
+      [{ x: 1280, y: 90 }],
+      [{ x: -0.5, y: 90 }],
+    ])("refuses %o as the page would, with no card and no frame lookup", async (point) => {
+      const { runner, prompts, deliverImage, page, holds } = dropHarness([payFrame()], {}, { readTopViewport: async () => VIEWPORT });
+      const asked = vi.spyOn(prompts, "ask");
+
+      const response = await runner.run(dropAt(point));
+
+      expect(asked).not.toHaveBeenCalled();
+      expect(response).toEqual({ callId: "call-3", outcome: "not-actionable", reason: "point-outside-viewport (frame 1280x720)" });
+      expect(walked(page)).toEqual([]);
+      expect(deliverImage).not.toHaveBeenCalled();
+      // The refusal comes before the walk, so no attachment was ever held for this call.
+      expect(holds).toEqual([]);
+    });
+
+    it("names the picture's size when the point was read off a screenshot", async () => {
+      const space = { frame: { width: 1280, height: 720 }, image: { width: 640, height: 360 } };
+      const { runner, prompts, deliverImage } = dropHarness([payFrame()], {}, {
+        readTopViewport: async () => VIEWPORT,
+        screenshotSpaces: { get: async () => space, remember: async () => undefined },
+      });
+      const asked = vi.spyOn(prompts, "ask");
+
+      // (300, 400) in the picture is (600, 800) in the frame: below its 720.
+      const response = await runner.run(dropAt({ x: 300, y: 400 }));
+
+      expect(asked).not.toHaveBeenCalled();
+      expect(response).toEqual({ callId: "call-3", outcome: "not-actionable", reason: "point-outside-viewport (screenshot 640x360)" });
+      expect(deliverImage).not.toHaveBeenCalled();
+    });
+
+    it("decides a point inside the viewport, and any point when the viewport cannot be read, as before", async () => {
+      for (const [point, readTopViewport] of [
+        [{ x: 1279.5, y: 719.5 }, async () => VIEWPORT],
+        [{ x: 160, y: 900 }, async () => undefined],
+        [{ x: 160, y: 900 }, async () => Promise.reject(new Error("no frame"))],
+      ] as const) {
+        const { runner, prompts, page } = dropHarness([payFrame()], {}, { readTopViewport });
+
+        const pending = runner.run(dropAt(point));
+        await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+        expect(walked(page)).not.toEqual([]);
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      }
+    });
+
+    /**
+     * The production reader, with nothing injected: a script in the top frame of the tab, in the
+     * extension's isolated world, as `files.ts`'s own bound reads it.
+     */
+    describe("with the default reader (a script in the top frame)", () => {
+      const scripted = (impl: (injection: unknown) => unknown) => {
+        const executeScript = vi.fn(async (injection: unknown) => impl(injection));
+        (globalThis as unknown as { chrome: { scripting: unknown } }).chrome.scripting = { executeScript };
+        return executeScript;
+      };
+      const sized = (width: unknown, height: unknown) => async () => [{ result: { width, height } }];
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it("reads the size from frame 0's isolated world and refuses an off-viewport point with no card", async () => {
+        const executeScript = scripted(sized(1280, 720));
+        const { runner, prompts, deliverImage, page, holds } = dropHarness([payFrame()]);
+        const asked = vi.spyOn(prompts, "ask");
+
+        const response = await runner.run(dropAt({ x: 160, y: 900 }));
+
+        expect(response).toEqual({ callId: "call-3", outcome: "not-actionable", reason: "point-outside-viewport (frame 1280x720)" });
+        expect(asked).not.toHaveBeenCalled();
+        expect(deliverImage).not.toHaveBeenCalled();
+        expect(walked(page)).toEqual([]);
+        expect(holds).toEqual([]);
+        expect(executeScript).toHaveBeenCalledTimes(1);
+        expect(executeScript).toHaveBeenCalledWith(
+          expect.objectContaining({ target: { tabId: AGENT_TAB, frameIds: [0] }, world: "ISOLATED", injectImmediately: true }),
+        );
+      });
+
+      it("names the picture's size when the point was read off a screenshot", async () => {
+        scripted(sized(1280, 720));
+        const space = { frame: { width: 1280, height: 720 }, image: { width: 640, height: 360 } };
+        const { runner, prompts, deliverImage } = dropHarness([payFrame()], {}, {
+          screenshotSpaces: { get: async () => space, remember: async () => undefined },
+        });
+        const asked = vi.spyOn(prompts, "ask");
+
+        const response = await runner.run(dropAt({ x: 300, y: 400 }));
+
+        expect(response).toEqual({ callId: "call-3", outcome: "not-actionable", reason: "point-outside-viewport (screenshot 640x360)" });
+        expect(asked).not.toHaveBeenCalled();
+        expect(deliverImage).not.toHaveBeenCalled();
+      });
+
+      it("asks as before for a point inside the size it reads", async () => {
+        const executeScript = scripted(sized(1280, 720));
+        const { runner, prompts, page } = dropHarness([payFrame()]);
+
+        const pending = runner.run(dropAt({ x: 1279.5, y: 719.5 }));
+        await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+        expect(executeScript).toHaveBeenCalledTimes(1);
+        expect(walked(page)).not.toEqual([]);
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      });
+
+      it.each([
+        ["a missing size", async () => [{}]],
+        ["no result at all", async () => undefined],
+        ["a width that is not a number", sized("1280", 720)],
+        ["a width that is not finite", sized(Number.POSITIVE_INFINITY, 720)],
+        ["a height that is NaN", sized(1280, Number.NaN)],
+        ["a rejected script", async () => Promise.reject(new Error("no frame"))],
+      ])("asks as before when the script gives %s", async (_name, impl) => {
+        const executeScript = scripted(impl);
+        const { runner, prompts, page, deliverImage } = dropHarness([payFrame()]);
+
+        const pending = runner.run(dropAt({ x: 160, y: 900 }));
+        await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+        expect(executeScript).toHaveBeenCalledTimes(1);
+        expect(walked(page)).not.toEqual([]);
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+        expect(deliverImage).not.toHaveBeenCalled();
+      });
+
+      it("asks as before when the script never answers, once the bound has passed", async () => {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        const executeScript = scripted(() => new Promise(() => undefined));
+        const { runner, prompts, page } = dropHarness([payFrame()]);
+
+        const pending = runner.run(dropAt({ x: 160, y: 900 }));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(executeScript).toHaveBeenCalledTimes(1);
+        expect(prompts.current()).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(FRAME_ANSWER_BOUND_MS);
+        expect(prompts.current()).toBeDefined();
+        expect(walked(page)).not.toEqual([]);
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      });
+    });
   });
 
   it("keeps the top frame's decision, card and text exactly as before outside every frame (SC-206)", async () => {

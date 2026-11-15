@@ -387,6 +387,58 @@ test.describe("agent upload image", () => {
   });
 
   /**
+   * #55: a drop point off the top document's viewport is refused before anybody is asked, with the
+   * answer the page would give it after the card; a point inside the viewport on the same page, on
+   * a site that asks, still raises its card (then Refuse).
+   */
+  test("refuses a drop point outside the viewport with no card, and still asks about one inside it", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+
+    const { panel, settings, client, call } = await pairedSession({ extensionContext, extensionId, extensionWorker });
+    let live: McpHarnessClient | undefined = client;
+    try {
+      const tabId = ((await call("tabs_create", { url: FIXTURE })) as { tabId: number }).tabId;
+      const page = await fixturePage(extensionContext);
+      // The picture is taken before the site is put in `ask`, so the only cards here are the drops'.
+      await settings.setSiteMode(SITE, "skip-checks");
+      const shot = await client.callTool("screenshot", { tabId });
+      expect(shot.isError, shot.text).toBe(false);
+      const imageId = (shot.json as { imageId: string }).imageId;
+      await reset(page);
+      await settings.setSiteMode(SITE, "ask");
+
+      // ============= outside: refused as the page would refuse it, no card, nothing delivered =============
+      const below = { x: ZONE_CENTRE.x, y: (await page.evaluate(() => window.innerHeight)) + 5_000 };
+      const refused = await answerWithoutCard(panel, client, "upload_image", { tabId, imageId, coordinate: below });
+      expect(refused.isError, refused.text).toBe(true);
+      expect(refused.json, refused.text).toMatchObject({
+        outcome: "not-actionable",
+        reason: expect.stringMatching(/^point-outside-viewport \((frame|screenshot) \d+x\d+\)$/),
+      });
+      await expect(page.locator("#report-zone")).toHaveText("none");
+
+      // ============= inside, same page: asked as before, and a refusal delivers nothing =============
+      const asking = client.callTool("upload_image", { tabId, imageId, coordinate: ZONE_CENTRE });
+      await panel.waitForText(ui("agent.promptTitle"));
+      await panel.clickButton(ui("agent.refuse"));
+      const denied = await asking;
+      expect(denied.isError).toBe(true);
+      expect(denied.json).toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      await expect(page.locator("#report-zone")).toHaveText("none");
+
+      await settings.setSiteMode(SITE, "skip-checks");
+      await call("tabs_close", { tabId });
+    } finally {
+      await live?.close();
+      live = undefined;
+    }
+  });
+
+  /**
    * 5/5, first half (SC-097, FR-168's last sentence): a worker recycling is invisible to the
    * retention, because the bytes were never in the browser.
    *
@@ -500,6 +552,32 @@ async function fixturePage(context: BrowserContext): Promise<Page> {
     .toBe(true);
   if (!found) throw new Error("fixture-tab-missing");
   return found;
+}
+
+/** Runs one call that must raise no card, whatever it answers; a card that appears fails it at once (a card would hold the call). */
+async function answerWithoutCard(
+  panel: SidePanelDriver,
+  client: McpHarnessClient,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ isError: boolean; text: string; json: unknown }> {
+  let settled = false;
+  const pending = client.callTool(tool, args).finally(() => {
+    settled = true;
+  });
+  while (!settled) {
+    const kinds = (await panel.evaluatePanel(
+      "[...document.querySelectorAll('[data-prompt]')].map((card)=>card.getAttribute('data-prompt'))",
+    )) as string[];
+    if (kinds.length > 0) {
+      const text = await panel.panelText();
+      await panel.clickIfPresent(ui("agent.refuse"));
+      await pending.catch(() => undefined);
+      throw new Error(`${tool} ${JSON.stringify(args)} raised a ${kinds.join(",")} card\n${text}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return pending;
 }
 
 /** Every report back to `none`, so each delivery below is evidence of its own call. */

@@ -5,6 +5,20 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.22.4 — 2026-11-15
+
+- **No card for a point that cannot be reached (#55).** When an element tool aims at a screen point
+  outside the page's viewport (a `click`, `type` or `key` target point, either end of a `drag`), or
+  `upload_image` drops at such a point, Hallpass used to ask the owner about it first and only then
+  find that nothing was there. It now refuses the point before asking, with the same answer the agent
+  got before (`no-match`, or `point-outside-viewport (...)` for a drop). Points inside the viewport are
+  asked about exactly as before.
+- **Typing into a frame Hallpass cannot follow always asks (#52).** Keys sent without a target go to
+  the frame that holds focus, and that frame's site decides whether to ask. When focus is inside a
+  `<fencedframe>`, or the browser cannot open closed shadow roots for the read, the site is now treated
+  as unknown, so the owner is always asked, instead of possibly being decided by the page's own site.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.22.3 — 2026-11-15
 
 - **Actions wait for a stuck frame once, not once per lookup (#70).** On a page holding a frame

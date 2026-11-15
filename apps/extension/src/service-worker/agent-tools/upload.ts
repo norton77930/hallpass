@@ -30,6 +30,7 @@ import {
 } from "./frame-consent.js";
 import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
 import type { AgentInputAttachments, AttachmentCallHold } from "./input.js";
+import { FRAME_ANSWER_BOUND_MS } from "./frames.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
@@ -96,6 +97,11 @@ export type AgentUploadDeps = {
    * own size over its zoom, the frame a drop point is checked against (R-282).
    */
   currentViewport?: (tabId: number) => Promise<CaptureFrame | undefined>;
+  /**
+   * #55: the top document's own viewport, as the drop's own bound reads it (`files.ts`); a script in
+   * the top frame by default. Absent or unanswered, a drop point is decided as before.
+   */
+  readTopViewport?: (tabId: number) => Promise<{ width: number; height: number } | undefined>;
   reportDiagnostic?: (code: string) => void;
 };
 
@@ -106,6 +112,49 @@ export type AgentUploadRunner = {
 
 function answer(callId: string, outcome: AgentNativeResponse["outcome"], reason: string): AgentNativeResponse {
   return { callId, outcome, reason };
+}
+
+/** The off-viewport drop's reason in the picture's size, the one the agent aims in (R-280). */
+function outsidePictureReason(space: ScreenshotSpace): string {
+  return `point-outside-viewport (screenshot ${space.image.width}x${space.image.height})`;
+}
+
+/**
+ * The top document's inner size, read where the drop reads it (#55): the extension's isolated world
+ * in frame 0, the one `files.ts`'s `resolveByPoint` runs in, so the bound is the same one. Bounded;
+ * no answer is `undefined`.
+ */
+async function readTopFrameViewport(tabId: number): Promise<{ width: number; height: number } | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), FRAME_ANSWER_BOUND_MS);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+  try {
+    const read = chrome.scripting
+      .executeScript({
+        target: { tabId, frameIds: [0] },
+        world: "ISOLATED",
+        injectImmediately: true,
+        func: () => {
+          const scope = globalThis as { innerWidth?: unknown; innerHeight?: unknown };
+          return { width: scope.innerWidth, height: scope.innerHeight };
+        },
+      })
+      .then((results) => {
+        const size = (results as Array<{ result?: { width?: unknown; height?: unknown } }> | undefined)?.[0]?.result;
+        const { width, height } = size ?? {};
+        return typeof width === "number" && Number.isFinite(width) && typeof height === "number" && Number.isFinite(height)
+          ? { width, height }
+          : undefined;
+      })
+      .catch(() => undefined);
+    return await Promise.race([read, expired]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -262,8 +311,8 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     tool: UploadTool,
     tabId: number,
     args: Record<string, unknown>,
-    /** Asked once the tab is bound and before the gate: a reason here refuses with nothing asked. */
-    beforeGate?: (binding: AgentPageBinding) => Promise<string | undefined>,
+    /** Asked once the tab is bound and before the gate: an answer here refuses with nothing asked. */
+    beforeGate?: (binding: AgentPageBinding) => Promise<AgentNativeResponse | undefined>,
     /**
      * What the upload names, when it names something: an element, whose frame is claimed before
      * the gate, or a drop point (read once `beforeGate` has set the picture's space), whose frame
@@ -284,7 +333,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     }
     const binding = bound.binding;
     const refused = beforeGate ? await beforeGate(binding) : undefined;
-    if (refused !== undefined) return { ok: false, response: answer(callId, "failed", refused) };
+    if (refused !== undefined) return { ok: false, response: refused };
 
     const claim: UploadClaim =
       target === undefined
@@ -442,17 +491,32 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     // A drop point is in the latest picture's pixels (R-280), and that picture must still be of a
     // page this wide (R-282) - checked before the owner is asked about a point that has moved.
     let space: ScreenshotSpace | undefined;
-    const readSpace = async (bound: AgentPageBinding): Promise<string | undefined> => {
-      if ("ref" in args.target) return undefined;
-      space = await deps.screenshotSpaces?.get(bound.tabId).catch(() => undefined);
-      if (!space) return undefined;
-      const facts = await captureFrameFacts(
-        bound.tabId,
-        deps.currentViewport ? { currentViewport: deps.currentViewport } : {},
-      );
-      return viewportChangedReason(space, facts.frame?.width);
-    };
     const named = args.target;
+    const readSpace = async (bound: AgentPageBinding): Promise<AgentNativeResponse | undefined> => {
+      if ("ref" in named) return undefined;
+      space = await deps.screenshotSpaces?.get(bound.tabId).catch(() => undefined);
+      if (space) {
+        const facts = await captureFrameFacts(
+          bound.tabId,
+          deps.currentViewport ? { currentViewport: deps.currentViewport } : {},
+        );
+        const changed = viewportChangedReason(space, facts.frame?.width);
+        if (changed !== undefined) return answer(callId, "failed", changed);
+      }
+      return outsideTopViewport(bound, toViewportPoint(named.coordinate, space));
+    };
+    /**
+     * #55: a drop point off the top document's viewport is refused before its frame is looked for
+     * and before anybody is asked, with the answer the page gives it (`files.ts`, `content-broker.ts`):
+     * the same bound on the same inner size, so a point the page would take is decided as before.
+     */
+    const outsideTopViewport = async (bound: AgentPageBinding, at: ViewportPoint): Promise<AgentNativeResponse | undefined> => {
+      const viewport = await (deps.readTopViewport ?? readTopFrameViewport)(bound.tabId).catch(() => undefined);
+      if (viewport === undefined) return undefined;
+      if (at.x >= 0 && at.y >= 0 && at.x < viewport.width && at.y < viewport.height) return undefined;
+      const frame = `${Math.max(0, Math.floor(viewport.width))}x${Math.max(0, Math.floor(viewport.height))}`;
+      return answer(callId, "not-actionable", space ? outsidePictureReason(space) : `point-outside-viewport (frame ${frame})`);
+    };
     const admitted = await admit(
       request,
       "upload_image",
@@ -512,9 +576,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
       ) {
         // The size named is the one the agent aims in: the picture's, when one set the space.
         const reason =
-          space && result.reason.startsWith("point-outside-viewport")
-            ? `point-outside-viewport (screenshot ${space.image.width}x${space.image.height})`
-            : result.reason;
+          space && result.reason.startsWith("point-outside-viewport") ? outsidePictureReason(space) : result.reason;
         return answer(callId, "not-actionable", reason);
       }
       return answer(callId, "failed", result.reason);

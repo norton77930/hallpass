@@ -1349,6 +1349,21 @@ function namedPoints(tool: AgentToolName, args: Record<string, unknown>): Array<
 }
 
 /**
+ * Whether a point target is one the page can never hit (#55), so it is refused before the owner is
+ * asked about it rather than after.
+ *
+ * A point target is resolved after the gate by the top document's `elementFromPoint`, which finds
+ * nothing once the point, rounded to the nearest pixel, is off the layout viewport (scrollbars not
+ * included; measured 2026-11-15), and the call answers `no-match`. Only a point a whole pixel past an
+ * edge is refused here: neither the browser's rounding of the point nor that of the measured size
+ * can bring it back in, so a point the page could still round onto the edge is decided and asked
+ * exactly as before.
+ */
+function pointPastViewport(point: ViewportPoint, viewport: Viewport): boolean {
+  return point.x <= -1 || point.y <= -1 || point.x >= viewport.width + 1 || point.y >= viewport.height + 1;
+}
+
+/**
  * One site for the whole action, from each child frame's decision (030 FR-450, FR-464).
  *
  * Every named ref has to be decided by the same site. A drag between the page and another site's
@@ -2782,6 +2797,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     if (tool !== "computer" && namedPoints(tool, acting).length > 0) {
       const acquired = await holdInput(binding.tabId, holds);
       if (!acquired.ok) return inputUnavailable(callId, acquired.unavailableReason);
+      // #55: a point the page can never hit is refused before its frame is looked for and before
+      // anybody is asked, with the answer the page would give it (`no-match`). A tab whose viewport
+      // cannot be measured is decided as before.
+      const viewport = await measureViewport(binding.tabId, (id, method, params) => deps.attachments.send(id, method, params));
+      if (viewport && namedPoints(tool, acting).some(([, point]) => pointPastViewport(point, viewport))) {
+        return answer(callId, "failed", "no-match");
+      }
     }
     const claim = await claimBeforeGate(tool, args, acting, context, binding, position.point);
     const gateSite = gateSiteOf(claim.deciding, binding.site);

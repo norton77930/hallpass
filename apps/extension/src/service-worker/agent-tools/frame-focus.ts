@@ -23,11 +23,11 @@ import { FOCUS_WALK_MAX_DEPTH, type FrameFocusAnswer } from "./frame-site.js";
  * (`FOCUS_WALK_MAX_DEPTH`, through `args`). `focusedChild` is `-1` only when focus ended on a plain
  * element of this document, or on none; an index into `frames` when a frame holder has it; and
  * `null` - unknown - for anything else: a holder (`iframe`, `frame`, `embed`, `object`, anything
- * with a `contentWindow`) whose frame is not one of this window's, a shadow chain deeper than the
- * cap, or a state this did not expect. A frame hung deeper than the cap, or at a place its parent
- * does not number, answers `path: null`. Focus inside a shadow root is followed to the element that
- * holds it, closed roots included where `chrome.dom` can open them: only which frame has focus
- * leaves the frame, nothing in the root.
+ * with a `contentWindow`) whose frame is not one of this window's, a focused `fencedframe`, a shadow
+ * chain deeper than the cap, no `chrome.dom` to open closed roots with (#52), or a state this did
+ * not expect. A frame hung deeper than the cap, or at a place its parent does not number, answers
+ * `path: null`. Focus inside a shadow root is followed to the element that holds it, closed roots
+ * included through `chrome.dom`: only which frame has focus leaves the frame, nothing in the root.
  */
 export function focusOfFrame(maxDepth: number): { path: number[] | null; focusedChild: number | null } {
   const unknown = { path: null, focusedChild: null };
@@ -50,10 +50,14 @@ export function focusOfFrame(maxDepth: number): { path: number[] | null; focused
     }
 
     const opens = typeof chrome === "object" && typeof chrome?.dom?.openOrClosedShadowRoot === "function";
+    // #52 (spec 030 FR-464): without `chrome.dom` a closed root cannot be opened, so whether one hides
+    // the focus is not known - even a plain-looking focused element may be a closed root's host. The
+    // place in the tree was read without it, so `path` stands; only the focused child is unknown.
+    if (!opens) return { path, focusedChild: null };
     let active: Element | null = document.activeElement;
     for (let depth = 0; active !== null; depth += 1) {
       const root: ShadowRoot | null =
-        (opens && active instanceof HTMLElement ? chrome.dom.openOrClosedShadowRoot(active) : null) ?? active.shadowRoot;
+        (active instanceof HTMLElement ? chrome.dom.openOrClosedShadowRoot(active) : null) ?? active.shadowRoot;
       const inner: Element | null = root?.activeElement ?? null;
       if (inner === null) break;
       // Focus goes on below the cap: where it ends is not known.
@@ -61,6 +65,9 @@ export function focusOfFrame(maxDepth: number): { path: number[] | null; focused
       active = inner;
     }
     if (active === null) return { path, focusedChild: -1 };
+    // #52 (spec 030): a fenced frame's document is never among `frames` and the element has no
+    // `contentWindow`, so where its focus goes cannot be followed - by name, not by what it lacks.
+    if (active.localName === "fencedframe") return { path, focusedChild: null };
     const holder = ["iframe", "frame", "embed", "object"].includes(active.localName) || "contentWindow" in active;
     if (!holder) return { path, focusedChild: -1 };
     const held = (active as { contentWindow?: Window | null }).contentWindow;

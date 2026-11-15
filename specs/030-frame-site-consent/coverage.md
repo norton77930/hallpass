@@ -132,10 +132,8 @@ Not part of this feature. Each is a candidate for its own issue.
 - **`frame-focus.ts` placement.** The focus read belongs in `chrome-adapters/` beside `frame-sender.ts`
   and `main-world-marks.ts`, with its own answer type. One predicate for "page decision from the top
   document" would also replace three inline checks.
-- **Focus read edges.** `<fencedframe>` is not in the focus read's list of frame holders, so focus a
-  user clicked into one may be read as the page's. The read also falls back to `element.shadowRoot`
-  when `chrome.dom` is missing, which only happens in tests; closed roots are missed if it ever ran
-  in the extension. Both should answer unknown.
+- **Focus read edges (#52, done 2026-11-15).** Focus on a `<fencedframe>`, and a read without
+  `chrome.dom.openOrClosedShadowRoot`, now answer unknown (`frame-focus.test.tsx`).
 - **Card wording.** A drag between two known sites is shown as "could not be established" rather than
   "two sites". (The first line and the remember button naming the frame's site were done in #51.)
 - **`askUploadDirectory` cards do not carry `frame`.** The card that asks for an upload directory can show
@@ -150,14 +148,17 @@ Not part of this feature. Each is a candidate for its own issue.
   raises a card (never decided by the page's skip-checks) and Refuse does nothing. **Not covered, and
   observed not to work (2026-11-15):** Allow once by ref ends `target-not-located` after the gate, and a
   point over the innermost control is asked as an unknown site (no Allow always), so neither reaches the
-  page and the innermost site's own skip-checks cannot be exercised there. The likely cause, read from
+  page and the innermost site's own skip-checks cannot be exercised there (public issue #75). The likely cause, read from
   the code and not yet measured: `Target.setAutoAttach` is sent only on the tab's session
   (`agent-tools/input.ts`), so the innermost frame has no session of its own for the point walk
   (`frame-site.ts`, `resolvePointSite`) or the DOM owner lookup (`frames.ts`, `createFrameOffsets`). The
   fail-safe direction holds (a card, never a silent action). Open: its own issue and fix; the story then
   extends to Allow once and skip-checks.
-- **Points outside the viewport.** A point target outside the viewport asks as an unknown site before the
-  page refuses it, so the owner is asked about an action that was never going to run.
+- **Points outside the viewport (#55, done 2026-11-15).** Element-tool point targets, drag ends and
+  `upload_image` drop points outside the top viewport are refused before the frame lookup, with no card
+  (`agent-effects.test.ts`, `agent-upload.test.ts`, packaged Story 8). Open: the element-tool pre-gate
+  `Page.getLayoutMetrics` read has no time bound of its own (as in `computer`'s preflight); the one-pixel
+  margin is measured at scale 1 and 1.25 without a scrolled page, not at a fractional scale after scrolling.
 - **SC-206 and the agent-input gate.** The `agent-input` packaged gate's two clicks into another site's
   frame now answer that frame's card, which is the behaviour of this spec (FR-450). This is an intended
   change to SC-206's "unchanged" for that one gate, and the spec's wording should be read that way.
