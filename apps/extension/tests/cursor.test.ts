@@ -1104,6 +1104,28 @@ describe("033/T996 marks hidden for an agent capture", () => {
     expect(sendResponse).toHaveBeenCalledWith({ painted: true });
   });
 
+  // 033 / #68: a hidden document never runs animation frames, so waiting for two would leave the worker
+  // waiting on its own cap; the page answers the hide at once instead.
+  it("acknowledges a hide at once in a hidden document, without waiting for animation frames", () => {
+    stubFrames();
+    Object.defineProperty(document, "hidden", { configurable: true, value: true });
+    try {
+      const listener = bind();
+      drawEverything(listener);
+      const sendResponse = vi.fn();
+
+      const kept = listener({ type: "marks", hidden: true }, { id: EXTENSION }, sendResponse);
+
+      expect(kept, "answered synchronously, so the channel is not kept open").toBe(false);
+      expect(sendResponse).toHaveBeenCalledTimes(1);
+      expect(sendResponse).toHaveBeenCalledWith({ painted: true });
+      expect(frames, "no animation frame was requested, and none is ever run").toHaveLength(0);
+      for (const mark of marks()) expect(mark.hasAttribute(HIDDEN), "the marks are hidden all the same").toBe(true);
+    } finally {
+      delete (document as unknown as Record<string, unknown>)["hidden"];
+    }
+  });
+
   it("restores itself 3 s after hiding when no hidden:false comes", () => {
     vi.useFakeTimers();
     stubFrames();

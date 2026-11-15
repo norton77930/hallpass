@@ -304,9 +304,12 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // 031 FR-470, R-461: allow every covered page action of this session on this site.
   "agent.allowSession",
   "agent.allowAlways",
+  // 030 #51: the same button on a frame card, naming the frame's site.
+  "agent.allowAlwaysOn",
   "agent.refuse",
   // 030 FR-457, FR-458: the card for an action inside an embedded frame.
   "agent.prompt.frameSite",
+  "agent.prompt.frameHeldBy",
   "agent.prompt.frameUnknown",
   "agent.prompt.frameAnswer",
   "agent.planTitle",

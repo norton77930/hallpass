@@ -589,13 +589,13 @@ describe("030 frame card", () => {
   it("names the frame's site and the page, and the answers are for the frame's site", () => {
     project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
     const text = screen.getByRole("dialog").textContent ?? "";
-    expect(text).toContain(ui("agent.prompt.frameSite").replace("{frameSite}", FRAME).replace("{site}", PAGE));
+    expect(text).toContain(ui("agent.prompt.frameHeldBy").replace("{site}", PAGE));
     expect(text).toContain(ui("agent.prompt.frameAnswer").replace("{frameSite}", FRAME));
     expect(text).toContain(ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Pay"));
 
     fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
     project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
-    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowAlways") }));
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowAlwaysOn").replace("{site}", FRAME) }));
     project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
     fireEvent.click(screen.getByRole("button", { name: ui("agent.refuse") }));
     expect(port.sent).toEqual([
@@ -634,6 +634,78 @@ describe("030 frame card", () => {
 
     fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
     expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true } }]);
+  });
+});
+
+/** #51: a consent card for an action inside another site's frame names the frame's site as the action's site. */
+describe("030 frame card wording (#51)", () => {
+  let port: FakeAgentPort;
+  const PAGE = "https://shop.example";
+  const FRAME = "https://pay.example";
+  const PROMPT = { promptId: "prompt-w", site: PAGE, tool: "click" as const, argsSummary: "click a page element", targetLabel: "Pay", targetRole: "button" };
+  const WORDS = {
+    "en-US": {
+      first: "Claude Code wants to do this on https://pay.example: Click a page element",
+      line: "Inside an embedded frame on the https://shop.example page",
+      always: "Always allow on https://pay.example",
+    },
+    "zh-TW": {
+      first: "Claude Code 想在 https://pay.example 上",
+      line: "位於 https://shop.example 頁面的內嵌框架裡",
+      always: "https://pay.example 以後都允許",
+    },
+  } as const;
+  const paragraphs = (): string[] =>
+    Array.from(screen.getByRole("dialog").querySelectorAll("p")).map((p) => p.textContent ?? "");
+  const labels = (): string[] =>
+    Array.from(screen.getByRole("dialog").querySelectorAll("button")).map((button) => button.textContent ?? "");
+
+  beforeEach(() => {
+    port = installAgentPort();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it.each(["en-US", "zh-TW"] as const)("in %s: first line, frame line and Always button name the frame's site", (locale) => {
+    renderShell(locale);
+    const t = (key: string) => lookup(key, locale);
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
+    const [first, line] = paragraphs();
+    expect(first).toContain(WORDS[locale].first);
+    expect(first).not.toContain(PAGE);
+    expect(line).toBe(WORDS[locale].line);
+    expect(paragraphs()).toContain(t("agent.prompt.frameAnswer").replace("{frameSite}", FRAME));
+    expect(labels()).toContain(WORDS[locale].always);
+    expect(labels()).not.toContain(t("agent.allowAlways"));
+  });
+
+  it.each(["en-US", "zh-TW"] as const)("in %s: a card without a frame and an unknown-frame card keep their words", (locale) => {
+    renderShell(locale);
+    const t = (key: string) => lookup(key, locale);
+    const consent = (site: string): string =>
+      t("agent.consentBody").replace("{agent}", "Claude Code").replace("{action}", t("agent.summary.click")).replace("{site}", site);
+
+    project(port, { ...IDLE, prompt: PROMPT });
+    expect(paragraphs()[0]).toBe(consent(PAGE));
+    expect(labels()).toContain(t("agent.allowAlways"));
+
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { unknown: true as const } } });
+    expect(paragraphs()[0]).toBe(consent(PAGE));
+    expect(paragraphs()[1]).toBe(t("agent.prompt.frameUnknown").replace("{site}", PAGE));
+    expect(labels().some((label) => label.includes(FRAME) || label === t("agent.allowAlways"))).toBe(false);
+  });
+
+  it("applies to the upload effect card too, which shares the consent body", () => {
+    renderShell();
+    project(port, {
+      ...IDLE,
+      prompt: { ...PROMPT, tool: "file_upload" as const, frame: { site: FRAME } },
+    });
+    expect(paragraphs()[0]).toContain("on https://pay.example:");
+    expect(paragraphs()[1]).toBe("Inside an embedded frame on the https://shop.example page");
   });
 });
 
@@ -819,10 +891,8 @@ describe("030 upload frame card", () => {
       project(port, { ...IDLE, prompt: { ...prompt, frame: { site: FRAME } } });
       const dialog = screen.getByRole("dialog");
       expect(frameLine(dialog)).toBe("site");
-      expect(dialog.textContent).toContain(
-        ui("agent.prompt.frameSite").replace("{frameSite}", FRAME).replace("{site}", PAGE),
-      );
-      expect(screen.getByRole("button", { name: ui("agent.allowAlways") })).toBeTruthy();
+      expect(dialog.textContent).toContain(ui("agent.prompt.frameHeldBy").replace("{site}", PAGE));
+      expect(screen.getByRole("button", { name: ui("agent.allowAlwaysOn").replace("{site}", FRAME) })).toBeTruthy();
     }
   });
 

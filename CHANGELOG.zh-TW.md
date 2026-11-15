@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.22.3 — 2026-11-15
+
+- **卡住的 frame 只等一次，不再每次查詢都等(#70)**:頁面上有一直不回應的 frame 時(例如頁面很下方的 `<iframe loading="lazy">`),一次點擊或按鍵會查好幾次頁面的 frame,每次最多等 2 秒。現在同一個工具呼叫最多只等這種 frame 一次，之後的查詢沿用那次的結果。這個 frame 仍然當作不知道屬於哪個網站，所以照舊會詢問。
+- **frame 詢問卡寫出它問的是哪個網站(#51)**:動作發生在另一個已知網站的內嵌 frame 裡時，卡片第一行現在寫的是 frame 的網站，下一行寫是哪個頁面放了這個 frame,記住選擇的按鈕從「這個網站以後都允許」改成「<frame 的網站> 以後都允許」。不在 frame 裡的動作，卡片不變。
+- 主機和擴充功能要一起升級：重新安裝主機並重新載入擴充功能。
+
 ## 0.22.2 — 2026-11-15
 
 - **有還沒載入的 frame 時，讀取也很快(#71)**:頁面下方有還沒載入的 `<iframe loading="lazy">` 時，`get_page_text`、`read_page`、`find` 以前要先等那個 frame 2 秒才回應，現在會立刻回應(實測遠低於 1 秒)。還沒載入的 frame 會列為無法讀取，結果標示 `truncated: true`;等 frame 載入後(例如捲到它的位置),就會照常讀到它的內容。需要判斷 frame 屬於哪個網站的動作，仍然和以前一樣會等 frame。

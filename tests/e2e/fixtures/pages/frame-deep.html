@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame deep fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 520px; height: 280px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Deep frame</h1>
+<p>A frame from the second site that itself holds a frame from a further origin.</p>
+<iframe id="outer-frame" title="second-site frame" width="520" height="280" src="__OOPIF_ORIGIN__/frame-deep-mid"></iframe>
+</body>
+</html>

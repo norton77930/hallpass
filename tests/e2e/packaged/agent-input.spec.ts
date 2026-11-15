@@ -343,7 +343,7 @@ test.describe("agent input", () => {
       // site's mode (FR-457), so the typing below runs inside the same frame without a second card.
       const clicking = client.callTool("click", { tabId, target: { ref: oopifBtn!.ref! } });
       await panel.waitForText(ui("agent.promptTitle"));
-      await panel.clickButton(ui("agent.allowAlways"));
+      await panel.clickButton(ui("agent.allowAlwaysOn").replace("{site}", OOPIF_SITE));
       const clickResult = await clicking;
       expect(clickResult.isError, `click failed: ${clickResult.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
       const clicked = clickResult.json;

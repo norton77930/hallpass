@@ -5,6 +5,20 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.22.3 — 2026-11-15
+
+- **Actions wait for a stuck frame once, not once per lookup (#70).** On a page holding a frame
+  that never answers (for example an `<iframe loading="lazy">` far below the fold), one click or
+  key looked up the page's frames several times and waited up to 2 s on each lookup. A tool call
+  now waits for such a frame at most once; the lookups after it in the same call use that answer.
+  The frame is still treated as one whose site is not known, so the action is still asked about as
+  before.
+- **The frame consent card names the site it asks about (#51).** For an action inside an embedded
+  frame from another known site, the card's first line now names the frame's site, the line below
+  says which page holds the frame, and the remember button reads "Always allow on <frame site>"
+  instead of "Always allow on this site". Cards for actions outside frames are unchanged.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.22.2 — 2026-11-15
 
 - **Reads are fast on pages with a frame that has not loaded (#71).** On a page holding an

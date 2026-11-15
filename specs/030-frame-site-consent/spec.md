@@ -339,3 +339,11 @@ Confirm that step one runs without a card, and step two raises a card for the fr
   its sender origin gives its site. Focus in the top document, or in a child the browser gives the page's
   site, is decided by the page as before. A frame that cannot be named is unknown and asks. Focus is read
   again right before the first key, and a change gives the frame-moved answer.
+- 2026-11-15 (#70): after one of a tool call's all-frames lookups on a tab times out, the rest of that
+  call's frame lookups on the tab take their fail-closed path at once instead of waiting the bound again.
+  So for the rest of that call, the FR-460 re-check reads `unknown`. Lookups made outside the call are
+  not affected, and the next call waits the full bound again.
+- 2026-11-15 (#51): wording only. On the consent card for an action inside another site's frame (FR-457,
+  FR-458), the first line names the frame's site as the action's site, the frame line says which page holds
+  the frame, and the remember button names the frame's site ("Always allow on {site}"). Cards without a
+  frame, unknown-frame cards and the drag two-sites case are unchanged.

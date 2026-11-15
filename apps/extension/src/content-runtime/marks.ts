@@ -141,6 +141,10 @@ export type MarksOutcome = "not-mine" | "answered" | "answering";
  * after a screenshot is taken only once the marks are painted back. A document with no animation
  * frames to wait for is answered at once; a background tab, where none run, is answered by the
  * worker's own cap, which is why the page asks for nothing more here.
+ *
+ * `doc.hidden` is answered at once for the same reason (033, #68): a hidden document runs no animation
+ * frames, so waiting for two would only make the worker wait out its cap. The marks are still hidden
+ * or shown above; only the acknowledgement skips the frames.
  */
 export function applyMarks(message: unknown, doc: Document, answer: () => void): MarksOutcome {
   if (!isMarksMessage(message)) return "not-mine";

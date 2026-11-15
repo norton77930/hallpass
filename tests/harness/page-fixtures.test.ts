@@ -124,6 +124,18 @@ describe("T885 frame fixtures", () => {
     expect(inner["src"]).toMatch(/^https:\/\/localhost:/);
   });
 
+  it("frame-deep: a second-site frame that holds a frame from the sibling-port origin (#56)", async () => {
+    const outer = only(await served("frame-deep"));
+    expect(outer["id"]).toBe("outer-frame");
+    expect(originOf(outer["src"])).toBe(SECOND_SITE);
+
+    const middle = await served(new URL(outer["src"] as string).pathname.slice(1));
+    const inner = only(middle);
+    expect(inner["id"]).toBe("inner-frame");
+    expect(originOf(inner["src"])).toBe(SIBLING);
+    expect(new URL(inner["src"] as string).pathname).toBe("/frame-consent-child");
+  });
+
   it("frame-navigating: a second-site frame that moves to a third origin on postMessage go", async () => {
     const page = await served("frame-navigating");
     const frame = only(page);

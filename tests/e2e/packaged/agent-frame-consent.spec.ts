@@ -28,6 +28,13 @@ const SECOND = "https://localhost:19443";
 /** Where `frame-navigating` sends its frame on `postMessage("go")` (`__CROSS_ORIGIN__`). */
 const MOVED_TO = "https://127.0.0.1:19445";
 
+/**
+ * #56: the origin `frame-deep` frames inside its second-site frame (`__CROSS_ORIGIN__`). The fixture hosts
+ * give only two sites (`127.0.0.1`, `localhost`), so this is the page's own site on the sibling port: a
+ * different origin (D-030-2) and a frame of its own, out of process from its `localhost` parent.
+ */
+const INNER = "https://127.0.0.1:19445";
+
 /** How long "no card appeared" is watched for after a call has already answered. */
 const NO_CARD_WINDOW_MS = 1_500;
 
@@ -145,7 +152,7 @@ test.describe("agent frame consent", () => {
       const typing = live.callTool("type", { tabId, target: { ref: field }, text: "always", mode: "replace" });
       await waitForPrompt(panel, "consent");
       expect((await frameLine(panel)).text).toContain(SECOND);
-      await clickInPrompt(panel, "consent", ui("agent.allowAlways"));
+      await clickInPrompt(panel, "consent", ui("agent.allowAlwaysOn").replace("{site}", SECOND));
       const typed = await typing;
       expect(typed.isError, `type: ${typed.text}\nstderr:\n${live.stderr()}`).toBe(false);
       await expect(frame.locator("#frame-field")).toHaveValue("always");
@@ -275,6 +282,81 @@ test.describe("agent frame consent", () => {
       await closeTab(extensionWorker, tabId);
     } finally {
       await forgetSites(settings, [SITE, SECOND]);
+      await client?.close();
+    }
+  });
+
+  // #56: a frame inside an out-of-process frame, each from another origin than its parent and in a target of
+  // its own. Only the half that works today is pinned (see the comment before the point click, and
+  // specs/030-frame-site-consent/coverage.md, "Nested out-of-process frames").
+  test("Story 2 (#56): a frame inside an out-of-process frame: the card names the innermost site; Refuse does nothing", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+    const { panel, settings } = await ownerSurfaces(extensionContext, extensionId, extensionWorker);
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const live = client;
+      const call = callerFor(() => client);
+      await panel.clickIfPresent(ui("agent.retry"));
+      await pairWithFirstCall(live, panel, { locale });
+
+      const tabId = await openTab(call, `${SITE}/frame-deep`);
+      const page = await agentPage(extensionContext, `${SITE}/frame-deep`);
+      const inner = page.frameLocator("#outer-frame").frameLocator("#inner-frame");
+      const status = inner.locator("#frame-status");
+      await expect(inner.locator("#frame-button")).toBeVisible();
+      await settings.setSiteMode(SITE, "skip-checks");
+
+      // The arrangement is the claim: both frames are targets of their own, read from the browser.
+      const targets = await frameTargets(extensionContext, page);
+      expect(targets.some((url) => url.startsWith(`${SECOND}/frame-deep-mid`)), targets.join("\n")).toBe(true);
+      expect(targets.some((url) => url.startsWith(`${INNER}/frame-consent-child`)), targets.join("\n")).toBe(true);
+      // eslint-disable-next-line no-console -- the measurement the coverage file cites.
+      console.log(`[#56] out-of-process frame targets:\n${targets.join("\n")}`);
+
+      // ===== a click by ref: the card names the innermost frame's site, not the middle's; Refuse does nothing =====
+      const button = await refFor(call, tabId, (node) => node.role === "button" && node.name === "Frame action");
+      const byRef = live.callTool("click", { tabId, target: { ref: button } });
+      await waitForPrompt(panel, "consent");
+      const line = await frameLine(panel);
+      expect(line.kind, await panel.panelText()).toBe("site");
+      expect(line.text).toContain(INNER);
+      expect(line.text).toContain(SITE);
+      expect(line.text, "the card names the middle frame's site").not.toContain(SECOND);
+      expect(await status.textContent(), "the click landed before the owner answered").toBe("not clicked");
+      await clickInPrompt(panel, "consent", ui("agent.refuse"));
+      const refused = await byRef;
+      expect(refused.isError, refused.text).toBe(true);
+      const answer = answerOf(refused) as { outcome?: string; reason?: string; hint?: string };
+      expect(answer, refused.text).toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      expect(answer.hint ?? "", "the refusal does not name the innermost frame's site").toContain(INNER);
+      await expectStill(status, "not clicked");
+      await expectNoPrompt(panel, "a card stayed up after Refuse");
+
+      // ===== a click by point over the innermost control: the page's skip-checks does not decide it =====
+      // Measured 2026-11-15 (#56): with two levels of out-of-process frame the point walk answers unknown
+      // (the card is raised, without Allow always), and Allow once on a ref is answered target-not-located
+      // after the gate; neither runs a click. So what is pinned is that a card is raised and Refuse leaves
+      // the page as it was; the card's frame kind and an Allow once that reaches the control are not.
+      const over = await centreOf(inner.locator("#frame-button"));
+      const byPoint = live.callTool("computer", { tabId, action: "left_click", x: over.x, y: over.y });
+      await waitForPrompt(panel, "consent");
+      expect((await frameLine(panel)).kind, await panel.panelText()).not.toBeNull();
+      expect(await status.textContent(), "the click landed before the owner answered").toBe("not clicked");
+      await clickInPrompt(panel, "consent", ui("agent.refuse"));
+      const pointRefused = await byPoint;
+      expect(pointRefused.isError, pointRefused.text).toBe(true);
+      expect(answerOf(pointRefused), pointRefused.text).toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      await expectStill(status, "not clicked");
+      await expectNoPrompt(panel, "a card stayed up after Refuse");
+
+      await closeTab(extensionWorker, tabId);
+    } finally {
+      await forgetSites(settings, [SITE, SECOND, INNER]);
       await client?.close();
     }
   });
@@ -775,6 +857,25 @@ async function expectStill(
   while (Date.now() < deadline) {
     expect(read === "value" ? await locator.inputValue() : await locator.textContent()).toBe(text);
     await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+/**
+ * The urls of the frames the browser holds as targets of their own (an out-of-process frame has one), read
+ * on the browser-level CDP session, so a fixture's claim of "its own process" is the browser's.
+ */
+async function frameTargets(context: BrowserContext, page: Page): Promise<string[]> {
+  const browser = context.browser();
+  if (!browser) throw new Error("browser-missing");
+  const session = await browser.newBrowserCDPSession();
+  try {
+    const { targetInfos } = (await session.send("Target.getTargets")) as {
+      targetInfos: Array<{ type: string; url: string }>;
+    };
+    const known = new Set(page.frames().map((frame) => frame.url()));
+    return targetInfos.filter((target) => target.type === "iframe" && known.has(target.url)).map((target) => target.url);
+  } finally {
+    await session.detach();
   }
 }
 

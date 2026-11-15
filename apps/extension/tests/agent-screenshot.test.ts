@@ -4,6 +4,7 @@ import { captureTab, SURFACE_CAPTURE_TIMEOUT_MS } from "../src/chrome-adapters/c
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { scriptedDebugger } from "./helpers/scripted-debugger.js";
 import { createInputAttachments, IDLE_DETACH_MS } from "../src/service-worker/agent-tools/input.js";
+import { withMarksHidden } from "../src/service-worker/agent-tools/capture-marks.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads, SCREENSHOT_MAX_BASE64_CHARS } from "../src/service-worker/agent-tools/reads.js";
 import { toViewportPoint, toViewportRegion } from "../src/service-worker/agent-tools/coordinate-space.js";
@@ -23,6 +24,8 @@ import { toViewportPoint, toViewportRegion } from "../src/service-worker/agent-t
  */
 
 const AGENT_TAB = 7;
+/** A tab of its own for the direct `withMarksHidden` test: the holds are module state shared by the whole file. */
+const TAB_FOR_HOLDS = 4242;
 const OWNER_TAB = 1;
 const WINDOW = 900;
 
@@ -1124,5 +1127,41 @@ describe("033/T997 the marks are hidden around an agent screenshot", () => {
     expect(seen.log.filter((entry) => entry === "hide")).toHaveLength(1);
     expect(seen.log.filter((entry) => entry === "show")).toHaveLength(1);
     expect(seen.log.at(-1)).toBe("show");
+  });
+
+  // #68: the hold is released (and deleted) before the show is awaited, so a capture that starts while
+  // the first one's show is still out hides again, rather than finding the old hold and skipping its hide.
+  it("a capture that starts during another's show sends its own hide and waits for it before capturing", async () => {
+    const log: string[] = [];
+    const answers: Array<() => void> = [];
+    const send = (_tabId: number, message: { type: "marks"; hidden: boolean }) => {
+      log.push(message.hidden ? "hide" : "show");
+      // The first hide is answered at once; the first show and the second hide stay pending.
+      if (log.length === 1) return { painted: true };
+      return new Promise<void>((resolve) => void answers.push(resolve));
+    };
+    const capturedA = vi.fn(async () => "a");
+    const capturedB = vi.fn(async () => {
+      log.push("capture-b");
+      return "b";
+    });
+
+    const one = withMarksHidden(TAB_FOR_HOLDS, capturedA, send);
+    await vi.waitFor(() => expect(log, "A's show is out and unanswered").toEqual(["hide", "show"]));
+    expect(capturedA).toHaveBeenCalledTimes(1);
+
+    const two = withMarksHidden(TAB_FOR_HOLDS, capturedB, send);
+    await vi.waitFor(() => expect(log, "B hides again instead of being skipped").toEqual(["hide", "show", "hide"]));
+    expect(capturedB, "B's picture waits for B's own hide to be answered").not.toHaveBeenCalled();
+
+    answers[0]!(); // A's show is answered
+    await expect(one).resolves.toBe("a");
+    expect(capturedB, "A finishing does not release B's hide").not.toHaveBeenCalled();
+
+    answers[1]!(); // B's hide is answered
+    await vi.waitFor(() => expect(log).toEqual(["hide", "show", "hide", "capture-b", "show"]));
+    answers[2]!(); // B's show is answered
+    await expect(two).resolves.toBe("b");
+    expect(log.filter((entry) => entry !== "capture-b")).toEqual(["hide", "show", "hide", "show"]);
   });
 });

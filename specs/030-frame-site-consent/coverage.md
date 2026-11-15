@@ -33,7 +33,7 @@ empty until T906 has been done.
 | Criterion | Tasks | Evidence |
 | --- | --- | --- |
 | SC-202 (type, click, drag, keys in an undecided site's frame raise a card; nothing changes before the answer) | T892, T899, T905 | packaged Story 1 (the field stays empty until Allow once; read from the fixture frame itself); `agent-effects.test.ts` "finds the frame before the gate without scrolling, and asks for the frame's site before any input". Keys and drag: unit only (drag by point; keys see the gap under FR-454) |
-| SC-203 (coordinate clicks over another site's frame decided by that frame, unknown points asked) | T897, T898, T905 | packaged Story 2; `computer.test.ts` (asks; unknown asks); `frame-site.test.ts` hit-test walk |
+| SC-203 (coordinate clicks over another site's frame decided by that frame, unknown points asked) | T897, T898, T905 | packaged Story 2, Story 2 (#56, two nested frames: asks, Refuse does nothing); `computer.test.ts` (asks; unknown asks); `frame-site.test.ts` hit-test walk |
 | SC-204 (a frame whose report disagrees with the browser never acts under the reported site) | T889, T899, T905 | `agent-effects.test.ts` "T899 a frame's own report never decides" (3); `frame-site.test.ts` "gives the sender's site when the body claims the page's site"; `frame-read-wiring.test.ts` "takes the site from the browser, never from what the frame says about itself"; packaged Story 3 (sandboxed frame whose own origin is the page's). **Gap**: the packaged gate has no frame that lies in a message body (R-449's test hook was not built; the browser-attached sender is the only source, which the unit tests pin) |
 | SC-205 (a frame that navigates between answer and gesture: 0 actions reach the new page, the agent is told) | T901, T905 | packaged Story 4 (the frame moves while the card is up; nothing reaches the new page); the T901 unit cases listed under FR-460 |
 | SC-206 (pages without other-site frames show no change; existing gates pass unchanged) | T906 | The unit side: the FR-465 cases above and the existing suites, which run unchanged. The packaged side: `agent-frames`, `agent-input`, `agent-reads`, `agent-press-outcomes` specs. **Not recorded here**: T906 had not run when this was written. `agent-input.spec.ts` was edited by this feature (see Follow-ups), so "unchanged" holds for the three others only |
@@ -45,7 +45,7 @@ empty until T906 has been done.
 | --- | --- | --- |
 | R-440 (sender origin, frame id and document id from the browser) | T886, T889, T891 | `frame-sender-probe.test.ts` (3); `frame-site.test.ts` "gives no site when the sender frame id is missing or not the claimed one", "...document id..."; measurements in research.md "Measured 2026-11-07 (T886)" (the throwaway measuring spec was deleted, as T886 required) |
 | R-441 (opaque is unknown; inline and blank inherit) | T886, T889, T899 | `frame-site.test.ts` "030 decideFrameSite" (srcdoc, about:blank, sandboxed, sender-origin shapes); `agent-effects.test.ts` "asks with frame unknown when the browser gives the frame an opaque origin..."; packaged Story 3. The 2,000 ms "frame does not answer" bound: `frame-merge.test.ts` "names a frame unknown when its lookup fails, outlasts the bound, or the browser forbids scripts there" |
-| R-442 (hit-test finds the frame; nonce names it; sender origin decides) | T886, T897 | `frame-site.test.ts` "030 resolvePointSite hit-test walk"; packaged Story 2 (a real out-of-process frame, one level) |
+| R-442 (hit-test finds the frame; nonce names it; sender origin decides) | T886, T897 | `frame-site.test.ts` "030 resolvePointSite hit-test walk"; packaged Story 2 (a real out-of-process frame, one level); packaged Story 2 (#56), two levels, the refused halves only (see Follow-ups) |
 | R-443 (scroll-free claim before the gate; the second claim after the gate cancels on a different frame) | T892 | `agent-effects.test.ts` "finds the frame before the gate without scrolling...", "cancels with the frame-moved answer when the delivery claim lands in another frame, and sends nothing", "cancels a ref no frame claimed before the gate that the delivery then finds inside a frame" |
 | R-444 (`GateInput.site` is the deciding site or `null`) | T888 | `site-mode-gate.test.ts` "030 unknown deciding site" (5) |
 | R-445 (optional `frame` on the prompt; Allow always stores the frame's site; unknown refuses `rememberMode`) | T887, T893, T896, T899 | contracts "030" (6); `prompt-card.test.tsx` "030 frame card"; `agent-effects.test.ts` T893 cases and "refuses an answer to an unknown-site card that asks to remember a mode..." |
@@ -76,7 +76,7 @@ empty until T906 has been done.
 | T902 | `frame-merge.test.ts` "030 frame sites in the merge"; `frame-read-wiring.test.ts` "030 read labels" |
 | T903 | `tests/contract/agent-tools-030.contract.test.ts` |
 | T904 | `site-mode-gate.test.ts` "030 a plan covers only its own site"; `agent-batch.test.ts` |
-| T905 | `tests/e2e/packaged/agent-frame-consent.spec.ts` (Stories 1, 1.3, 2, 3, 4, 5, 6) |
+| T905 | `tests/e2e/packaged/agent-frame-consent.spec.ts` (Stories 1, 1.3, 2, 3, 4, 5, 6; Story 2 (#56) added for two nested frames) |
 | T906 | owed: the four SC-206 gates unchanged, then typecheck, `npm test`, build, `test:contract`, `snapshot:check` |
 | T907 | this file; then the two reviews |
 | T908 | `agent-effects.test.ts` "T908 keys sent to focus are decided by the frame that holds it"; `frame-site.test.ts` (focus walk); `frame-focus.test.tsx` (depth cap, embed/object, path past the cap); packaged Story 7 |
@@ -136,15 +136,26 @@ Not part of this feature. Each is a candidate for its own issue.
   user clicked into one may be read as the page's. The read also falls back to `element.shadowRoot`
   when `chrome.dom` is missing, which only happens in tests; closed roots are missed if it ever ran
   in the extension. Both should answer unknown.
-- **Card wording.** The card's first line names the page's site as the action's site, and "Always allow
-  on this site" does not name which site. A drag between two known sites is shown as "could not be
-  established" rather than "two sites".
+- **Card wording.** A drag between two known sites is shown as "could not be established" rather than
+  "two sites". (The first line and the remember button naming the frame's site were done in #51.)
 - **`askUploadDirectory` cards do not carry `frame`.** The card that asks for an upload directory can show
   the frame line (`prompt-card.test.tsx` "shows the frame line on the directory card too"), but the
   worker never sets `frame` on it, so it names the page and not the frame holding the target. The
   `file_upload` and `upload_image` effect cards do carry it.
-- **Nested out-of-process frames.** The walk into a frame inside a frame, both in their own process, is
-  checked only by unit fakes. The packaged gate covers one level.
+- **Nested out-of-process frames (#56, partly done).** Packaged "Story 2 (#56)" now stands on
+  `frame-deep` (top `127.0.0.1:19443`, middle `localhost:19443`, innermost `127.0.0.1:19445`; the fixture
+  hosts give only two sites, so the innermost is the page's site on the sibling port; the browser holds
+  the middle and the innermost frame as targets of their own). It pins that a click by ref raises a card
+  naming the innermost site (not the middle's) and that Refuse does nothing, and that a click by point
+  raises a card (never decided by the page's skip-checks) and Refuse does nothing. **Not covered, and
+  observed not to work (2026-11-15):** Allow once by ref ends `target-not-located` after the gate, and a
+  point over the innermost control is asked as an unknown site (no Allow always), so neither reaches the
+  page and the innermost site's own skip-checks cannot be exercised there. The likely cause, read from
+  the code and not yet measured: `Target.setAutoAttach` is sent only on the tab's session
+  (`agent-tools/input.ts`), so the innermost frame has no session of its own for the point walk
+  (`frame-site.ts`, `resolvePointSite`) or the DOM owner lookup (`frames.ts`, `createFrameOffsets`). The
+  fail-safe direction holds (a card, never a silent action). Open: its own issue and fix; the story then
+  extends to Allow once and skip-checks.
 - **Points outside the viewport.** A point target outside the viewport asks as an unknown site before the
   page refuses it, so the owner is asked about an action that was never going to run.
 - **SC-206 and the agent-input gate.** The `agent-input` packaged gate's two clicks into another site's

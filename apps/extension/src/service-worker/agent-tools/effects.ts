@@ -12,9 +12,10 @@ import {
   type RuntimeAction,
   type SiteMode,
 } from "@hallpass/contracts";
+import { createAllFramesCallMemo, type AllFramesCallMemo } from "../../chrome-adapters/all-frames.js";
 import type { captureTab, CaptureDeps, CaptureFrame, CaptureRegion } from "../../chrome-adapters/capture.js";
 import type { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
-import type { readMainWorldMarks } from "../../chrome-adapters/main-world-marks.js";
+import { readMainWorldMarks } from "../../chrome-adapters/main-world-marks.js";
 import {
   clearFrameNonce,
   enumerateFrameOffsets,
@@ -49,7 +50,7 @@ import {
   type PointerButton,
 } from "./input.js";
 import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
-import type { readFrameFocus } from "./frame-focus.js";
+import { readFrameFocus } from "./frame-focus.js";
 import {
   createFocusSiteOf,
   createFrameSiteOf,
@@ -301,6 +302,12 @@ export type AgentEffectDeps = {
    * that decides them. The all-frames read by default.
    */
   readFrameFocus?: typeof readFrameFocus;
+  /**
+   * This runner's calls' memory of a timed-out all-frames lookup (#70), consulted only by the
+   * lookups the runner makes for a call - every other caller on the tab is untouched. A fresh one by
+   * default; injected so a test's own locator can look up under the same memory.
+   */
+  allFramesMemo?: AllFramesCallMemo;
   /** How long a navigation started by an effect is given to unload the old document. */
   settleMs?: number;
   reportDiagnostic?: (code: string) => void;
@@ -348,6 +355,9 @@ export type AgentEffectRunner = {
 
 /** How a call ends the download observer's window for its own page action (FR-077, #36 follow-up). */
 type PageActionWindow = { close?: (() => void) | undefined };
+
+/** How a call ends its all-frames lookup memory on its tab (#70, `AllFramesCallMemo.open`). */
+type AllFramesCallWindow = { close?: (() => void) | undefined };
 
 /** The holds one call has taken on the tab's attachment (031/T945, R-466); ended when it answers. */
 type CallHolds = AttachmentCallHold[];
@@ -1379,16 +1389,21 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   const execute = deps.execute ?? executeOnActiveTab;
   const probe = deps.probe ?? probeActiveTab;
   const settleMs = deps.settleMs ?? DEFAULT_SETTLE_MS;
+  // #70: every all-frames lookup this runner makes for a call goes through its own memory, so one
+  // stuck lookup is waited for once per call; lookups made by anything else on the tab never do.
+  const callLookups = deps.allFramesMemo ?? createAllFramesCallMemo();
+  const enumerateCallFrames = callLookups.guard((tabId: number) => enumerateTabFrames(tabId));
   const injected = deps.locate;
   const locators: TargetLocatorSource = injected
     ? { forDelivery: () => injected }
     : createTargetLocator({
+        enumerateFrames: enumerateCallFrames,
         // 004/T128, B67: a same-origin chain measures its own offset in-page, in one round trip;
         // only a frame that walk could not reach the top from falls back to the debugger's chain,
         // which rides the same attachment the input does - one debugger on the tab, measured only
         // for a tab an effect is already being delivered to.
         offsets: createHybridFrameOffsets({
-          measureInPage: enumerateFrameOffsets,
+          measureInPage: callLookups.guard(enumerateFrameOffsets),
           cdp: createFrameOffsets({
             send: (tabId, method, params) => deps.attachments.send(tabId, method, params),
           }),
@@ -1426,19 +1441,20 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   const watchTabCreated = deps.watchTabCreated ?? watchChromeTabCreated;
   const readTabUrl = deps.tabUrl ?? chromeTabUrl;
   const readAddress = deps.tabAddress ?? readTabAddress;
-  const claimRefFrame = deps.claimRefFrame ?? ((context, binding, ref) => discoverRefFrame(context, binding, ref));
+  const claimRefFrame =
+    deps.claimRefFrame ?? ((context, binding, ref) => discoverRefFrame(context, binding, ref, enumerateCallFrames));
   const probed = deps.probeFrameSender ? { probeFrameSender: deps.probeFrameSender } : {};
   /** A claimed child frame's site, from the browser's sender for one message it sends (030 R-440). */
   const frameSiteOf = createFrameSiteOf(deps.probeFrameSender);
   /** The site under a point (030 FR-455), over the input attachment the gesture will leave by. */
   const pointSiteOf = createPointSiteOf({
     attachments: deps.attachments,
-    ...(deps.readFrameMarks ? { readFrameMarks: deps.readFrameMarks } : {}),
+    readFrameMarks: callLookups.guard(deps.readFrameMarks ?? readMainWorldMarks),
     ...probed,
   });
   /** The site of the frame holding focus (030 T908), where keys sent with no target land. */
   const focusSiteOf = createFocusSiteOf({
-    ...(deps.readFrameFocus ? { readFrameFocus: deps.readFrameFocus } : {}),
+    readFrameFocus: callLookups.guard(deps.readFrameFocus ?? readFrameFocus),
     ...probed,
   });
 
@@ -2658,9 +2674,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   async function runCall(request: AgentToolRequest): Promise<AgentNativeResponse> {
     const pageAction: PageActionWindow = {};
     const holds: CallHolds = [];
+    const frameLookups: AllFramesCallWindow = {};
     try {
-      return await runEffect(request, pageAction, holds);
+      return await runEffect(request, pageAction, holds, frameLookups);
     } finally {
+      // #70: however the call answered, its memory of a timed-out all-frames lookup ends with it.
+      frameLookups.close?.();
       pageAction.close?.();
       // 031/T945, R-466: however the call answered, its holds on the attachment end with it.
       for (const held of holds) held.done();
@@ -2684,6 +2703,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     request: AgentToolRequest,
     pageAction: PageActionWindow,
     holds: CallHolds,
+    frameLookups: AllFramesCallWindow,
   ): Promise<AgentNativeResponse> {
     const { callId, tool } = request;
     // Where this call's input budget is measured from (015 review F4): as near the host's own start
@@ -2697,6 +2717,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     const args = parsed.data as Record<string, unknown>;
     const tabId = typeof args.tabId === "number" ? args.tabId : request.tabId;
     if (tabId === undefined) return answer(callId, "failed", "no-tab");
+    // #70: from here to the answer - the pre-gate claim, the frame re-check before dispatch and the
+    // locate - one stuck all-frames lookup on this tab is waited for once, not once per lookup.
+    frameLookups.close = callLookups.open(tabId);
     const ownership = await deps.tabOwnership(request.sessionId, tabId);
     if (ownership.state !== "this") {
       // FR-034: a tab this session does not hold is not this agent's to touch, whatever the site

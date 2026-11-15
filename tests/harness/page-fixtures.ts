@@ -153,6 +153,10 @@ const PAGE_FILES = [
    * `sandbox="allow-scripts"`; `frame-srcdoc` and `frame-blank` have no address; `frame-navigating`
    * moves its frame to `frame-navigated` on the sibling-port origin (`__CROSS_ORIGIN__`) when it
    * receives `postMessage("go")`. Every frame has a fixed size and is on screen without scrolling.
+   * Issue #56: `frame-deep` frames `frame-deep-mid` from the second site (`__OOPIF_ORIGIN__`), which
+   * frames `frame-consent-child` from the sibling-port origin (`__CROSS_ORIGIN__`) - two levels of
+   * frame, each from an origin other than its parent's. The fixture hosts offer only two sites
+   * (`127.0.0.1` and `localhost`), so the innermost origin is the top page's site on another port.
    */
   "frame-consent",
   "frame-consent-child",
@@ -162,6 +166,8 @@ const PAGE_FILES = [
   "frame-blank",
   "frame-nested",
   "frame-nested-mid",
+  "frame-deep",
+  "frame-deep-mid",
   "frame-navigating",
   "frame-navigated",
   /**
