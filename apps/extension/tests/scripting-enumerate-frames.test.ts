@@ -43,3 +43,37 @@ describe("004/T153 enumerateTabFrames - a parent that could not be scripted", ()
     expect(leaf?.parentFrameId).not.toBe(-1);
   });
 });
+
+/**
+ * Issue #54: siblings are listed in their parent's own frame order, which is what the frame offsets
+ * pair against the debugger's tree. Ordered as text, a frame at index 10 came before the one at 2.
+ */
+describe("#54 enumerateTabFrames - sibling order", () => {
+  it("lists eleven siblings in their index order, not their text order", async () => {
+    const indexes = [10, 2, 0, 9, 1, 3, 4, 5, 6, 7, 8];
+    stubChrome([
+      { frameId: 0, result: { url: "https://fixtures.test/top", path: [] } },
+      ...indexes.map((index) => ({ frameId: 100 + index, result: { url: "about:srcdoc", path: [index] } })),
+    ]);
+
+    const frames = await enumerateTabFrames(9);
+
+    expect(frames.filter((frame) => frame.parentFrameId === 0).map((frame) => frame.frameId)).toEqual([
+      100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110,
+    ]);
+  });
+
+  it("flags a frame that cannot find itself among its parent's frames (an iframe in a shadow root)", async () => {
+    stubChrome([
+      { frameId: 0, result: { url: "https://fixtures.test/top", path: [] } },
+      { frameId: 5, result: { url: "about:srcdoc", path: [0] } },
+      { frameId: 6, result: { url: "about:srcdoc", path: [-1] } },
+    ]);
+
+    const frames = await enumerateTabFrames(9);
+
+    expect(frames.find((frame) => frame.frameId === 6)).toMatchObject({ unindexed: true });
+    expect(frames.find((frame) => frame.frameId === 5)).not.toHaveProperty("unindexed");
+    expect(frames.find((frame) => frame.frameId === 0)).not.toHaveProperty("unindexed");
+  });
+});

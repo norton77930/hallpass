@@ -52,7 +52,9 @@ import { SiteMovedBeforeDispatch } from "./site-recheck.js";
  * above). The session itself carries input dispatch only - `Input.dispatchMouseEvent`,
  * `Input.dispatchKeyEvent` and `Input.insertText` at the frame's own coordinates - and
  * `Target.setAutoAttach` is the one command that discovers such a session exists at all, sent once
- * per attachment, never per effect.
+ * on the tab's session per attachment and once on each frame session the moment it is announced -
+ * auto-attach is per session, so a frame inside an out-of-process frame is announced only to a
+ * session that asked (#75) - and never per effect.
  *
  * **A third stated exception, on the same three counts** (008/T224, D-008-5, R-138): `Page` is
  * enabled on every attachment, because a native dialog is *only* announced - there is no state to
@@ -218,6 +220,12 @@ export type AgentInputAttachmentsDeps = {
 const DIAGNOSTICS_DOMAINS = ["Runtime", "Log", "Network"] as const;
 
 /**
+ * Flat auto-attach (004/T129), the same on the tab's session and on every frame session (#75): no
+ * pause on start, and every child a session of its own addressed by `{tabId, sessionId}`.
+ */
+const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } as const;
+
+/**
  * Which of the two causes Chrome's refusal was.
  *
  * The distinction matters because the two need different things from the owner: close the
@@ -288,8 +296,12 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
    * docs mark deprecated on `Target.detachedFromTarget` and which a real detach can omit). Fed by
    * that event and by its opposite, `Target.detachedFromTarget`; gone entirely when the tab's
    * attachment is.
+   *
+   * #75: each entry remembers the session it was announced on (`parent`, absent for the tab's own),
+   * because auto-attach is per session: a frame inside an out-of-process frame is announced on that
+   * frame's session, and goes when it does.
    */
-  const oopif = new Map<number, Map<string, OopifSession>>();
+  const oopif = new Map<number, Map<string, { session: OopifSession; parent: string | undefined }>>();
   let adapter: DebuggerAdapter | undefined;
   let wired = false;
   /**
@@ -400,10 +412,11 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
         disarm(tabId);
       });
       // The auto-attach table's only source (004/T129): a cross-site child frame announces itself
-      // as its own target on the *tab's* session, never on a session of its own asking to be
-      // found. Both events are read for their addressing fields alone - a `targetId` and a
-      // `sessionId` - and nothing here subscribes to what either target says about the page.
-      adapter.onEvent((tabId, method, params) => {
+      // as its own target on its *parent's* session - the tab's for a frame in the page, the frame's
+      // own for a frame inside it (#75) - never on a session of its own asking to be found. Both
+      // events are read for their addressing fields alone - a `targetId` and a `sessionId` - and
+      // nothing here subscribes to what either target says about the page.
+      adapter.onEvent((tabId, method, params, onSession) => {
         if (method === "Target.attachedToTarget") {
           const info = params as {
             sessionId?: unknown;
@@ -432,11 +445,19 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
           // attach-table plumbing this brief's window does not cover.
           const url = typeof info.targetInfo?.url === "string" ? info.targetInfo.url : "";
           let forTab = oopif.get(tabId);
+          // #75: announced on a child session this table no longer holds - its frame has already
+          // detached - is a frame nothing here can still reach; it is not recorded under nobody.
+          if (onSession !== undefined && !forTab?.has(onSession)) return;
           if (!forTab) {
             forTab = new Map();
             oopif.set(tabId, forTab);
           }
-          forTab.set(sessionId, { targetId, sessionId, url });
+          const announced = forTab.has(sessionId);
+          forTab.set(sessionId, { session: { targetId, sessionId, url }, parent: onSession });
+          // #75: auto-attach is per session, not recursive (measured: the tab's own announces the
+          // middle frame only), so each new frame session is asked too - once, when it first
+          // appears, and only over an attachment that is still there.
+          if (!announced && tabs.has(tabId)) void autoAttach(tabId, sessionId);
           return;
         }
         if (method === "Target.detachedFromTarget") {
@@ -444,11 +465,38 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
           // omit it; `sessionId` is what `Target.attachedToTarget` keyed this entry by above, and
           // it is the field CDP always sends here.
           const sessionId = (params as { sessionId?: unknown }).sessionId;
-          if (typeof sessionId === "string") oopif.get(tabId)?.delete(sessionId);
+          const forTab = oopif.get(tabId);
+          if (typeof sessionId !== "string" || forTab === undefined) return;
+          // #75: the frames announced on that session lived inside it, and go with it - at every
+          // depth - whether or not Chrome also says so for each of them.
+          const gone = new Set([sessionId]);
+          forTab.delete(sessionId);
+          let dropped = true;
+          while (dropped) {
+            dropped = false;
+            for (const [child, entry] of forTab) {
+              if (entry.parent === undefined || !gone.has(entry.parent)) continue;
+              gone.add(child);
+              forTab.delete(child);
+              dropped = true;
+            }
+          }
         }
       });
     }
     return adapter;
+  }
+
+  /**
+   * One frame session asked to announce its own out-of-process children (#75). Its failure is
+   * reported and ignored, as the tab's is: the frame itself still takes input over its session.
+   */
+  async function autoAttach(tabId: number, sessionId: string): Promise<void> {
+    try {
+      await debug().send(tabId, "Target.setAutoAttach", { ...AUTO_ATTACH }, sessionId);
+    } catch {
+      deps.reportDiagnostic?.("agent.diagnostics.child-autoattach-failed");
+    }
   }
 
   async function domains(tabId: number, verb: "enable" | "disable"): Promise<void> {
@@ -512,16 +560,16 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
       }
       unavailable.delete(tabId);
       tabs.set(tabId, { holders: new Set([holder]), diagnosticsEnabled: holder === "diagnostics" });
-      // One per attachment (004/T129): flat auto-attach is what turns a cross-site child frame into
-      // its own addressable session at all, and it is asked for here rather than on the first
-      // effect that happens to need it - by the time a delivery is asking "does this frame have a
-      // session", Chrome must already have told this worker so.
+      // One per attachment on the tab's session (004/T129), and one per frame session as each is
+      // announced (#75, the `Target.attachedToTarget` handler): flat auto-attach is what turns a
+      // cross-site child frame into its own addressable session at all, and it is asked for here
+      // rather than on the first effect that happens to need it - by the time a delivery is asking
+      // "does this frame have a session", Chrome must already have told this worker so. That holds
+      // for the tab's direct children; a nested frame's announcement follows its parent's own
+      // `setAutoAttach`, which is not awaited here, so the first call after an attach can still find
+      // no session for it. That answer is the fail-closed one: unknown by point, not located by ref.
       try {
-        await debug().send(tabId, "Target.setAutoAttach", {
-          autoAttach: true,
-          waitForDebuggerOnStart: false,
-          flatten: true,
-        });
+        await debug().send(tabId, "Target.setAutoAttach", { ...AUTO_ATTACH });
       } catch {
         deps.reportDiagnostic?.("agent.diagnostics.autoattach-failed");
       }
@@ -636,7 +684,7 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
       return [...tabs.keys()];
     },
     oopifSessions(tabId) {
-      return [...(oopif.get(tabId)?.values() ?? [])];
+      return [...(oopif.get(tabId)?.values() ?? [])].map((entry) => entry.session);
     },
     state(tabId) {
       const state = tabs.get(tabId);

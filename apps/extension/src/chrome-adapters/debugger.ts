@@ -14,10 +14,15 @@
 /** The DevTools protocol version this extension speaks. Pinned: a floating one is a silent upgrade. */
 export const DEBUGGER_PROTOCOL_VERSION = "1.3";
 
+/**
+ * `sessionId` is the flattened child session the event came on (#75) - absent for the tab's own.
+ * Auto-attach is per session, so which session announced a frame is what says whose child it is.
+ */
 export type DebuggerEventListener = (
   tabId: number,
   method: string,
   params: Record<string, unknown>,
+  sessionId?: string,
 ) => void;
 
 export type DebuggerAdapter = {
@@ -61,7 +66,9 @@ type ChromeDebugger = {
     params?: Record<string, unknown>,
   ): Promise<Record<string, unknown> | undefined>;
   onEvent: {
-    addListener(callback: (source: { tabId?: number }, method: string, params?: unknown) => void): void;
+    addListener(
+      callback: (source: { tabId?: number; sessionId?: string }, method: string, params?: unknown) => void,
+    ): void;
   };
   onDetach: { addListener(callback: (source: { tabId?: number }, reason?: string) => void): void };
   getTargets(): Promise<Array<{ tabId?: number; type?: string; attached?: boolean }>>;
@@ -96,7 +103,7 @@ export function createChromeDebuggerAdapter(): DebuggerAdapter {
     onEvent(listener) {
       api().onEvent.addListener((source, method, params) => {
         if (source.tabId === undefined) return;
-        listener(source.tabId, method, (params ?? {}) as Record<string, unknown>);
+        listener(source.tabId, method, (params ?? {}) as Record<string, unknown>, source.sessionId);
       });
     },
     onDetach(listener) {

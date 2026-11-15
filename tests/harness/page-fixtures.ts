@@ -157,6 +157,11 @@ const PAGE_FILES = [
    * frames `frame-consent-child` from the sibling-port origin (`__CROSS_ORIGIN__`) - two levels of
    * frame, each from an origin other than its parent's. The fixture hosts offer only two sites
    * (`127.0.0.1` and `localhost`), so the innermost origin is the top page's site on another port.
+   * Issue #54: `frame-shadow-sibling` holds `frame-consent-child` from the sibling-port origin
+   * (`__CROSS_ORIGIN__`, cross-origin but same-process), then a `data:` frame whose whole area is a
+   * decoy button inside a declarative shadow root. A frame in a shadow root is not in `window.frames`,
+   * so the frame lookup lists it first among its siblings while the debugger's frame tree lists it
+   * after the target (measured 2026-11-15).
    */
   "frame-consent",
   "frame-consent-child",
@@ -168,6 +173,7 @@ const PAGE_FILES = [
   "frame-nested-mid",
   "frame-deep",
   "frame-deep-mid",
+  "frame-shadow-sibling",
   "frame-navigating",
   "frame-navigated",
   /**

@@ -286,10 +286,9 @@ test.describe("agent frame consent", () => {
     }
   });
 
-  // #56: a frame inside an out-of-process frame, each from another origin than its parent and in a target of
-  // its own. Only the half that works today is pinned (see the comment before the point click, and
-  // specs/030-frame-site-consent/coverage.md, "Nested out-of-process frames").
-  test("Story 2 (#56): a frame inside an out-of-process frame: the card names the innermost site; Refuse does nothing", async ({
+  // #56, #75: a frame inside an out-of-process frame, each from another origin than its parent and in a target
+  // of its own. Its own site decides every action on it - by ref and by point - as for a frame one level down.
+  test("Story 2 (#56, #75): a frame inside an out-of-process frame is decided by the innermost site, by ref and by point", async ({
     extensionContext,
     extensionId,
     extensionWorker,
@@ -318,16 +317,30 @@ test.describe("agent frame consent", () => {
       // eslint-disable-next-line no-console -- the measurement the coverage file cites.
       console.log(`[#56] out-of-process frame targets:\n${targets.join("\n")}`);
 
-      // ===== a click by ref: the card names the innermost frame's site, not the middle's; Refuse does nothing =====
+      /** The fixture's own status line back to "not clicked", so the next step's click is its own. */
+      const resetStatus = async (): Promise<void> => {
+        const frame = page.frames().find((candidate) => candidate.url().startsWith(`${INNER}/frame-consent-child`));
+        expect(frame, page.frames().map((candidate) => candidate.url()).join("\n")).toBeTruthy();
+        await frame!.evaluate(() => {
+          (document.getElementById("frame-status") as HTMLElement).textContent = "not clicked";
+        });
+        await expect(status).toHaveText("not clicked");
+      };
+      /** The card is about the innermost frame: its site and the page's, never the middle frame's. */
+      const expectInnermostCard = async (why: string): Promise<void> => {
+        await waitForPrompt(panel, "consent");
+        const line = await frameLine(panel);
+        expect(line.kind, `${why}\n${await panel.panelText()}`).toBe("site");
+        expect(line.text, why).toContain(INNER);
+        expect(line.text, why).toContain(SITE);
+        expect(line.text, `${why}: the card names the middle frame's site`).not.toContain(SECOND);
+        expect(await status.textContent(), `${why}: the click landed before the owner answered`).toBe("not clicked");
+      };
+
+      // ===== by ref: the card names the innermost site; Refuse does nothing =====
       const button = await refFor(call, tabId, (node) => node.role === "button" && node.name === "Frame action");
       const byRef = live.callTool("click", { tabId, target: { ref: button } });
-      await waitForPrompt(panel, "consent");
-      const line = await frameLine(panel);
-      expect(line.kind, await panel.panelText()).toBe("site");
-      expect(line.text).toContain(INNER);
-      expect(line.text).toContain(SITE);
-      expect(line.text, "the card names the middle frame's site").not.toContain(SECOND);
-      expect(await status.textContent(), "the click landed before the owner answered").toBe("not clicked");
+      await expectInnermostCard("click by ref");
       await clickInPrompt(panel, "consent", ui("agent.refuse"));
       const refused = await byRef;
       expect(refused.isError, refused.text).toBe(true);
@@ -337,22 +350,47 @@ test.describe("agent frame consent", () => {
       await expectStill(status, "not clicked");
       await expectNoPrompt(panel, "a card stayed up after Refuse");
 
-      // ===== a click by point over the innermost control: the page's skip-checks does not decide it =====
-      // Measured 2026-11-15 (#56): with two levels of out-of-process frame the point walk answers unknown
-      // (the card is raised, without Allow always), and Allow once on a ref is answered target-not-located
-      // after the gate; neither runs a click. So what is pinned is that a card is raised and Refuse leaves
-      // the page as it was; the card's frame kind and an Allow once that reaches the control are not.
+      // ===== by ref: Allow once clicks the innermost control (#75: was target-not-located after the gate) =====
+      const allowRef = live.callTool("click", { tabId, target: { ref: button } });
+      await expectInnermostCard("click by ref, Allow once");
+      await clickInPrompt(panel, "consent", ui("agent.allowOnce"));
+      const allowed = await allowRef;
+      expect(allowed.isError, `click: ${allowed.text}\nstderr:\n${live.stderr()}`).toBe(false);
+      await expect(status).toHaveText("clicked");
+      await expectNoPrompt(panel, "a card stayed up after Allow once");
+      await resetStatus();
+
+      // ===== by point over the innermost control: the innermost site is asked about (#75: was unknown) =====
       const over = await centreOf(inner.locator("#frame-button"));
       const byPoint = live.callTool("computer", { tabId, action: "left_click", x: over.x, y: over.y });
-      await waitForPrompt(panel, "consent");
-      expect((await frameLine(panel)).kind, await panel.panelText()).not.toBeNull();
-      expect(await status.textContent(), "the click landed before the owner answered").toBe("not clicked");
+      await expectInnermostCard(`click by point ${JSON.stringify(over)}`);
       await clickInPrompt(panel, "consent", ui("agent.refuse"));
       const pointRefused = await byPoint;
       expect(pointRefused.isError, pointRefused.text).toBe(true);
       expect(answerOf(pointRefused), pointRefused.text).toMatchObject({ outcome: "denied", reason: "owner-denied" });
       await expectStill(status, "not clicked");
       await expectNoPrompt(panel, "a card stayed up after Refuse");
+
+      // ===== by point, Allow always: stores the innermost site only, and the click lands =====
+      const always = live.callTool("computer", { tabId, action: "left_click", x: over.x, y: over.y });
+      await expectInnermostCard(`click by point ${JSON.stringify(over)}, Allow always`);
+      await clickInPrompt(panel, "consent", ui("agent.allowAlwaysOn").replace("{site}", INNER));
+      const alwaysClicked = await always;
+      expect(alwaysClicked.isError, `computer: ${alwaysClicked.text}\nstderr:\n${live.stderr()}`).toBe(false);
+      await expect(status).toHaveText("clicked");
+      await expect.poll(() => settings.siteMode(INNER), { timeout: 15_000 }).toBe("skip-checks");
+      expect(await settings.siteMode(SECOND).catch(() => null), "the middle frame's site was stored").not.toBe(
+        "skip-checks",
+      );
+
+      // ===== the innermost site at skip-checks decides there, with the page's site back at ask: no card =====
+      await settings.setSiteMode(SITE, "ask");
+      await resetStatus();
+      await actWithoutCard(panel, live, "computer", { tabId, action: "left_click", x: over.x, y: over.y });
+      await expect(status).toHaveText("clicked");
+      await resetStatus();
+      await actWithoutCard(panel, live, "click", { tabId, target: { ref: button } });
+      await expect(status).toHaveText("clicked");
 
       await closeTab(extensionWorker, tabId);
     } finally {

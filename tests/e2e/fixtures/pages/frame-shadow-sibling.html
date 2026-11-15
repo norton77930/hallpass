@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame shadow sibling fixture</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 480px; height: 180px; border: 1px solid #999; margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Frame shadow sibling</h1>
+<p>A frame from the sibling-port origin, then a decoy frame inside a shadow root.</p>
+<iframe id="target-frame" title="target frame" width="480" height="180" src="__CROSS_ORIGIN__/frame-consent-child"></iframe>
+<div id="decoy-host"><template shadowrootmode="open"><style>iframe { display: block; width: 480px; height: 180px; border: 1px solid #999; }</style><iframe id="decoy-frame" title="decoy frame" width="480" height="180" src="data:text/html,<!doctype html><body style='margin:0'><button type='button' id='decoy-button' data-hit='decoy clicked' onclick='this.textContent=this.dataset.hit' style='position:fixed;inset:0;width:100%;height:100%;font:16px system-ui'>not clicked</button></body>"></iframe></template></div>
+</body>
+</html>

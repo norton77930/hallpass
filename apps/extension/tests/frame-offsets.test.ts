@@ -360,9 +360,204 @@ describe("T124/T125a frame offsets", () => {
   });
 
   /**
-   * 004/T128, B67 - the debugger's chain pairs the enumeration's frame ids with `Page.getFrameTree`'s
-   * tokens **by order** (`pairFrameTokens`), which two structurally parallel branches - two sibling
-   * frames of the same shape, exactly what `frames.html` has - can mis-key: its own comment warns a
+   * Issue #54 - the enumeration and the debugger's frame tree describe the same page, but not always
+   * the same frames: a frame that did not answer the enumeration (unscriptable, or not loaded) is
+   * still in the debugger's tree, an out-of-process frame is in the enumeration but not in the tab's
+   * own tree, and either side may list siblings in another order. Pairing siblings by position alone
+   * then hands a frame its sibling's owner box, and a click lands in the sibling. Every case here
+   * asks for one thing: each frame's offset is its own owner's box, or nothing at all - never
+   * another frame's.
+   */
+  describe("pairing the enumeration with the debugger's tree (#54)", () => {
+    type Node = { id: string; url: string; children?: Node[] };
+    const TOP_NODE = (children: Node[]): Node => ({ id: "TOP", url: TOP_URL, children });
+    const A_URL = "https://fixtures.test:19445/a";
+    const B_URL = "https://fixtures.test:19445/b";
+    const SRCDOC = "about:srcdoc";
+
+    /** The debugger answering for `tree`, where `boxes` is each token's owner box in its parent. */
+    function treeProtocol(tree: Node, boxes: Record<string, { x: number; y: number }>) {
+      const toCdp = (node: Node): Record<string, unknown> => ({
+        frame: { id: node.id, url: node.url },
+        ...(node.children ? { childFrames: node.children.map(toCdp) } : {}),
+      });
+      const nodeIds = new Map(Object.keys(boxes).map((token, index) => [token, 100 + index]));
+      const send = async (_tabId: number, method: string, params: Record<string, unknown> = {}) => {
+        if (method === "Page.getFrameTree") return { frameTree: toCdp(tree) };
+        if (method === "DOM.getFrameOwner") {
+          const backendNodeId = nodeIds.get(String(params.frameId));
+          if (backendNodeId === undefined) throw new Error("unknown frame token");
+          return { backendNodeId };
+        }
+        if (method === "DOM.getBoxModel") {
+          const token = [...nodeIds].find(([, id]) => id === params.backendNodeId)?.[0];
+          const at = token === undefined ? undefined : boxes[token];
+          if (!at) throw new Error("unknown node");
+          return { model: { content: [at.x, at.y, at.x + 300, at.y, at.x + 300, at.y + 200, at.x, at.y + 200] } };
+        }
+        return {};
+      };
+      return { send };
+    }
+
+    async function offsetsOf(
+      frames: BrowserFrame[],
+      tree: Node,
+      boxes: Record<string, { x: number; y: number }>,
+    ): Promise<Record<number, FrameOffset | undefined>> {
+      const delivery = createFrameOffsets(treeProtocol(tree, boxes)).forDelivery(TAB);
+      const answer: Record<number, FrameOffset | undefined> = {};
+      for (const frame of frames) answer[frame.frameId] = await delivery.offsetFor(frames, frame.frameId);
+      return answer;
+    }
+
+    const top: BrowserFrame = { frameId: 0, parentFrameId: -1, url: TOP_URL };
+
+    it("does not hand a frame the box of a sibling before it that did not answer the enumeration", async () => {
+      // The page's first child (an unscriptable or not-yet-loaded frame) is in the debugger's tree
+      // but not in the enumeration; the second is the frame the click is for.
+      const frames: BrowserFrame[] = [top, { frameId: 5, parentFrameId: 0, url: B_URL }];
+      const tree = TOP_NODE([
+        { id: "SKIPPED", url: "data:text/html,decoy" },
+        { id: "TARGET", url: B_URL },
+      ]);
+
+      const offsets = await offsetsOf(frames, tree, { SKIPPED: { x: 8, y: 50 }, TARGET: { x: 8, y: 260 } });
+
+      expect(offsets[5]).toEqual({ x: 8, y: 260 });
+    });
+
+    it("pairs reordered siblings by what both sides report, not by position", async () => {
+      const frames: BrowserFrame[] = [
+        top,
+        // The enumeration's url carries the fragment; the debugger's never does.
+        { frameId: 5, parentFrameId: 0, url: `${A_URL}#section` },
+        { frameId: 6, parentFrameId: 0, url: B_URL },
+      ];
+      const tree = TOP_NODE([
+        { id: "B", url: B_URL },
+        { id: "A", url: A_URL },
+      ]);
+
+      const offsets = await offsetsOf(frames, tree, { A: { x: 10, y: 400 }, B: { x: 10, y: 20 } });
+
+      expect(offsets[5]).toEqual({ x: 10, y: 400 });
+      expect(offsets[6]).toEqual({ x: 10, y: 20 });
+    });
+
+    it("leaves same-url siblings without coordinates when the two sides do not line up, and still pairs a unique one", async () => {
+      // Two srcdoc frames in the debugger's tree, one of them missing from the enumeration: which
+      // one answered cannot be told, so neither box is given to it.
+      const frames: BrowserFrame[] = [
+        top,
+        { frameId: 5, parentFrameId: 0, url: SRCDOC },
+        { frameId: 6, parentFrameId: 0, url: B_URL },
+      ];
+      const tree = TOP_NODE([
+        { id: "S1", url: SRCDOC },
+        { id: "S2", url: SRCDOC },
+        { id: "TARGET", url: B_URL },
+      ]);
+
+      const offsets = await offsetsOf(frames, tree, {
+        S1: { x: 0, y: 0 },
+        S2: { x: 0, y: 200 },
+        TARGET: { x: 0, y: 400 },
+      });
+
+      expect(offsets[5]).toBeUndefined();
+      expect(offsets[6]).toEqual({ x: 0, y: 400 });
+    });
+
+    it("does not give one of two parallel branches the other branch's boxes when a branch is missing", async () => {
+      // `frames.html`'s shape with both children on one url: each child holds a grandchild of the
+      // same url too. The first child did not answer, so the second child and its grandchild are the
+      // only enumerated ones - and the first branch's boxes are exactly the wrong answer.
+      const frames: BrowserFrame[] = [
+        top,
+        { frameId: 4, parentFrameId: 0, url: A_URL },
+        { frameId: 8, parentFrameId: 4, url: B_URL },
+      ];
+      const tree = TOP_NODE([
+        { id: "C1", url: A_URL, children: [{ id: "G1", url: B_URL }] },
+        { id: "C2", url: A_URL, children: [{ id: "G2", url: B_URL }] },
+      ]);
+      const boxes = { C1: { x: 10, y: 20 }, G1: { x: 5, y: 7 }, C2: { x: 10, y: 400 }, G2: { x: 5, y: 9 } };
+
+      const offsets = await offsetsOf(frames, tree, boxes);
+
+      expect(offsets[4]).toBeUndefined();
+      expect(offsets[8]).toBeUndefined();
+    });
+
+    it("does not pair by order when a child is not indexed in its parent (an iframe in a shadow root)", async () => {
+      // The shadow-root iframe is not in `window.frames`, so the enumeration sorts it first, while
+      // the debugger's tree lists it in creation order, after the light-DOM sibling. Same url both
+      // sides: by order each would be handed the other's box, so neither is given one.
+      const frames: BrowserFrame[] = [
+        top,
+        { frameId: 6, parentFrameId: 0, url: A_URL, unindexed: true },
+        { frameId: 5, parentFrameId: 0, url: A_URL },
+      ];
+      const tree = TOP_NODE([
+        { id: "LIGHT", url: A_URL },
+        { id: "SHADOW", url: A_URL },
+      ]);
+
+      const offsets = await offsetsOf(frames, tree, { LIGHT: { x: 10, y: 20 }, SHADOW: { x: 10, y: 400 } });
+
+      expect(offsets[5]).toBeUndefined();
+      expect(offsets[6]).toBeUndefined();
+    });
+
+    it("still gives an unindexed child its own box when its url is unique on both sides", async () => {
+      const frames: BrowserFrame[] = [
+        top,
+        { frameId: 6, parentFrameId: 0, url: B_URL, unindexed: true },
+        { frameId: 5, parentFrameId: 0, url: A_URL },
+      ];
+      const tree = TOP_NODE([
+        { id: "LIGHT", url: A_URL },
+        { id: "SHADOW", url: B_URL },
+      ]);
+
+      const offsets = await offsetsOf(frames, tree, { LIGHT: { x: 10, y: 20 }, SHADOW: { x: 10, y: 400 } });
+
+      expect(offsets[5]).toEqual({ x: 10, y: 20 });
+      expect(offsets[6]).toEqual({ x: 10, y: 400 });
+    });
+
+    it("keeps every offset of a well-formed tree, parallel same-url branches included", async () => {
+      const frames: BrowserFrame[] = [
+        top,
+        { frameId: 3, parentFrameId: 0, url: A_URL },
+        { frameId: 4, parentFrameId: 0, url: A_URL },
+        { frameId: 7, parentFrameId: 3, url: B_URL },
+        { frameId: 8, parentFrameId: 4, url: B_URL },
+      ];
+      const tree = TOP_NODE([
+        { id: "C1", url: A_URL, children: [{ id: "G1", url: B_URL }] },
+        { id: "C2", url: A_URL, children: [{ id: "G2", url: B_URL }] },
+      ]);
+      const boxes = { C1: { x: 10, y: 20 }, G1: { x: 5, y: 7 }, C2: { x: 10, y: 400 }, G2: { x: 5, y: 9 } };
+
+      const offsets = await offsetsOf(frames, tree, boxes);
+
+      expect(offsets).toEqual({
+        0: { x: 0, y: 0 },
+        3: { x: 10, y: 20 },
+        4: { x: 10, y: 400 },
+        7: { x: 15, y: 27 },
+        8: { x: 15, y: 409 },
+      });
+    });
+  });
+
+  /**
+   * 004/T128, B67 - the debugger's chain once paired the enumeration's frame ids with
+   * `Page.getFrameTree`'s tokens **by order** alone (`pairFrameTokens`; today `pairChildren` pairs by
+   * order only where both sides line up, #54), which two structurally parallel branches - two sibling
+   * frames of the same shape, exactly what `frames.html` has - could mis-key: its own comment warns a
    * mis-key "would offset an element by another frame's box". Measured live against `frames.html`
    * (B67), a same-origin grandchild's composed offset was off by (80, 350) from the offset an
    * in-page `frameElement` walk computes independently - the same shape of error this section

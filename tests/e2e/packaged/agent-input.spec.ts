@@ -381,6 +381,117 @@ test.describe("agent input", () => {
       await client?.close();
     }
   });
+
+  /**
+   * Issue #54 - a click by ref inside a cross-origin, same-process frame whose sibling the frame
+   * lookup and the debugger's frame tree list in another order. `frame-shadow-sibling.html` puts a
+   * frame from the sibling-port origin first, then a `data:` decoy frame inside a shadow root: the
+   * decoy is not in `window.frames`, so the lookup lists it first while the debugger's tree lists it
+   * second (measured 2026-11-15). The in-page walk cannot cross the origin boundary, so the offset
+   * comes from pairing the two lists - and paired by position, the target got the decoy's owner
+   * box. The decoy is one button over its whole frame, so a click that lands there says so in the
+   * decoy's own text. (A frame that does not answer the lookup at all could not be built here: a
+   * `data:` frame answers, a failed load is a target of its own, and a lazy frame refuses the whole
+   * lookup.)
+   */
+  test("a ref click in a cross-origin frame lands on its control when a shadow-root sibling is listed in another order (#54)", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(120_000);
+
+    const ownerPage = extensionContext.pages()[0] ?? (await extensionContext.newPage());
+    await ownerPage.goto(`${SITE}/waiting`);
+    await ownerPage.bringToFront();
+    const ownerTabId = await extensionWorker.evaluate(async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id === undefined) throw new Error("active-tab-missing");
+      return tab.id;
+    });
+
+    const panel = await openSidePanel({
+      context: extensionContext,
+      extensionId,
+      fixturePage: ownerPage,
+      tabId: ownerTabId,
+      copy,
+    });
+    await waitForAgentPanel(panel);
+    const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#sites" });
+
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const call = callerFor(() => client);
+      await panel.clickIfPresent(ui("agent.retry"));
+      await pairWithFirstCall(client, panel, { locale });
+
+      const created = (await call("tabs_create", { url: `${SITE}/frame-shadow-sibling` })) as { tabId: number };
+      const tabId = created.tabId;
+      const page = await agentPage(extensionContext, `${SITE}/frame-shadow-sibling`);
+      await settings.setSiteMode(SITE, "skip-checks");
+
+      // `tabs_create` can answer before the page's iframes commit, so both are waited for.
+      await expect
+        .poll(() => page.frames().some((frame) => frame.url().startsWith("data:")), {
+          message: "the data: decoy frame never loaded",
+        })
+        .toBe(true);
+      await expect
+        .poll(() => page.frames().some((frame) => frame.url().startsWith(CROSS_SITE)), {
+          message: "the sibling-port frame never loaded",
+        })
+        .toBe(true);
+      const decoyFrame = page.frames().find((frame) => frame.url().startsWith("data:"));
+      const targetFrame = page.frames().find((frame) => frame.url().startsWith(CROSS_SITE));
+      await expect(decoyFrame!.locator("#decoy-button")).toHaveText("not clicked");
+
+      // The story's other precondition, the inverse of the out-of-process story's proof: the decoy is
+      // in the tab's own frame tree (the debugger's `Page.getFrameTree` lists it), not a target of its
+      // own - an out-of-process frame shows up in the target list, a same-process one never does.
+      expect(
+        await extensionWorker.evaluate(async () => {
+          const targets = (await chrome.debugger.getTargets()) as Array<{ url?: string }>;
+          return targets.some((target) => target.url?.startsWith("data:"));
+        }),
+        "the data: decoy is its own debugger target, not a frame of the tab's own tree",
+      ).toBe(false);
+
+      const structure = (await call("read_page", { tabId, filter: "interactive" })) as {
+        frames?: Array<{ frame: string; url: string }>;
+        nodes: Array<{ ref?: string; name?: string; frame?: string }>;
+      };
+      // The story's precondition: the decoy is in a shadow root, so `window.frames` holds the target only.
+      expect(await page.evaluate(() => window.length), "the shadow-root decoy is indexed by window.frames").toBe(1);
+      expect(
+        await page.evaluate(() => document.querySelector("#decoy-host")?.shadowRoot?.querySelector("iframe") !== null),
+        "the decoy frame is not inside the shadow root",
+      ).toBe(true);
+      const targetLabel = structure.frames?.find((frame) => frame.url.startsWith(CROSS_SITE))?.frame;
+      expect(targetLabel, `no frame on ${CROSS_SITE}: ${JSON.stringify(structure.frames)}`).toBeTruthy();
+      const button = structure.nodes.find((node) => node.name === "Frame action" && node.frame === targetLabel);
+      expect(button?.ref, `the target frame's button has no ref: ${JSON.stringify(structure.nodes)}`).toBeTruthy();
+
+      // 030 FR-450: the frame is another origin, so it asks for its own site.
+      const clicking = client.callTool("click", { tabId, target: { ref: button!.ref! } });
+      await panel.waitForText(ui("agent.promptTitle"));
+      await panel.clickButton(ui("agent.allowOnce"));
+      const result = await clicking;
+
+      // Never the decoy's content, whatever the click answered.
+      await expect(decoyFrame!.locator("#decoy-button"), "the click landed in the decoy sibling frame").toHaveText(
+        "not clicked",
+      );
+      expect(result.isError, `click failed: ${result.text}\nmcp-server stderr:\n${client.stderr()}`).toBe(false);
+      expect(result.json).toMatchObject({ observed: { effect: "activated", verified: true } });
+      await expect(targetFrame!.locator("#frame-status")).toHaveText("clicked");
+
+      await call("tabs_close", { tabId });
+    } finally {
+      await client?.close();
+    }
+  });
 });
 
 /** Calls a tool and fails loudly with the host's own stderr when it did not answer `ok`. */

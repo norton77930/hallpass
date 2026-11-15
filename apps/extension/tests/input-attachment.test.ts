@@ -40,29 +40,37 @@ const DIAGNOSTICS_DOMAINS = ["Runtime.enable", "Log.enable", "Network.enable"];
 type FakeDebugger = {
   attached: number[];
   detached: number[];
-  commands: Array<{ tabId: number; method: string; params?: Record<string, unknown> }>;
+  /** `sessionId` only when the command addressed a child session (#75), so the tab's own read as before. */
+  commands: Array<{ tabId: number; method: string; params?: Record<string, unknown>; sessionId?: string }>;
   /** Set by a test that wants Chrome to refuse the attachment, as it does for C7. */
   attachError: string | undefined;
+  /** Set by a test that wants one command refused (#75): Chrome answering an error for it. */
+  failCommand?: (method: string, sessionId: string | undefined) => boolean;
   /**
    * Set by a test that wants a window open during a detach in flight (T161): `chrome.debugger.detach`
    * awaits this before resolving, the same real gap `Input.detach`'s own round trip to Chrome leaves
    * open.
    */
   detachGate?: Promise<void>;
-  emit(tabId: number, method: string, params: Record<string, unknown>): void;
+  /** A protocol event; `sessionId` is the child session it came on (#75), absent for the tab's own. */
+  emit(tabId: number, method: string, params: Record<string, unknown>, sessionId?: string): void;
 };
 
 function installChrome(): { fakeDebugger: FakeDebugger; url: { value: string } } {
   const local: Record<string, unknown> = {};
-  const listeners: Array<(source: { tabId?: number }, method: string, params?: unknown) => void> = [];
+  const listeners: Array<
+    (source: { tabId?: number; sessionId?: string }, method: string, params?: unknown) => void
+  > = [];
   const url = { value: `${SITE}/form` };
   const fakeDebugger: FakeDebugger = {
     attached: [],
     detached: [],
     commands: [],
     attachError: undefined,
-    emit(tabId, method, params) {
-      for (const listener of listeners) listener({ tabId }, method, params);
+    emit(tabId, method, params, sessionId) {
+      for (const listener of listeners) {
+        listener(sessionId === undefined ? { tabId } : { tabId, sessionId }, method, params);
+      }
     },
   };
   (globalThis as { chrome?: unknown }).chrome = {
@@ -100,12 +108,24 @@ function installChrome(): { fakeDebugger: FakeDebugger; url: { value: string } }
         fakeDebugger.attached = fakeDebugger.attached.filter((tabId) => tabId !== target.tabId);
         fakeDebugger.detached.push(target.tabId);
       },
-      async sendCommand(target: { tabId: number }, method: string, params?: Record<string, unknown>) {
-        fakeDebugger.commands.push({ tabId: target.tabId, method, ...(params ? { params } : {}) });
+      async sendCommand(
+        target: { tabId: number; sessionId?: string },
+        method: string,
+        params?: Record<string, unknown>,
+      ) {
+        fakeDebugger.commands.push({
+          tabId: target.tabId,
+          method,
+          ...(params ? { params } : {}),
+          ...(target.sessionId === undefined ? {} : { sessionId: target.sessionId }),
+        });
+        if (fakeDebugger.failCommand?.(method, target.sessionId)) throw new Error(`${method} failed`);
         return {};
       },
       onEvent: {
-        addListener(callback: (source: { tabId?: number }, method: string, params?: unknown) => void) {
+        addListener(
+          callback: (source: { tabId?: number; sessionId?: string }, method: string, params?: unknown) => void,
+        ) {
           listeners.push(callback);
         },
       },
@@ -655,6 +675,137 @@ describe("T118 the input attachment", () => {
     await releasing;
 
     expect(attachments.oopifSessions(AGENT_TAB)).toEqual([]);
+  });
+
+  /**
+   * #75: auto-attach is per session, not recursive (measured on a real two-level out-of-process frame):
+   * the tab's own setAutoAttach announces the middle frame only, and its child is announced on the
+   * middle frame's session once that session asks for it too. Without it the innermost frame has no
+   * session, and both the point walk and a ref's delivery give up on it.
+   */
+  describe("#75 nested out-of-process frames", () => {
+    const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true };
+    const announce = (sessionId: string, url: string, on?: string) =>
+      fake.fakeDebugger.emit(
+        AGENT_TAB,
+        "Target.attachedToTarget",
+        { sessionId, targetInfo: { targetId: `target-${sessionId}`, type: "iframe", url } },
+        on,
+      );
+    const autoAttachSends = () =>
+      fake.fakeDebugger.commands.filter((command) => command.method === "Target.setAutoAttach");
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    it("asks each announced frame's own session to auto-attach too, once per session", async () => {
+      const { attachments } = harness();
+      await attachments.acquire(AGENT_TAB, "input");
+
+      announce("mid", "https://localhost:19443/frame-deep-mid");
+      announce("mid", "https://localhost:19443/frame-deep-mid");
+      await settle();
+
+      expect(autoAttachSends()).toEqual([
+        { tabId: AGENT_TAB, method: "Target.setAutoAttach", params: AUTO_ATTACH },
+        { tabId: AGENT_TAB, method: "Target.setAutoAttach", params: AUTO_ATTACH, sessionId: "mid" },
+      ]);
+    });
+
+    it("records a frame announced on a child session, two levels deep and deeper", async () => {
+      const { attachments } = harness();
+      await attachments.acquire(AGENT_TAB, "input");
+
+      announce("mid", "https://localhost:19443/frame-deep-mid");
+      announce("inner", "https://127.0.0.1:19445/frame-consent-child", "mid");
+      announce("innermost", "https://elsewhere.test/leaf", "inner");
+      await settle();
+
+      expect(attachments.oopifSessions(AGENT_TAB).map((session) => session.sessionId)).toEqual([
+        "mid",
+        "inner",
+        "innermost",
+      ]);
+      expect(attachments.oopifSessions(AGENT_TAB)[1]).toEqual({
+        targetId: "target-inner",
+        sessionId: "inner",
+        url: "https://127.0.0.1:19445/frame-consent-child",
+      });
+      expect(autoAttachSends().map((command) => command.sessionId)).toEqual([undefined, "mid", "inner", "innermost"]);
+    });
+
+    it("reports a child session's refused auto-attach and keeps the frame it already has", async () => {
+      const reported: string[] = [];
+      const attachments = createInputAttachments({ reportDiagnostic: (code) => reported.push(code) });
+      fake.fakeDebugger.failCommand = (method, sessionId) =>
+        method === "Target.setAutoAttach" && sessionId !== undefined;
+      expect(await attachments.acquire(AGENT_TAB, "input")).toEqual({ ok: true });
+
+      announce("mid", "https://localhost:19443/frame-deep-mid");
+      await settle();
+
+      expect(reported).toEqual(["agent.diagnostics.child-autoattach-failed"]);
+      expect(attachments.oopifSessions(AGENT_TAB).map((session) => session.sessionId)).toEqual(["mid"]);
+    });
+
+    it("drops the frames attached under a detached session, and the tab's detach clears the rest", async () => {
+      const { attachments } = harness();
+      await attachments.acquire(AGENT_TAB, "input");
+      announce("mid", "https://localhost:19443/frame-deep-mid");
+      announce("inner", "https://127.0.0.1:19445/frame-consent-child", "mid");
+      announce("leaf", "https://elsewhere.test/leaf", "inner");
+      announce("sibling", "https://sibling.test/frame");
+
+      // The middle frame navigates to another site: Chrome detaches its session, and only that one.
+      fake.fakeDebugger.emit(AGENT_TAB, "Target.detachedFromTarget", { sessionId: "mid" });
+      expect(attachments.oopifSessions(AGENT_TAB).map((session) => session.sessionId)).toEqual(["sibling"]);
+
+      // Its new document is a new session, asked again; its child arrives on that one.
+      announce("mid-2", "https://localhost:19443/frame-deep-mid");
+      announce("inner-2", "https://127.0.0.1:19445/frame-consent-child", "mid-2");
+      await settle();
+      expect(attachments.oopifSessions(AGENT_TAB).map((session) => session.sessionId)).toEqual([
+        "sibling",
+        "mid-2",
+        "inner-2",
+      ]);
+      expect(autoAttachSends().filter((command) => command.sessionId === "mid-2")).toHaveLength(1);
+
+      await attachments.release(AGENT_TAB);
+      expect(attachments.oopifSessions(AGENT_TAB)).toEqual([]);
+    });
+
+    it("ignores a frame announced on a session it already dropped, and does not ask it", async () => {
+      const { attachments } = harness();
+      await attachments.acquire(AGENT_TAB, "input");
+      announce("mid", "https://localhost:19443/frame-deep-mid");
+      fake.fakeDebugger.emit(AGENT_TAB, "Target.detachedFromTarget", { sessionId: "mid" });
+
+      announce("late", "https://127.0.0.1:19445/frame-consent-child", "mid");
+      await settle();
+
+      expect(attachments.oopifSessions(AGENT_TAB)).toEqual([]);
+      expect(autoAttachSends().filter((command) => command.sessionId === "late")).toEqual([]);
+    });
+
+    it("does not ask a frame announced while the tab's detach is in flight (T161)", async () => {
+      const { attachments } = harness();
+      await attachments.acquire(AGENT_TAB, "input");
+      let releaseGate!: () => void;
+      fake.fakeDebugger.detachGate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      const releasing = attachments.release(AGENT_TAB);
+      // Past the before-release hooks: the attachment is now being detached (its round trip held).
+      await settle();
+      expect(attachments.attached()).toEqual([]);
+
+      announce("racing", "https://localhost:19443/frame-deep-mid");
+      await settle();
+      releaseGate();
+      await releasing;
+
+      expect(autoAttachSends().filter((command) => command.sessionId === "racing")).toEqual([]);
+      expect(attachments.oopifSessions(AGENT_TAB)).toEqual([]);
+    });
   });
 });
 

@@ -356,3 +356,13 @@ Confirm that step one runs without a card, and step two raises a card for the fr
   `point-outside-viewport (...)` for the drop. Element tools refuse early only a point a whole pixel past
   an edge, so rounding cannot refuse a point the page would hit. A viewport that cannot be measured is
   decided as before. `computer` already refused such points before the gate (004/T139).
+- 2026-11-15 (#75): a frame inside an out-of-process frame, where each level is another site in its own
+  process, now gets its own input session. So an action on it by ref or by point is decided by its own
+  site (FR-450, FR-455), Allow once performs it, and Allow always stores that site. Before, it was asked
+  as unknown by point, and an allowed action by ref was not located. The decision never became less
+  strict; only the fail-closed answers became the frame's own.
+- 2026-11-15 (#54): click placement only, not consent. A click inside a nested same-process frame is
+  placed by that frame's own box or not at all: when the page's frame list and the debugger's frame
+  tree cannot be matched for a frame (a sibling missing on one side, a frame inside a shadow root,
+  siblings in another order), that frame has no coordinates and the click answers not located, instead
+  of landing on a sibling frame.

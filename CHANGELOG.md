@@ -5,6 +5,21 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.22.5 — 2026-11-15
+
+- **A frame two levels deep is decided by its own site (#75).** For a frame inside an embedded frame,
+  where each level is another site in its own process, an action by point used to be asked about as
+  an unknown site, and an action by ref allowed on the card then failed with `target-not-located`.
+  Hallpass now reaches that frame directly: the card names its site, Allow once performs the action,
+  and Allow always remembers that frame's site. Nothing that used to ask now runs without asking.
+- **A click in a nested frame never lands on a sibling frame (#54).** To place a click inside a frame
+  from another origin, Hallpass matches the page's frames with the browser's own frame list. That match
+  used the order of the frames alone, so when the two lists differed (a frame inside a shadow root, a
+  frame missing from one list), the click could land in the frame next to the target. Frames are now
+  matched only when both lists agree; otherwise the click answers that the target was not located,
+  instead of clicking somewhere else. Consent is not affected.
+- Host and extension upgrade together: reinstall the host and reload the extension.
+
 ## 0.22.4 — 2026-11-15
 
 - **No card for a point that cannot be reached (#55).** When an element tool aims at a screen point

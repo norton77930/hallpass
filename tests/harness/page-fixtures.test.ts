@@ -136,6 +136,20 @@ describe("T885 frame fixtures", () => {
     expect(new URL(inner["src"] as string).pathname).toBe("/frame-consent-child");
   });
 
+  it("frame-shadow-sibling: a sibling-port frame, then a data: decoy frame in a shadow root (#54)", async () => {
+    const page = await served("frame-shadow-sibling");
+    const [target, decoy, ...rest] = frames(page);
+    expect(rest).toHaveLength(0);
+    expect(page.indexOf('shadowrootmode="open"')).toBeGreaterThan(page.indexOf('id="target-frame"'));
+    expect(page.indexOf('shadowrootmode="open"')).toBeLessThan(page.indexOf('id="decoy-frame"'));
+    expect(decoy?.["id"]).toBe("decoy-frame");
+    expect(decoy?.["src"]).toMatch(/^data:text\/html,/);
+    expect(decoy?.["src"]).toContain("id='decoy-button'");
+    expect(target?.["id"]).toBe("target-frame");
+    expect(originOf(target?.["src"])).toBe(SIBLING);
+    expect(new URL(target?.["src"] as string).pathname).toBe("/frame-consent-child");
+  });
+
   it("frame-navigating: a second-site frame that moves to a third origin on postMessage go", async () => {
     const page = await served("frame-navigating");
     const frame = only(page);

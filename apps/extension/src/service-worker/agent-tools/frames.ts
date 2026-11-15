@@ -54,6 +54,13 @@ export type BrowserFrame = {
    * injection into it could wait for its load until the page's bound.
    */
   unloaded?: true;
+  /**
+   * #54: the frame could not find itself among its parent's `window.frames` (an iframe inside a
+   * shadow root is not there), so its place in the parent's frame order is not known. Internal to
+   * the extension's own enumeration; the pairing with the debugger's tree does not pair by order
+   * for a parent that has such a child.
+   */
+  unindexed?: true;
 };
 
 /** #71: whether any frame of an enumeration had not loaded, which makes a read of it partial. */
@@ -684,11 +691,74 @@ type DeliveryState = {
 };
 
 /**
- * Pairs the enumeration's numeric frame ids with the debugger's frame tokens.
+ * The url both sides can agree on: the debugger reports a frame's url without its fragment, the
+ * enumeration with it. Anything that is not a string agrees with nothing.
+ */
+function urlKey(url: unknown): string | undefined {
+  if (typeof url !== "string") return undefined;
+  const hash = url.indexOf("#");
+  return hash < 0 ? url : url.slice(0, hash);
+}
+
+/**
+ * One parent's children, paired only where the pairing is shown rather than assumed (#54).
  *
- * The two describe the same tree, and siblings are paired **in order** for the same reason the
- * structural merge pairs owners in order: a url is not a key - `srcdoc` and `about:blank` frames
- * share theirs - and a mis-key here would offset an element by another frame's box.
+ * The enumeration and the debugger's tree list the same page but not always the same frames: a
+ * frame that did not answer the enumeration (unscriptable, or not loaded within its bound) is still
+ * in the tree, an out-of-process frame is in the enumeration but not in the tab's own tree, and a
+ * sibling may be listed in another order. Paired by position alone, every frame after the
+ * difference got its sibling's owner box, and a click landed in the sibling.
+ *
+ * There is no key both sides carry for a frame - the enumeration's numeric id and the debugger's
+ * token are never mapped onto each other, and asking the frame itself through the debugger would be
+ * another stated exception to the attachment's invariant (`input.ts`) - so the rule is fail-closed:
+ *
+ * - **Same count, every position reports the same url, and every child has an index in its
+ *   parent**: the lists line up, and are paired in order. This is every well-formed page,
+ *   `frames.html`'s same-shaped branches and same-url (`srcdoc`, `about:blank`) siblings included,
+ *   so their offsets are exactly what they were. A child flagged `unindexed` (an iframe in a shadow
+ *   root, which the debugger lists in creation order but the enumeration sorts first) rules the
+ *   order out for its parent: with equal urls the two orders cannot be told apart, so each frame
+ *   would be handed the other's box.
+ * - **Otherwise**, a child is paired only with the one reported child whose url is unique on both
+ *   sides. Siblings sharing a url cannot be told apart and stay unpaired, so they have no offset -
+ *   the existing "could not locate the target" answer - rather than a guessed sibling's box.
+ */
+function pairChildren(
+  enumerated: BrowserFrame[],
+  reported: CdpFrameNode[],
+): Array<[BrowserFrame, CdpFrameNode]> {
+  const reportedKeys = reported.map((node) => urlKey(node.frame?.url));
+  const lineUp =
+    enumerated.length === reported.length &&
+    !enumerated.some((frame) => frame.unindexed === true) &&
+    enumerated.every((frame, index) => {
+      const key = urlKey(frame.url);
+      return key !== undefined && key === reportedKeys[index];
+    });
+  if (lineUp) return enumerated.map((frame, index) => [frame, reported[index] as CdpFrameNode]);
+
+  const counted = (keys: Array<string | undefined>): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const key of keys) if (key !== undefined) counts.set(key, (counts.get(key) ?? 0) + 1);
+    return counts;
+  };
+  const enumeratedCounts = counted(enumerated.map((frame) => urlKey(frame.url)));
+  const reportedCounts = counted(reportedKeys);
+  const pairs: Array<[BrowserFrame, CdpFrameNode]> = [];
+  for (const frame of enumerated) {
+    const key = urlKey(frame.url);
+    if (key === undefined || enumeratedCounts.get(key) !== 1 || reportedCounts.get(key) !== 1) continue;
+    const node = reported[reportedKeys.indexOf(key)];
+    if (node) pairs.push([frame, node]);
+  }
+  return pairs;
+}
+
+/**
+ * Pairs the enumeration's numeric frame ids with the debugger's frame tokens, one parent's children
+ * at a time (`pairChildren`). A frame left unpaired - and every frame under it - has no token, so
+ * no offset: a mis-key here would offset an element by another frame's box.
  */
 function pairFrameTokens(frames: BrowserFrame[], root: CdpFrameNode): Map<number, string> {
   const tokens = new Map<number, string>();
@@ -700,12 +770,8 @@ function pairFrameTokens(frames: BrowserFrame[], root: CdpFrameNode): Map<number
     const token = node.frame?.id;
     if (typeof token !== "string") return;
     tokens.set(frameId, token);
-    const enumerated = childrenOf(frameId);
-    const reported = node.childFrames ?? [];
-    for (let index = 0; index < enumerated.length && index < reported.length; index += 1) {
-      const child = enumerated[index];
-      const reportedChild = reported[index];
-      if (child && reportedChild) visit(child.frameId, reportedChild);
+    for (const [child, reportedChild] of pairChildren(childrenOf(frameId), node.childFrames ?? [])) {
+      visit(child.frameId, reportedChild);
     }
   };
   visit(top.frameId, root);
@@ -728,9 +794,10 @@ export type InPageFrameOffsetMeasurer = (tabId: number) => Promise<Map<number, F
  * falls back to the debugger only for a frame the in-page walk could not reach the top from (004/
  * T128, B67 - see `frameOffsetToTop`/`enumerateFrameOffsets`, `chrome-adapters/scripting.ts`).
  *
- * The debugger's chain pairs the enumeration's frame ids with `Page.getFrameTree`'s tokens **by
- * order**, which two structurally parallel branches - `frames.html`'s two same-shaped child
- * sections - can mis-key ("would offset an element by another frame's box", `pairFrameTokens`'s own
+ * The debugger's chain pairs the enumeration's frame ids with `Page.getFrameTree`'s tokens (`pairChildren`:
+ * by order only where both sides line up url for url, otherwise by a url unique on both sides),
+ * which two structurally parallel branches - `frames.html`'s two same-shaped child
+ * sections - could once mis-key ("would offset an element by another frame's box", `pairFrameTokens`'s own
  * warning). A same-origin frame does not need that pairing at all: it can read its own place on the
  * page directly, in one round trip covering every frame of the tab. Only a cross-origin hop still
  * needs the debugger, because `window.frameElement` is exactly the property the same-origin policy

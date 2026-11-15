@@ -12,7 +12,13 @@ import { executeInAllFrames } from "./all-frames.js";
  * whose real document is not there yet: a reader must not take what it answered as the frame's
  * content, and must say the page was not read whole.
  */
-export type EnumeratedFrame = { frameId: number; parentFrameId: number; url: string; unloaded?: true };
+export type EnumeratedFrame = {
+  frameId: number;
+  parentFrameId: number;
+  url: string;
+  unloaded?: true;
+  unindexed?: true;
+};
 
 /**
  * The page runtime, in one named frame.
@@ -183,8 +189,9 @@ export async function enumerateFrameOffsets(tabId: number): Promise<Map<number, 
  *
  * Parentage is not in the result, so each frame reports its own index chain and the chains are
  * matched here: the frame whose path is this one's path minus its last step is its parent. A frame
- * that could not find itself in its parent (`-1`) still lands under that parent, in the order the
- * browser returned it, which is the same order the merge pairs owners by.
+ * that could not find itself in its parent (`-1`) still lands under that parent, sorted before the
+ * parent's indexed frames (its `-1` is the lowest index) and flagged `unindexed`: it has no place
+ * in the parent's frame order, so the frame pairing does not trust the order around it (#54).
  */
 /**
  * Plants one value in a named frame's **page** world (004/T129, B75).
@@ -249,10 +256,23 @@ export async function enumerateTabFrames(
     return [{ frameId: entry.frameId, url: result.url, path: result.path, unloaded }];
   });
   const byPath = new Map(described.map((frame) => [frame.path.join("."), frame.frameId]));
+  // #54: index by index as numbers - as text, a frame at index 10 sorted before the one at 2, and
+  // siblings are paired against the debugger's tree in this order (`frames.ts` `pairChildren`).
+  const byIndexes = (left: number[], right: number[]): number => {
+    for (let step = 0; step < left.length; step += 1) {
+      const difference = (left[step] ?? 0) - (right[step] ?? 0);
+      if (difference !== 0) return difference;
+    }
+    return 0;
+  };
   return described
-    .sort((left, right) => left.path.length - right.path.length || left.path.join(".").localeCompare(right.path.join(".")))
+    .sort((left, right) => left.path.length - right.path.length || byIndexes(left.path, right.path))
     .map((frame) => {
       const unloaded = frame.unloaded ? { unloaded: true as const } : {};
+      // #54: a frame that could not find itself in its parent's `frames` (an iframe inside a shadow
+      // root is not there) has no place in that parent's order, so it is flagged and the frame
+      // pairing (`frames.ts` `pairChildren`) does not trust the order around it.
+      const unindexed = frame.path.length > 0 && frame.path[frame.path.length - 1] === -1;
       if (frame.path.length === 0) return { frameId: frame.frameId, parentFrameId: -1, url: frame.url, ...unloaded };
       const parentFrameId = byPath.get(frame.path.slice(0, -1).join("."));
       // 004/T153 (S4 review): a frame whose parent never answered - sandboxed, CSP-blocked, or
@@ -262,7 +282,13 @@ export async function enumerateTabFrames(
       // honest unknown: never a valid ancestor (no frame is its own parent), so the chain walk
       // that reads it stops and answers `undefined` rather than a click delivered somewhere
       // arbitrary on the page.
-      return { frameId: frame.frameId, parentFrameId: parentFrameId ?? frame.frameId, url: frame.url, ...unloaded };
+      return {
+        frameId: frame.frameId,
+        parentFrameId: parentFrameId ?? frame.frameId,
+        url: frame.url,
+        ...unloaded,
+        ...(unindexed ? { unindexed: true as const } : {}),
+      };
     });
 }
 
