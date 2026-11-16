@@ -366,3 +366,10 @@ Confirm that step one runs without a card, and step two raises a card for the fr
   tree cannot be matched for a frame (a sibling missing on one side, a frame inside a shadow root,
   siblings in another order), that frame has no coordinates and the click answers not located, instead
   of landing on a sibling frame.
+- 2026-11-16 (#51 remainder): wording only. The consent card for a drag whose two ends are decided by two
+  different known sites (two frames of two sites, or the page's own document and another site's frame)
+  now names both sites, the start's then the end's, instead of only saying the frame's site could not be
+  established. The decision is unchanged (FR-464): no one site decides it, so it still asks, offers once
+  or deny, and offers no Allow always (a remembered mode for it is still refused). The card's frame
+  field carries the two sites as display-only data. The `askUploadDirectory` frame line remains open: it
+  needs a link-protocol change between the host and the worker.

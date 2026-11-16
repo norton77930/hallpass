@@ -24,6 +24,7 @@ import {
   AGENT_UPLOAD_MAX_BASE64_CHARS,
   ATTENTION_SENTENCES,
   BROWSER_REFUSAL_HINTS,
+  HELD_HINT,
   INTERRUPT_HINTS,
   PAIRING_DECLINED_MARKER,
   PAIRING_REFUSAL_HINTS,
@@ -331,8 +332,11 @@ export function positiveEnv(name: string, env: NodeJS.ProcessEnv = process.env):
 /** What the owner is told the connection came through; the panel shows it beside the agent's name. */
 const AGENT_ORIGIN = "stdio:local";
 
-/** The six endings of a directory question (014/R-187 §1); the host maps each to an answer. */
-type UploadConsentDecision = "once" | "always" | "deny" | "timed-out" | "interrupted" | "busy";
+/**
+ * The six endings of a directory question (014/R-187 §1); the host maps each to an answer. And
+ * `held` (034 FR-515): the session is held, so the worker asked nobody.
+ */
+type UploadConsentDecision = "once" | "always" | "deny" | "timed-out" | "interrupted" | "busy" | "held";
 
 /**
  * How a directory question ended here, with what the worker said about it (S3 review F1).
@@ -2405,6 +2409,15 @@ export async function startAgentMcpServer(): Promise<AgentMcpServer> {
             reason: "owner-interrupted",
             hint: INTERRUPT_HINTS.nothingDelivered,
           });
+        }
+        if (decision === "held") {
+          /**
+           * 034 FR-515: the owner pressed Stop on the page, so the worker raised no card. The same
+           * answer the worker gives every other call of a held session, word for word - and given
+           * here, before a file is opened or a directory written.
+           */
+          log("agent.upload.consent-held");
+          return refuse({ callId, outcome: "stopped", reason: "owner-held", hint: HELD_HINT });
         }
         if (decision === "busy") {
           /**

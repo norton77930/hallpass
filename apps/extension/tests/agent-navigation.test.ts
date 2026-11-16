@@ -1310,6 +1310,91 @@ describe("T041 agent tab tools", () => {
       await attachments.releaseAll();
     });
 
+    it("still hears the page's leave-site prompt on tabs_close 20 s after the last effect: the close holds the tab (#60 item 4)", async () => {
+      // The same composition as the navigation case above, with the hold's end counted.
+      const debug = scriptedDebugger();
+      const attachments = createInputAttachments({ debug: debug.adapter });
+      const dialogs = createAgentDialogs({
+        send: (tabId, method, params) => attachments.send(tabId, method, params),
+        siteModes: { get: async () => ({ mode: "ask" as const }), set: async () => undefined },
+        prompts: { ask: async () => ({ decision: "deny" }) as never },
+        tabOwnership: async () => ({ state: "this" }) as never,
+        siteOfTab: async () => "https://example.test",
+        holderOf: async () => SESSION,
+        onActivity() {},
+        onNotice() {},
+      });
+      attachments.onEvent((tabId, method, params) => dialogs.onDebuggerEvent(tabId, method, params));
+      let holdsDone = 0;
+      const tools = build(60, {
+        dialogs: { beginUnload: (tabId, policy) => dialogs.beginUnload(tabId, policy) },
+        holdAttachment: async (tabId) => {
+          const held = await attachments.hold(tabId);
+          return {
+            outcome: held.outcome,
+            done() {
+              holdsDone += 1;
+              held.done();
+            },
+          };
+        },
+      } as Partial<Parameters<typeof createAgentTabTools>[0]>);
+      const created = await tools.run(call("tabs_create", { url: "https://example.test/one" }));
+      const { tabId } = created.result as { tabId: number };
+
+      vi.useFakeTimers();
+      try {
+        (await attachments.hold(tabId)).done();
+        await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(debug.state.detached).toEqual([tabId]);
+
+      // Closing the page raises "leave site?", heard only over an attachment, and the tab stays.
+      const chromeTabs = (globalThis as { chrome: { tabs: { remove: (id: number) => Promise<void> } } }).chrome.tabs;
+      chromeTabs.remove = async (id) => {
+        debug.emit(id, "Page.javascriptDialogOpening", {
+          type: "beforeunload",
+          url: "https://example.test/one",
+          message: "",
+          hasBrowserHandler: true,
+        });
+      };
+
+      const answer = await tools.run(call("tabs_close", { tabId }));
+
+      expect(answer).toMatchObject({
+        outcome: "failed",
+        reason: "blocked-by-beforeunload",
+        refusal: { reason: "blocked-by-beforeunload", url: "https://example.test/one" },
+      });
+      expect(debug.state.commands).toContainEqual({
+        tabId,
+        method: "Page.handleJavaScriptDialog",
+        params: { accept: false },
+      });
+      // Let go when the call answered: nothing but the next call keeps the tab now.
+      expect(holdsDone).toBe(1);
+      expect(attachments.holders(tabId)).toEqual(["input"]);
+      await attachments.releaseAll();
+    });
+
+    it("still closes the tab when the attachment for the close is refused (#60 item 4)", async () => {
+      const tools = build(60, {
+        holdAttachment: async () => {
+          throw new Error("refused");
+        },
+      } as Partial<Parameters<typeof createAgentTabTools>[0]>);
+      const created = await tools.run(call("tabs_create", { url: "https://example.test/one" }));
+      const { tabId } = created.result as { tabId: number };
+
+      const answer = await tools.run(call("tabs_close", { tabId }));
+
+      expect(answer).toMatchObject({ outcome: "ok", result: { closed: true } });
+      expect(fake.removed).toContain(tabId);
+    });
+
     it("runs nothing when the owner refuses the forced leave", async () => {
       const stub = unloadStub("https://example.test/one");
       const tools = build(60, {

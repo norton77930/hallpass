@@ -145,12 +145,25 @@ Not part of this feature. Each is a candidate for its own issue.
   document" would also replace three inline checks.
 - **Focus read edges (#52, done 2026-11-15).** Focus on a `<fencedframe>`, and a read without
   `chrome.dom.openOrClosedShadowRoot`, now answer unknown (`frame-focus.test.tsx`).
-- **Card wording.** A drag between two known sites is shown as "could not be established" rather than
-  "two sites". (The first line and the remember button naming the frame's site were done in #51.)
+- **Card wording (#51, done 2026-11-16).** A drag between two known sites (two frames of two sites, or the
+  page's document and another site's frame) now names both sites on the card, start then end, instead of
+  only "could not be established"; it still asks, offers once or deny and no Allow always
+  (`agent-effects.test.ts` "#51 a drag between two known sites names both on the card",
+  `prompt-card.test.tsx` "names both sites of a drag between two sites", `agent-tools.test.ts` "frame
+  unknown takes the two sites a drag runs between"). (The first line and the remember button naming the
+  frame's site were done in #51 on 2026-11-15.)
+  Left after the review (2026-11-16): the agent's answer for that drag still says the frame's site could
+  not be established, and the client-side question names only the page's site; after Allow once a drag
+  whose ends are in two debugger sessions (two sites' frames under site isolation) is still refused
+  `cross-frame-drag`, so the card is actionable only when both ends share one process; no unit case
+  covers a point end or a same-origin child frame end.
 - **`askUploadDirectory` cards do not carry `frame`.** The card that asks for an upload directory can show
   the frame line (`prompt-card.test.tsx` "shows the frame line on the directory card too"), but the
   worker never sets `frame` on it, so it names the page and not the frame holding the target. The
   `file_upload` and `upload_image` effect cards do carry it.
+  Accepted limitation (owner decision 2026-11-16): the fix needs a host-to-worker link-protocol change,
+  and the owner chose not to make it; #51 closes without it. The effect cards that run the upload name the
+  frame's site, so the consent that matters for the upload itself is not affected.
 - **Nested out-of-process frames (#56, #75, done 2026-11-15).** Packaged "Story 2 (#56, #75)" stands on
   `frame-deep` (top `127.0.0.1:19443`, middle `localhost:19443`, innermost `127.0.0.1:19445`; the fixture
   hosts give only two sites, so the innermost is the page's site on the sibling port; the browser holds
@@ -167,9 +180,20 @@ Not part of this feature. Each is a candidate for its own issue.
   session and ask as unknown (fail-closed).
 - **Points outside the viewport (#55, done 2026-11-15).** Element-tool point targets, drag ends and
   `upload_image` drop points outside the top viewport are refused before the frame lookup, with no card
-  (`agent-effects.test.ts`, `agent-upload.test.ts`, packaged Story 8). Open: the element-tool pre-gate
-  `Page.getLayoutMetrics` read has no time bound of its own (as in `computer`'s preflight); the one-pixel
-  margin is measured at scale 1 and 1.25 without a scrolled page, not at a fractional scale after scrolling.
+  (`agent-effects.test.ts`, `agent-upload.test.ts`, packaged Story 8 for the click and
+  `agent-upload-image.spec.ts` "refuses a drop point outside the viewport with no card, and still asks
+  about one inside it" for the drop). Follow-ups from the #55 review (#76): the pre-gate
+  `Page.getLayoutMetrics` read (`measureViewport`, shared with `computer`'s preflight) is now bounded by
+  `FRAME_ANSWER_BOUND_MS` and answers unknown when it gets none, so the point is decided as before
+  (`computer.test.ts` "#76 measureViewport is bounded", `agent-effects.test.ts` "decides a point as
+  before when the viewport read gets no answer"); the drop's injected size read is executed against a
+  stubbed window in `agent-upload.test.ts` ("refuses by the size the injected function reads from the
+  window's inner size"); and the upload-image spec's header counts its seven journeys. The one-pixel
+  margin was measured at device scale 1.25 after a one-device-pixel scroll (2026-11-15, headless test
+  Chromium, six window sizes giving fractional visual viewports such as 657.6 and 985.6): the reported
+  `cssLayoutViewport` size is whole, and the farthest point `elementFromPoint` still hits is at most
+  0.45 past it (and -0.45 at the top-left), so no point a whole pixel past an edge is one the page
+  would hit; the margin stays 1. Not measured: a headed window with classic scrollbars.
 - **SC-206 and the agent-input gate.** The `agent-input` packaged gate's two clicks into another site's
   frame now answer that frame's card, which is the behaviour of this spec (FR-450). This is an intended
   change to SC-206's "unchanged" for that one gate, and the spec's wording should be read that way.

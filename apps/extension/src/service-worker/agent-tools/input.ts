@@ -116,6 +116,27 @@ export type AttachmentOutcome = { ok: true } | { ok: false; unavailableReason: I
 export const IDLE_DETACH_MS = 20_000;
 
 /**
+ * The alarm that outlives the idle countdown (#60 item 2).
+ *
+ * The countdown is a `setTimeout`, and twenty quiet seconds are exactly when MV3 evicts the worker -
+ * taking the timer with it and leaving the attachment, and Chrome's debugging bar, until the next
+ * call. An alarm survives the eviction and wakes a fresh worker, whose start-up reconciliation
+ * (`diagnostics.start`, C1) lets go of an attachment it has no record of. One alarm for every tab,
+ * set no earlier than the latest countdown ends: a worker that wakes for it either has no record of
+ * any tab, or has its own countdowns to honour, so a per-tab alarm would carry nothing more.
+ */
+export const IDLE_DETACH_ALARM = "hallpass-idle-detach";
+
+/** Chrome's floor for an alarm (Chrome 120+, packed extensions): one set nearer fires at 30 s anyway. */
+export const IDLE_DETACH_ALARM_FLOOR_MS = 30_000;
+
+/** The part of `chrome.alarms` the idle countdown uses, injected so a test can fake it (#60 item 2). */
+export type IdleDetachAlarms = {
+  create(name: string, info: { when: number }): void | Promise<unknown>;
+  clear(name: string): void | Promise<unknown>;
+};
+
+/**
  * One call's use of a tab's attachment (031/T945, R-466).
  *
  * `done` is idempotent and safe in every state the tab can be in by then - detached by Chrome,
@@ -142,6 +163,12 @@ export type AgentInputAttachments = {
    * cancels that countdown; the next call re-attaches as the first one did.
    */
   hold(tabId: number): Promise<AttachmentCallHold>;
+  /**
+   * `IDLE_DETACH_ALARM` fired (#60 item 2). A tab whose countdown is due and that is still idle is
+   * let go of, as its timer would have; one not yet due is left to its own countdown, and a tab in
+   * use has none. The wake is set again for whatever is still counting down.
+   */
+  idleAlarm(): Promise<void>;
   /** Who holds the tab right now, read-only; empty when it is not attached (031/R-466). */
   holders(tabId: number): readonly AttachmentHolder[];
   /** One holder is done. The attachment ends only when no holder is left. */
@@ -211,6 +238,8 @@ export type OopifSession = { targetId: string; sessionId: string; url: string };
 export type AgentInputAttachmentsDeps = {
   debug?: DebuggerAdapter;
   reportDiagnostic?: (code: string) => void;
+  /** #60 item 2: the wake behind the idle countdown. Absent sets none (the countdown alone). */
+  alarms?: IdleDetachAlarms;
 };
 
 /**
@@ -327,8 +356,10 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
    * tab's tokens, so a call that never finished cannot keep the next lease attached.
    */
   const inFlight = new Map<number, Set<object>>();
-  /** The armed idle countdowns (031/R-466); at most one per tab. */
-  const idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** The armed idle countdowns (031/R-466); at most one per tab, with when each ends (#60 item 2). */
+  const idleTimers = new Map<number, { timer: ReturnType<typeof setTimeout>; deadline: number }>();
+  /** When the wake alarm is set for, while it is (#60 item 2); undefined when none is. */
+  let alarmWhen: number | undefined;
   /**
    * Detaches still on their way to Chrome (031/T945).
    *
@@ -339,10 +370,39 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
   const detaching = new Map<number, Promise<void>>();
 
   function disarm(tabId: number): void {
-    const timer = idleTimers.get(tabId);
-    if (timer === undefined) return;
-    clearTimeout(timer);
+    const countdown = idleTimers.get(tabId);
+    if (countdown === undefined) return;
+    clearTimeout(countdown.timer);
     idleTimers.delete(tabId);
+    syncAlarm();
+  }
+
+  /**
+   * Keeps the wake alarm no earlier than the latest countdown's end, and gone when none is pending
+   * (#60 item 2). Best effort: a worker that cannot set it still has its in-memory countdown.
+   */
+  function syncAlarm(): void {
+    const alarms = deps.alarms;
+    if (alarms === undefined) return;
+    try {
+      if (idleTimers.size === 0) {
+        if (alarmWhen === undefined) return;
+        alarmWhen = undefined;
+        void Promise.resolve(alarms.clear(IDLE_DETACH_ALARM)).catch(() =>
+          deps.reportDiagnostic?.("agent.attachment.idle-alarm-failed"),
+        );
+        return;
+      }
+      let latest = 0;
+      for (const countdown of idleTimers.values()) latest = Math.max(latest, countdown.deadline);
+      if (alarmWhen !== undefined && alarmWhen >= latest) return;
+      alarmWhen = Math.max(latest, Date.now() + IDLE_DETACH_ALARM_FLOOR_MS);
+      void Promise.resolve(alarms.create(IDLE_DETACH_ALARM, { when: alarmWhen })).catch(() =>
+        deps.reportDiagnostic?.("agent.attachment.idle-alarm-failed"),
+      );
+    } catch {
+      deps.reportDiagnostic?.("agent.attachment.idle-alarm-failed");
+    }
   }
 
   /** No call in progress, and `input` the only holder: nothing needs the tab but the next call. */
@@ -358,17 +418,23 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
 
   function armIfIdle(tabId: number): void {
     if (idleTimers.has(tabId) || !idle(tabId)) return;
-    idleTimers.set(
-      tabId,
-      setTimeout(() => {
+    idleTimers.set(tabId, {
+      timer: setTimeout(() => {
         idleTimers.delete(tabId);
-        // Asked again at the far end: anything that changed the answer meanwhile also disarmed
-        // this, but the check is what makes that a convenience rather than the guarantee.
-        if (!idle(tabId)) return;
-        // Dropped, never released: the before-release hook is the viewport clear (R-466).
-        void api.drop(tabId, "input").catch(() => deps.reportDiagnostic?.("agent.attachment.idle-detach-failed"));
+        syncAlarm();
+        void letGoIfIdle(tabId);
       }, IDLE_DETACH_MS),
-    );
+      deadline: Date.now() + IDLE_DETACH_MS,
+    });
+    syncAlarm();
+  }
+
+  async function letGoIfIdle(tabId: number): Promise<void> {
+    // Asked again at the far end: anything that changed the answer meanwhile also disarmed the
+    // countdown, but the check is what makes that a convenience rather than the guarantee.
+    if (!idle(tabId)) return;
+    // Dropped, never released: the before-release hook is the viewport clear (R-466).
+    await api.drop(tabId, "input").catch(() => deps.reportDiagnostic?.("agent.attachment.idle-detach-failed"));
   }
 
   /**
@@ -643,6 +709,21 @@ export function createInputAttachments(deps: AgentInputAttachmentsDeps = {}): Ag
         throw error;
       }
     },
+    async idleAlarm() {
+      // The alarm is one-shot: whatever is still counting down needs a new one.
+      alarmWhen = undefined;
+      const now = Date.now();
+      for (const [tabId, countdown] of [...idleTimers]) {
+        // Each let-go below is a round trip to Chrome; a call meanwhile may have disarmed this tab's
+        // countdown or started a new one, which is then the one in charge (#60 review).
+        if (idleTimers.get(tabId) !== countdown || countdown.deadline > now) continue;
+        // Due, and its timer has not run (a throttled worker): this is that timer, run late.
+        clearTimeout(countdown.timer);
+        idleTimers.delete(tabId);
+        await letGoIfIdle(tabId);
+      }
+      syncAlarm();
+    },
     holders(tabId) {
       return [...(tabs.get(tabId)?.holders ?? [])];
     },
@@ -814,8 +895,29 @@ export type PointerButton = "left" | "right" | "middle";
  * `press` (033 FR-505, R-492) says a press will land at this point: the page spreads one ring from
  * the arrow's tip when the move arrives. Only the click family and a drag's press move send it; a
  * hover, a scroll and a drag's end are moves without a press.
+ *
+ * `box` (035 R-526, contracts/pill-messages.md) is the located target's box, in the same top-document
+ * viewport pixels as the point: the page uses it, with the point, to decide whether the pill steps
+ * aside. Sent by the element tools that aim at a located target; never by `computer`, and never for
+ * a drag's end.
  */
-export type CursorMessage = { type: "cursor"; x?: number; y?: number; hide?: true; press?: true };
+export type CursorMessage = {
+  type: "cursor";
+  x?: number;
+  y?: number;
+  hide?: true;
+  press?: true;
+  box?: PointerBox;
+};
+
+/** 035 R-526: a located target's box, exactly these four numbers on the wire. */
+export type PointerBox = { x: number; y: number; width: number; height: number };
+
+/**
+ * The box a gesture's target was located at (035 R-526). Any rect carrying these four numbers will do
+ * - a located target's rect has more - and only these four are ever sent.
+ */
+export type PointerAim = { box?: PointerBox };
 
 /**
  * Sends the page one cursor message. A returned promise settles when the page reports the pointer
@@ -855,12 +957,16 @@ export type PointerDispatchCheck = { beforeDispatch?: () => Promise<boolean> };
 
 export type AgentPointerInput = {
   /** The move alone, which is what a hover *is* (G6). */
-  hover(tabId: number, point: PointerPoint, destination?: PointerDestination & PointerDispatchCheck): Promise<void>;
+  hover(
+    tabId: number,
+    point: PointerPoint,
+    destination?: PointerDestination & PointerDispatchCheck & PointerAim,
+  ): Promise<void>;
   /** Move to the point, press, release - in that order and at that point. */
   click(
     tabId: number,
     point: PointerPoint,
-    options?: { button?: PointerButton; clickCount?: number } & PointerDestination & PointerDispatchCheck,
+    options?: { button?: PointerButton; clickCount?: number } & PointerDestination & PointerDispatchCheck & PointerAim,
   ): Promise<void>;
   /** A wheel at the point, so the page scrolls whatever is under the pointer. */
   scroll(
@@ -869,12 +975,15 @@ export type AgentPointerInput = {
     delta: { deltaX: number; deltaY: number },
     destination?: PointerDestination & PointerDispatchCheck,
   ): Promise<void>;
-  /** Move, press, move, release: the drag a person's hand makes. */
+  /**
+   * Move, press, move, release: the drag a person's hand makes. `box` is the start target's: the
+   * end point names no element, so the move to it carries none (035 R-526).
+   */
   drag(
     tabId: number,
     from: PointerPoint,
     to: PointerPoint,
-    destination?: PointerDestination & PointerDispatchCheck,
+    destination?: PointerDestination & PointerDispatchCheck & PointerAim,
   ): Promise<void>;
 };
 
@@ -962,11 +1071,24 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
    * arrow stop on the target and *then* the page react, never the other way round. The cap keeps a
    * page that cannot answer (no listener, hidden, mid-navigation) from holding the input.
    */
-  async function arrive(tabId: number, at: PointerPoint, capMs: number, press = false): Promise<void> {
+  async function arrive(
+    tabId: number,
+    at: PointerPoint,
+    capMs: number,
+    press = false,
+    box?: PointerBox,
+  ): Promise<void> {
     let ack: Promise<void>;
     try {
       ack = Promise.resolve(
-        cursor(tabId, { type: "cursor", x: at.x, y: at.y, ...(press ? { press: true as const } : {}) }),
+        cursor(tabId, {
+          type: "cursor",
+          x: at.x,
+          y: at.y,
+          ...(press ? { press: true as const } : {}),
+          // 035 R-526: the four numbers and nothing else, whatever the caller's rect carries.
+          ...(box === undefined ? {} : { box: { x: box.x, y: box.y, width: box.width, height: box.height } }),
+        }),
       ).catch(() => undefined);
     } catch {
       return;
@@ -990,8 +1112,9 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
     check: PointerDispatchCheck,
     run: () => Promise<void>,
     press = false,
+    box?: PointerBox,
   ): Promise<void> {
-    await arrive(tabId, at, CURSOR_ARRIVAL_CAP_MS, press);
+    await arrive(tabId, at, CURSOR_ARRIVAL_CAP_MS, press, box);
     // After the glide, before the first event (014 change log 2026-10-11): the wait above is the
     // window a page can leave the site in, so the question is asked at its far end.
     if (check.beforeDispatch && !(await check.beforeDispatch())) throw new SiteMovedBeforeDispatch();
@@ -1000,7 +1123,14 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
 
   return {
     async hover(tabId, point, destination = {}) {
-      await sequence(tabId, point, destination, () => move(tabId, point, undefined, destination.sessionId));
+      await sequence(
+        tabId,
+        point,
+        destination,
+        () => move(tabId, point, undefined, destination.sessionId),
+        false,
+        destination.box,
+      );
     },
     async click(tabId, point, options = {}) {
       const button = options.button ?? "left";
@@ -1010,7 +1140,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
         await move(tabId, point, undefined, sessionId);
         await mouse(tabId, { type: "mousePressed", x: point.x, y: point.y, button, clickCount }, sessionId);
         await mouse(tabId, { type: "mouseReleased", x: point.x, y: point.y, button, clickCount }, sessionId);
-      }, true);
+      }, true, options.box);
     },
     async scroll(tabId, point, delta, destination = {}) {
       const sessionId = destination.sessionId;
@@ -1048,7 +1178,7 @@ export function createPointerInput(deps: AgentPointerInputDeps): AgentPointerInp
           { type: "mouseReleased", x: to.x, y: to.y, button: "left", clickCount: 1 },
           sessionId,
         );
-      }, true);
+      }, true, destination.box);
     },
   };
 }

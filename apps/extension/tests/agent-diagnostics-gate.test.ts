@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CONSENT_TIMEOUT_HINT, type AgentNativeRequest, type AgentNativeResponse } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
+import { scriptedDebugger } from "./helpers/scripted-debugger.js";
 import { createAgentDiagnostics } from "../src/service-worker/agent-tools/diagnostics.js";
 import { createInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import { diagnosticsGrantsFrom } from "../src/service-worker/agent-tools/page-action-grants.js";
@@ -912,5 +913,98 @@ describe("T056 agent diagnostics gate", () => {
 
     expect(fake.fakeDebugger.detached).toEqual([41]);
     expect(runner.attached()).toEqual([]);
+  });
+
+  /**
+   * #60 item 3 - two Allow once calls on one tab share its diagnostics attachment, and the first to
+   * finish must not cut the other's (R-466: never another holder's lease). The attachment and what
+   * it buffered end with the last of them.
+   */
+  describe("overlapping allow-once calls on one tab", () => {
+    /** The scripted debugger, with each `Runtime.evaluate` held open until the test lets it answer. */
+    function heldEvaluates() {
+      const debug = scriptedDebugger();
+      const gates: Array<() => void> = [];
+      const send = debug.adapter.send.bind(debug.adapter);
+      debug.adapter.send = async (tabId, method, params, sessionId) => {
+        if (method === "Runtime.evaluate") await new Promise<void>((open) => gates.push(open));
+        return send(tabId, method, params, sessionId);
+      };
+      const attachments = createInputAttachments({ debug: debug.adapter });
+      return { debug, attachments, gates };
+    }
+
+    async function allowOnce(prompts: AgentPromptController): Promise<void> {
+      await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+      prompts.decide(prompts.current()?.promptId ?? "", true);
+    }
+
+    it("runs two overlapping allow-once evaluates, and lets go only after the second", async () => {
+      const { debug, attachments, gates } = heldEvaluates();
+      const { runner, prompts, siteModes } = harness({ attachments });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const first = runner.run(request("evaluate", { expression: "1" }));
+      await allowOnce(prompts);
+      await vi.waitFor(() => expect(gates).toHaveLength(1));
+      const second = runner.run(request("evaluate", { expression: "2" }, { callId: "call-2" }));
+      await allowOnce(prompts);
+      await vi.waitFor(() => expect(gates).toHaveLength(2));
+      // Buffered under the once: it must not outlive the last call that allowed it.
+      debug.emit(AGENT_TAB, "Runtime.consoleAPICalled", logged("under the once"));
+
+      gates[0]?.();
+      await expect(first).resolves.toMatchObject({ callId: "call-1", outcome: "ok" });
+      expect(attachments.holders(AGENT_TAB)).toEqual(["diagnostics"]);
+      expect(debug.state.detached).toEqual([]);
+
+      gates[1]?.();
+      await expect(second).resolves.toMatchObject({ callId: "call-2", outcome: "ok" });
+      expect(attachments.holders(AGENT_TAB)).toEqual([]);
+      expect(debug.state.detached).toEqual([AGENT_TAB]);
+      expect(runner.attached()).toEqual([]);
+
+      await siteModes.set(SITE, { diagnosticsGranted: true });
+      const later = await runner.run(request("read_console", {}, { callId: "call-3" }));
+      expect(later.result).toEqual({ messages: [], truncated: false });
+      await attachments.releaseAll();
+    });
+
+    it("keeps an allow-once evaluate's attachment when an allow-once read on the tab finishes first", async () => {
+      const { debug, attachments, gates } = heldEvaluates();
+      const { runner, prompts, siteModes } = harness({ attachments });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const script = runner.run(request("evaluate", { expression: "1" }));
+      await allowOnce(prompts);
+      await vi.waitFor(() => expect(gates).toHaveLength(1));
+      const read = runner.run(request("read_console", {}, { callId: "call-2" }));
+      await allowOnce(prompts);
+      await expect(read).resolves.toMatchObject({ callId: "call-2", outcome: "ok" });
+      expect(attachments.holders(AGENT_TAB)).toEqual(["diagnostics"]);
+
+      gates[0]?.();
+      await expect(script).resolves.toMatchObject({ callId: "call-1", outcome: "ok" });
+      expect(attachments.holders(AGENT_TAB)).toEqual([]);
+      expect(debug.state.detached).toEqual([AGENT_TAB]);
+    });
+
+    it("keeps an allow-once evaluate's attachment when another call's question on the tab is refused", async () => {
+      const { debug, attachments, gates } = heldEvaluates();
+      const { runner, prompts, siteModes } = harness({ attachments });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const script = runner.run(request("evaluate", { expression: "1" }));
+      await allowOnce(prompts);
+      await vi.waitFor(() => expect(gates).toHaveLength(1));
+      const refused = await refusedAfterAsking(runner, prompts, request("read_console", {}, { callId: "call-2" }));
+      expect(refused).toMatchObject({ outcome: "denied", reason: "diagnostics-not-granted" });
+      expect(attachments.holders(AGENT_TAB)).toEqual(["diagnostics"]);
+
+      gates[0]?.();
+      await expect(script).resolves.toMatchObject({ callId: "call-1", outcome: "ok" });
+      expect(debug.state.detached).toEqual([AGENT_TAB]);
+      expect(runner.attached()).toEqual([]);
+    });
   });
 });

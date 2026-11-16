@@ -7,7 +7,11 @@ All schemas stay strict (`strictObject`). Host and extension ship together, as t
 ```text
 frame?: { site: SiteOrigin }      // the action's target is in a frame of this site
       | { unknown: true }          // the frame's site could not be established
+      | { unknown: true,           // #51 (2026-11-16): a drag between two different known sites,
+          sites: [SiteOrigin, SiteOrigin] } // start then end; display only, two different sites
 ```
+
+- `sites` changes nothing the card asks or offers: the same once or deny, no Allow always.
 
 - `site` (existing) is still the page's site.
 - `frame` is absent when the deciding site equals the page's site, so existing prompts are unchanged.

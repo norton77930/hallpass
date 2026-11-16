@@ -17,6 +17,7 @@ import { createAgentPromptController } from "../src/service-worker/agent-tools/p
 import { createSiteModeStore } from "../src/service-worker/site-mode-store.js";
 import type { PageExecutionOutcome } from "../src/service-worker/page-ports.js";
 import { testInputAttachments } from "./helpers/input-attachments.js";
+import { FRAME_ANSWER_BOUND_MS } from "../src/service-worker/agent-tools/frames.js";
 import { frameAnswerText } from "../src/service-worker/agent-tools/site-recheck.js";
 import { createInputAttachments, IDLE_DETACH_MS, type AgentInputAttachments } from "../src/service-worker/agent-tools/input.js";
 import type { DebuggerAdapter } from "../src/chrome-adapters/debugger.js";
@@ -1962,6 +1963,41 @@ describe("030 pre-gate claim", () => {
     expect((await siteModes.get(SITE)).mode).toBe("follow-a-plan");
   });
 
+  /**
+   * #53 - the order after an Allow: the lease is read again before anything is stored, and the
+   * unknown-site refusal comes after that read. Pinned so one shared ask-and-apply step keeps it.
+   */
+  it("reads the lease after the answer, before storing Allow always or refusing an unknown site (#53)", async () => {
+    for (const [senders, site] of [
+      [undefined, PAY],
+      [{ 12: { origin: "null", frameId: 12, documentId: "bdoc-12" } }, "unknown"],
+    ] as const) {
+      let held = true;
+      const { runner, siteModes, prompts, input } = framedHarness(
+        { tabOwnership: async (_sessionId, tabId) => (held && tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }) },
+        senders,
+      );
+      await siteModes.set(SITE, { mode: "follow-a-plan" });
+      const stored = vi.spyOn(siteModes, "set");
+
+      const pending = runner.run(typeIntoCard());
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()).toMatchObject({ frame: site === PAY ? { site: PAY } : { unknown: true } });
+      held = false;
+      prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "denied",
+        reason: "not-yours",
+        refusal: { reason: "not-yours" },
+      });
+      expect(stored).not.toHaveBeenCalled();
+      expect((await siteModes.get(PAY)).mode).toBe("ask");
+      expect(inputEvents(input.commands)).toEqual([]);
+    }
+  });
+
   it("delivers nothing on Refuse or on no answer, and names the frame's site (T893)", async () => {
     const { runner, prompts, input } = framedHarness();
 
@@ -2054,6 +2090,107 @@ describe("030 pre-gate claim", () => {
       expect((await siteModes.get(SITE)).mode).toBe("follow-a-plan");
       expect(input.acquired).toEqual([]);
       expect(inputEvents(input.commands)).toEqual([]);
+    });
+  });
+
+  /**
+   * #51 - a drag between two different known sites has no one site to decide it (FR-464), so it asks
+   * with frame unknown as before; the card now also names the two sites, start then end. The names
+   * are display only: nothing about the decision changes.
+   */
+  describe("#51 a drag between two known sites names both on the card", () => {
+    const ADS = "https://ads.fixtures.test:19445";
+    const withSecondFrame = (senders: Record<number, { origin?: string; frameId?: number; documentId?: string }> = {}) => {
+      DOCUMENTS[13] = { url: `${ADS}/ad`, origin: ADS, epoch: "doc-ads", handles: ["t_ad"] };
+      PATHS[13] = [1];
+      return framedHarness(
+        {
+          locate: async ({ ref }) => (ref === "t_card" ? CARD_RECT : { x: 100, y: 40, width: 80, height: 20 }),
+        },
+        { 12: { origin: PAY, frameId: 12, documentId: "bdoc-12" }, 13: { origin: ADS, frameId: 13, documentId: "bdoc-13" }, ...senders },
+      );
+    };
+    afterEach(() => {
+      delete DOCUMENTS[13];
+      delete PATHS[13];
+    });
+    const dragBetween = (from: string, to: string) =>
+      dragRequest({ args: { tabId: AGENT_TAB, from: { ref: from }, to: { ref: to } } });
+
+    it("names the start site and the end site when two frames of two sites are the ends", async () => {
+      for (const [from, to, sites] of [
+        ["t_card", "t_ad", [PAY, ADS]],
+        ["t_ad", "t_card", [ADS, PAY]],
+      ] as const) {
+        const { runner, siteModes, prompts, input } = withSecondFrame();
+        await siteModes.set(SITE, { mode: "skip-checks" });
+
+        const pending = runner.run(dragBetween(from, to));
+        await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+        expect(prompts.current()?.frame).toEqual({ unknown: true, sites });
+        expect(inputEvents(input.commands)).toEqual([]);
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await expect(pending).resolves.toMatchObject({ outcome: "denied", hint: frameAnswerText("unknown", "unknown-site") });
+      }
+    });
+
+    it("names the page's site for an end in the page's own document", async () => {
+      for (const [from, to, sites] of [
+        ["t_save", "t_card", [SITE, PAY]],
+        ["t_card", "t_save", [PAY, SITE]],
+      ] as const) {
+        const { runner, siteModes, prompts } = withSecondFrame();
+        await siteModes.set(SITE, { mode: "skip-checks" });
+
+        const pending = runner.run(dragBetween(from, to));
+        await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+        expect(prompts.current()?.frame).toEqual({ unknown: true, sites });
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await pending;
+      }
+    });
+
+    it("keeps the decision: Allow always is refused, nothing is stored, nothing is sent", async () => {
+      const { runner, siteModes, prompts, input } = withSecondFrame();
+      await siteModes.set(SITE, { mode: "follow-a-plan" });
+      const stored = vi.spyOn(siteModes, "set");
+
+      const pending = runner.run(dragBetween("t_card", "t_ad"));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+
+      await expect(pending).resolves.toEqual({
+        callId: "call-1",
+        outcome: "denied",
+        reason: "owner-denied",
+        hint: frameAnswerText("unknown", "unknown-site"),
+      });
+      expect(stored).not.toHaveBeenCalled();
+      expect((await siteModes.get(PAY)).mode).toBe("ask");
+      expect((await siteModes.get(ADS)).mode).toBe("ask");
+      expect(inputEvents(input.commands)).toEqual([]);
+    });
+
+    it("names no sites when either end's site is unknown", async () => {
+      const { runner, siteModes, prompts } = withSecondFrame({ 13: { origin: "null", frameId: 13, documentId: "bdoc-13" } });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(dragBetween("t_card", "t_ad"));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()?.frame).toEqual({ unknown: true });
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await pending;
+    });
+
+    it("keeps a drag inside one site's frame decided by that site, with no sites", async () => {
+      const { runner, siteModes, prompts } = withSecondFrame();
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const pending = runner.run(dragBetween("t_card", "t_card2"));
+      await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+      expect(prompts.current()?.frame).toEqual({ site: PAY });
+      prompts.decide(prompts.current()?.promptId ?? "", false);
+      await pending;
     });
   });
 
@@ -2179,14 +2316,19 @@ describe("030 pre-gate claim", () => {
       "Runtime.releaseObject",
     ]);
 
-    function pointed(frame: FakeFrame) {
+    function pointed(frame: FakeFrame, options: { stallFirstMetrics?: boolean } = {}) {
       const page = fakePointPage([frame], { pageSite: SITE });
       const recorder = testInputAttachments();
       const recorded = recorder.attachments.send.bind(recorder.attachments);
+      let metricsAsked = 0;
       const attachments = {
         ...recorder.attachments,
         async send(tabId: number, method: string, params?: Record<string, unknown>, sessionId?: string) {
           await recorded(tabId, method, params, sessionId);
+          // #76: the renderer never answers the first viewport read (the one made before the gate).
+          if (options.stallFirstMetrics === true && method === "Page.getLayoutMetrics" && (metricsAsked += 1) === 1) {
+            return new Promise<never>(() => {});
+          }
           return WALK.has(method) ? page.send(method, params ?? {}, sessionId) : {};
         },
         oopifSessions: () => page.sessions(),
@@ -2293,6 +2435,22 @@ describe("030 pre-gate claim", () => {
       expect(page.probed).toEqual([]);
       expect(inputEvents(input.commands)).toEqual([]);
       expect(input.holds.every((hold) => hold.done)).toBe(true);
+    });
+
+    it("decides a point as before when the viewport read gets no answer: the card is raised, not no-match (#76)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { runner, prompts } = pointed(payFrame(), { stallFirstMetrics: true });
+
+        const pending = runner.run(pointClick(160, 900));
+        await vi.advanceTimersByTimeAsync(FRAME_ANSWER_BOUND_MS);
+
+        expect(prompts.current()).toBeDefined();
+        prompts.decide(prompts.current()?.promptId ?? "", false);
+        await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("decides a point less than a pixel past the edge as before: the page may still round it in (#55)", async () => {

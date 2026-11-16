@@ -44,6 +44,13 @@ export function activityText(item: ActivityItem, t: (key: string) => string): st
     // step, and which step it was is not something the card should claim to know afterwards.
     return t("agent.activity.interrupt");
   }
+  if (item.kind === "hold") {
+    // 034 R-521: the owner pressed Stop on the page - one line, no site and no message, as an interrupt.
+    return t("agent.activity.hold");
+  }
+  if (item.kind === "resume") {
+    return t("agent.activity.resume");
+  }
   if (item.kind === "restore") {
     const state = item.message === "fullscreen" ? WINDOW_STATE_KEYS.fullscreen : WINDOW_STATE_KEYS.maximized;
     return t("agent.activity.restore").replace("{state}", () => t(state));
@@ -228,6 +235,8 @@ export function SessionCard(props: {
   onStop: () => void;
   onRelease: () => void;
   onInterrupt: () => void;
+  /** 034 R-521: lifts the owner's Stop from the page; the panel sends one `ui.agent.session-resume`. */
+  onResume: () => void;
   /** 017 FR-259: ends this session's site plan at once; the session goes on. */
   onWithdrawSitePlan: () => void;
   /**
@@ -239,6 +248,8 @@ export function SessionCard(props: {
   const t = (key: string): string => lookup(key, props.locale);
   const { session } = props;
   const state = session.state ?? "working";
+  // 034 R-521: the owner stopped this session from the page and has not resumed it yet.
+  const heldFromPage = session.heldAt !== undefined;
   /**
    * Whether there is anything to interrupt (014 FR-178), as the worker counted it.
    *
@@ -298,6 +309,11 @@ export function SessionCard(props: {
           <p className="agent-session-state">{stateText(session, props.now, t)}</p>
         </div>
         <p className="agent-session-sites">{holdsText(session, t)}</p>
+        {heldFromPage ? (
+          <p className="agent-session-held" role="status">
+            {t("agent.session.heldFromPage")}
+          </p>
+        ) : null}
         {/* 024 FR-393: the standing permissions are on the settings page; this card links to the site it acts on. */}
         {session.site === undefined || props.onManageSite === undefined ? null : (
           <button
@@ -408,7 +424,13 @@ export function SessionCard(props: {
             assistive technology and for the eye, and pressing it anyway says what happened instead
             (014 US1 scenario 5). With a call in flight it is the plain control it looks like.
           */}
-          {state === "working" ? (
+          {/* 034 R-521: a held session has nothing to interrupt; the way on is Resume, or End session. */}
+          {heldFromPage ? (
+            <button type="button" className="agent-resume" onClick={props.onResume}>
+              {t("agent.session.resume")}
+            </button>
+          ) : null}
+          {state === "working" && !heldFromPage ? (
             <button
               type="button"
               className="agent-interrupt"

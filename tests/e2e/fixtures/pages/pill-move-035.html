@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pill move 035 fixture</title>
+<style>
+  /* 035 - the page the pill-move live checks stand on (quickstart scenarios 1-13).
+
+     Everything is fixed-positioned so "under the pill" means the same thing on every run:
+       #corner  top 12px, right 20px, 44 x 28  - under the top-right pill's last control
+       #centre  the middle of the page         - nothing near either pill place
+       #tall    the right 80px, full height    - covers both the top-right and the bottom-right pill places;
+                                                 hidden until a journey shows it (scenario 7)
+     The page records what it receives in window.__pill035 (below) so a journey reads facts from the page
+     itself: where the pill was when a press reached a button, whether any press reached the pill, and
+     when the pill was hidden for a capture. The words avoid the caption words of the pointer (033). */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { height: 100vh; overflow: hidden; font: 16px/1.4 system-ui, sans-serif; color: #222; }
+  .at { position: fixed; margin: 0; box-sizing: border-box; }
+  button { font: inherit; }
+  #status { top: 12px; left: 16px; }
+  #corner { top: 12px; right: 20px; width: 44px; height: 28px; padding: 0; }
+  #centre { top: 45%; left: 35%; width: 140px; height: 40px; }
+  #tall { top: 0; bottom: 0; right: 0; width: 80px; border: 0; background: #dde; display: none; }
+</style>
+<script>
+  (function () {
+    var probe = (window.__pill035 = { places: [], hidden: [], corner: [], centre: [], tall: [], pill: [] });
+    var PILL = '[data-hallpass-pill]';
+    var HIDDEN = 'data-hallpass-hidden';
+
+    // Which half of the viewport the pill is in: its centre above or below the middle.
+    function place() {
+      var pill = document.querySelector(PILL);
+      if (!pill) return 'none';
+      var box = pill.getBoundingClientRect();
+      return box.top + box.height / 2 < window.innerHeight / 2 ? 'top' : 'bottom';
+    }
+
+    // Every change of the pill's place, and every time it is hidden or shown (a capture hides it).
+    var lastPlace = 'none';
+    var lastHidden = false;
+    function observe() {
+      var now = place();
+      if (now !== lastPlace) {
+        lastPlace = now;
+        probe.places.push({ place: now });
+      }
+      var pill = document.querySelector(PILL);
+      var hidden = !!pill && pill.hasAttribute(HIDDEN);
+      if (hidden !== lastHidden) {
+        lastHidden = hidden;
+        probe.hidden.push({ on: hidden, place: now });
+      }
+    }
+    new MutationObserver(observe).observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['style', HIDDEN],
+    });
+
+    // What reaches the page's controls, with the pill's place at that moment; and any press that
+    // reaches the pill itself (a click made by the page's own script is recorded too, as untrusted).
+    var PRESSES = { pointerdown: 1, pointerup: 1, mousedown: 1, mouseup: 1, click: 1 };
+    var clicks = { corner: 0, centre: 0 };
+    function record(event) {
+      var target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest(PILL)) {
+        if (PRESSES[event.type]) probe.pill.push({ type: event.type, trusted: event.isTrusted });
+        return;
+      }
+      var list = target.id === 'corner' ? probe.corner : target.id === 'centre' ? probe.centre : target.id === 'tall' ? probe.tall : null;
+      if (!list) return;
+      list.push({ type: event.type, place: place(), trusted: event.isTrusted });
+      if (event.type === 'click' && clicks[target.id] !== undefined) {
+        clicks[target.id] += 1;
+        var status = document.getElementById('status');
+        if (status) status.textContent = 'corner ' + clicks.corner + ' / centre ' + clicks.centre;
+      }
+    }
+    ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'mouseover', 'mousemove'].forEach(function (type) {
+      window.addEventListener(type, record, true);
+    });
+  })();
+</script>
+</head>
+<body>
+<p id="status" class="at">corner 0 / centre 0</p>
+<button type="button" id="corner" class="at" aria-label="Corner button">C</button>
+<button type="button" id="centre" class="at" aria-label="Centre button">Centre</button>
+<button type="button" id="tall" class="at" aria-label="Tall side element"></button>
+</body>
+</html>

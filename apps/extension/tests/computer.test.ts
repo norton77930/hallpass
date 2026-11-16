@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WINDOW_MINIMIZED_HINT, type AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { captureTab, SCREENSHOT_MAX_BASE64_CHARS } from "../src/chrome-adapters/capture.js";
+import { measureViewport } from "../src/service-worker/agent-tools/computer.js";
+import { FRAME_ANSWER_BOUND_MS } from "../src/service-worker/agent-tools/frames.js";
 import { createAgentEffects } from "../src/service-worker/agent-tools/effects.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentPromptController } from "../src/service-worker/agent-tools/prompts.js";
@@ -947,5 +949,56 @@ describe("030 a coordinate action is decided by the frame under its point", () =
     expect(presses(commands)).toHaveLength(1);
     // Asked before the gate, and again right before the press.
     expect(page.probed).toEqual([5, 5]);
+  });
+});
+
+/**
+ * #76: the viewport read the #55 off-viewport check and `computer`'s preflight make before the gate
+ * is bounded. A renderer that never answers `Page.getLayoutMetrics` settles it `undefined`, which
+ * every caller already treats as "cannot be measured: decided as before".
+ */
+describe("#76 measureViewport is bounded", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("settles undefined once the bound passes without an answer, and not before", async () => {
+    const send = vi.fn(() => new Promise<unknown>(() => {}));
+    let settled: { viewport: unknown } | undefined;
+    void measureViewport(AGENT_TAB, send).then((viewport) => {
+      settled = { viewport };
+    });
+
+    await vi.advanceTimersByTimeAsync(FRAME_ANSWER_BOUND_MS - 1);
+    expect(settled).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(settled).toEqual({ viewport: undefined });
+    expect(send).toHaveBeenCalledWith(AGENT_TAB, "Page.getLayoutMetrics");
+  });
+
+  it("ignores an answer or a failure that arrives after the bound", async () => {
+    let fail!: (error: Error) => void;
+    const send = () =>
+      new Promise<unknown>((_resolve, reject) => {
+        fail = reject;
+      });
+    const pending = measureViewport(AGENT_TAB, send);
+
+    await vi.advanceTimersByTimeAsync(FRAME_ANSWER_BOUND_MS);
+    await expect(pending).resolves.toBeUndefined();
+    // Vitest fails the run on an unhandled rejection, so a late failure nobody awaits would show here.
+    fail(new Error("the renderer answered too late"));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("answers the viewport as soon as the read does, and leaves no timer behind", async () => {
+    const send = async () => ({ cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } });
+
+    await expect(measureViewport(AGENT_TAB, send)).resolves.toEqual({ width: 800, height: 600 });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

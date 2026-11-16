@@ -9,6 +9,7 @@ import {
   composeAgentRuntime,
 } from "../src/service-worker/agent-runtime.js";
 import type { AgentPortLike } from "../src/service-worker/agent-bridge.js";
+import { IDLE_DETACH_ALARM } from "../src/service-worker/agent-tools/input.js";
 
 /**
  * 004/T095 — several agent sessions on one worker (US2, R-111).
@@ -474,6 +475,15 @@ describe("T095 several agent sessions in one worker", () => {
     expect(fake.clearedAlarms).toContain("stale-alarm-a");
     expect(fake.clearedAlarms).toContain("stale-alarm-b");
     expect(fake.clearedAlarms).not.toContain(AGENT_RETRY_ALARM);
+  });
+
+  it("leaves the idle-detach wake alone on start: it is one of its own (#60 item 2)", async () => {
+    fake.alarms.push({ name: "stale-alarm-a", info: {} }, { name: IDLE_DETACH_ALARM, info: {} });
+    const port = fakePort();
+    composeAgentRuntime({ connectNative: () => port });
+
+    await vi.waitFor(() => expect(fake.clearedAlarms).toContain("stale-alarm-a"));
+    expect(fake.clearedAlarms).not.toContain(IDLE_DETACH_ALARM);
   });
 
   /**

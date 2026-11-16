@@ -757,6 +757,63 @@ test.describe("agent frame consent", () => {
       await client?.close();
     }
   });
+
+  test("Story 9 (#51): a drag from the page into another site's frame names both sites, and still offers no Allow always", async ({
+    extensionContext,
+    extensionId,
+    extensionWorker,
+  }) => {
+    test.setTimeout(300_000);
+    const { panel, settings } = await ownerSurfaces(extensionContext, extensionId, extensionWorker);
+    let client: McpHarnessClient | undefined;
+    try {
+      client = await startMcpClient({ clientName: "Claude Code" });
+      const live = client;
+      const call = callerFor(() => client);
+      await panel.clickIfPresent(ui("agent.retry"));
+      await pairWithFirstCall(live, panel, { locale });
+
+      const tabId = await openTab(call, `${SITE}/frame-consent`);
+      const page = await agentPage(extensionContext, `${SITE}/frame-consent`);
+      const frame = page.frameLocator("#consent-frame");
+      await expect(frame.locator("#frame-field")).toBeVisible();
+      // Even with the page's own site on skip-checks, no one site decides a drag between two sites.
+      await settings.setSiteMode(SITE, "skip-checks");
+
+      // Points, start on the page's own heading, end on the frame's field.
+      const from = await centreOf(page.locator("#top-heading"));
+      const to = await centreOf(frame.locator("#frame-field"));
+      const dragging = live.callTool("drag", { tabId, from, to });
+      await waitForPrompt(panel, "consent");
+      const line = await frameLine(panel);
+      expect(line.kind, await panel.panelText()).toBe("unknown");
+      expect(line.text).toContain(SITE);
+      expect(line.text).toContain(SECOND);
+      expect(line.text.indexOf(SITE), "the start site is named before the end site").toBeLessThan(line.text.indexOf(SECOND));
+      expect(await promptButtons(panel, "consent")).toEqual(
+        expect.arrayContaining([ui("agent.allowOnce"), ui("agent.refuse")]),
+      );
+      expect(await promptButtons(panel, "consent"), "a two-site drag card offers Allow always").not.toContain(
+        ui("agent.allowAlways"),
+      );
+      await panelShot(panel, `frame-card-two-sites-${locale}.png`);
+
+      await clickInPrompt(panel, "consent", ui("agent.refuse"));
+      const refused = await dragging;
+      expect(refused.isError, refused.text).toBe(true);
+      expect(answerOf(refused), refused.text).toMatchObject({ outcome: "denied", reason: "owner-denied" });
+      expect(await frame.locator("#frame-field").inputValue()).toBe("");
+      await expect.poll(() => promptKinds(panel), { timeout: 10_000, message: "the card stayed up after Refuse" }).toEqual([]);
+      expect(await settings.siteMode(SECOND).catch(() => null), "refusing stored something for the frame's site").not.toBe(
+        "skip-checks",
+      );
+
+      await closeTab(extensionWorker, tabId);
+    } finally {
+      await forgetSites(settings, [SITE, SECOND]);
+      await client?.close();
+    }
+  });
 });
 
 type ReadNode ={ ref?: string; role?: string; name?: string; frame?: string; site?: string };

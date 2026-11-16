@@ -1,5 +1,16 @@
-import { executeInAllFrames } from "../../chrome-adapters/all-frames.js";
-import { FOCUS_WALK_MAX_DEPTH, type FrameFocusAnswer } from "./frame-site.js";
+import { executeInAllFrames } from "./all-frames.js";
+
+/**
+ * How many frames deep the focus chain is followed, and how many shadow levels a frame follows its
+ * own focus (`focusOfFrame` gets it through `executeScript` args); deeper is unknown.
+ */
+export const FOCUS_WALK_MAX_DEPTH = 32;
+
+/**
+ * One frame's focus answer as the browser gave it: the frame and document ids it attached, and what
+ * the script returned (`focusOfFrame`'s result, or `null` when the frame returned nothing).
+ */
+export type FrameFocusReading = { frameId?: number; documentId?: string; result?: unknown };
 
 /**
  * Where the tab's focus is, read across every frame at once (030 T908).
@@ -85,13 +96,13 @@ export function focusOfFrame(maxDepth: number): { path: number[] | null; focused
  * Every frame's focus answer for tab `tabId`, with the browser's frame and document ids. Rejects past
  * the all-frames bound (`executeInAllFrames`); `resolveFocusSite` answers that as unknown.
  */
-export async function readFrameFocus(tabId: number): Promise<FrameFocusAnswer[]> {
+export async function readFrameFocus(tabId: number): Promise<FrameFocusReading[]> {
   const results = (await executeInAllFrames({
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: focusOfFrame,
     args: [FOCUS_WALK_MAX_DEPTH],
-  })) as Array<{ frameId?: number; documentId?: string; result?: unknown }> | undefined;
+  })) as FrameFocusReading[] | undefined;
   return (results ?? []).map((entry) => ({
     ...(typeof entry.frameId === "number" ? { frameId: entry.frameId } : {}),
     ...(typeof entry.documentId === "string" ? { documentId: entry.documentId } : {}),

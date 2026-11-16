@@ -1,5 +1,21 @@
-import { applyPointerStep, moveCursor, removeCursor, type CursorHost } from "./cursor.js";
-import { applyIndicator, isIndicatorHide, type IndicatorHost } from "./indicator.js";
+import {
+  applyPointerStep,
+  isCursorMessage,
+  isPointerStep,
+  moveCursor,
+  removeCursor,
+  type CursorHost,
+} from "./cursor.js";
+import {
+  applyIndicator,
+  isIndicatorHide,
+  placePill,
+  type IndicatorHost,
+  type PillOpenPress,
+  type PillOpenReply,
+  type PillPress,
+  type PillPressReply,
+} from "./indicator.js";
 import { applyMarks } from "./marks.js";
 
 /**
@@ -43,10 +59,43 @@ function post(runtime: ChromeAgentRuntime, message: AgentContentMessage): void {
   }
 }
 
+/**
+ * A pill press (034/R-517): sent, and the worker's `{ accepted }` reply handed back. A rejected or
+ * throwing send, and any answer of another shape, resolve as `undefined` - "no reply" - which the
+ * pill answers with its resend and its not-delivered words.
+ */
+async function press(runtime: ChromeAgentRuntime, message: PillPress): Promise<PillPressReply | undefined> {
+  try {
+    const reply = await runtime.sendMessage?.(message);
+    const accepted = (reply as { accepted?: unknown } | undefined | null)?.accepted;
+    return typeof accepted === "boolean" ? { accepted } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The Open side panel press (035/R-527): sent once, the worker's `{ opened }` reply handed back. A
+ * rejected or throwing send, and any answer of another shape, resolve as `undefined` - "no reply" -
+ * which the pill answers with its not-opened words. Never resent: a resend carries no user gesture.
+ */
+async function openPanel(runtime: ChromeAgentRuntime): Promise<PillOpenReply | undefined> {
+  try {
+    const message: PillOpenPress = { type: "ui.agent.pill-open-panel" };
+    const reply = await runtime.sendMessage?.(message);
+    const opened = (reply as { opened?: unknown } | undefined | null)?.opened;
+    return typeof opened === "boolean" ? { opened } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function indicatorHost(runtime: ChromeAgentRuntime, doc: Document): IndicatorHost {
   return {
     doc,
     send: (message) => post(runtime, message),
+    press: (message) => press(runtime, message),
+    openPanel: () => openPanel(runtime),
     // The same answer the pointer gets: the browser's, not the page's.
     isTopFrame: cursorHost(doc).isTopFrame,
   };
@@ -76,6 +125,8 @@ export function bindAgentContentRuntime(runtime: ChromeAgentRuntime, doc: Docume
     // The pointer's words and rest spot (033/R-491). Fire-and-forget: the worker never waits on a
     // step, so there is no reply and the channel is not kept open. A malformed step is not owned
     // here and falls through to the cursor check, which does not own it either.
+    // 035/R-525: a rest step brings the pill back to the owner's edge - the rest spot is at the bottom-left.
+    if (isPointerStep(message) && message.mode === "rest" && cursorHost(doc).isTopFrame) placePill(doc, undefined);
     if (applyPointerStep(message, cursorHost(doc))) return false;
     // Hide the marks for a capture the agent will see, and bring them back (033/R-499). A hide is
     // answered once the hidden state has been painted, a show once the marks are painted back, so the
@@ -91,6 +142,17 @@ export function bindAgentContentRuntime(runtime: ChromeAgentRuntime, doc: Docume
     if (marks !== "not-mine") return marks === "answering";
     // The pointer mark (T127). The browser's own answer decides which document draws it, never the
     // page's - `window.top` is the one fact a frame cannot lie about itself.
+    // 035/R-524: the pill's place is decided and applied here, synchronously, before the glide starts and
+    // so before the arrival reply below - the worker dispatches the agent's press only after that reply,
+    // which is what keeps the press off the pill. A hide or a malformed message does not point anywhere.
+    if (isCursorMessage(message) && cursorHost(doc).isTopFrame) {
+      placePill(
+        doc,
+        message.hide === true || message.x === undefined || message.y === undefined
+          ? undefined
+          : { point: { x: message.x, y: message.y }, ...(message.box ? { box: message.box } : {}) },
+      );
+    }
     const arrival = moveCursor(message, cursorHost(doc));
     if (arrival === undefined) return false;
     // Answered when the travel has ended, so the worker's press lands where the owner watched the

@@ -46,6 +46,12 @@ export type AgentToolRequest = AgentNativeRequest & {
   stopped?: (() => boolean) | undefined;
 };
 
+/**
+ * The two words the registry can set (014 FR-180). `owner-held` (034 R-516) is never one of them: it
+ * answers a call refused before it registered, so no handle can ever read it.
+ */
+export type OwnerEndReason = Exclude<AgentStopReason, "owner-held">;
+
 export type AgentStopHandle = {
   /** Whether Stop has reached this call. Read between steps and between polls, never once. */
   stopped(): boolean;
@@ -56,7 +62,7 @@ export type AgentStopHandle = {
    * about what is left standing - a stop hands the session's tabs back, an interrupt keeps every
    * one of them - and a runner that guessed would tell an agent the wrong one.
    */
-  reason(): AgentStopReason | undefined;
+  reason(): OwnerEndReason | undefined;
   /**
    * The owner's 中斷, as something a caller can await (014 FR-179, R-185 §2).
    *
@@ -132,7 +138,7 @@ export function createAgentStopSignals(): AgentStopSignals {
     callId: string;
     sessionId: string;
     stopped: boolean;
-    reason?: AgentStopReason;
+    reason?: OwnerEndReason;
     /** Created on demand: only the dispatcher awaits one, and only for calls that are raced. */
     interruption?: { promise: Promise<void>; resolve: () => void };
   };
@@ -171,7 +177,7 @@ export function createAgentStopSignals(): AgentStopSignals {
     return separator === -1 ? id : id.slice(0, separator);
   };
 
-  function flag(entry: Registration, reason: AgentStopReason): void {
+  function flag(entry: Registration, reason: OwnerEndReason): void {
     // The first word wins. A stop that arrives after an interrupt has nothing left to end, and
     // rewriting the reason would change the answer a runner is already composing.
     if (entry.stopped) return;

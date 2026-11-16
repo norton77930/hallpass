@@ -66,14 +66,29 @@ describe("T350 the reasons an owner's decision answers with", () => {
   });
 
   /**
-   * The flag the stop registry carries, and the two words it can read (data-model "Stop flag").
+   * The words the owner's controls answer a call with (data-model "Stop flag", 034 R-516).
    *
-   * Two, and closed: a runner asks the handle what ended it and answers that word verbatim, so a
-   * third value invented in a runner would reach an agent as a reason nothing documents.
+   * Closed: a runner asks the handle what ended it and answers that word verbatim, so a value
+   * invented in a runner would reach an agent as a reason nothing documents. The registry carries
+   * the first two; the third answers a call refused while the session is held, which never ran.
    */
-  it("closes the stop flag's two reasons", () => {
+  it("closes the stop flag's reasons", () => {
     const reasons = contractExport<readonly string[]>("AGENT_STOP_REASONS");
-    expect([...reasons]).toEqual(["owner-stopped", "owner-interrupted"]);
+    // 034 R-516: `owner-held` is the third word, for a call refused while the owner's Stop holds the session.
+    expect([...reasons]).toEqual(["owner-stopped", "owner-interrupted", "owner-held"]);
+  });
+
+  /**
+   * 034 R-516 - what a call of a held session is told. One sentence, no hole, and it is the only
+   * prose the agent receives for the hold; the host passes the worker's answer through unchanged.
+   */
+  it("answers a call of a held session with owner-held and its one sentence", () => {
+    const hint = contractExport<string>("HELD_HINT");
+    expect(hint).toBe(
+      "The owner pressed Stop on the page, so nothing was done. Stop and tell your user; the owner can resume from the page or the side panel.",
+    );
+    const response = contractSchema("agentNativeResponseSchema");
+    expectAccepted(response, { callId: CALL, outcome: "stopped", reason: "owner-held", hint }, "a held answer carrying its sentence");
   });
 
   /**
@@ -331,8 +346,10 @@ describe("T350 the frames the host, the relay and the worker agree on", () => {
      * so nothing was interrupted and nothing was declined - and both of those were what the host
      * used to tell the agent about a second session asking at the same moment. It is the word every
      * other tool of this product already answers that situation with.
+     *
+     * 034 FR-515 adds `held`: the session is held, so the worker raised no card at all.
      */
-    for (const decision of ["once", "always", "deny", "timed-out", "interrupted", "busy"]) {
+    for (const decision of ["once", "always", "deny", "timed-out", "interrupted", "busy", "held"]) {
       expectAccepted(
         frame,
         { type: "upload-consent-result", callId: CALL, decision },

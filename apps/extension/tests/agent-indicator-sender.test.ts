@@ -160,6 +160,16 @@ const RAISED = {
   // what the owner is told, and the browser under test runs in zh-TW here.
   label: lookup("agent.indicator.active", "zh-TW"),
   action: lookup("agent.indicator.focusMain", "zh-TW"),
+  // 034 R-518: a session that is not held shows Stop, with the words for a press nobody answers.
+  mode: "working",
+  stop: lookup("agent.indicator.stop", "zh-TW"),
+  stopUndelivered: lookup("agent.indicator.stopUndelivered", "zh-TW"),
+  // 035 R-530: the owner's edge (top until a move press) and the move and open controls' words.
+  edge: "top",
+  moveToTop: lookup("agent.indicator.moveToTop", "zh-TW"),
+  moveToBottom: lookup("agent.indicator.moveToBottom", "zh-TW"),
+  openPanel: lookup("agent.indicator.openPanel", "zh-TW"),
+  panelUnopened: lookup("agent.indicator.panelUnopened", "zh-TW"),
 };
 const LOWERED = { type: "indicator", show: false };
 
@@ -419,5 +429,112 @@ describe("the sender's injection fallback, by its deps", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(calls.injected).toEqual([]);
     expect(calls.reported).toEqual([]);
+  });
+});
+
+/**
+ * 034/T1009 - the pill's state and words (R-518, data-model "Pill state", contracts/pill-messages.md).
+ *
+ * One composer chooses every word the pill shows, in the owner's locale, for the three states a
+ * session can be in: working (Stop), held (the held label and Resume) and a side-panel conversation
+ * (Stop, never Resume). The not-delivered words travel with the state, because the worker may be the
+ * thing that does not answer the press. A page that reloads while its session is held is answered
+ * with the held pill, from the same composer.
+ */
+describe("T1009 the pill's state and words", () => {
+  type Mode = "working" | "held" | "conversation";
+
+  function composed(mode: Mode, locale: string) {
+    const sent: Array<{ tabId: number; message: IndicatorMessage }> = [];
+    const indicator = createAgentIndicator({
+      send: async (tabId, message) => {
+        sent.push({ tabId, message });
+      },
+      inject: async () => undefined,
+      reportDiagnostic: () => undefined,
+      holderOf: async (tabId) => (tabId === 3 ? undefined : "session-a"),
+      modeOf: () => mode,
+      tabsOf: async () => [5, 7],
+      locale: () => locale,
+    });
+    return { indicator, sent };
+  }
+
+  function expected(mode: Mode, locale: string): IndicatorMessage {
+    const words = (key: Parameters<typeof lookup>[0]) => lookup(key, locale);
+    // 035 R-530: every pill carries the owner's edge and the move and open controls' words.
+    const common = {
+      edge: "top" as const,
+      moveToTop: words("agent.indicator.moveToTop"),
+      moveToBottom: words("agent.indicator.moveToBottom"),
+      openPanel: words("agent.indicator.openPanel"),
+      panelUnopened: words("agent.indicator.panelUnopened"),
+    };
+    if (mode === "held") {
+      return {
+        type: "indicator",
+        show: true,
+        mode: "held",
+        heldLabel: words("agent.indicator.held"),
+        action: words("agent.indicator.focusMain"),
+        resume: words("agent.indicator.resume"),
+        resumeUndelivered: words("agent.indicator.resumeUndelivered"),
+        ...common,
+      };
+    }
+    return {
+      type: "indicator",
+      show: true,
+      mode,
+      label: words("agent.indicator.active"),
+      action: words("agent.indicator.focusMain"),
+      stop: words("agent.indicator.stop"),
+      stopUndelivered: words("agent.indicator.stopUndelivered"),
+      ...common,
+    };
+  }
+
+  for (const locale of ["en-US", "zh-TW"]) {
+    for (const mode of ["working", "held", "conversation"] as const) {
+      it(`fills the ${mode} pill's words in ${locale}`, async () => {
+        const { indicator, sent } = composed(mode, locale);
+
+        indicator.raise(7, "session-a");
+
+        await expect.poll(() => sent, { timeout: 1000 }).toEqual([{ tabId: 7, message: expected(mode, locale) }]);
+      });
+    }
+  }
+
+  it("words differ between the two locales, so the locale is really read", () => {
+    expect(lookup("agent.indicator.stop", "zh-TW")).not.toBe(lookup("agent.indicator.stop", "en-US"));
+    expect(lookup("agent.indicator.held", "zh-TW")).not.toBe(lookup("agent.indicator.held", "en-US"));
+  });
+
+  it("answers a held session's reloaded page with the held pill", async () => {
+    const { indicator, sent } = composed("held", "en-US");
+
+    await indicator.answerAnnouncement(7);
+
+    await expect.poll(() => sent, { timeout: 1000 }).toEqual([{ tabId: 7, message: expected("held", "en-US") }]);
+  });
+
+  it("still answers a tab nobody holds with no pill, whatever the mode", async () => {
+    const { indicator, sent } = composed("held", "en-US");
+
+    await indicator.answerAnnouncement(3);
+
+    await expect.poll(() => sent, { timeout: 1000 }).toEqual([{ tabId: 3, message: { type: "indicator", show: false } }]);
+  });
+
+  it("raises every tab of a session at once", async () => {
+    const { indicator, sent } = composed("held", "zh-TW");
+
+    await indicator.raiseSession("session-a");
+
+    await expect.poll(() => sent, { timeout: 1000 }).toEqual([
+      { tabId: 5, message: expected("held", "zh-TW") },
+      { tabId: 7, message: expected("held", "zh-TW") },
+    ]);
   });
 });

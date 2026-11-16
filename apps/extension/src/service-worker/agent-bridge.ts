@@ -340,8 +340,11 @@ export type AgentBridge = {
   disconnect(): void;
 };
 
-/** The six things the owner's answer can be (014/R-187 §1); the runtime maps its card to one. */
-export type UploadConsentDecision = "once" | "always" | "deny" | "timed-out" | "interrupted" | "busy";
+/**
+ * The six things the owner's answer can be (014/R-187 §1); the runtime maps its card to one. And a
+ * seventh that is no answer at all (034 FR-515): the session is held, so no card was raised.
+ */
+export type UploadConsentDecision = "once" | "always" | "deny" | "timed-out" | "interrupted" | "busy" | "held";
 
 const defaultTimer: AgentReconnectTimer = {
   set: (callback, delayMs) => setTimeout(callback, delayMs),

@@ -59,7 +59,10 @@ const RING_ATTRIBUTE = "data-hallpass-ring";
 const STYLE_ATTRIBUTE = "data-hallpass-cursor-style";
 
 /** What the worker sends before each pointer gesture (`input.ts`); `hide` is kept for the protocol. */
-export type CursorMessage = { type: "cursor"; x?: number; y?: number; hide?: true; press?: true };
+export type CursorMessage = { type: "cursor"; x?: number; y?: number; hide?: true; press?: true; box?: CursorBox };
+
+/** 035/R-526: the located target's rectangle in top-document viewport pixels; the pill steps aside for it. */
+export type CursorBox = { x: number; y: number; width: number; height: number };
 
 /** What the worker sends when a tool call starts (033/R-491): the words and what the pointer does. */
 export type PointerStepMode = "travel" | "stay" | "rest";
@@ -160,11 +163,33 @@ export function isCursorMessage(message: unknown): message is CursorMessage {
   if (!message || typeof message !== "object" || Array.isArray(message)) return false;
   const candidate = message as Record<string, unknown>;
   if (candidate["type"] !== "cursor") return false;
-  if (!hasOnlyKeys(candidate, ["type", "x", "y", "press", "hide"])) return false;
+  if (!hasOnlyKeys(candidate, ["type", "x", "y", "press", "hide", "box"])) return false;
   if ("hide" in candidate) return candidate["hide"] === true && Object.keys(candidate).length === 2;
   if (typeof candidate["x"] !== "number" || !Number.isFinite(candidate["x"])) return false;
   if (typeof candidate["y"] !== "number" || !Number.isFinite(candidate["y"])) return false;
+  if ("box" in candidate && !isCursorBox(candidate["box"])) return false;
   return !("press" in candidate) || candidate["press"] === true;
+}
+
+/** 035/R-526: exactly x, y, width, height, all finite, width and height not negative. */
+function isCursorBox(box: unknown): box is CursorBox {
+  if (!box || typeof box !== "object" || Array.isArray(box)) return false;
+  const candidate = box as Record<string, unknown>;
+  const keys = Object.keys(candidate);
+  if (keys.length !== 4 || !hasOnlyKeys(candidate, ["x", "y", "width", "height"])) return false;
+  const { x, y, width, height } = candidate;
+  return (
+    typeof x === "number" &&
+    Number.isFinite(x) &&
+    typeof y === "number" &&
+    Number.isFinite(y) &&
+    typeof width === "number" &&
+    Number.isFinite(width) &&
+    width >= 0 &&
+    typeof height === "number" &&
+    Number.isFinite(height) &&
+    height >= 0
+  );
 }
 
 /** Exactly `{ type, words, mode }`, `words` a string of at most 60 characters, `mode` one of three. */

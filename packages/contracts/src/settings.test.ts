@@ -110,6 +110,7 @@ describe("024 settingsCommandSchema", () => {
     const refused = [
       command("ui.agent.session-stop", { sessionId: "s" }),
       command("ui.agent.session-interrupt", { sessionId: "s" }),
+      command("ui.agent.session-resume", { sessionId: "s" }),
       command("ui.agent.session-release", { sessionId: "s" }),
       command("ui.agent.site-plan-withdraw", { sessionId: "s" }),
       command("ui.agent.site-plan-decide", { proposalId: "p", approve: false, origins: [] }),

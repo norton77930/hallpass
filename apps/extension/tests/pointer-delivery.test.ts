@@ -437,3 +437,140 @@ describe("T120 pointer delivery", () => {
     });
   });
 });
+
+/**
+ * 035/T1041 - the target's box travels with the cursor message (R-526, contracts/pill-messages.md).
+ *
+ * The page decides whether the pill steps aside from the agent's point and, when the step has a
+ * located target, its box - so the element tools that aim at a located target send the box the point
+ * was taken from, and nothing else does: a `computer` step and a drag's end point name no element.
+ */
+describe("T1041 the cursor message's box", () => {
+  const OTHER_RECT = { x: 300, y: 200, width: 40, height: 40 };
+
+  beforeEach(() => {
+    installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  describe("the pointer", () => {
+    function recording() {
+      const fake = fakeAttachments();
+      const cursor: CursorMessage[] = [];
+      const pointer = createPointerInput({
+        attachments: fake.attachments,
+        cursor: (tabId, message) => {
+          cursor.push({ tabId, message: message as Record<string, unknown> });
+        },
+      });
+      return { pointer, cursor: () => cursor.map((entry) => entry.message) };
+    }
+
+    it("puts the click's box on its move, beside the unchanged point and press", async () => {
+      const { pointer, cursor } = recording();
+
+      await pointer.click(AGENT_TAB, CENTRE, { button: "left", clickCount: 1, box: TARGET_RECT });
+
+      expect(cursor()).toEqual([{ type: "cursor", x: 140, y: 50, press: true, box: TARGET_RECT }]);
+    });
+
+    it("puts the hover's box on its move", async () => {
+      const { pointer, cursor } = recording();
+
+      await pointer.hover(AGENT_TAB, CENTRE, { box: TARGET_RECT });
+
+      expect(cursor()).toEqual([{ type: "cursor", x: 140, y: 50, box: TARGET_RECT }]);
+    });
+
+    it("puts the drag's start box on the press move and none on the end", async () => {
+      const { pointer, cursor } = recording();
+
+      await pointer.drag(AGENT_TAB, { x: 10, y: 20 }, { x: 90, y: 120 }, { box: TARGET_RECT });
+
+      expect(cursor()).toEqual([
+        { type: "cursor", x: 10, y: 20, press: true, box: TARGET_RECT },
+        { type: "cursor", x: 90, y: 120 },
+      ]);
+    });
+
+    it("sends a box of exactly the four keys, whatever else the caller's rect carries", async () => {
+      const { pointer, cursor } = recording();
+      const rect = { ...TARGET_RECT, link: true, frame: { sessionId: "frame-1" } };
+
+      await pointer.click(AGENT_TAB, CENTRE, { box: rect });
+
+      expect(cursor()[0]).toHaveProperty("box", TARGET_RECT);
+      expect(Object.keys((cursor()[0] as { box: object }).box).sort()).toEqual(["height", "width", "x", "y"]);
+    });
+
+    it("sends no box key for a click, hover, scroll or drag that names none (what computer steps do)", async () => {
+      const { pointer, cursor } = recording();
+
+      await pointer.click(AGENT_TAB, CENTRE, { button: "left", clickCount: 1 });
+      await pointer.hover(AGENT_TAB, CENTRE);
+      await pointer.scroll(AGENT_TAB, CENTRE, { deltaX: 0, deltaY: 100 });
+      await pointer.drag(AGENT_TAB, { x: 10, y: 20 }, { x: 90, y: 120 });
+
+      for (const message of cursor()) expect(message).not.toHaveProperty("box");
+    });
+  });
+
+  describe("through the effect tools", () => {
+    it("sends the located target's rect with a ref click", async () => {
+      const { runner, siteModes, cursor } = harness();
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      await runner.run(request("click"));
+
+      expect(cursor.map((entry) => entry.message)).toEqual([
+        { type: "cursor", x: 140, y: 50, press: true, box: TARGET_RECT },
+      ]);
+    });
+
+    it("sends it with a hover, at the same point", async () => {
+      const { runner, siteModes, cursor } = harness();
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      await runner.run(request("hover"));
+
+      expect(cursor.map((entry) => entry.message)).toEqual([{ type: "cursor", x: 140, y: 50, box: TARGET_RECT }]);
+    });
+
+    it.each([
+      ["type", { text: "hi" }],
+      ["key", { key: "Enter" }],
+    ])("sends it with the focusing click of %s on a target", async (tool, args) => {
+      const { runner, siteModes, cursor } = harness();
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      await runner.run(request(tool, args));
+
+      expect(cursor.map((entry) => entry.message)).toEqual([
+        { type: "cursor", x: 140, y: 50, press: true, box: TARGET_RECT },
+      ]);
+    });
+
+    it("sends the start target's rect with a drag's press move and none with its end", async () => {
+      const { runner, siteModes, cursor } = harness({
+        locate: async ({ ref }) => (ref === "t_from" ? TARGET_RECT : OTHER_RECT),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      await runner.run({
+        callId: "call-drag",
+        sessionId: "session-p1",
+        tool: "drag",
+        tabId: AGENT_TAB,
+        args: { tabId: AGENT_TAB, from: { ref: "t_from" }, to: { ref: "t_to" } },
+      });
+
+      expect(cursor.map((entry) => entry.message)).toEqual([
+        { type: "cursor", x: 140, y: 50, press: true, box: TARGET_RECT },
+        { type: "cursor", x: 320, y: 220 },
+      ]);
+    });
+  });
+});

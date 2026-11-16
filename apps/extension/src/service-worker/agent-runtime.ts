@@ -3,6 +3,7 @@ import {
   AGENT_EFFECT_TOOL_NAMES,
   AGENT_SESSION_COLOURS,
   AGENT_SESSION_GRANTS_SHOWN,
+  HELD_HINT,
   INTERRUPT_HINTS,
   isRootDirectory,
   type AgentActivityItem,
@@ -19,6 +20,7 @@ import {
   type AgentToolName,
   type SiteMode,
 } from "@hallpass/contracts";
+import { activateWorkspace } from "../chrome-adapters/action-entry.js";
 import { setAttention } from "../chrome-adapters/action-badge.js";
 import { downloadFile, watchDownloadChanged, watchDownloadCreated } from "../chrome-adapters/downloads.js";
 import { createOffscreenAdapter } from "../chrome-adapters/offscreen.js";
@@ -64,12 +66,16 @@ import {
 import { createAgentDiagnostics } from "./agent-tools/diagnostics.js";
 import { createAgentDialogs } from "./agent-tools/dialogs.js";
 import { createAgentDownloadTools } from "./agent-tools/downloads.js";
-import { createInputAttachments, enableFocusEmulation } from "./agent-tools/input.js";
+import { IDLE_DETACH_ALARM, createInputAttachments, enableFocusEmulation } from "./agent-tools/input.js";
 import {
   createAgentIndicator,
   isAgentAnnounceMessage,
   type IndicatorMessage,
+  type PillMode,
 } from "./agent-tools/indicator.js";
+import { createHoldStore, type SessionHold } from "./hold-store.js";
+import { createPillEdgeStore, isPillEdge, type PillEdge } from "./pill-edge-store.js";
+import { lookup } from "../locales/catalog.js";
 import { createAgentEffects } from "./agent-tools/effects.js";
 import { createAgentPageBindings } from "./agent-tools/page-binding.js";
 import { createStatedPlans } from "./agent-tools/plans.js";
@@ -210,6 +216,35 @@ function isFocusMainMessage(message: unknown): message is FocusMainMessage {
   const candidate = message as Partial<FocusMainMessage>;
   if (candidate.type !== "ui.agent.focus-main") return false;
   return candidate.tabId === undefined || typeof candidate.tabId === "number";
+}
+
+/**
+ * 034 R-517 (contracts/pill-messages.md): a trusted press on the pill's Stop or Resume. The body is
+ * the type and nothing else - no session, no tab - so the worker decides everything from Chrome's
+ * own attribution of the sender (R-522).
+ */
+type PillPressType = "ui.agent.pill-stop" | "ui.agent.pill-resume";
+
+/** Whether the listener answers this message at all: the two press types, whatever else they carry. */
+function isPillPressType(message: unknown): message is { type: PillPressType } {
+  if (!message || typeof message !== "object") return false;
+  const type = (message as { type?: unknown }).type;
+  return type === "ui.agent.pill-stop" || type === "ui.agent.pill-resume";
+}
+
+/**
+ * 035 R-529 (contracts/pill-messages.md): a trusted press on the pill's move control. The body names
+ * the edge the control shows and nothing else; the tab is only ever Chrome's `sender.tab.id`.
+ */
+type PillMovePress = { type: "ui.agent.pill-move"; to: PillEdge };
+
+function isPillMoveType(message: unknown): message is { type: "ui.agent.pill-move" } {
+  return !!message && typeof message === "object" && (message as { type?: unknown }).type === "ui.agent.pill-move";
+}
+
+/** 035 R-527: a trusted press on the pill's "Open side panel"; the body is the type and nothing else. */
+function isPillOpenType(message: unknown): message is { type: "ui.agent.pill-open-panel" } {
+  return !!message && typeof message === "object" && (message as { type?: unknown }).type === "ui.agent.pill-open-panel";
 }
 
 /** What the worker is told about the sender of a content-script message; Chrome fills it in. */
@@ -497,6 +532,11 @@ export type AgentRuntime = {
    */
   interruptSession: (sessionId: string) => { interrupted: number };
   /**
+   * 034 R-521: the session card's Resume - the page-Stop hold is lifted and the next call runs. A
+   * session that is not held, or that this worker does not know, changes nothing.
+   */
+  resumeSession: (sessionId: string) => Promise<void>;
+  /**
    * The session card's Release tabs (006 FR-087): every tab the session holds goes back to the owner
    * the way `tabs_release` hands one back, and the session stays live and paired.
    */
@@ -570,7 +610,7 @@ function scheduleReconcileAlarm(): void {
  * over from an earlier version (0.2.0 used other names). Cleared once on start.
  */
 async function clearLegacyAlarms(): Promise<void> {
-  const known = new Set([AGENT_RETRY_ALARM, AGENT_HEARTBEAT_ALARM, AGENT_RECONCILE_ALARM]);
+  const known = new Set([AGENT_RETRY_ALARM, AGENT_HEARTBEAT_ALARM, AGENT_RECONCILE_ALARM, IDLE_DETACH_ALARM]);
   const all = (await chrome.alarms?.getAll?.()) ?? [];
   for (const alarm of all) {
     if (!known.has(alarm.name)) await chrome.alarms?.clear(alarm.name);
@@ -675,7 +715,10 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * rejection is: it means the tab has no content script at all (open since before the extension
    * was reloaded), and the indicator injects one for a raise.
    */
+  /** 035 R-528: the owner's edge for the pill; the composer below waits for its first load. */
+  const pillEdge = createPillEdgeStore();
   const indicator = createAgentIndicator({
+    pillEdge,
     send: async (tabId, message: IndicatorMessage) => {
       await chrome.tabs?.sendMessage?.(tabId, message, { frameId: 0 });
     },
@@ -683,9 +726,13 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     reportDiagnostic: reportTestDiagnostic,
     holderOf: async (tabId) => (await tabs.leases()).find((lease) => lease.tabId === tabId)?.sessionId,
     locale: ownerLocale,
+    // 034 R-518: working, held or a side-panel conversation, read from the hold mirror and the session.
+    modeOf: (sessionId) => pillModeOf(sessionId),
+    tabsOf: async (sessionId) =>
+      (await tabs.leases()).filter((lease) => lease.sessionId === sessionId).map((lease) => lease.tabId),
   });
   const tabs = createAgentTabManager({
-    onTabJoined: (_sessionId, tabId) => indicator.raise(tabId),
+    onTabJoined: (sessionId, tabId) => indicator.raise(tabId, sessionId),
     onTabLeft: (sessionId, tabId) => {
       indicator.lower(tabId);
       // The window that tab was in may now hold none of this session's (008/FR-119). Not awaited:
@@ -937,6 +984,132 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * its only writer.
    */
   const sessionGrantStore = createSessionGrantStore();
+  /**
+   * 034 R-513: the sessions the owner stopped from a page, and since when.
+   *
+   * The memory mirror is what every call is checked against - synchronously, so a hold set by a
+   * press is in force before anything that press interrupts can unwind. The store under it is what
+   * outlives this worker: `start()` loads it into the mirror once, and every call waits for that
+   * load, so a session that greets a restarted worker is refused from its very first call. A hold
+   * set or deleted while the load is still reading is not overwritten by what the load finds.
+   *
+   * A load that fails leaves the store not loaded (review N1): the next call, greeting, press or
+   * question tries it again before it is decided, and only a try that fails as well lets that one
+   * through unheld, with the diagnostic. Nothing is loaded before `start()`.
+   */
+  const holdStore = createHoldStore();
+  const holds = new Map<string, SessionHold>();
+  const holdsChangedBeforeLoad = new Set<string>();
+  /**
+   * 034 R-514 (review round 4): whether each session's first greeting to this worker carried a panel
+   * token, for the greetings that came before the holds were loaded - so a hold the load finds that
+   * was set while its session was not known is settled by that first greeting, exactly as a greeting
+   * after the load settles it (`settleHold`). Only the first is kept; emptied by the load that
+   * succeeds.
+   */
+  const greetedBeforeLoad = new Map<string, { withToken: boolean }>();
+  let holdsLoadStarted = false;
+  let holdsLoadDone = false;
+  /** Whether a try has failed: until one does, nothing can have been drawn without the holds. */
+  let holdsLoadFailed = false;
+  let holdsLoading: Promise<void> | undefined;
+  function holdsLoaded(): Promise<void> {
+    if (!holdsLoadStarted || holdsLoadDone) return Promise.resolve();
+    holdsLoading ??= holdStore
+      .load()
+      .then(
+        (loaded) => {
+          const found: string[] = [];
+          for (const [sessionId, hold] of Object.entries(loaded)) {
+            if (holdsChangedBeforeLoad.has(sessionId)) continue;
+            holds.set(sessionId, hold);
+            found.push(sessionId);
+          }
+          holdsLoadDone = true;
+          holdsChangedBeforeLoad.clear();
+          const greeted = new Map(greetedBeforeLoad);
+          greetedBeforeLoad.clear();
+          for (const sessionId of found) {
+            const first = greeted.get(sessionId);
+            if (first !== undefined) settleHold(sessionId, first.withToken);
+          }
+          if (found.length === 0) return;
+          /**
+           * Review round 2 (G4): a load that succeeds after earlier tries failed may find pills that
+           * were drawn working meanwhile - a tab adopted, a page that announced itself - so each
+           * session it found held has its pills drawn held, as the Stop that set the hold drew them.
+           */
+          if (holdsLoadFailed) {
+            for (const sessionId of found) {
+              void indicator.raiseSession(sessionId).catch(() => reportTestDiagnostic("agent.pill.raise-failed"));
+            }
+          }
+          // Review round 3 (H2): the read is done and the holds are in; a subscriber that throws
+          // being told so is its own diagnostic, never a failed load.
+          try {
+            notify();
+          } catch {
+            reportTestDiagnostic("agent.hold.notify-failed");
+          }
+        },
+        // Only the read itself failing is a failed load.
+        () => {
+          holdsLoadFailed = true;
+          reportTestDiagnostic("agent.hold.load-failed");
+        },
+      )
+      .finally(() => {
+        holdsLoading = undefined;
+      });
+    return holdsLoading;
+  }
+  function setHold(sessionId: string, hold: SessionHold): void {
+    holds.set(sessionId, hold);
+    if (!holdsLoadDone) holdsChangedBeforeLoad.add(sessionId);
+  }
+  /**
+   * 034 R-514, FR-519 (review round 4): what a session's first greeting to this worker does to its
+   * hold. Decided from the hold's own record - whether the worker that handled the Stop had the
+   * session registered - and never from what greetings carry, which a link client writes itself.
+   *
+   * A hold set knowingly (`sessionKnown`) is never dropped by a greeting. One set while the session
+   * was not known - a restarted worker that found a leased tab and no session to read the kind from
+   * - is settled by the session's first greeting since: a token greeting says it is a conversation,
+   * which is never held, so the hold goes and the pills follow; a plain greeting says it is an outside
+   * agent, so the hold becomes one set knowingly, written down so no later greeting - to this worker
+   * or the next - lets it go.
+   */
+  function settleHold(sessionId: string, greetedWithToken: boolean): void {
+    const hold = holds.get(sessionId);
+    if (hold === undefined || hold.sessionKnown) return;
+    if (greetedWithToken) {
+      void deleteHolds([sessionId])
+        .then(() => indicator.raiseSession(sessionId))
+        .catch(() => reportTestDiagnostic("agent.hold.conversation-drop-failed"));
+      return;
+    }
+    const known: SessionHold = { ...hold, sessionKnown: true };
+    setHold(sessionId, known);
+    void holdStore.set(sessionId, known).catch(() => reportTestDiagnostic("agent.hold.record-failed"));
+  }
+  /** The mirror at once, the store after it; a store that cannot be written is only a diagnostic. */
+  async function deleteHolds(sessionIds: readonly string[]): Promise<void> {
+    for (const sessionId of sessionIds) {
+      holds.delete(sessionId);
+      if (!holdsLoadDone) holdsChangedBeforeLoad.add(sessionId);
+    }
+    await holdStore.deleteMany(sessionIds).catch(() => reportTestDiagnostic("agent.hold.delete-failed"));
+  }
+  /** 034 R-512: what a held session's call is answered, whatever the tool; nothing else runs. */
+  function heldAnswer(request: AgentNativeRequest): AgentNativeResponse | undefined {
+    if (!holds.has(request.sessionId)) return undefined;
+    return { callId: request.callId, outcome: "stopped", reason: "owner-held", hint: HELD_HINT };
+  }
+  /** 034 R-518, R-520: the pill a session's tabs show. */
+  function pillModeOf(sessionId: string): PillMode {
+    if (holds.has(sessionId)) return "held";
+    return sessions.get(sessionId)?.kind === "panel" ? "conversation" : "working";
+  }
   /**
    * The runners' view of it: a session this worker does not know holds nothing and is granted
    * nothing, a grant recorded for another agent under the same session id covers nothing, and a
@@ -1357,7 +1530,15 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    * tab closed, a session ended or an agent unpaired takes it down, whichever of the two asked for
    * it. Owned by a runner it would only ever be let go of by that runner's own rules.
    */
-  const attachments = createInputAttachments({ reportDiagnostic: reportTestDiagnostic });
+  const attachments = createInputAttachments({
+    reportDiagnostic: reportTestDiagnostic,
+    // #60 item 2: the idle countdown's wake, so an eviction during it cannot leave the tab attached.
+    // Through globalThis, as the reconcile alarm: a countdown can settle after a test's stub went.
+    alarms: {
+      create: (name, info) => globalThis.chrome?.alarms?.create(name, info),
+      clear: (name) => globalThis.chrome?.alarms?.clear(name),
+    },
+  });
 
   /**
    * What each session's card remembers having happened, and the one thing it is being told
@@ -2015,6 +2196,23 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       if (held) return await withTransitionNotice(request, held as AgentNativeResponse);
       // 033 R-491: after the transition check (a held call has not started) and before the runner.
       const shown = await showPointerStep(watched);
+      /**
+       * 034 SC-225 (review P1): the pointer step's lease read is outside the race above, so an
+       * interrupt - or the page's Stop, which interrupts and holds - can land in it. Read once more,
+       * synchronously before the runner starts: a call ended there never reaches the page.
+       *
+       * The hold is read as well as the handle (review round 2, G3) because a call can be held
+       * without its handle ever being flagged: a batch's step registers its own handle when it is
+       * dispatched here, and the batch registers its own only after its ownership and site reads,
+       * so a Stop landing in those reads flags neither. Each step passes this check, and the batch
+       * stops at the first step answered `owner-interrupted` and composes the report of which
+       * steps never ran (FR-180) - which is why the batch call itself is not answered here.
+       */
+      if (request.tool !== "browser_batch" && (handle.stopped() || holds.has(request.sessionId))) {
+        return handle.reason() === "owner-stopped"
+          ? { callId, outcome: "stopped", reason: "owner-stopped" }
+          : interruptedAnswer(callId);
+      }
       const running = runTool(watched);
       if (request.tool === "browser_batch") {
         return await withTransitionNotice(request, await recordAfter(request, await running));
@@ -2308,6 +2506,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     const { callId } = request;
     // An `always` answered for this very call: the host placed it, so it has written (FR-194).
     settleUploadRecord(callId);
+    // 034 R-513: the holds a previous worker left are in the mirror before any call is answered.
+    await holdsLoaded();
     /**
      * The call names its session, and that is the session it is answered as (004 US2).
      *
@@ -2326,6 +2526,13 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
        */
       return { callId, outcome: "denied", reason: "session-ended" };
     }
+    /**
+     * 034 R-512, FR-515: the owner stopped this session from a page. Before admission, the panel's
+     * start-tab claim and the dispatch point, so no pointer step, dialog probe, runner or page
+     * message happens for it - every tool, reads included, until the owner resumes.
+     */
+    const held = heldAnswer(request);
+    if (held) return held;
     if (!(await admitted(request.sessionId, session))) {
       // Checked per call rather than remembered from the pairing: unpairing has to bite the very
       // next call of a session that is already open (SC-026), and a cached "yes" would let it not.
@@ -2356,7 +2563,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     // Nothing is re-pointed here: the call names its session, and every runner reads that id off
     // the request it was handed. A batch's steps carry it too, so a step that resumes after an
     // await is still answered as the session that sent it (004/T103a).
-    return dispatchTool(request);
+    //
+    // 034 R-515: and once more, synchronously before the dispatch point registers the call: a Stop
+    // pressed while this call was inside its admission check found nothing in flight to interrupt,
+    // so the hold it set is the only thing that can still keep this call from running.
+    return heldAnswer(request) ?? dispatchTool(request);
   }
 
   /**
@@ -2420,6 +2631,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     await tabs.endSession(ending);
     sessions.delete(ending);
     replacedSessions.delete(ending);
+    // 034 R-514: the hold lives exactly as long as its session - and goes only once the session is
+    // gone, so a call in the release's own gap is still refused as held rather than run.
+    await deleteHolds([ending]);
     // 019 R-321: and the token it greeted with, which only a fresh greeting can present again.
     panelTokenOf.delete(ending);
     /**
@@ -2535,7 +2749,167 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     if (!sender.id || sender.id !== chrome.runtime?.id) return;
     const from = sender.tab?.id;
     if (from === undefined) return;
+    // 034 US3.4: a page reloaded right after a worker restart is answered from the loaded holds.
+    await holdsLoaded();
     await indicator.answerAnnouncement(from);
+  }
+
+  /**
+   * 034 R-515, R-517, R-522: the owner pressed Stop or Resume on the pill in a page.
+   *
+   * The same two facts as `focusMainTab` decide whose press it is, and the message is neither of
+   * them: `sender.id` says it is this extension's content script, `sender.tab.id` is the only tab it
+   * can be about, and the lease on that tab is the only session it can reach. A body with anything
+   * beside its type is refused whole - a page has nothing to say about which session it stops.
+   *
+   * Answers whether the press was taken: the pill shows its not-delivered words only when no answer
+   * comes at all, so `false` is for a press that was not this worker's to act on.
+   */
+  async function pillPressed(message: unknown, sender: ContentMessageSender): Promise<boolean> {
+    if (!isPillPressType(message) || Object.keys(message).length !== 1) return false;
+    if (!sender.id || sender.id !== chrome.runtime?.id) return false;
+    const from = sender.tab?.id;
+    if (from === undefined) return false;
+    const lease = (await tabs.leases()).find((held) => held.tabId === from);
+    if (!lease) return false;
+    await holdsLoaded();
+    const { sessionId } = lease;
+    if (message.type === "ui.agent.pill-resume") {
+      // Not held (already resumed, or a conversation's pill): nothing to lift, and nothing wrong.
+      await resumeSession(sessionId);
+      return true;
+    }
+    if (sessions.get(sessionId)?.kind === "panel") return stopPanelConversation(sessionId);
+    /**
+     * A second Stop, from any of the session's tabs, keeps the first hold - its time, its tab, its
+     * line on the card - and only draws the held pill again (review N2): a page still showing Stop is
+     * why the owner pressed it twice.
+     */
+    if (holds.has(sessionId)) {
+      await indicator.raiseSession(sessionId).catch(() => reportTestDiagnostic("agent.pill.raise-failed"));
+      return true;
+    }
+    /**
+     * Whether this worker has met the session is the owner's side of the record (review round 4): a
+     * greeting may drop only a hold set while it had not, and only the session's first one since.
+     */
+    const hold: SessionHold = { at: new Date().toISOString(), tabId: from, sessionKnown: sessions.has(sessionId) };
+    /**
+     * The order is the claim (R-515). The hold first, in memory and synchronously, so a call the
+     * agent sends while its in-flight ones unwind is refused rather than dispatched; then those calls
+     * end exactly as the card's 中斷 ends them - `owner-interrupted`, the question withdrawn with no
+     * decision, the site's mode untouched - and only then the slower work: the store, the pills, the
+     * pointer, the panel.
+     */
+    setHold(sessionId, hold);
+    stops.interruptSession(sessionId);
+    prompts.cancelSession(sessionId, "interrupted");
+    noteActivity(sessionId, { at: Date.now(), kind: "hold", outcome: "held" });
+    await holdStore.set(sessionId, hold).catch(() => reportTestDiagnostic("agent.hold.record-failed"));
+    /**
+     * From here the press has been taken (review N2): the session is held and its calls are refused,
+     * so a pill or pointer that cannot be redrawn is a diagnostic - answering "not taken" would show
+     * the owner the not-delivered words for a Stop that worked.
+     */
+    try {
+      await indicator.raiseSession(sessionId);
+      // R-519: the pointer's caption says so too, at rest (a rest caption does not fade). Resume sends
+      // nothing; the next call's caption replaces it.
+      const stopped: PointerStepMessage = { type: "pointer-step", words: lookup("agent.pointer.stopped", ownerLocale()), mode: "rest" };
+      for (const held of await tabs.leases()) {
+        if (held.sessionId === sessionId) deliverPointerStep(held.tabId, stopped, false);
+      }
+    } catch {
+      reportTestDiagnostic("agent.pill.raise-failed");
+    }
+    notify();
+    return true;
+  }
+
+  /**
+   * 035 R-529, FR-527, FR-533: the owner pressed the pill's move control.
+   *
+   * The edge is the owner's setting for the browser, not a session's, so no lease is needed: a press
+   * from any tab of this extension's own content script is taken, and the tab is only ever Chrome's
+   * `sender.tab.id` (a body naming anything beside the edge is refused whole). The body names the edge
+   * the control shows rather than asking for a toggle, because while the pill has stepped aside its
+   * control names the edge it is not at, and that edge is what the owner chose.
+   *
+   * Answers whether the edge was stored; the redraw of the held tabs is the caller's, after the answer.
+   */
+  async function pillMoved(message: unknown, sender: ContentMessageSender): Promise<boolean> {
+    if (!isPillMoveType(message) || Object.keys(message).length !== 2) return false;
+    const to = (message as Partial<PillMovePress>).to;
+    if (!isPillEdge(to)) return false;
+    if (!sender.id || sender.id !== chrome.runtime?.id) return false;
+    if (typeof sender.tab?.id !== "number") return false;
+    await pillEdge.set(to);
+    return true;
+  }
+
+  /** 035 R-529: every tab every session holds draws its pill again, at the owner's edge now. */
+  async function redrawPills(): Promise<void> {
+    // The held/working state of each pill comes from the hold mirror (034 R-518).
+    await holdsLoaded();
+    for (const lease of await tabs.leases()) indicator.raise(lease.tabId, lease.sessionId);
+  }
+
+  /**
+   * 035 R-527, FR-531, FR-532: the owner pressed the pill's "Open side panel".
+   *
+   * Everything before the open is synchronous. The browser accepts `sidePanel.open()` only while the
+   * press's user gesture is live, and one `await` spends it (measured, R-527) - so no lease lookup, no
+   * hold read, no storage read comes first, and this function is entered from the listener with
+   * nothing awaited before it. `activateWorkspace` issues the open before its own first suspension,
+   * and is what the toolbar icon and Alt+A call, so it is the same panel. Opening grants nothing
+   * (FR-532), so a tab no session holds may open it too.
+   *
+   * Answers whether the open went through; any refusal or rejection is `false`.
+   */
+  async function pillOpened(message: unknown, sender: ContentMessageSender): Promise<boolean> {
+    if (!isPillOpenType(message) || Object.keys(message).length !== 1) return false;
+    if (!sender.id || sender.id !== chrome.runtime?.id) return false;
+    const from = sender.tab?.id;
+    if (typeof from !== "number") return false;
+    try {
+      await activateWorkspace(from);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 034 R-520, FR-519: Stop on a side-panel conversation's pill is the conversation's own Stop.
+   *
+   * No hold: the broker ends the turn, and the next message may use the browser again. The browser
+   * step in flight ends at once rather than when the broker's cancel reaches the agent. Nothing is
+   * done when the conversation cannot be reached - no broker on this relay run, or a token that maps
+   * to no conversation - and the press is answered as not taken.
+   */
+  function stopPanelConversation(sessionId: string): boolean {
+    const token = panelTokenOf.get(sessionId);
+    const conversationId = token === undefined ? undefined : panelTokens.conversationOf(token);
+    if (conversationId === undefined || conversations.current() === undefined) return false;
+    stops.interruptSession(sessionId);
+    prompts.cancelSession(sessionId, "interrupted");
+    conversations.command({ type: "ui.conversation.stop", payload: { conversationId } });
+    notify();
+    return true;
+  }
+
+  /**
+   * 034 R-514, R-521: the hold is lifted - from the pill or the session card. A session that is not
+   * held, or that this worker does not know, changes nothing. The calls refused while it was held
+   * stay answered; nothing is replayed.
+   */
+  async function resumeSession(sessionId: string): Promise<void> {
+    await holdsLoaded();
+    if (!holds.has(sessionId)) return;
+    await deleteHolds([sessionId]);
+    noteActivity(sessionId, { at: Date.now(), kind: "resume", outcome: "resumed" });
+    await indicator.raiseSession(sessionId);
+    notify();
   }
 
   /** This worker's view of which browser run it belongs to (013/R-184); read once, on first ask. */
@@ -2634,16 +3008,36 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
    *
    * The card is an ordinary `ask`, which is what gives it 011's bounds, its waiting ticks and its
    * badge for a panel nobody has open - the person is being asked about their own disk and there is
-   * no reason for that question to behave differently from every other. Its five endings become
-   * the five words of the answer frame, and the list is asked for again afterwards because an
-   * answer may have changed it.
+   * no reason for that question to behave differently from every other. Its endings become six of
+   * the answer frame's seven words (`once`, `always`, `deny`, `timed-out`, `busy`, `interrupted`);
+   * the seventh, `held` (034 FR-515), is answered without a card. The list is asked for again
+   * afterwards because an answer may have changed it.
    */
   async function askUploadDirectory(request: {
     sessionId: string;
     callId: string;
     files: Array<{ path: string; directory: string }>;
   }): Promise<void> {
+    /**
+     * 034 FR-515 (review I2): the host asks before the call crosses, so the hold has not refused
+     * that call yet - and a card about the owner's disk is the last thing a session they stopped
+     * should raise. Answered at once, in its own word, which the host refuses as `owner-held`.
+     */
+    await holdsLoaded();
+    if (holds.has(request.sessionId)) {
+      bridge.sendUploadConsentResult(request.callId, "held");
+      return;
+    }
     const site = await siteOfSession(request.sessionId);
+    /**
+     * Again after the site's lookup (review round 2, G1): a Stop pressed during that await set the
+     * hold after the check above and withdrew only a card already standing, so this one would be
+     * raised for a session the owner just stopped. Nothing awaits between here and `prompts.ask`.
+     */
+    if (holds.has(request.sessionId)) {
+      bridge.sendUploadConsentResult(request.callId, "held");
+      return;
+    }
     if (site === undefined) {
       /**
        * No tab, so no session's work this could belong to (S3 review F3).
@@ -2783,6 +3177,9 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         reportTestDiagnostic("agent.conversation.broker-session-taken");
         return;
       }
+      // 034 review N1: a hold read that failed at start is tried again, so the greeting's first call
+      // is decided against what the previous worker left rather than against nothing.
+      void holdsLoaded();
       const known = sessions.get(announcement.sessionId);
       const helloAt = new Date().toISOString();
       /**
@@ -2830,6 +3227,16 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
             notify();
           });
         return;
+      }
+      /**
+       * 034 FR-519 (review I1, round 4): a conversation is never held, and a press that reached a
+       * restarted worker before this greeting held what it could not tell was one. Whether this
+       * greeting may settle the hold is the hold's own record (`settleHold`), never this greeting's
+       * fields. A hold not loaded yet is settled by the load, from the first greeting noted here.
+       */
+      if (holds.has(announcement.sessionId)) settleHold(announcement.sessionId, kind !== undefined);
+      else if (!holdsLoadDone && !greetedBeforeLoad.has(announcement.sessionId)) {
+        greetedBeforeLoad.set(announcement.sessionId, { withToken: kind !== undefined });
       }
       if (known) {
         known.lastHelloAt = helloAt;
@@ -3305,6 +3712,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
           // What the card's 中斷 control is enabled by (014 FR-178), read from the registry that
           // would answer the press - never a second tally that could disagree with it.
           inFlight,
+          // 034 R-521: stopped from the page, and since when; absent while not held.
+          ...(holds.has(session.sessionId) ? { heldAt: holds.get(session.sessionId)!.at } : {}),
           ...(recording === undefined ? {} : { recording }),
           // What happened on this session's tabs while the owner may have been looking elsewhere
           // (008 FR-113), and the one thing the panel is telling them without asking (FR-114).
@@ -3395,6 +3804,10 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       });
     },
     start(): void {
+      // 034 R-513: the holds a previous worker set, read once; every call and announcement waits for
+      // it, and a read that failed is tried again by the next of them (review N1).
+      holdsLoadStarted = true;
+      void holdsLoaded();
       // 011 FR-152: once, on wake, before anything else can raise a question. A worker Chrome
       // evicted mid-question comes back with the browser still showing its badge, and nothing else
       // in the life of this worker would ever clear it - the question it was about is gone.
@@ -3438,21 +3851,68 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
        * the owner's click.
        *
        * `false` is returned deliberately - this message is not answered, and a listener that
-       * claimed it would answer asynchronously is what makes `sendMessage` hang (004/T107a).
+       * claimed it would answer asynchronously is what makes `sendMessage` hang (004/T107a). The two
+       * pill presses are the exception (034 R-517): they are always answered, so `true` is honest.
        */
-      chrome.runtime?.onMessage?.addListener((message: unknown, sender: ContentMessageSender) => {
-        // The one listener, deliberately: a second one for the announcement would be a second
-        // thing returning `false` about every message the first one already saw (004/T107a). Both
-        // messages are answered the same way - by what the worker *does*, never through the port -
-        // so `false` stays honest and no sender is left waiting on a reply that never comes.
-        void announced(message, sender).catch(() =>
-          reportTestDiagnostic("agent.indicator.announce-failed"),
-        );
-        void focusMainTab(message, sender).catch(() =>
-          reportTestDiagnostic("agent.focus-main.failed"),
-        );
-        return false;
-      });
+      chrome.runtime?.onMessage?.addListener(
+        (message: unknown, sender: ContentMessageSender, sendResponse?: (reply: unknown) => void) => {
+          /**
+           * 035 R-527: the open press is handled first and with nothing awaited before it - the call
+           * below reaches `chrome.sidePanel.open` inside this listener call, which is the only moment
+           * the browser still counts the press as a user gesture. Always answered, so `true`.
+           */
+          if (isPillOpenType(message)) {
+            void pillOpened(message, sender)
+              .catch(() => {
+                reportTestDiagnostic("agent.pill.open-failed");
+                return false;
+              })
+              .then((opened) => sendResponse?.({ opened }));
+            return true;
+          }
+          /**
+           * 035 R-529: the move press is answered too (the pill resends at 1 s and gives up at 2 s, as
+           * for 034's presses); an accepted one redraws every held tab after the answer is sent.
+           */
+          if (isPillMoveType(message)) {
+            void pillMoved(message, sender)
+              .catch(() => {
+                reportTestDiagnostic("agent.pill.move-failed");
+                return false;
+              })
+              .then((accepted) => {
+                sendResponse?.({ accepted });
+                if (accepted) void redrawPills().catch(() => reportTestDiagnostic("agent.pill.raise-failed"));
+              });
+            return true;
+          }
+          /**
+           * 034 R-517: the two pill presses are the only content messages answered on the port - the
+           * pill shows its not-delivered words when no answer comes - so `true` keeps the channel open
+           * for them, and for nothing else. A press that fails inside is answered as not taken.
+           */
+          if (isPillPressType(message)) {
+            void pillPressed(message, sender)
+              .catch(() => {
+                reportTestDiagnostic("agent.pill.press-failed");
+                return false;
+              })
+              .then((accepted) => sendResponse?.({ accepted }));
+            return true;
+          }
+          // The one listener, deliberately: a second one for the announcement would be a second
+          // thing returning `false` about every message the first one already saw (004/T107a). Both
+          // messages are answered the same way - by what the worker *does*, never through the port -
+          // so `false` stays honest and no sender is left waiting on a reply that never comes.
+          void announced(message, sender).catch(() =>
+            reportTestDiagnostic("agent.indicator.announce-failed"),
+          );
+          void focusMainTab(message, sender).catch(() =>
+            reportTestDiagnostic("agent.focus-main.failed"),
+          );
+          return false;
+        },
+      );
       // A heartbeat a predecessor left armed (evicted while connected) would otherwise keep firing
       // beside the retry alarm in an instance that never reaches `connected` (review B121 #5); the
       // link's own `connected` re-arms it.
@@ -3465,6 +3925,11 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         // references check on theirs - that the link it exists to protect is still there.
         if (alarm.name === AGENT_HEARTBEAT_ALARM && bridge.status() !== "connected") {
           bridge.connect();
+        }
+        if (alarm.name === IDLE_DETACH_ALARM) {
+          // #60 item 2. In a worker the alarm woke, `diagnostics.start()` above is what lets go of
+          // the attachment it has no record of; in a live one, the countdowns it knows are honoured.
+          void attachments.idleAlarm().catch(() => reportTestDiagnostic("agent.attachment.idle-alarm-failed"));
         }
         if (alarm.name === AGENT_RECONCILE_ALARM) {
           // The bound is up. Whatever did not greet the relay that is running now is released, and
@@ -3510,6 +3975,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       await sitePlanStore.clearAgent(agentId).catch(() => reportTestDiagnostic("agent.site-plan.clear-failed"));
       // 031 R-456: a session grant is an authorization too, and goes the same two ways.
       await endSessionGrants(mine);
+      // 034 R-514: and a page-Stop hold, which lives no longer than the pairing behind it.
+      await deleteHolds(mine);
       await sessionGrantStore.clearAgent(agentId).catch(() => reportTestDiagnostic("agent.session-grant.clear-failed"));
       // FR-263: the end of each active plan, on the card the session keeps if it is paired again.
       for (const [sessionId, count] of ending) noteSitePlan(sessionId, "ended", count);
@@ -3624,6 +4091,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         notify();
       }
     },
+    resumeSession,
     interruptSession(sessionId: string): { interrupted: number } {
       if (!sessions.has(sessionId)) {
         reportTestDiagnostic("agent.interrupt.other-session");

@@ -148,6 +148,20 @@ export const messages = {
   // page itself, so they say which tab is meant and where the control goes.
   "agent.indicator.active": "An agent is working in this tab",
   "agent.indicator.focusMain": "Back to the agent's tab",
+  // 034 FR-523: the pill's Stop and Resume controls, its held word and the two not-delivered lines.
+  // The worker sends them to the page as text (R-518); the page never chooses words.
+  "agent.indicator.stop": "Stop",
+  "agent.indicator.held": "Stopped",
+  "agent.indicator.resume": "Resume",
+  "agent.indicator.stopUndelivered":
+    "Stop didn't reach Hallpass. Open the side panel (toolbar icon or Alt+A) and choose End session.",
+  "agent.indicator.resumeUndelivered": "Resume didn't reach Hallpass. Use Resume on the side panel.",
+  // 035 FR-536: the pill's move control (it names the edge the pill is not at), the open control and
+  // the line shown when the side panel did not open. Sent to the page as text (R-530, R-532).
+  "agent.indicator.moveToTop": "Move to top",
+  "agent.indicator.moveToBottom": "Move to bottom",
+  "agent.indicator.openPanel": "Open side panel",
+  "agent.indicator.panelUnopened": "The side panel didn't open. Use the toolbar icon or Alt+A.",
   // The caption beside the agent's pointer, one per action (033 FR-499). The worker substitutes
   // {host}, {query}, {keys} and {n} itself (R-493); a base phrase stays short enough to be one line.
   "agent.pointer.click": "Clicking",
@@ -177,6 +191,8 @@ export const messages = {
   "agent.pointer.readConsole": "Reading console",
   "agent.pointer.readNetwork": "Reading network activity",
   "agent.pointer.wait": "Waiting {n} seconds",
+  // 034 FR-523: the caption the pointer rests on when the owner presses Stop on the page (R-519).
+  "agent.pointer.stopped": "Stopped",
   "agent.pairingTitle": "An agent wants to connect to this browser",
   "agent.pairingOrigin": "Connected through {origin}",
   "agent.pairingWaiting": "{count} connections waiting",
@@ -292,6 +308,9 @@ export const messages = {
   // 014 FR-178: the second control, and the line for a press that found nothing running.
   "agent.session.interrupt": "Interrupt this step",
   "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",
+  // 034 FR-523: a session the owner stopped from the page says so and offers Resume (R-521).
+  "agent.session.heldFromPage": "Stopped from the page",
+  "agent.session.resume": "Resume",
   // 008 FR-109: the one line a card says about a recording - while it runs, when it is full, and
   // after the file is written.
   "agent.session.recording": "Recording · {frames} frames",
@@ -312,6 +331,9 @@ export const messages = {
   "agent.activity.uploadDrop": "Screenshot dropped on {site}",
   "agent.activity.unknownSite": "the page",
   "agent.activity.interrupt": "You interrupted a step",
+  // 034 R-521: the two lines the owner's Stop on the page and Resume leave on the card.
+  "agent.activity.hold": "You pressed Stop on the page",
+  "agent.activity.resume": "You resumed the session",
   // 032 FR-494: one line per settled question - what was asked, which site, where and how it was answered.
   "agent.activity.consent": "{question} · {site} · {answer}",
   "agent.activity.consentAnswered": "{answer} {place}",
@@ -346,6 +368,8 @@ export const messages = {
   "agent.activity.cleared": "Cleared",
   "agent.activity.delivered": "Delivered",
   "agent.activity.interrupted": "Interrupted by you",
+  "agent.activity.held": "Stopped by you",
+  "agent.activity.resumed": "Resumed by you",
   "agent.activity.approved": "Approved by you",
   "agent.activity.replaced": "Replaced",
   "agent.activity.withdrawn": "Withdrawn by you",
@@ -370,6 +394,7 @@ export const messages = {
   "agent.prompt.frameSite": "Inside an embedded frame from {frameSite}, on {site}",
   "agent.prompt.frameHeldBy": "Inside an embedded frame on the {site} page",
   "agent.prompt.frameUnknown": "Inside an embedded frame whose site is unknown, on {site}",
+  "agent.prompt.frameTwoSites": "A drag between two sites, from {from} to {to}, on {site}",
   "agent.prompt.frameAnswer": "Your answer is about {frameSite}, not the page around it.",
   // 014 FR-187, FR-188: the move, and the three answers to it. Both origins in the question,
   // because where the tab *was* is half of what the owner is deciding about.

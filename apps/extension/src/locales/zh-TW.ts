@@ -153,6 +153,18 @@ export const messages: Record<MessageKey, string> = {
   "uncertain.effect": "上一個動作可能已執行，而且不會重試",
   "agent.indicator.active": "代理程式正在這個分頁中操作",
   "agent.indicator.focusMain": "回到代理程式的分頁",
+  // 034 FR-523：浮標的「停止」「繼續」控制、停住時的字，以及兩句沒有送達的說明。
+  // 文字由 worker 送到頁面（R-518），頁面不自己選字。
+  "agent.indicator.stop": "停止",
+  "agent.indicator.held": "已停止",
+  "agent.indicator.resume": "繼續",
+  "agent.indicator.stopUndelivered": "停止沒有送達。請打開側邊欄（工具列圖示或 Alt+A），按「結束工作階段」。",
+  "agent.indicator.resumeUndelivered": "繼續沒有送達。請在側邊欄按「繼續」。",
+  // 035 FR-536：浮標的移動控制（寫的是浮標目前不在的那一邊）、打開側邊欄控制，以及側邊欄沒打開時的說明。
+  "agent.indicator.moveToTop": "移到上方",
+  "agent.indicator.moveToBottom": "移到下方",
+  "agent.indicator.openPanel": "打開側邊欄",
+  "agent.indicator.panelUnopened": "側邊欄沒有打開。請按工具列圖示或 Alt+A。",
   "agent.pointer.click": "點擊",
   "agent.pointer.doubleClick": "雙擊",
   "agent.pointer.tripleClick": "三連擊",
@@ -180,6 +192,8 @@ export const messages: Record<MessageKey, string> = {
   "agent.pointer.readConsole": "讀取主控台",
   "agent.pointer.readNetwork": "讀取網路活動",
   "agent.pointer.wait": "等待 {n} 秒",
+  // 034 FR-523：主人在頁面按下「停止」時，游標停住處旁的說明（R-519）。
+  "agent.pointer.stopped": "已停止",
   "agent.pairingTitle": "有 agent 想連上這個瀏覽器",
   "agent.pairingOrigin": "透過 {origin} 連線",
   "agent.pairingWaiting": "{count} 個連線正在等待",
@@ -278,6 +292,9 @@ export const messages: Record<MessageKey, string> = {
   // 014 FR-178：停止旁邊的第二個控制，以及按下時什麼都沒在跑的那一行。
   "agent.session.interrupt": "中斷這一步",
   "agent.session.nothingToInterrupt": "沒有進行中的動作",
+  // 034 FR-523：主人從頁面停止的工作階段會這樣說，並提供「繼續」（R-521）。
+  "agent.session.heldFromPage": "已從頁面停止",
+  "agent.session.resume": "繼續",
   "agent.session.recording": "錄製中 · {frames} 幀",
   "agent.session.recordingFull": "錄製已滿 {frames} 幀,等待匯出",
   "agent.session.recordingExported": "已匯出 {filename}",
@@ -295,6 +312,9 @@ export const messages: Record<MessageKey, string> = {
   "agent.activity.uploadDrop": "截圖已拖放到 {site}",
   "agent.activity.unknownSite": "這個頁面",
   "agent.activity.interrupt": "主人中斷了一步",
+  // 034 R-521：主人在頁面按「停止」與按「繼續」在卡片上留下的兩行。
+  "agent.activity.hold": "主人在頁面按了「停止」",
+  "agent.activity.resume": "主人讓工作階段繼續",
   // 032 FR-494：每個已結案的提問一行 — 問了什麼、哪個網站、在哪裡怎麼回答。
   "agent.activity.consent": "{question} · {site} · {answer}",
   "agent.activity.consentAnswered": "{answer}（{place}）",
@@ -329,6 +349,8 @@ export const messages: Record<MessageKey, string> = {
   "agent.activity.cleared": "已清除",
   "agent.activity.delivered": "已送達",
   "agent.activity.interrupted": "你已中斷",
+  "agent.activity.held": "你已停止",
+  "agent.activity.resumed": "你已繼續",
   "agent.activity.approved": "你已核准",
   "agent.activity.replaced": "已替換",
   "agent.activity.withdrawn": "你已撤回",
@@ -353,6 +375,7 @@ export const messages: Record<MessageKey, string> = {
   "agent.prompt.frameSite": "在來自 {frameSite} 的內嵌框架裡，位於 {site} 頁面",
   "agent.prompt.frameHeldBy": "位於 {site} 頁面的內嵌框架裡",
   "agent.prompt.frameUnknown": "在 {site} 頁面內、來源不明的內嵌框架裡",
+  "agent.prompt.frameTwoSites": "從 {from} 拖曳到 {to}（兩個不同的網站），位於 {site} 頁面",
   "agent.prompt.frameAnswer": "你的答案針對的是 {frameSite}，不是外面的頁面。",
   // 014 FR-187、FR-188:這次移動,以及主人的三個答案。
   "agent.prompt.transition": "這個工作階段的分頁從 {from} 移到了 {to}。可以繼續在那裡工作嗎?",

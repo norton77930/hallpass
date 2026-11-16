@@ -95,6 +95,9 @@ export const ACTIVITY_OUTCOME_KEYS: Record<NonNullable<AgentActivityItem["outcom
   replaced: "agent.activity.replaced",
   withdrawn: "agent.activity.withdrawn",
   ended: "agent.activity.ended",
+  // 034 R-521: the owner's Stop on the page, and lifting it (the kind lines are in AGENT_PANEL_KEYS below).
+  held: "agent.activity.held",
+  resumed: "agent.activity.resumed",
 };
 
 /**
@@ -241,6 +244,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // The second control beside Stop, and what it says when nothing was running (014 FR-178).
   "agent.session.interrupt",
   "agent.session.nothingToInterrupt",
+  // 034 R-521: a session the owner stopped from the page, and the control that lifts it.
+  "agent.session.heldFromPage",
+  "agent.session.resume",
   // The recording line (008 FR-109).
   "agent.session.recording",
   "agent.session.recordingFull",
@@ -264,6 +270,9 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.activity.unknownSite",
   // The step the owner ended themselves (014 FR-182).
   "agent.activity.interrupt",
+  // 034 R-521: the owner's Stop on the page and the resume that lifted it.
+  "agent.activity.hold",
+  "agent.activity.resume",
   // 032 FR-494: the settled-question line and the sentence for a kind the panel has no words for.
   // The question, place and answer words are expanded below from the contract's own values.
   "agent.activity.consent",
@@ -311,6 +320,7 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.prompt.frameSite",
   "agent.prompt.frameHeldBy",
   "agent.prompt.frameUnknown",
+  "agent.prompt.frameTwoSites",
   "agent.prompt.frameAnswer",
   "agent.planTitle",
   "agent.planSite",

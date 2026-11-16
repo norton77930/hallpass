@@ -402,6 +402,15 @@ export function createAgentPanelPort(input: AgentPanelPortInput): AgentPanelPort
             );
             return;
           }
+          /**
+           * 034 R-521: lift the page-Stop hold, as the pill's Resume does. Not awaited and not
+           * answered: a session that is not held changes nothing, and the panel re-reads the picture.
+           */
+          case "ui.agent.session-resume":
+            void input.runtime
+              .resumeSession(command.payload.sessionId)
+              .catch(() => input.reportDiagnostic?.("agent.resume.failed"));
+            return;
           default:
             input.reportDiagnostic?.("agent.panel.command-rejected");
         }

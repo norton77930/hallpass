@@ -94,6 +94,8 @@ export {
   // 015: the reasons this feature adds, each pinned to the outcome it answers with.
   AGENT_015_REASON_OUTCOMES,
   INTERRUPT_HINTS,
+  // 034 R-516: what a call of a session the owner's Stop holds is told.
+  HELD_HINT,
   UPLOAD_HINTS,
   // 003 FR-032a: a decline answers one request, an unpair the session; how each is marked and said.
   PAIRING_DECLINED_MARKER,
@@ -179,6 +181,7 @@ export {
   AGENT_VIEWPORT_MIN_PX,
   AGENT_VIEWPORT_MAX_PX,
   agentViewportResultSchema,
+  HINT_MAX_CHARS,
   agentBatchStepSchema,
   agentBatchStepResultSchema,
   agentBatchResultSchema,

@@ -185,6 +185,22 @@ describe("030", () => {
     expect(parsePrompt({ frame: { site: "" } })).toBe(false);
   });
 
+  it("frame unknown takes the two sites a drag runs between, and nothing else (#51)", () => {
+    const a = "https://pay.test";
+    const b = "https://ads.test:8443";
+    expect(parsePrompt({ frame: { unknown: true, sites: [a, b] } })).toBe(true);
+    // The page's own site may be one end of the drag.
+    expect(parsePrompt({ frame: { unknown: true, sites: ["https://shop.test", b] } })).toBe(true);
+    expect(parsePrompt({ frame: { unknown: true, sites: [a] } })).toBe(false);
+    expect(parsePrompt({ frame: { unknown: true, sites: [a, b, "https://c.test"] } })).toBe(false);
+    expect(parsePrompt({ frame: { unknown: true, sites: [a, a] } })).toBe(false);
+    expect(parsePrompt({ frame: { unknown: true, sites: [a, "https://pay.test/path"] } })).toBe(false);
+    expect(parsePrompt({ frame: { unknown: true, sites: [a, "unknown"] } })).toBe(false);
+    expect(parsePrompt({ frame: { site: a, sites: [a, b] } })).toBe(false);
+    expect(parsePrompt({ frame: { unknown: true, sites: [a, b], url: "https://pay.test/x" } })).toBe(false);
+    expect(agentEffectPromptSchema.parse(prompt({ frame: { unknown: true } })).frame).toEqual({ unknown: true });
+  });
+
   it("frame refuses the page's own site: a frame of the page's site is decided as the page (R-445)", () => {
     expect(parsePrompt({ frame: { site: "https://shop.test" } })).toBe(false);
     expect(parsePrompt({ frame: { site: "https://shop.test:8443" } })).toBe(true);
@@ -353,5 +369,52 @@ describe("032 activity item kind consent", () => {
 
   it("keeps the latest 20 per session in the projection", () => {
     expect(AGENT_ACTIVITY_KEPT).toBe(20);
+  });
+});
+
+/**
+ * 034 T1002 - the panel <-> worker additions for Stop from the page (contracts/pill-messages.md,
+ * R-516, R-521): `ui.agent.session-resume`, a session's optional `heldAt`, and the activity kinds
+ * `hold`/`held` and `resume`/`resumed`.
+ */
+describe("034 session resume, heldAt and the hold activity lines", () => {
+  const resume = (payload: Record<string, unknown>) =>
+    agentPanelCommandSchema.safeParse({ type: "ui.agent.session-resume", payload }).success;
+  const base = { paired: [], tabs: [], sites: [], bridge: "connected" };
+  const session = { sessionId: "s-1", agentId: "a-1", tabs: [] };
+  const state = (value: Record<string, unknown>): boolean =>
+    agentPanelMessageSchema.safeParse({ type: "worker.agent.state", payload: { ...base, sessions: [value] } }).success;
+  const parses = (value: Record<string, unknown>): boolean => agentActivityItemSchema.safeParse(value).success;
+
+  it("takes a resume of one session by id and refuses an extra field or a missing id", () => {
+    expect(resume({ sessionId: "s-1" })).toBe(true);
+    expect(resume({ sessionId: "s-1", tabId: 3 })).toBe(false);
+    expect(resume({})).toBe(false);
+    expect(resume({ sessionId: "" })).toBe(false);
+  });
+
+  it("is not a link frame", () => {
+    expect(agentLinkFrameSchema.safeParse({ type: "ui.agent.session-resume", payload: { sessionId: "s-1" } }).success).toBe(false);
+  });
+
+  it("a session view carries an ISO heldAt, or none, and refuses another date", () => {
+    expect(state(session)).toBe(true);
+    expect(state({ ...session, heldAt: "2026-11-15T08:30:00.000Z" })).toBe(true);
+    expect(state({ ...session, heldAt: "yesterday" })).toBe(false);
+    expect(state({ ...session, heldAt: "2026-11-15" })).toBe(false);
+    expect(state({ ...session, heldAt: 1763195400000 })).toBe(false);
+  });
+
+  it("an activity line reads hold/held and resume/resumed, and refuses a mismatched outcome", () => {
+    expect(parses({ at: 1, kind: "hold", outcome: "held" })).toBe(true);
+    expect(parses({ at: 1, kind: "resume", outcome: "resumed" })).toBe(true);
+    expect(parses({ at: 1, kind: "hold", outcome: "interrupted" })).toBe(false);
+    expect(parses({ at: 1, kind: "hold", outcome: "resumed" })).toBe(false);
+    expect(parses({ at: 1, kind: "resume", outcome: "held" })).toBe(false);
+    expect(parses({ at: 1, kind: "resume", outcome: "interrupted" })).toBe(false);
+    expect(parses({ at: 1, kind: "hold" })).toBe(false);
+    // The new outcomes belong to the new kinds alone.
+    expect(parses({ at: 1, kind: "interrupt", outcome: "held" })).toBe(false);
+    expect(parses({ at: 1, kind: "dialog", outcome: "resumed" })).toBe(false);
   });
 });

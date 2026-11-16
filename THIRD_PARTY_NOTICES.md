@@ -16,7 +16,7 @@ travels with the release zip.
 | @modelcontextprotocol/sdk | 1.32.2 | MIT | MCP server |
 | gifenc | 1.0.3 | MIT | extension off-screen document (GIF encoding for session recordings) |
 | @agentclientprotocol/sdk | 1.9.0 | Apache-2.0 | side-panel agent broker (client for the owner's coding agent) |
-| koffi | 3.3.6 | MIT | side-panel agent broker (Windows job object that ends agent processes with the browser) |
+| koffi | 3.3.7 | MIT | side-panel agent broker (Windows job object that ends agent processes with the browser) |
 
 `react-markdown` and `remark-gfm` bring the unified, micromark, mdast and hast families into the
 side-panel bundle, and the MCP SDK brings its own dependencies into the host bundles; every one of them
@@ -45,8 +45,8 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | Package | Version | Licence |
 | --- | --- | --- |
 | @agentclientprotocol/sdk | 1.9.0 | Apache-2.0 |
-| @hono/node-server | 2.1.1 | MIT |
-| @koromix/koffi-win32-x64 | 3.3.6 | MIT |
+| @hono/node-server | 2.1.8 | MIT |
+| @koromix/koffi-win32-x64 | 3.3.7 | MIT |
 | @modelcontextprotocol/sdk | 1.32.2 | MIT |
 | @types/debug | 4.1.13 | MIT |
 | @types/estree | 1.0.9 | MIT |
@@ -114,7 +114,7 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | hasown | 2.0.4 | MIT |
 | hast-util-to-jsx-runtime | 2.3.6 | MIT |
 | hast-util-whitespace | 3.0.0 | MIT |
-| hono | 4.13.13 | MIT |
+| hono | 4.13.18 | MIT |
 | html-url-attributes | 3.0.1 | MIT |
 | http-errors | 2.0.1 | MIT |
 | iconv-lite | 0.7.3 | MIT |
@@ -132,7 +132,7 @@ file it carries. Regenerate with `npm run notices`; the contract test fails when
 | jose | 6.2.12 | MIT |
 | json-schema-traverse | 1.0.0 | MIT |
 | json-schema-typed | 8.0.2 | BSD-2-Clause |
-| koffi | 3.3.6 | MIT |
+| koffi | 3.3.7 | MIT |
 | longest-streak | 3.1.0 | MIT |
 | markdown-table | 3.0.4 | MIT |
 | math-intrinsics | 1.1.0 | MIT |
@@ -442,7 +442,7 @@ Apache License
    limitations under the License.
 ```
 
-#### @hono/node-server 2.1.1 (MIT)
+#### @hono/node-server 2.1.8 (MIT)
 
 ```text
 MIT License
@@ -468,7 +468,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-#### @koromix/koffi-win32-x64 3.3.6 (MIT)
+#### @koromix/koffi-win32-x64 3.3.7 (MIT)
 
 ```text
 MIT License
@@ -2265,7 +2265,7 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-#### hono 4.13.13 (MIT)
+#### hono 4.13.18 (MIT)
 
 ```text
 MIT License
@@ -2731,7 +2731,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-#### koffi 3.3.6 (MIT)
+#### koffi 3.3.7 (MIT)
 
 ```text
 MIT License

@@ -154,6 +154,13 @@ type TabDiagnostics = {
   pending: Map<string, NetworkRecord>;
   /** Whether a buffer bound has already thrown something away. */
   overflowed: boolean;
+  /**
+   * The calls serving from this attachment right now (#60 item 3). Two Allow once calls on one tab
+   * share it, so the first to finish must not cut the other's (R-466).
+   */
+  calls: number;
+  /** An Allow once ended, or a question was refused, while a call still used it: let go at the last. */
+  letGoWhenUnused: boolean;
 };
 
 function answer(callId: string, outcome: AgentNativeResponse["outcome"], reason: string): AgentNativeResponse {
@@ -343,7 +350,15 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       await detach(tabId);
     }
     // The buffers exist before the domains do, because enabling them is what starts filling these.
-    tabs.set(tabId, { site, console: [], network: [], pending: new Map(), overflowed: false });
+    tabs.set(tabId, {
+      site,
+      console: [],
+      network: [],
+      pending: new Map(),
+      overflowed: false,
+      calls: 0,
+      letGoWhenUnused: false,
+    });
     const acquired = await attachments().acquire(tabId, "diagnostics");
     if (!acquired.ok) {
       tabs.delete(tabId);
@@ -463,7 +478,7 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       argsSummary: GRANT_QUESTION[tool],
     });
     if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
-    if (asked.decision !== "allow") await release(tabId);
+    if (asked.decision !== "allow") await releaseWhenUnused(tabId);
     if (asked.decision === "timed-out") return noAnswerResponse(callId, asked);
     if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
     if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
@@ -601,16 +616,22 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       return answer(callId, "failed", "debugger-not-attached");
     }
 
-    if (!once) return serve(callId, tool, tabId, args);
+    const state = tabs.get(tabId);
+    if (state === undefined) return serve(callId, tool, tabId, args);
     /**
      * 031 R-466, FR-476: an Allow once is a yes for this call and no other, so what it attached ends
      * with the call - the buffers and the diagnostics holder, never another holder's lease - whether
-     * the read or the script returned or threw.
+     * the read or the script returned or threw. #60 item 3: another call on the tab may be using the
+     * same attachment, so it ends with the last of them, not with the first to finish.
      */
+    state.calls += 1;
     try {
       return await serve(callId, tool, tabId, args);
     } finally {
-      await release(tabId);
+      state.calls -= 1;
+      if (once) state.letGoWhenUnused = true;
+      // Still this tab's attachment: one a move or a revoke replaced is not this call's to end.
+      if (state.calls === 0 && state.letGoWhenUnused && tabs.get(tabId) === state) await detach(tabId);
     }
   }
 
@@ -657,6 +678,17 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
 
   async function release(tabId: number): Promise<void> {
     if (!tabs.has(tabId)) return;
+    await detach(tabId);
+  }
+
+  /** `release`, unless a call is serving from the attachment: then it ends with the last (#60 item 3). */
+  async function releaseWhenUnused(tabId: number): Promise<void> {
+    const state = tabs.get(tabId);
+    if (state === undefined) return;
+    if (state.calls > 0) {
+      state.letGoWhenUnused = true;
+      return;
+    }
     await detach(tabId);
   }
 

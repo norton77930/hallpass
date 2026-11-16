@@ -106,7 +106,8 @@ frame's site (or "unknown site") and the page. Allow always stores the frame's s
 (`siteModes.set(frame.site)`, today `binding.site` at `effects.ts:2456`). With `frame.unknown`, the card
 offers no Allow always, and the worker refuses a `rememberMode` for that prompt.
 A drag between two known sites that differ is shown as unknown. This fails closed; clearer wording for
-that card is a follow-up.
+that card is a follow-up. (Done 2026-11-16, #51: that card's `frame` also carries `sites`, the start and
+end sites, and the line names both; the decision is unchanged.)
 
 **Rationale**: one optional field and one store target. Prompts for same-site actions are byte-for-byte
 unchanged (FR-465, SC-206).

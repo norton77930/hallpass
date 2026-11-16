@@ -1,9 +1,4 @@
-import {
-  agentToolArgSchemas,
-  type AgentNativeResponse,
-  type AgentToolName,
-  type SiteMode,
-} from "@hallpass/contracts";
+import { agentToolArgSchemas, type AgentNativeResponse, type AgentToolName } from "@hallpass/contracts";
 import { deliverImageOnTab, setFilesOnTab } from "../content-broker.js";
 import type { SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts, AgentToolContext } from "./context.js";
@@ -20,20 +15,20 @@ import type { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
 import type { readMainWorldMarks } from "../../chrome-adapters/main-world-marks.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import {
+  askAndApplyConsent,
   createFrameSiteOf,
   createPointSiteOf,
+  decidedByTopDocument,
   frameMovedAnswer,
   gateSiteOf,
   promptFrameOf,
-  rememberWithoutSiteRefusal,
-  withFrameAnswer,
 } from "./frame-consent.js";
 import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
 import type { AgentInputAttachments, AttachmentCallHold } from "./input.js";
 import { FRAME_ANSWER_BOUND_MS } from "./frames.js";
 import { decideGate, type StatedPlan } from "./gate.js";
 import { bindingFailureResponse, type AgentPageBinding, type AgentPageBindings } from "./page-binding.js";
-import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import type { AgentPromptController } from "./prompts.js";
 import { discoverRefFrame, type RefFrame } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
@@ -283,8 +278,7 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     if (held !== undefined) holds.push(held);
     const decided = await pointSiteOf(binding, at);
     // A point in the top document is the page's, exactly as a ref there is (FR-465).
-    const top = decided.kind === "page" && decided.frameId === undefined;
-    return { frame: undefined, ...(top ? {} : { deciding: decided }), point: { at, decided } };
+    return { frame: undefined, ...(decidedByTopDocument(decided) ? {} : { deciding: decided }), point: { at, decided } };
   }
 
   /**
@@ -360,48 +354,33 @@ export function createAgentUpload(deps: AgentUploadDeps): AgentUploadRunner {
     }
     if (decision.decision === "prompt") {
       const delivery = deliveryOf(tool, args);
-      const asked = await deps.prompts.ask({
+      // The order the effects keep too (`askAndApplyConsent`): asked, answered, the lease read again,
+      // an Allow always on an unknown site refused, the chosen mode stored.
+      const consent = await askAndApplyConsent({
         callId,
-        // Which call the host knows it as, when this upload is a batch step (011 review H1).
-        hostCallId: request.hostCallId,
-        // And whether the owner ended the call while the runner was still getting here (FR-179).
-        stopped: request.stopped,
         sessionId: request.sessionId,
-        site: binding.site,
-        ...(promptFrame === undefined ? {} : { frame: promptFrame }),
-        tool,
-        argsSummary: summariseToolCall(tool, args),
-        ...(delivery === undefined ? {} : { delivery }),
+        tabId,
+        claim,
+        gateSite,
+        promptFrame,
+        tabOwnership: deps.tabOwnership,
+        siteModes: deps.siteModes,
+        ask: () =>
+          deps.prompts.ask({
+            callId,
+            // Which call the host knows it as, when this upload is a batch step (011 review H1).
+            hostCallId: request.hostCallId,
+            // And whether the owner ended the call while the runner was still getting here (FR-179).
+            stopped: request.stopped,
+            sessionId: request.sessionId,
+            site: binding.site,
+            ...(promptFrame === undefined ? {} : { frame: promptFrame }),
+            tool,
+            argsSummary: summariseToolCall(tool, args),
+            ...(delivery === undefined ? {} : { delivery }),
+          }),
       });
-      if (asked.decision === "busy") return { ok: false, response: answer(callId, "busy", "prompt-pending") };
-      if (asked.decision === "timed-out") {
-        // 030 FR-461: a frame's card also names the frame's site and why nothing was sent.
-        const noAnswer = noAnswerResponse(callId, asked);
-        return { ok: false, response: promptFrame === undefined ? noAnswer : withFrameAnswer(noAnswer, claim, "undecided") };
-      }
-      if (asked.decision === "stopped") return { ok: false, response: answer(callId, "stopped", "owner-stopped") };
-      // 014 FR-179: the step ended, the session did not, and nothing was decided about the site.
-      if (asked.decision === "interrupted")
-        return { ok: false, response: answer(callId, "stopped", "owner-interrupted") };
-      if (asked.decision === "deny") {
-        const denied = answer(callId, "denied", "owner-denied");
-        return { ok: false, response: promptFrame === undefined ? denied : withFrameAnswer(denied, claim, "refused") };
-      }
-      // 006 FR-087: the tab may have been handed back while the question stood (see effects.ts).
-      const held = await deps.tabOwnership(request.sessionId, tabId);
-      if (held.state !== "this") return { ok: false, response: ownershipRefusal(callId, held) };
-      if (asked.decision === "released") {
-        return { ok: false, response: ownershipRefusal(callId, { state: "not-yours" }) };
-      }
-      // 030 FR-458: a card for a frame whose site is unknown offers no Allow always, so a reply that
-      // asks to remember a mode answers a question nobody was shown - refused as the effects refuse it.
-      const unanswerable = rememberWithoutSiteRefusal(callId, asked.rememberMode, gateSite, claim);
-      if (unanswerable !== undefined) return { ok: false, response: unanswerable };
-      if (asked.rememberMode && gateSite !== null) {
-        // The site the card decided: a frame's card stores the frame's site, never the page's
-        // (030 FR-457).
-        await deps.siteModes.set(gateSite, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
-      }
+      if (!consent.ok) return { ok: false, response: consent.response };
     }
     return { ok: true, context, binding, claim };
   }

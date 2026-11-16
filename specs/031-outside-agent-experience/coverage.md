@@ -121,9 +121,13 @@ Listed so that none of them reads as covered above. Not part of this feature unl
    before. FR-467 covers consent questions that carry `prompt-raised`.
 2. **`tabs_close` and the beforeunload prompt after an idle drop.** A page's leave-site prompt is heard after
    the 20 s drop only where a navigation holds the tab (`agent-navigation.test.ts` "... (031 slice C P1)");
-   the `tabs_close` path has no such hold and no test.
+   the `tabs_close` path has no such hold and no test. **Fixed 2026-11-16 (#60)**: `tabs_close` holds the
+   attachment across the unload as `navigate` does (`agent-navigation.test.ts`, the tabs_close cases after an
+   idle drop); like `navigate`, it can now show the debugging bar briefly.
 3. **Overlapping allow-once diagnostics calls on one tab fail closed.** The second call's once is refused
-   rather than shared (T937 round 2 Nit). No test pins the fail-closed answer.
+   rather than shared (T937 round 2 Nit). No test pins the fail-closed answer. **Fixed 2026-11-16 (#60)**: the
+   calls serving from one tab's attachment are counted and the allow-once attachment is let go after the last
+   (`agent-diagnostics-gate.test.ts` "overlapping allow-once calls on one tab").
 4. **A site revoke does not clear session grants.** The owner revoking a site in the site list leaves a
    page-actions or diagnostics session grant for it in force until the session ends (FR-469, SC-211).
    No test; no code.
@@ -141,3 +145,15 @@ Listed so that none of them reads as covered above. Not part of this feature unl
    its 45 s / no-mark behaviour for a visible panel (spec amended 2026-11-09).
 10. **quickstart.md check 4** was updated to the amended D-031-11 expectation (a picture of the tab with
     the window left minimized; "minimized" only when that capture fails).
+11. **Idle detach after a worker restart (#60, fixed 2026-11-16).** The 20 s countdown also keeps one
+   `chrome.alarms` alarm (no earlier than the countdown's end, at least 30 s away), so an evicted worker is woken
+   and its start-up reconciliation lets go of the attachment (`input-attachment.test.ts` "#60 the idle
+   countdown survives a worker restart"). Measured 2026-11-16 on Chromium 151.0.7922.34 (Playwright build) with
+   two probe extensions and no Hallpass: the one holding a debugger attachment kept its idle worker for the
+   whole 4.5 min run, while the one without an attachment lost its worker about 30 s in. So while the
+   attachment lasts Chrome does not evict the worker for being idle; the alarm is a backup for a worker that
+   stops for another reason (a crash, an update, a Chrome build that evicts it anyway).
+12. **#60 items 1 and 5, accepted by the owner (2026-11-16).** Item 5: `navigate` (and `tabs_close`, which
+    attaches to hear a leave-site prompt) briefly shows Chrome's debugging bar on a tab Hallpass was not
+    attached to; this is kept. Item 1: a screenshot whose surface capture hangs is answered after its bound
+    (spec 032 R-490), but the hung capture itself is not cancelled; this is kept.

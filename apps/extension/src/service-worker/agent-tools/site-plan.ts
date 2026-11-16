@@ -1,4 +1,9 @@
-import { agentProposeSitesArgsSchema, type AgentNativeResponse, type AgentToolName } from "@hallpass/contracts";
+import {
+  agentProposeSitesArgsSchema,
+  HINT_MAX_CHARS,
+  type AgentNativeResponse,
+  type AgentToolName,
+} from "@hallpass/contracts";
 import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
 import type { AgentToolRequest } from "./stop.js";
 
@@ -37,8 +42,7 @@ export type AgentSitePlanRunner = {
   run(request: AgentToolRequest): Promise<AgentNativeResponse>;
 };
 
-/** The contract caps `hint`; a refusal is a sentence about one entry, never the whole proposal. */
-const HINT_MAX_CHARS = 400;
+/** The contract caps `hint` (`HINT_MAX_CHARS`); a refusal is a sentence about one entry, never the whole proposal. */
 const ENTRY_MAX_CHARS = 200;
 
 /**

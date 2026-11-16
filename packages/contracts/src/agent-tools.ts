@@ -1283,6 +1283,13 @@ const agentBatchShape = {
 const agentBatchArgsSchema = z.strictObject(agentBatchShape);
 
 /**
+ * The bound a `hint` a worker or host writes has to fit, in every answer and frame that carries one
+ * (a batch step's, a whole call's, an attention frame's). The worker composes its own hints against
+ * the same number, so what it sends is never refused at the boundary.
+ */
+export const HINT_MAX_CHARS = 400;
+
+/**
  * What one step of a batch answered, in the position it was sent in.
  *
  * The position is what makes the answer readable at all: the steps are ordered, the batch stops at
@@ -1302,7 +1309,7 @@ export const agentBatchStepResultSchema = z.strictObject({
    * agent meets this situation, and dropping the sentence here would leave the one answer that
    * could unstick it inside the batch.
    */
-  hint: z.string().max(400).optional(),
+  hint: z.string().max(HINT_MAX_CHARS).optional(),
 });
 
 export type AgentBatchStepResult = z.infer<typeof agentBatchStepResultSchema>;
@@ -2891,14 +2898,18 @@ export const WINDOW_MINIMIZED_HINT =
   "Hallpass does not restore it: ask the owner to restore the Chrome window, then retry.";
 
 /**
- * The two words the owner's own controls end a call with (014 data-model "Stop flag").
+ * The words the owner's own controls answer a call with (014 data-model "Stop flag").
  *
  * Closed, and pinned here rather than written as a literal in each runner, because a runner asks
  * the stop handle what ended it and answers that word verbatim (FR-180): a synonym invented in one
- * of the seven runners would reach an agent as a reason nothing documents. Stop is the session
- * ending; interrupt is this one step ending and nothing else.
+ * of the seven runners would reach an agent as a reason nothing documents. The first two end a
+ * call: stop is the session ending; interrupt is this one step ending and nothing else.
+ *
+ * 034 R-516 adds a third: `owner-held` answers a call *refused* because the owner pressed Stop on
+ * the page and the session is held. It is the answer to a call that never started, where the two
+ * above end one that did, so the agent can tell "nothing was done" from "this was cut short".
  */
-export const AGENT_STOP_REASONS = ["owner-stopped", "owner-interrupted"] as const;
+export const AGENT_STOP_REASONS = ["owner-stopped", "owner-interrupted", "owner-held"] as const;
 
 export type AgentStopReason = (typeof AGENT_STOP_REASONS)[number];
 
@@ -2979,6 +2990,17 @@ export const INTERRUPT_HINTS = {
     "The owner interrupted this step after its input was delivered; it may have taken effect and was " +
     "not verified. Read the page before re-running it.",
 } as const;
+
+/**
+ * What a call of a held session is told (034 FR-525, R-516, contracts/agent-stop-reason.md).
+ *
+ * Here beside `INTERRUPT_HINTS` for the same reason: the worker composes it, the agent reads it and
+ * the gate asserts it. One sentence, no hole to fill (FR-151), and the only prose the agent gets
+ * for the hold - it says nothing was done, so there is no "may have taken effect" to qualify.
+ */
+export const HELD_HINT =
+  "The owner pressed Stop on the page, so nothing was done. Stop and tell your user; the owner can " +
+  "resume from the page or the side panel.";
 
 /**
  * What an upload says about a directory it would not remember (014 FR-194, S3 review F7).
@@ -3110,7 +3132,7 @@ export const agentNativeResponseSchema = z.strictObject({
    * would have helped. The text is never page-derived: it is one of `ATTENTION_SENTENCES`, and the
    * bound is the length of the longer of them with room to spare.
    */
-  hint: z.string().max(400).optional(),
+  hint: z.string().max(HINT_MAX_CHARS).optional(),
 });
 
 export type AgentNativeResponse = z.infer<typeof agentNativeResponseSchema>;
@@ -3332,11 +3354,15 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
    * being asked something else, so this card was never raised. The host maps each to what the call
    * answers, and `busy` is the one that must not be dressed up as any of the others: an agent told
    * `owner-interrupted` about a card nobody ever saw learns the owner did something they did not.
+   *
+   * 034 FR-515 adds `held`, which is no answer either: the owner pressed Stop on the page and the
+   * session is held, so the worker raised no card. The host refuses the call `owner-held`, as the
+   * worker refuses every other call of that session, before a file is read or a root is written.
    */
   z.strictObject({
     type: z.literal("upload-consent-result"),
     callId: z.string().min(1).max(64),
-    decision: z.enum(["once", "always", "deny", "timed-out", "interrupted", "busy"]),
+    decision: z.enum(["once", "always", "deny", "timed-out", "interrupted", "busy", "held"]),
     /**
      * Where the person has to click, when this question expired with nobody able to see it
      * (011 FR-146, S3 review F1).
@@ -3347,7 +3373,7 @@ export const agentControlFrameSchema = z.discriminatedUnion("type", [
      * the person how to answer it. Optional on a frame type this feature introduced, so no older
      * side can meet it; the text is one of `ATTENTION_SENTENCES` and never page-derived.
      */
-    hint: z.string().max(400).optional(),
+    hint: z.string().max(HINT_MAX_CHARS).optional(),
   }),
 ]);
 
@@ -4069,8 +4095,10 @@ const agentActivityItemBaseSchema = z.strictObject({
    * and its end (FR-263); `message` is the number of sites, never the origins themselves.
    * 032: `consent` is one settled owner question (FR-494, R-488); it carries `question`, `channel`
    * and `answer` instead of an outcome.
+   * 034: `hold` is the owner's Stop on the page (outcome `held`) and `resume` is the owner lifting it
+   * (outcome `resumed`), one line each (R-521).
    */
-  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt", "site-plan", "consent"]),
+  kind: z.enum(["dialog", "export", "restore", "viewport", "upload", "interrupt", "site-plan", "consent", "hold", "resume"]),
   /** Required on every kind but `consent`, which says what happened in `answer` (see the refinement). */
   outcome: z
     .enum([
@@ -4093,6 +4121,9 @@ const agentActivityItemBaseSchema = z.strictObject({
       "replaced",
       "withdrawn",
       "ended",
+      /** 034 R-521: the owner's Stop on the page held the session, and the owner lifted the hold. */
+      "held",
+      "resumed",
     ])
     .optional(),
   /** The host the dialog belonged to; absent when the item is not about a page. */
@@ -4129,6 +4160,13 @@ export const agentActivityItemSchema = agentActivityItemBaseSchema.superRefine((
     return;
   }
   if (item.outcome === undefined) issue("this kind of item carries an outcome");
+  // 034 R-521: the two new outcomes belong to the two new kinds, each to its own.
+  if ((item.kind === "hold") !== (item.outcome === "held") && item.outcome !== undefined) {
+    issue("held pairs with the kind hold and with nothing else");
+  }
+  if ((item.kind === "resume") !== (item.outcome === "resumed") && item.outcome !== undefined) {
+    issue("resumed pairs with the kind resume and with nothing else");
+  }
   if (item.question !== undefined || item.channel !== undefined || item.answer !== undefined) {
     issue("question, channel and answer belong to a consent item");
   }
@@ -4198,6 +4236,12 @@ const agentSessionViewSchema = z.strictObject({
    * projection from before this slice carried no count, which the panel reads as zero.
    */
   inFlight: z.number().int().nonnegative().optional(),
+  /**
+   * When the owner's Stop on the page held this session (034 R-521): present exactly while it is
+   * held, so the card says "Stopped from the page" and offers Resume. Optional because a projection
+   * from before 034 carried none, which the panel reads as not held.
+   */
+  heldAt: z.iso.datetime().optional(),
   /**
    * How the session's recording stands, for the card's own line (008 FR-109, data-model "Panel
    * messages").
@@ -4292,9 +4336,25 @@ export const agentEffectPromptSchema = z.strictObject({
    * `{ site }` is the frame's site, which then differs from `site` above; `{ unknown: true }` means
    * the frame's site could not be established. Absent when the deciding site is the page's own, so
    * every earlier prompt parses unchanged.
+   *
+   * `{ unknown: true, sites: [from, to] }` (#51) is the same "no one site decides" card for a drag
+   * whose two ends belong to two different known sites - a page's document may be one end, so a
+   * listed site may be the page's own. `sites` is display only: it names the two sites the card is
+   * about and never changes what the card asks or offers (still once or deny, no Allow always).
    */
   frame: z
-    .union([z.strictObject({ site: siteOriginSchema }), z.strictObject({ unknown: z.literal(true) })])
+    .union([
+      z.strictObject({ site: siteOriginSchema }),
+      z
+        .strictObject({
+          unknown: z.literal(true),
+          sites: z.tuple([siteOriginSchema, siteOriginSchema]).optional(),
+        })
+        .refine((value) => value.sites === undefined || value.sites[0] !== value.sites[1], {
+          path: ["sites"],
+          message: "a drag between two sites names two different sites",
+        }),
+    ])
     .optional(),
   tool: agentToolNameSchema,
   /**
@@ -4838,6 +4898,14 @@ export const agentPanelCommandSchema = z.discriminatedUnion("type", [
    */
   z.strictObject({
     type: z.literal("ui.agent.session-interrupt"),
+    payload: z.strictObject({ sessionId: z.string().min(1).max(128) }),
+  }),
+  /**
+   * Lift the hold the owner's Stop on the page put on one session (034 R-521). A session that is
+   * not held, or not known, changes nothing and is not an error: the card may be a frame behind.
+   */
+  z.strictObject({
+    type: z.literal("ui.agent.session-resume"),
     payload: z.strictObject({ sessionId: z.string().min(1).max(128) }),
   }),
   /** Forget one remembered pair of origins (014 FR-191); the next such move asks again. */

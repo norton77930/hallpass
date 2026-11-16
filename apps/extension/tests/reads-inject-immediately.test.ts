@@ -9,7 +9,7 @@ import {
 import { createAgentPageBindings, type AgentPageBinding } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads } from "../src/service-worker/agent-tools/reads.js";
 import { findOnTab } from "../src/service-worker/agent-tools/refs.js";
-import { readFrameFocus } from "../src/service-worker/agent-tools/frame-focus.js";
+import { readFrameFocus } from "../src/chrome-adapters/frame-focus.js";
 import type { BrowserFrame } from "../src/service-worker/agent-tools/frames.js";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 

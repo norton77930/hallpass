@@ -5,6 +5,35 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.23.0 — 2026-11-16
+
+- **Stop an agent from the page (#64).** The pill on a tab an agent is working in now has a Stop
+  button. For an agent connected from outside (Claude Code, Codex and the like), Stop ends the calls it
+  has in flight and holds the session: every further call is refused with the new reason `owner-held`
+  and nothing is done, until you press Resume on the pill or on the session's card in the side panel.
+  The hold has no timeout and survives a restart of the extension's background worker. For a side-panel
+  conversation, Stop ends the turn, as the conversation's own Stop does. Only a real press counts; the
+  page cannot press it for you.
+- **Move the pill, and it steps out of the agent's way (#65).** "Move to bottom" / "Move to top" puts
+  the pill at the top right or bottom right of the page, and the choice is kept for the whole browser:
+  every tab and site, across restarts. When the agent's pointer, its click point or the element it aims
+  at is under the pill, the pill moves to the other edge for that moment and comes back afterwards.
+  A new "Open side panel" button on the pill opens Hallpass's side panel in that window; if Chrome does
+  not open it, the pill says to use the toolbar icon or Alt+A.
+- **A drag between two sites names both (#51).** A drag that starts in one site's frame and ends in
+  another site's frame used to raise a card saying the frame's site could not be established. The card
+  now names both sites. It still offers only Allow once.
+- **The debugger is let go after a worker restart (#60).** The debugger attachment Hallpass keeps for
+  20 s after an action is now also released when Chrome restarted the extension's background worker in
+  the meantime. Two overlapping allow-once diagnostics calls on one tab no longer cut each other off,
+  and `tabs_close` hears the page's "Leave site?" prompt again after that idle release. As with
+  `navigate`, Chrome's "being debugged" bar can show briefly while a tab is closed.
+- **A bounded viewport read (#76).** The page-size read Hallpass makes before deciding about a screen
+  point now has a time bound; a page that does not answer is decided as before instead of holding the
+  call. Dependency patch and minor updates.
+- Agents see one change: the new stop reason `owner-held`. Host and extension upgrade together:
+  reinstall the host and reload the extension.
+
 ## 0.22.5 — 2026-11-15
 
 - **A frame two levels deep is decided by its own site (#75).** For a frame inside an embedded frame,

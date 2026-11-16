@@ -136,9 +136,18 @@ function frameLine(
       </div>
     );
   }
+  // A drag between two known sites is still "no one site decides it": the line names both (#51)
+  // and the card offers exactly what an unknown frame's card does.
   return (
     <div data-frame="unknown">
-      <p>{t("agent.prompt.frameUnknown").replace("{site}", () => displayOrigin(prompt.site))}</p>
+      <p>
+        {frame.sites === undefined
+          ? t("agent.prompt.frameUnknown").replace("{site}", () => displayOrigin(prompt.site))
+          : t("agent.prompt.frameTwoSites")
+              .replace("{from}", () => displayOrigin(frame.sites![0]))
+              .replace("{to}", () => displayOrigin(frame.sites![1]))
+              .replace("{site}", () => displayOrigin(prompt.site))}
+      </p>
     </div>
   );
 }

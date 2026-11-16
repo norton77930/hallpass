@@ -692,6 +692,9 @@ export function AgentShell(props: { locale: string }): ReactElement {
             onInterrupt={() => {
               send({ type: "ui.agent.session-interrupt", payload: { sessionId: session.sessionId } });
             }}
+            onResume={() => {
+              send({ type: "ui.agent.session-resume", payload: { sessionId: session.sessionId } });
+            }}
             onWithdrawSitePlan={() => {
               send({ type: "ui.agent.site-plan-withdraw", payload: { sessionId: session.sessionId } });
             }}

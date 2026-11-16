@@ -114,7 +114,8 @@ export type AgentTabToolDeps = {
     beginUnload(tabId: number, policy: "stay" | "leave"): { settled: Promise<BeforeunloadOutcome>; end(): void };
   };
   /**
-   * The tab's debugger attachment, held for the length of a `navigate` (031/R-466, slice C review P1).
+   * The tab's debugger attachment, held for the length of a `navigate` (031/R-466, slice C review P1)
+   * and of a `tabs_close` (#60 item 4), for the same reason.
    *
    * The "leave site?" prompt is announced only over an attachment, and 20 s after the last effect
    * the idle release has let the tab go - so a navigation with nothing holding it would never hear
@@ -585,6 +586,9 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
         const decided = await decideForce(request, tool, tabId, args);
         if (decided) return decided;
       }
+      // Attached before the close, as navigate is, so the "leave site?" it may raise is heard after
+      // an idle release let the tab go (#60 item 4). A refused hold still closes, unheard.
+      const held = await deps.holdAttachment?.(tabId).catch(() => undefined);
       // Armed before the close, because the prompt is raised by the close itself (FR-115).
       const watch = deps.dialogs?.beginUnload(tabId, force ? "leave" : "stay");
       try {
@@ -593,6 +597,7 @@ export function createAgentTabTools(deps: AgentTabToolDeps): AgentTabToolRunner 
         // The policy was this call's; the tab goes back to staying put (data-model
         // BeforeunloadPolicy).
         watch?.end();
+        held?.done();
       }
     }
 

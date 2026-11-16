@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { focusOfFrame } from "../src/service-worker/agent-tools/frame-focus.js";
-import { FOCUS_WALK_MAX_DEPTH } from "../src/service-worker/agent-tools/frame-site.js";
+import { FOCUS_WALK_MAX_DEPTH, focusOfFrame } from "../src/chrome-adapters/frame-focus.js";
 
 /**
  * 030/T908 review round 2 - the in-frame half of the focus walk answers unknown for anything it

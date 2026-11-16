@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bindAgentContentRuntime } from "../src/content-runtime/agent-entry.js";
 import { snapshotDocument } from "../src/content-runtime/collector.js";
 import {
@@ -14,6 +14,7 @@ import {
   removeCursor,
 } from "../src/content-runtime/cursor.js";
 import { planTravel } from "../src/content-runtime/cursor-motion.js";
+import { placePill, INDICATOR_PILL_ATTRIBUTE } from "../src/content-runtime/indicator.js";
 import { INDICATOR_MARKER_ATTRIBUTE } from "../src/content-runtime/indicator-marker.js";
 import { visibleTextOf } from "../src/content-runtime/visible-text.js";
 
@@ -286,6 +287,29 @@ describe("033/T991 the messages are exact shapes", () => {
       { type: "cursor", hide: true, x: 1, y: 2 },
       { type: "cursor", hide: false },
       { type: "cursors", x: 1, y: 2 },
+    ];
+    for (const message of rejected) expect(isCursorMessage(message), JSON.stringify(message)).toBe(false);
+  });
+
+  it("035/T1037 takes an optional `box` of exactly x, y, width, height, and refuses the whole message otherwise", () => {
+    const box = { x: 10, y: 20, width: 30, height: 40 };
+    expect(isCursorMessage({ type: "cursor", x: 1, y: 2, box })).toBe(true);
+    expect(isCursorMessage({ type: "cursor", x: 1, y: 2, press: true, box })).toBe(true);
+    expect(isCursorMessage({ type: "cursor", x: 1, y: 2, box: { ...box, width: 0, height: 0 } })).toBe(true);
+    expect(isCursorMessage({ type: "cursor", x: 1, y: 2, box: { ...box, x: -5, y: -5 } })).toBe(true);
+
+    const rejected: unknown[] = [
+      { type: "cursor", x: 1, y: 2, box: { ...box, extra: 1 } },
+      { type: "cursor", x: 1, y: 2, box: { x: 1, y: 2, width: 3 } },
+      { type: "cursor", x: 1, y: 2, box: { ...box, x: Number.NaN } },
+      { type: "cursor", x: 1, y: 2, box: { ...box, y: Number.POSITIVE_INFINITY } },
+      { type: "cursor", x: 1, y: 2, box: { ...box, width: -1 } },
+      { type: "cursor", x: 1, y: 2, box: { ...box, height: -0.5 } },
+      { type: "cursor", x: 1, y: 2, box: { ...box, width: "30" } },
+      { type: "cursor", x: 1, y: 2, box: "10,20,30,40" },
+      { type: "cursor", x: 1, y: 2, box: [10, 20, 30, 40] },
+      { type: "cursor", x: 1, y: 2, box: null },
+      { type: "cursor", hide: true, box },
     ];
     for (const message of rejected) expect(isCursorMessage(message), JSON.stringify(message)).toBe(false);
   });
@@ -884,6 +908,165 @@ describe("T126 through the content runtime", () => {
 
     expect(cursor()).toBeNull();
     expect(sendResponse).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 035/T1039 - the pill steps aside on the cursor message (R-524, R-525, FR-529, FR-530).
+ *
+ * The worker dispatches the press only after the `{ arrived: true }` reply, so the pill has to be at its
+ * new place before the glide starts and before that reply. These go through the entry, where the
+ * decision is made.
+ */
+describe("035/T1039 the entry steps the pill aside", () => {
+  type Listener = (
+    message: unknown,
+    sender: { id?: string },
+    sendResponse: (response: unknown) => void,
+  ) => boolean | void;
+
+  const words = { label: "Agent is working", action: "Back", moveToTop: "Move to top", moveToBottom: "Move to bottom" };
+
+  function bind(): Listener {
+    const captured: { listener?: Listener } = {};
+    bindAgentContentRuntime(
+      {
+        id: EXTENSION,
+        sendMessage: () => undefined,
+        onMessage: {
+          addListener: (listener: Listener) => {
+            captured.listener = listener;
+          },
+        },
+      },
+      document,
+    );
+    if (!captured.listener) throw new Error("listener not registered");
+    return captured.listener;
+  }
+
+  const from = { id: EXTENSION };
+
+  function pillPlace(): "top" | "bottom" {
+    const pill = document.querySelector<HTMLElement>(`[${INDICATOR_PILL_ATTRIBUTE}]`);
+    if (!pill) throw new Error("the pill is not drawn");
+    return pill.style.bottom === "8px" ? "bottom" : "top";
+  }
+
+  function drawPill(listener: Listener, edge?: "top" | "bottom"): void {
+    listener({ type: "indicator", show: true, ...words, ...(edge ? { edge } : {}) }, from, () => undefined);
+  }
+
+  beforeEach(() => {
+    // The pill's size: 290 x 30 at x 700, so its area at the top is x 692..998, y 0..46 in a 1024 x 768 viewport.
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      const box = this.hasAttribute(INDICATOR_PILL_ATTRIBUTE)
+        ? { x: 700, y: 8, width: 290, height: 30 }
+        : { x: 0, y: 0, width: 0, height: 0 };
+      return { ...box, left: box.x, top: box.y, right: box.x + box.width, bottom: box.y + box.height, toJSON: () => box };
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    placePill(document, undefined);
+  });
+
+  it("decides and applies the place before the glide starts and before the arrival reply", async () => {
+    installAnimate();
+    const listener = bind();
+    drawPill(listener);
+    listener({ type: "cursor", x: 100, y: 300 }, from, () => undefined);
+    expect(pillPlace(), "a point clear of the pill leaves it").toBe("top");
+
+    const original = HTMLElement.prototype.animate;
+    const atGlide: string[] = [];
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement, ...args: Parameters<typeof original>) {
+        if (this === cursor()) atGlide.push(pillPlace());
+        return original.apply(this, args);
+      },
+    });
+    const atReply: string[] = [];
+    const sendResponse = vi.fn(() => void atReply.push(pillPlace()));
+
+    const kept = listener({ type: "cursor", x: 800, y: 20 }, from, sendResponse);
+
+    expect(kept).toBe(true);
+    expect(atGlide, "the glide started once, with the pill already aside").toEqual(["bottom"]);
+    pointerAnimations()[0]?.finish();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendResponse).toHaveBeenCalledWith({ arrived: true });
+    expect(atReply, "and it was aside when the reply went").toEqual(["bottom"]);
+  });
+
+  it("counts the target box, not only the point", () => {
+    const listener = bind();
+    drawPill(listener);
+
+    listener({ type: "cursor", x: 550, y: 130 }, from, () => undefined);
+    expect(pillPlace(), "the point alone is clear").toBe("top");
+    listener({ type: "cursor", x: 550, y: 130, box: { x: 100, y: 30, width: 900, height: 200 } }, from, () => undefined);
+    expect(pillPlace(), "the box reaches the pill's area").toBe("bottom");
+  });
+
+  it("returns to the owner's edge once a later point is clear", () => {
+    const listener = bind();
+    drawPill(listener);
+    listener({ type: "cursor", x: 800, y: 20 }, from, () => undefined);
+    expect(pillPlace()).toBe("bottom");
+
+    listener({ type: "cursor", x: 100, y: 300 }, from, () => undefined);
+    expect(pillPlace()).toBe("top");
+  });
+
+  it("steps up from an owner's edge at the bottom", () => {
+    const listener = bind();
+    drawPill(listener, "bottom");
+    listener({ type: "cursor", x: 800, y: 760 }, from, () => undefined);
+    expect(pillPlace()).toBe("top");
+  });
+
+  it("stays at the owner's edge when the points overlap both areas", () => {
+    const listener = bind();
+    drawPill(listener);
+    listener({ type: "cursor", x: 800, y: 20, box: { x: 750, y: 0, width: 100, height: 768 } }, from, () => undefined);
+    expect(pillPlace()).toBe("top");
+  });
+
+  it("returns to the owner's edge on cursor { hide: true }", () => {
+    const listener = bind();
+    drawPill(listener);
+    listener({ type: "cursor", x: 800, y: 20 }, from, () => undefined);
+    expect(pillPlace()).toBe("bottom");
+
+    listener({ type: "cursor", hide: true }, from, () => undefined);
+    expect(pillPlace()).toBe("top");
+  });
+
+  it("returns to the owner's edge on a rest pointer step", () => {
+    const listener = bind();
+    drawPill(listener);
+    listener({ type: "cursor", x: 800, y: 20 }, from, () => undefined);
+    expect(pillPlace()).toBe("bottom");
+
+    listener({ type: "pointer-step", words: "Resting", mode: "rest" }, from, () => undefined);
+    expect(pillPlace()).toBe("top");
+  });
+
+  it("does not move the pill for a stay or travel step, a malformed cursor message or another sender", () => {
+    const listener = bind();
+    drawPill(listener);
+    listener({ type: "cursor", x: 800, y: 20 }, from, () => undefined);
+    expect(pillPlace()).toBe("bottom");
+
+    listener({ type: "pointer-step", words: "Clicking", mode: "stay" }, from, () => undefined);
+    listener({ type: "pointer-step", words: "Clicking", mode: "travel" }, from, () => undefined);
+    listener({ type: "cursor", x: 100, y: 300, box: { x: 0, y: 0, width: -1, height: 1 } }, from, () => undefined);
+    listener({ type: "cursor", x: 100, y: 300 }, { id: "someone-else" }, () => undefined);
+    expect(pillPlace()).toBe("bottom");
   });
 });
 

@@ -3,6 +3,8 @@ import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { scriptedDebugger } from "./helpers/scripted-debugger.js";
 import {
+  IDLE_DETACH_ALARM,
+  IDLE_DETACH_ALARM_FLOOR_MS,
   IDLE_DETACH_MS,
   createInputAttachments,
   enableFocusEmulation,
@@ -1056,5 +1058,137 @@ describe("T944 letting go when idle (R-466, FR-482, D-031-13)", () => {
     expect(debug.state.attached.has(AGENT_TAB)).toBe(true);
     expect(attachments.holders(AGENT_TAB)).toEqual(["input"]);
     call.done();
+  });
+});
+
+/**
+ * #60 item 2 - the idle countdown is a `setTimeout`, and a worker Chrome evicts during it takes the
+ * timer with it: the attachment and the debugging bar would stay until the next call. A one-shot
+ * alarm wakes the worker no earlier than the countdown would end; the fresh worker's start-up
+ * reconciliation lets go of the attachment it no longer knows about.
+ */
+describe("#60 the idle countdown survives a worker restart", () => {
+  const THIRD_TAB = 9;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function alarmHarness(debug = scriptedDebugger()) {
+    const created: Array<{ name: string; when: number }> = [];
+    const cleared: string[] = [];
+    const attachments = createInputAttachments({
+      debug: debug.adapter,
+      alarms: {
+        create(name, info) {
+          created.push({ name, when: info.when });
+        },
+        clear(name) {
+          cleared.push(name);
+        },
+      },
+    });
+    return { attachments, debug, created, cleared };
+  }
+
+  it("arms a wake alarm no earlier than the countdown's end and no nearer than Chrome's floor", async () => {
+    expect(IDLE_DETACH_ALARM_FLOOR_MS).toBe(30_000);
+    const { attachments, created } = alarmHarness();
+    const armedAt = Date.now();
+
+    (await attachments.hold(AGENT_TAB)).done();
+
+    expect(created).toHaveLength(1);
+    expect(created[0]?.name).toBe(IDLE_DETACH_ALARM);
+    expect(created[0]?.when).toBeGreaterThanOrEqual(armedAt + IDLE_DETACH_MS);
+    expect(created[0]?.when).toBeGreaterThanOrEqual(armedAt + IDLE_DETACH_ALARM_FLOOR_MS);
+  });
+
+  it("clears the alarm only when no countdown is pending on any tab", async () => {
+    const { attachments, cleared } = alarmHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    (await attachments.hold(OTHER_TAB)).done();
+
+    // A call on one tab disarms its countdown; the other's still needs the wake.
+    const call = await attachments.hold(AGENT_TAB);
+    expect(cleared).toEqual([]);
+    await attachments.release(OTHER_TAB);
+    expect(cleared).toEqual([IDLE_DETACH_ALARM]);
+
+    // And the in-memory countdown ending in a live worker clears it too.
+    call.done();
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(cleared).toEqual([IDLE_DETACH_ALARM, IDLE_DETACH_ALARM]);
+  });
+
+  it("drops an idle tab whose countdown is due when the alarm fires in a live worker, and leaves a tab in use alone", async () => {
+    const { attachments, debug, created } = alarmHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    const inUse = await attachments.hold(OTHER_TAB);
+    // Wall-clock time passes without the timers running: the worker was throttled, not evicted.
+    vi.setSystemTime(Date.now() + IDLE_DETACH_MS / 2);
+    (await attachments.hold(THIRD_TAB)).done();
+    vi.setSystemTime(Date.now() + IDLE_DETACH_MS / 2);
+
+    await attachments.idleAlarm();
+
+    expect(debug.state.detached).toEqual([AGENT_TAB]);
+    expect(attachments.holders(OTHER_TAB)).toEqual(["input"]);
+    // Not due yet: its own countdown stays in charge, and the wake is still set for it.
+    expect(attachments.holders(THIRD_TAB)).toEqual(["input"]);
+    expect(created.at(-1)?.when).toBeGreaterThanOrEqual(Date.now() + IDLE_DETACH_MS / 2);
+    inUse.done();
+    await attachments.releaseAll();
+  });
+
+  it("leaves a due tab alone when a call restarted its countdown while the alarm was letting go of another", async () => {
+    const { attachments, debug } = alarmHarness();
+    (await attachments.hold(AGENT_TAB)).done();
+    (await attachments.hold(OTHER_TAB)).done();
+    vi.setSystemTime(Date.now() + IDLE_DETACH_MS);
+    let open!: () => void;
+    debug.state.detachGate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+
+    // The alarm is letting go of the first due tab; a call on the second comes and goes meanwhile.
+    const firing = attachments.idleAlarm();
+    (await attachments.hold(OTHER_TAB)).done();
+    open();
+    await firing;
+
+    // The second tab's countdown starts again from that call: it is not due, and its timer is the only one.
+    expect(debug.state.detached).toEqual([AGENT_TAB]);
+    expect(attachments.holders(OTHER_TAB)).toEqual(["input"]);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(IDLE_DETACH_MS);
+    expect(debug.state.detached).toEqual([AGENT_TAB, OTHER_TAB]);
+  });
+
+  it("lets go of the attachment in a fresh worker the alarm woke, through start-up reconciliation", async () => {
+    const debug = scriptedDebugger();
+    const evicted = alarmHarness(debug);
+    (await evicted.attachments.hold(AGENT_TAB)).done();
+    expect(evicted.created).toHaveLength(1);
+
+    // Chrome evicted the worker during the countdown and kept the attachment; the alarm wakes a new one.
+    const fresh = alarmHarness(debug);
+    const diagnostics = createAgentDiagnostics({
+      context: testSessionContexts(),
+      siteModes: createSiteModeStore(),
+      prompts: createAgentPromptController({ timeoutMs: 60 }),
+      tabOwnership: async () => ({ state: "this" }),
+      attachments: fresh.attachments,
+      watchTabs: () => () => undefined,
+    });
+    await diagnostics.start();
+    await fresh.attachments.idleAlarm();
+
+    expect(debug.state.detached).toEqual([AGENT_TAB]);
+    expect(debug.state.attached.size).toBe(0);
   });
 });

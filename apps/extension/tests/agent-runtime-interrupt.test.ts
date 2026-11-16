@@ -66,6 +66,12 @@ type Harness = {
   transitionReadsFail: boolean;
   /** The same read, parked, so an interrupt can land while the check is still in flight. */
   holdTransitionReads(): () => void;
+  /**
+   * The tab leases' reads, parked from now on - the pointer step's lease read among them, so an
+   * interrupt can land after the transition check and before the runner. `parked` settles once a
+   * read is waiting.
+   */
+  holdLeaseReads(): { release: () => void; parked: Promise<void> };
 };
 
 function installChrome(): Harness {
@@ -74,6 +80,7 @@ function installChrome(): Harness {
   const tabs = [{ id: TAB, url: `${SITE}/one`, title: "Agent one", groupId: -1, active: true, windowId: 900 }];
   /** Parked while a test wants the dispatch point's transition read still in flight. */
   let held: Promise<void> | undefined;
+  let leasesHeld: { gate: Promise<void>; reached: () => void } | undefined;
   const harness: Harness = {
     commands: [],
     detached: [],
@@ -90,6 +97,21 @@ function installChrome(): Harness {
         };
       });
       return release;
+    },
+    holdLeaseReads() {
+      let release = (): void => undefined;
+      let reached = (): void => undefined;
+      const parked = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = () => {
+          leasesHeld = undefined;
+          resolve();
+        };
+      });
+      leasesHeld = { gate, reached };
+      return { release, parked };
     },
   };
   const hanging = new Promise<Record<string, unknown>>((resolve) => {
@@ -117,6 +139,10 @@ function installChrome(): Harness {
           if (keys.includes(AGENT_TRANSITIONS_KEY)) {
             if (harness.transitionReadsFail) throw new Error("storage.session unavailable");
             if (held) await held;
+          }
+          if (keys.includes("agentTabLeases") && leasesHeld) {
+            leasesHeld.reached();
+            await leasesHeld.gate;
           }
           return area(session).get(keys);
         },
@@ -503,6 +529,48 @@ describe("T369 the dispatch point's own failures", () => {
       await vi.waitFor(() => expect(runtime.prompts.current()).toBeUndefined());
     } finally {
       release();
+    }
+  });
+
+  /**
+   * 034 SC-225 (review P1): the pointer step reads the leases after the transition check and outside
+   * its race, and the runner used to start after it whatever had happened meanwhile. An interrupt -
+   * or the page's Stop, which interrupts - landing in that read must keep the runner from the page.
+   */
+  it("does not start the runner when the interrupt lands while the pointer step reads the leases", async () => {
+    const { port, runtime } = await pairedRuntime();
+    await runtime.siteModes.set(SITE, { mode: "skip-checks" });
+    const releaseTransition = fake.holdTransitionReads();
+    let leases: { release: () => void; parked: Promise<void> } | undefined;
+    try {
+      port.emit({
+        callId: "call-t",
+        sessionId: SESSION,
+        tool: "type",
+        tabId: TAB,
+        args: { tabId: TAB, text: "hello", mode: "insert" },
+      });
+      await vi.waitFor(async () => expect((await runtime.projection()).sessions[0]?.inFlight).toBe(1));
+      leases = fake.holdLeaseReads();
+      releaseTransition();
+      await leases.parked;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(runtime.interruptSession(SESSION)).toEqual({ interrupted: 1 });
+      leases.release();
+
+      await vi.waitFor(() => expect(answerFor(port, "call-t")).toBeDefined());
+      expect(answerFor(port, "call-t")).toEqual({
+        callId: "call-t",
+        outcome: "stopped",
+        reason: "owner-interrupted",
+        hint: INTERRUPT_HINTS.nothingDelivered,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(fake.commands.filter((method) => method.startsWith("Input.")), "the runner reached the page").toEqual([]);
+    } finally {
+      releaseTransition();
+      leases?.release();
     }
   });
 

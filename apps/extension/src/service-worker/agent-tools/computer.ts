@@ -1,6 +1,7 @@
 import type { AgentNativeResponse } from "@hallpass/contracts";
 import type { CaptureRegion } from "../../chrome-adapters/capture.js";
 import type { AgentKeyboardInput, AgentPointerInput, PointerDispatchCheck } from "./input.js";
+import { FRAME_ANSWER_BOUND_MS } from "./frames.js";
 
 /**
  * Acting by position (004/T139, US7, FR-069, FR-070, R-120).
@@ -49,11 +50,24 @@ export async function measureViewport(
   send: (tabId: number, method: string, params?: Record<string, unknown>) => Promise<unknown>,
 ): Promise<Viewport | undefined> {
   let metrics: unknown;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    metrics = await send(tabId, "Page.getLayoutMetrics");
+    // #76: bounded, like the other single reads made before the gate (the drop's size read in
+    // `upload.ts` uses the same bound). A renderer that does not answer is a viewport that cannot be
+    // measured, which every caller decides as it did before the read existed. The `catch` on the
+    // read itself keeps an answer or failure that comes after the bound from going unhandled.
+    const read = send(tabId, "Page.getLayoutMetrics").catch((): undefined => undefined);
+    const expired = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), FRAME_ANSWER_BOUND_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    metrics = await Promise.race([read, expired]);
   } catch {
     return undefined;
+  } finally {
+    clearTimeout(timer);
   }
+  if (metrics === undefined || metrics === null) return undefined;
   const layout = (metrics as { cssLayoutViewport?: { clientWidth?: unknown; clientHeight?: unknown } })
     .cssLayoutViewport;
   const width = layout?.clientWidth;

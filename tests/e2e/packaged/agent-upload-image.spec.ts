@@ -28,10 +28,11 @@ const ID_SHAPE = /^img_[a-z0-9]{10}$/;
  * memory, crosses native messaging as base64, is turned back into a `File` inside the page's own
  * realm, and is then read back from what the page itself reports. Each of those four steps is a
  * different engine's idea of what bytes are, and a jsdom harness agrees with all of them by
- * construction. So the five journeys here are the five things an owner would check: the picture
+ * construction. So the seven journeys here are the seven things an owner would check: the picture
  * arrives in a form, it arrives as a drop where it was aimed (including one document down), a
  * picture the host no longer has never reaches the page at all, the site's mode decides as it does
- * for a click, and the retention belongs to the session rather than to the worker.
+ * for a click, a drop point outside the viewport is refused with no card (#55), a picture survives
+ * a worker restart, and it is forgotten when the session ends.
  *
  * **The two environment overrides.** `HALLPASS_SCREENSHOT_RETENTION_MS` and
  * `HALLPASS_SCREENSHOT_BUDGET_CHARS` are read by the cache factory *only when set* (`mcp-server.ts`

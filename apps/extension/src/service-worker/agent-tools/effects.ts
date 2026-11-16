@@ -10,10 +10,10 @@ import {
   type AgentToolName,
   type CurrentDialog,
   type RuntimeAction,
-  type SiteMode,
 } from "@hallpass/contracts";
 import { createAllFramesCallMemo, type AllFramesCallMemo } from "../../chrome-adapters/all-frames.js";
 import type { captureTab, CaptureDeps, CaptureFrame, CaptureRegion } from "../../chrome-adapters/capture.js";
+import { readFrameFocus } from "../../chrome-adapters/frame-focus.js";
 import type { probeFrameSender } from "../../chrome-adapters/frame-sender.js";
 import { readMainWorldMarks } from "../../chrome-adapters/main-world-marks.js";
 import {
@@ -50,18 +50,17 @@ import {
   type PointerButton,
 } from "./input.js";
 import { sameDecidingSite, type DecidingSite, type ViewportPoint } from "./frame-site.js";
-import { readFrameFocus } from "./frame-focus.js";
 import {
+  askAndApplyConsent,
   createFocusSiteOf,
   createFrameSiteOf,
   createPointSiteOf,
+  decidedByTopDocument,
   frameAnswerSite,
   frameMovedAnswer,
   frameMovedResponse,
   gateSiteOf,
   promptFrameOf,
-  rememberWithoutSiteRefusal,
-  withFrameAnswer,
 } from "./frame-consent.js";
 import {
   createFrameOffsets,
@@ -97,7 +96,7 @@ import {
   type ScreenshotSpace,
   type ScreenshotSpaces,
 } from "./coordinate-space.js";
-import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import type { AgentPromptController } from "./prompts.js";
 import { discoverRefFrame, findOnTab, resolveRef, type AgentTarget, type RefFrame } from "./refs.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
@@ -1369,8 +1368,17 @@ function pointPastViewport(point: ViewportPoint, viewport: Viewport): boolean {
  * Every named ref has to be decided by the same site. A drag between the page and another site's
  * frame, or between two sites' frames, has no one site to ask about, so it counts as unknown and
  * always asks; so does any frame whose site could not be established.
+ *
+ * `dragSites` (#51) is the drag's start and end site when each end is decided by a known site. It is
+ * only carried onto the unknown a two-site drag collapses to, so its card can name both sites; it
+ * changes nothing about the decision.
  */
-function combineDecisions(decided: DecidingSite[], anyTop: boolean, pageSite: string): DecidingSite | undefined {
+function combineDecisions(
+  decided: DecidingSite[],
+  anyTop: boolean,
+  pageSite: string,
+  dragSites?: [string, string],
+): DecidingSite | undefined {
   if (decided.length === 0) return undefined;
   const unknown = decided.find((entry) => entry.kind === "unknown");
   if (unknown) return unknown;
@@ -1378,7 +1386,8 @@ function combineDecisions(decided: DecidingSite[], anyTop: boolean, pageSite: st
   if (frames.length === 0) return decided[0];
   const first = frames[0]!;
   if (anyTop || frames.length !== decided.length || frames.some((entry) => entry.site !== first.site)) {
-    return { kind: "unknown", pageSite };
+    const named = dragSites !== undefined && dragSites[0] !== dragSites[1];
+    return { kind: "unknown", pageSite, ...(named ? { sites: dragSites } : {}) };
   }
   return first;
 }
@@ -1524,16 +1533,33 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       const site = await pointSiteOf(binding, point);
       points.set(end, site);
       // A point in the top document is the page's, exactly as a ref there is.
-      if (site.kind === "page" && site.frameId === undefined) anyTop = true;
+      if (decidedByTopDocument(site)) anyTop = true;
       else decided.push(site);
     }
+    // #51: the site that decides each end of a drag, start then end, for the card that names them;
+    // `undefined` when an end is not decided by a known site. Display only.
+    const dragEndSites = (): [string, string] | undefined => {
+      const ends = (["from", "to"] as const).map((end): string | undefined => {
+        const ref = (args[end] as { ref?: unknown } | undefined)?.ref;
+        let deciding: DecidingSite | undefined;
+        if (typeof ref === "string") {
+          const frame = frames.get(ref);
+          if (frame === undefined || frame.frameId === 0) return binding.site;
+          deciding = probed.get(frame.frameId);
+        } else {
+          deciding = points.get(end);
+        }
+        return deciding === undefined || deciding.kind === "unknown" ? undefined : deciding.site;
+      });
+      return ends[0] === undefined || ends[1] === undefined ? undefined : [ends[0], ends[1]];
+    };
     const focus = toFocus ? await focusSiteOf(binding) : undefined;
     if (focus !== undefined) {
       // Focus in the top document is the page's, exactly as a ref there is (FR-465).
-      if (focus.kind === "page" && focus.frameId === undefined) anyTop = true;
+      if (decidedByTopDocument(focus)) anyTop = true;
       else decided.push(focus);
     }
-    const deciding = combineDecisions(decided, anyTop, binding.site);
+    const deciding = combineDecisions(decided, anyTop, binding.site, tool === "drag" ? dragEndSites() : undefined);
     return {
       frames,
       ...(deciding === undefined ? {} : { deciding }),
@@ -2117,6 +2143,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       }
       // Both ends, for the path a recorded frame draws (008/FR-105), once the check let it go.
       await pointer.drag(binding.tabId, centreOf(fromRect), centreOf(toRect), {
+        // 035 R-526: the start target's box goes with the press move; the end names no box.
+        box: fromRect,
         ...(fromRect.frame?.sessionId === undefined ? {} : { sessionId: fromRect.frame.sessionId }),
         beforeDispatch: onGatedSiteThenDelivered(
           binding,
@@ -2154,6 +2182,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     if (tool === "hover") {
       await pointer.hover(binding.tabId, point, {
+        box: target.rect,
         ...(target.rect.frame?.sessionId === undefined ? {} : { sessionId: target.rect.frame.sessionId }),
         beforeDispatch: deliveredAt,
       });
@@ -2240,6 +2269,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         pointer.click(binding.tabId, point, {
           button: gesture.button,
           clickCount: gesture.clickCount,
+          box: target.rect,
           ...(target.rect.frame?.sessionId === undefined ? {} : { sessionId: target.rect.frame.sessionId }),
           beforeDispatch: deliveredAt,
         }),
@@ -2342,6 +2372,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         pointer.click(binding.tabId, centreOf(target.rect), {
           button: "left",
           clickCount: 1,
+          // 035 R-526: the focusing click aims at the target, so the page can step the pill aside.
+          box: target.rect,
           ...(sessionId === undefined ? {} : { sessionId }),
           beforeDispatch: onGatedSiteThenDelivered(
             binding,
@@ -2835,65 +2867,40 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       noteApproval(tabId, tool, args);
     }
     if (decision.decision === "prompt") {
-      const asked = await deps.prompts.ask({
-        // Whose question this is (B5): the host giving up on *this* call takes it down, and a
-        // backstop for some other call leaves it standing.
+      // Asked, answered, the lease read again, an Allow always on an unknown site refused, the chosen
+      // mode stored: the order both runners keep (`askAndApplyConsent`).
+      const consent = await askAndApplyConsent({
         callId,
-        // And which call the host knows it as, when this effect is a batch step (011 review H1).
-        hostCallId: request.hostCallId,
-        // And whether the owner ended the call while the runner was still getting here (FR-179).
-        stopped: request.stopped,
         sessionId: request.sessionId,
-        site: binding.site,
-        ...(promptFrame === undefined ? {} : { frame: promptFrame }),
-        tool,
-        argsSummary: summariseToolCall(tool, args),
-        // The one target that cannot be described in words: a picture of the place instead.
-        ...(position.point && position.viewport
-          ? await promptCrop(binding, position.point, position.viewport)
-          : {}),
+        tabId,
+        claim,
+        gateSite,
+        promptFrame,
+        tabOwnership: deps.tabOwnership,
+        siteModes: deps.siteModes,
+        ask: async () =>
+          deps.prompts.ask({
+            // Whose question this is (B5): the host giving up on *this* call takes it down, and a
+            // backstop for some other call leaves it standing.
+            callId,
+            // And which call the host knows it as, when this effect is a batch step (011 review H1).
+            hostCallId: request.hostCallId,
+            // And whether the owner ended the call while the runner was still getting here (FR-179).
+            stopped: request.stopped,
+            sessionId: request.sessionId,
+            site: binding.site,
+            ...(promptFrame === undefined ? {} : { frame: promptFrame }),
+            tool,
+            argsSummary: summariseToolCall(tool, args),
+            // The one target that cannot be described in words: a picture of the place instead.
+            ...(position.point && position.viewport
+              ? await promptCrop(binding, position.point, position.viewport)
+              : {}),
+          }),
       });
-      if (asked.decision === "busy") return answer(callId, "busy", "prompt-pending");
-      if (asked.decision === "timed-out") {
-        // FR-043: nothing ran. The prompt is dead, so a late Allow cannot start it either. And if
-        // it was raised where nobody could see it, the answer says where to click (011 FR-146).
-        // 030 FR-461: a frame's card also names the frame's site and why nothing was sent.
-        return promptFrame === undefined
-          ? noAnswerResponse(callId, asked)
-          : withFrameAnswer(noAnswerResponse(callId, asked), claim, "undecided");
-      }
-      // 006 FR-087: the owner's Stop reaches a parked call in the same word an in-flight wait gets.
-      if (asked.decision === "stopped") return answer(callId, "stopped", "owner-stopped");
-      // 014 FR-179: the owner ended this step and kept the session; not a decline, and not a stop.
-      if (asked.decision === "interrupted") return answer(callId, "stopped", "owner-interrupted");
-      if (asked.decision === "deny") {
-        const denied = answer(callId, "denied", "owner-denied");
-        return promptFrame === undefined ? denied : withFrameAnswer(denied, claim, "refused");
-      }
-      /**
-       * The lease, read again now that the owner has answered (006 FR-087, S1 review).
-       *
-       * The check at the top of this call is a fact about the moment the question was raised. The
-       * owner may press Release tabs while it stands and then answer "only this time" - or the
-       * release itself may be what ended the question - and either way the tab is theirs again, so
-       * the effect is refused exactly as any unheld tab is, before anything is delivered.
-       */
-      const held = await deps.tabOwnership(request.sessionId, tabId);
-      if (held.state !== "this") return ownershipRefusal(callId, held);
-      if (asked.decision === "released") return ownershipRefusal(callId, { state: "not-yours" });
-      // 030 FR-458, T899: a card for a frame whose site is unknown offers no Allow always, so a
-      // reply that asks to remember a mode answers a question nobody was shown. It is refused like
-      // a Refuse: nothing is stored, nothing is delivered, and the agent is told why.
-      const unanswerable = rememberWithoutSiteRefusal(callId, asked.rememberMode, gateSite, claim);
-      if (unanswerable !== undefined) return unanswerable;
-      if (asked.rememberMode && gateSite !== null) {
-        // FR-042: the owner may set the site's mode from inside the prompt they are answering - the
-        // site the card decided, which for a frame's card is the frame's site, never the page's
-        // (030 FR-457). A frame whose site is unknown has no site to store anything under (FR-458).
-        await deps.siteModes.set(gateSite, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
-      }
+      if (!consent.ok) return consent.response;
       // 031 R-456: "This session" - the gate's site, for this session only, with where it was given.
-      await recordSessionGrant(deps.sessionGrants, request.sessionId, gateSite, tool, asked, deps.reportDiagnostic);
+      await recordSessionGrant(deps.sessionGrants, request.sessionId, gateSite, tool, consent.allowed, deps.reportDiagnostic);
       // The owner's own yes, which is the other half of "approved" (008/R-139).
       noteApproval(tabId, tool, args);
     }

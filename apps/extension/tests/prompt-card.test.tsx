@@ -635,6 +635,23 @@ describe("030 frame card", () => {
     fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
     expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true } }]);
   });
+
+  it("names both sites of a drag between two sites, and still offers no Always allow (#51)", () => {
+    const FROM = "https://pay.example";
+    const TO = "https://ads.example:8443";
+    project(port, { ...IDLE, prompt: { ...PROMPT, frame: { unknown: true as const, sites: [FROM, TO] as [string, string] } } });
+    const dialog = screen.getByRole("dialog");
+    const line = ui("agent.prompt.frameTwoSites").replace("{from}", FROM).replace("{to}", TO).replace("{site}", PAGE);
+    expect(dialog.textContent).toContain(line);
+    expect(dialog.textContent).not.toContain(ui("agent.prompt.frameUnknown").replace("{site}", PAGE));
+    expect(dialog.querySelector("[data-frame]")?.getAttribute("data-frame")).toBe("unknown");
+    expect(screen.queryByRole("button", { name: ui("agent.allowAlways") })).toBeNull();
+    expect(screen.queryByRole("button", { name: ui("agent.allowSession") })).toBeNull();
+    expect(screen.getByRole("button", { name: ui("agent.refuse") })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
+    expect(port.sent).toEqual([{ type: "ui.agent.effect-decide", payload: { promptId: "prompt-f", allow: true } }]);
+  });
 });
 
 /** #51: a consent card for an action inside another site's frame names the frame's site as the action's site. */

@@ -4,7 +4,7 @@ import { readMainWorldMarks } from "../src/chrome-adapters/main-world-marks.js";
 import { enumerateFrameOffsets, enumerateTabFrames } from "../src/chrome-adapters/scripting.js";
 import { createAgentPageBindings } from "../src/service-worker/agent-tools/page-binding.js";
 import { createAgentReads } from "../src/service-worker/agent-tools/reads.js";
-import { readFrameFocus } from "../src/service-worker/agent-tools/frame-focus.js";
+import { readFrameFocus } from "../src/chrome-adapters/frame-focus.js";
 import { FRAME_ANSWER_BOUND_MS } from "../src/service-worker/agent-tools/frames.js";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 

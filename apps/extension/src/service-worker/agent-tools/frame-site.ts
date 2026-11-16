@@ -1,4 +1,5 @@
 import { canonicalOriginFromUrl } from "@hallpass/domain";
+import { FOCUS_WALK_MAX_DEPTH } from "../../chrome-adapters/frame-focus.js";
 
 /**
  * Which site decides an action inside a frame (030 FR-450..FR-453, R-440, R-441).
@@ -44,11 +45,15 @@ export type FrameClaim = {
  * `frameId` and `documentId` are the claimed ones, kept for the re-check right before the gesture
  * (R-446). They are optional on `page` and `unknown` because a top-frame or coordinate action may
  * decide without a claim.
+ *
+ * `sites` on `unknown` (#51) is display only: a drag whose two ends are decided by two different
+ * known sites is unknown - no one site decides it - and its card names those two sites, the start's
+ * then the end's. Nothing that decides reads it.
  */
 export type DecidingSite =
   | { kind: "page"; site: string; pageSite: string; frameId?: number; documentId?: string }
   | { kind: "frame"; site: string; pageSite: string; frameId: number; documentId: string }
-  | { kind: "unknown"; pageSite: string; frameId?: number; documentId?: string };
+  | { kind: "unknown"; pageSite: string; frameId?: number; documentId?: string; sites?: [string, string] };
 
 /**
  * Decide the site of the claimed frame from the browser's attribution of its reply.
@@ -326,12 +331,6 @@ export type FocusSitePorts = {
   /** The whole walk's bound; past it the site is unknown. Absent is unbounded. */
   boundMs?: number;
 };
-
-/**
- * How many frames deep the focus chain is followed, and how many shadow levels a frame follows its
- * own focus (`focusOfFrame` gets it through `executeScript` args); deeper is unknown.
- */
-export const FOCUS_WALK_MAX_DEPTH = 32;
 
 type FocusEntry = { frameId: number; documentId: string; path: number[]; focusedChild: unknown };
 

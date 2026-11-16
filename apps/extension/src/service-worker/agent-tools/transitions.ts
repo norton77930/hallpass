@@ -1,4 +1,4 @@
-import { transitionNoticeText, type SiteMode } from "@hallpass/contracts";
+import { HINT_MAX_CHARS, transitionNoticeText, type SiteMode } from "@hallpass/contracts";
 
 /**
  * When a tab moving to another site is something the owner has to be told about (014 US2,
@@ -105,13 +105,11 @@ export function clearPending(state: TabTransitionState): TabTransitionState {
  * Returns the hint to use, which is the one it was given when the notice does not fit or is
  * already in it, and `undefined` when there was neither.
  */
-export const TRANSITION_HINT_MAX_CHARS = 400;
-
 export function hintWithTransitionNotice(from: string, to: string, hint?: string): string | undefined {
   const notice = transitionNoticeText(from, to);
   if (hint?.includes(notice)) return hint;
   const composed = hint === undefined ? notice : `${hint} ${notice}`;
-  return composed.length > TRANSITION_HINT_MAX_CHARS ? hint : composed;
+  return composed.length > HINT_MAX_CHARS ? hint : composed;
 }
 
 /** The ordered pair, as the session set and the panel's rows spell it. */

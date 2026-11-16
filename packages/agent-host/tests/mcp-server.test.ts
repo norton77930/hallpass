@@ -12,6 +12,7 @@ import {
   AGENT_TOOL_DESCRIPTORS,
   ATTENTION_SENTENCES,
   BROWSER_REFUSAL_HINTS,
+  HELD_HINT,
   INTERRUPT_HINTS,
   PAIRING_DECLINED_MARKER,
   PAIRING_REFUSAL_HINTS,
@@ -1699,6 +1700,33 @@ describe("T012 agent MCP server", () => {
       expect(worker.requests).toEqual([]);
     });
 
+    /**
+     * 034 FR-515 (review I2): the owner stopped this session from a page. The worker raises no card
+     * and answers `held`; the call is refused exactly as the worker refuses every other call of a
+     * held session, and nothing was read or written on this side.
+     */
+    it("refuses the call owner-held when the session is held, and writes no directory", async () => {
+      const outside = await stageFileOutsideEveryRoot();
+      client = await startMcpClient({
+        env: { LOCALAPPDATA: dataDir, [UPLOAD_CONSENT_BOUND_ENV]: "2000" },
+      });
+      worker = await startFakeAgentWorker({
+        env: { LOCALAPPDATA: dataDir },
+        pairing: "accept",
+        features: ["upload-consent"],
+        uploadConsent: () => "held",
+        answers: UPLOADED,
+      });
+      await worker.waitForHello();
+
+      const result = await client.callTool("file_upload", { tabId: 3, ref: "tgt-1", paths: [outside.path] });
+
+      expect(result.isError).toBe(true);
+      expect(result.json).toEqual({ outcome: "stopped", reason: "owner-held", hint: HELD_HINT });
+      expect(worker.requests).toEqual([]);
+      expect(await configuredRoots()).toBeUndefined();
+    });
+
     it("ends the question when the browser goes away while it stands", async () => {
       const outside = await stageFileOutsideEveryRoot();
       client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
@@ -2476,6 +2504,33 @@ describe("T012 agent MCP server", () => {
 
         expect(result.isError).toBe(true);
         expect(result.json).toEqual({ outcome: "busy", reason: "step 1: prompt-pending" });
+        expect(worker.requests).toEqual([]);
+        expect(await configuredRoots()).toBeUndefined();
+      });
+
+      // 034 FR-515 (review round 2, G5): a held session's step is refused in the worker's own words.
+      it("answers owner-held with the held hint when the session is held, and reads no file", async () => {
+        const outside = await stageOutside("private", "diary.txt");
+        client = await startMcpClient({ env: { LOCALAPPDATA: dataDir } });
+        worker = await startFakeAgentWorker({
+          env: { LOCALAPPDATA: dataDir },
+          pairing: "accept",
+          features: ["upload-consent"],
+          uploadConsent: () => "held",
+          answers: RAN,
+        });
+        await worker.waitForHello();
+
+        const result = await client.callTool("browser_batch", {
+          tabId: 3,
+          steps: [
+            { tool: "click", args: { target: { ref: "btn-1" } } },
+            { tool: "file_upload", args: { ref: "tgt-1", paths: [outside.path] } },
+          ],
+        });
+
+        expect(result.isError).toBe(true);
+        expect(result.json).toEqual({ outcome: "stopped", reason: "step 2: owner-held", hint: HELD_HINT });
         expect(worker.requests).toEqual([]);
         expect(await configuredRoots()).toBeUndefined();
       });

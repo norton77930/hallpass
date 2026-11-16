@@ -619,6 +619,8 @@ describe("030 upload into a frame from another site", () => {
       claims?: Claim[];
       /** The browser's sender for the probed frame; `null` is a frame that never answered. */
       sender?: Sender | null;
+      /** Whether the session still holds the tab; read on every ownership lookup (#53). */
+      ownedBy?: () => boolean;
     } = {},
   ) {
     const timeline: string[] = [];
@@ -650,7 +652,8 @@ describe("030 upload into a frame from another site", () => {
       siteModes,
       bindings: createAgentPageBindings(),
       prompts,
-      tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
+      tabOwnership: async (_sessionId, tabId) =>
+        tabId === AGENT_TAB && (options.ownedBy?.() ?? true) ? { state: "this" } : { state: "not-yours" },
       setFiles: setFiles as unknown as NonNullable<Deps["setFiles"]>,
       deliverImage: deliverImage as unknown as NonNullable<Deps["deliverImage"]>,
       discoverFrame: discoverFrame as unknown as NonNullable<Deps["discoverFrame"]>,
@@ -725,6 +728,37 @@ describe("030 upload into a frame from another site", () => {
     expect((await pending).outcome).toBe("ok");
     expect((await siteModes.get(PAY)).mode).toBe("skip-checks");
     expect((await siteModes.get(SITE)).mode).toBe("follow-a-plan");
+  });
+
+  /**
+   * #53 - the order after an Allow: the lease is read again before anything is stored, and the
+   * unknown-site refusal comes after that read. Pinned so one shared ask-and-apply step keeps it.
+   */
+  it("reads the lease after the answer, before storing Allow always or refusing an unknown site (#53)", async () => {
+    for (const sender of [undefined, { origin: "null", frameId: 12, documentId: "bdoc-12" }]) {
+      for (const build of [uploadRequest, imageRequest]) {
+        let held = true;
+        const { runner, siteModes, prompts, setFiles, deliverImage } = framedHarness({
+          ...(sender === undefined ? {} : { sender }),
+          ownedBy: () => held,
+        });
+        await siteModes.set(SITE, { mode: "follow-a-plan" });
+        const stored = vi.spyOn(siteModes, "set");
+
+        const pending = runner.run(build());
+        await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+        held = false;
+        prompts.decide(prompts.current()?.promptId ?? "", true, "skip-checks");
+
+        const response = await pending;
+        expect(response).toMatchObject({ outcome: "denied", reason: "not-yours", refusal: { reason: "not-yours" } });
+        expect(response.hint).toBeUndefined();
+        expect(stored).not.toHaveBeenCalled();
+        expect((await siteModes.get(PAY)).mode).toBe("ask");
+        expect(setFiles).not.toHaveBeenCalled();
+        expect(deliverImage).not.toHaveBeenCalled();
+      }
+    }
   });
 
   it("answers a refusal and a timeout with the frame's site and the reason, and writes nothing", async () => {
@@ -1069,6 +1103,31 @@ describe("030 a drop point is decided by the frame under it", () => {
 
       afterEach(() => {
         vi.useRealTimers();
+        vi.unstubAllGlobals();
+      });
+
+      /**
+       * #76: the injected function itself runs here, against a window whose inner size is the
+       * viewport and whose outer size is a different one, so a function that read another size would
+       * decide the point differently. (The fakes above hand back a size without running it.)
+       */
+      it("refuses by the size the injected function reads from the window's inner size", async () => {
+        vi.stubGlobal("innerWidth", 1280);
+        vi.stubGlobal("innerHeight", 720);
+        vi.stubGlobal("outerWidth", 1600);
+        vi.stubGlobal("outerHeight", 900);
+        const executeScript = scripted(async (injection) => [{ result: (injection as { func: () => unknown }).func() }]);
+        const { runner, prompts, deliverImage, page } = dropHarness([payFrame()]);
+        const asked = vi.spyOn(prompts, "ask");
+
+        // Past the inner size, inside the outer one.
+        const response = await runner.run(dropAt({ x: 1290, y: 90 }));
+
+        expect(executeScript).toHaveBeenCalledTimes(1);
+        expect(response).toEqual({ callId: "call-3", outcome: "not-actionable", reason: "point-outside-viewport (frame 1280x720)" });
+        expect(asked).not.toHaveBeenCalled();
+        expect(deliverImage).not.toHaveBeenCalled();
+        expect(walked(page)).toEqual([]);
       });
 
       it("reads the size from frame 0's isolated world and refuses an off-viewport point with no card", async () => {

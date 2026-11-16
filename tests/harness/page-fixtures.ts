@@ -183,6 +183,12 @@ const PAGE_FILES = [
    */
   "pointer-033",
   "pointer-033-csp",
+  /**
+   * 035/T1047: the pill-move live checks. A button under the top-right pill area (`#corner`), one in the
+   * middle (`#centre`), a tall element down the right edge covering both pill places (`#tall`, shown by
+   * the journey), and a probe (`window.__pill035`) that records where the pill was when a press arrived.
+   */
+  "pill-move-035",
 ] as const;
 
 type PageFileName = (typeof PAGE_FILES)[number];
