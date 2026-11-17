@@ -173,6 +173,9 @@ test.describe("agent panel screenshots", () => {
         const sites = settingsPageDriver(settings.page, locale);
         await sites.setAppearance({ language: locale, theme: "light" });
         await sites.goto("#sites");
+        // #78: the notice of the mode change above was written in the language the page had then and stays until
+        // dismissed; the picture is of the sites, so it is closed first.
+        await sites.evaluateSettings("document.querySelectorAll('.settings-page .toast-close').forEach((b) => b.click())");
         const lowerName = `016-panel-${locale}-sites.png`;
         const lowerSaved = test.info().outputPath(lowerName);
         await sites.screenshot(lowerSaved);
@@ -185,6 +188,9 @@ test.describe("agent panel screenshots", () => {
           .soft(leak, `${lowerName} shows ${JSON.stringify(listPath)}; launch the browser with a neutral LOCALAPPDATA (e.g. C:\\hallpass-demo) and retake. Kept only at ${lowerSaved}`)
           .toBe(false);
         if (!leak) copyFileSync(lowerSaved, join(MEDIA, lowerName));
+        // #78: the owner's language and theme outrank the browser's (024 D-024-20), so the choice made for this
+        // shot is handed back before the next locale; left pinned, the panel stays in this language and theme.
+        await sites.setAppearance({ language: "system", theme: "system" });
 
         // 036 R-538: Answer answers nothing and sends nothing; it moves focus to the question's card. Focus is
         // taken off the card first, so the check is of the press and not of where focus already was.
@@ -209,8 +215,9 @@ test.describe("agent panel screenshots", () => {
       await ok(alpha, "tabs_close", { tabId: tabA });
       await ok(beta, "tabs_close", { tabId: tabB });
       openTabs.length = 0;
-      // The `ask` row was this run's own; forget it for the next gate.
-      await settings.revokeSite(SITE_ASK);
+      // #78: no `ask` row to forget. `ask` is the default mode and, since 024 dropped the diagnostics grant from
+      // this composition, nothing is stored for that site: its row is listed only while its tab is open, and the
+      // tabs were closed just above.
       await settings.setAppearance({ language: "system", theme: "system" });
     } finally {
       for (const tabId of openTabs) {

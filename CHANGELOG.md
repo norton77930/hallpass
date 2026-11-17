@@ -5,6 +5,13 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.25.1 — 2026-11-17
+
+- **Up-to-date screenshots (#78).** The side-panel and settings screenshots in the README's media now
+  show the current panel: the warm palette and the new session cards, in English and Traditional
+  Chinese, light and dark. The test run that takes them reaches its second language again. Nothing in
+  the extension or the helper changed.
+
 ## 0.25.0 — 2026-11-17
 
 - **A warmer, calmer panel.** The side panel and the settings page move from cool grey to a warm
