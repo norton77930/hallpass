@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Panel preview (throwaway palette prototype)</title>
+    <style>
+      html, body { margin: 0; }
+      * { box-sizing: border-box; }
+      #root { display: flex; gap: 24px; width: 800px; }
+      #root > div > div { width: 380px; height: 860px; display: flex; flex-direction: column; background: var(--bg); color: var(--text); font: 13px system-ui, sans-serif; border: 1px solid var(--line); }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./panel-preview.tsx"></script>
+  </body>
+</html>

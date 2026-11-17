@@ -255,3 +255,8 @@ External-agent pairing, consent, site modes and the packaged-gate suites behave 
 
 - New agents and adapter bumps (021). Syntax highlighting. Regenerate or edit a message. Attachments.
   Voice. Per-project permission levels. Any change to what an agent may do.
+
+## Change log
+
+- **2026-11-17** (037): D-020-2's ground and neutral colours are superseded by the warm paper palette of
+  037 FR-558; the single indigo accent is kept.

@@ -5,6 +5,14 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.25.0 — 2026-11-17
+
+- **A warmer, calmer panel.** The side panel and the settings page move from cool grey to a warm
+  paper ground in light mode and a warm charcoal ground in dark mode. Buttons, the selected tab and the
+  focus ring keep the same indigo, every text stays at the same contrast or better, and session
+  colours still match Chrome's tab groups. Only colours changed: layout, wording and behaviour are as
+  before.
+
 ## 0.24.0 — 2026-11-17
 
 - **Session cards that read at a glance.** The side panel's Sessions tab now puts the sessions that
