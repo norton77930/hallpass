@@ -388,3 +388,8 @@ panel returns; macOS and Linux support; any change to what the buttons, modes or
 | D-016-8 tab strip | FR-238 – FR-241 | SC-118 |
 | D-016-9 robustness | FR-242 – FR-244 | SC-119 |
 | D-016-10 close-out | FR-245 – FR-247 | SC-120 |
+
+## Change log
+
+- **2026-11-17** (036): FR-232's fixed place for "End session" is superseded by 036 FR-551 (footer, right,
+  danger text; Take back tabs on the left); the session card's layout is now specs/036-session-card-layout.

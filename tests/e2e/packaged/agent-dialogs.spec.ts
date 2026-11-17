@@ -3,7 +3,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, showAllActivity, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -103,7 +103,9 @@ test.describe("agent dialogs", () => {
       await call("dialog", { tabId, action: "accept", promptText: "typed" });
       await expect(pageAt(extensionContext, DIALOGS).locator("#result")).toHaveText("prompt:typed");
 
-      // FR-113: every one of them is on the card, whatever the mode decided.
+      // FR-113: every one of them is on the card, whatever the mode decided. (036 FR-550: the card shows its
+      // newest three rows and a "Show all" for the rest, so the rest are expanded before the card is read.)
+      await showAllActivity(panel);
       const text = await panel.panelText();
       expect(text).toContain("Delete 3 orders? This cannot be undone.");
       expect(text).toContain("What is your name?");

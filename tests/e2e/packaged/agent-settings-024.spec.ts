@@ -529,12 +529,14 @@ test.describe("024 settings page (quickstart L1-L14)", () => {
       const settings = await openSettingsPage({ context: extensionContext, worker: extensionWorker, extensionId, locale, route: "#agents" });
       await expect.poll(() => panel.evaluatePanel("document.querySelectorAll('section[data-session-id]').length"), { timeout: 20_000 }).toBe(1);
 
-      const label = ui("agent.session.manageSiteLabel", { site: SITE });
+      // 036 FR-547: each site row of "Sites and permissions" has an icon button named for its site, and the card
+      // writes a site without its scheme (the card is open: it is the only session).
+      const label = ui("agent.session.manageSiteLabel", { site: new URL(SITE).host });
       const manage = `(()=>{const b=[...document.querySelectorAll('button.agent-session-manage')].find((x)=>x.getAttribute('aria-label')===${JSON.stringify(label)});if(!b)return false;b.click();return true})()`;
       await expect
         .poll(() => panel.evaluatePanel(manage, true), {
           timeout: 20_000,
-          message: "the session card shows no Manage link for its site (024 FR-393: the card's projection carries no site)",
+          message: "the session card shows no Manage button for its site (024 FR-393, 036 FR-547: its site rows carry one per site with a known origin)",
         })
         .toBe(true);
       // The open page is reused and routed (R-372): one tab, Sites, the row marked.

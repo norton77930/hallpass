@@ -371,13 +371,14 @@ test.describe("agent upload image", () => {
 
       // FR-174: one line on the session's card, written from pieces by the panel - the delivery the
       // page reported decides which of the two sentences it is.
-      const uploadLine = ui("agent.activity.uploadInput").replace("{site}", SITE);
+      // 036 FR-549: the card writes the site as its rows do, without the scheme.
+      const uploadLine = ui("agent.activity.uploadInput").replace("{site}", new URL(SITE).host);
       await panel.waitForText(uploadLine);
       const panelText = await panel.panelText();
       expect(panelText.split(uploadLine).length - 1, `expected exactly one activity line:\n${panelText}`).toBe(1);
       expect(panelText).toContain(ui("agent.activity.delivered"));
       // The refused upload left no line: the list is what a session *did*, not what it asked.
-      expect(panelText).not.toContain(ui("agent.activity.uploadDrop").replace("{site}", SITE));
+      expect(panelText).not.toContain(ui("agent.activity.uploadDrop").replace("{site}", new URL(SITE).host));
 
       await settings.setSiteMode(SITE, "skip-checks");
       await call("tabs_close", { tabId });

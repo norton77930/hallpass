@@ -26,6 +26,8 @@ import {
  */
 describe("T191 session card", () => {
   let port: FakeAgentPort;
+  /** 036: the activity list's rows; the sites section is a list as well. */
+  const activityRows = (node: HTMLElement): HTMLElement[] => [...node.querySelectorAll<HTMLElement>(".agent-session-activity > li")];
   const SESSIONS: AgentPanelState = {
     ...IDLE,
     paired: [
@@ -76,13 +78,15 @@ describe("T191 session card", () => {
 
     const a = card("session-a");
     expect(a.textContent).toContain("Claude Code");
-    // 016 FR-229: the held tabs are counted and the sites named, in the subtitle.
-    expect(a.textContent).toContain("holds 2 tabs: shop.test");
+    // 036 FR-541, FR-545: the held tabs are counted in the state line and every site is named once, in its own section.
+    expect(a.querySelector(".agent-session-tabs")?.textContent).toBe("2 tabs");
+    expect([...a.querySelectorAll(".agent-session-site-name")].map((node) => node.textContent)).toEqual(["shop.test"]);
     expect(a.textContent).not.toContain("Cart - Shop");
     expect(a.textContent).not.toContain("https://shop.test/cart");
     const b = card("session-b");
     expect(b.textContent).toContain("Second Agent");
-    expect(b.textContent).toContain("holds 1 tab: docs.test, api.test");
+    expect(b.querySelector(".agent-session-tabs")?.textContent).toBe("1 tab");
+    expect([...b.querySelectorAll(".agent-session-site-name")].map((node) => node.textContent)).toEqual(["docs.test", "api.test"]);
   });
 
   it("names each session by its own greeting, and falls back to the paired name only when the projection carries none", () => {
@@ -191,7 +195,10 @@ describe("T191 session card", () => {
       sessions: [{ sessionId: "session-c", agentId: "agent-1", tabs: [], sites: [], state: "working" }],
     });
 
-    expect(card("session-c").textContent).toContain(ui("agent.session.noSites"));
+    // 036: nothing is held and nothing is known, so the line has no count and there is no sites section to be empty.
+    expect(card("session-c").querySelector(".agent-session-tabs")).toBeNull();
+    expect(card("session-c").querySelector(".agent-session-sites")).toBeNull();
+    expect(within(card("session-c")).queryByRole("heading", { name: ui("agent.session.sitesTitle") })).toBeNull();
   });
 
   /**
@@ -271,7 +278,7 @@ describe("T191 session card", () => {
       ],
     });
 
-    const items = within(card("session-x")).getAllByRole("listitem");
+    const items = activityRows(card("session-x"));
     expect(items).toHaveLength(2);
     expect(items[0]?.textContent).toContain(
       ui("agent.activity.dialog").replace("{site}", "shop.test").replace("{message}", "Delete 3 orders?"),
@@ -311,7 +318,7 @@ describe("T191 session card", () => {
         ],
       });
 
-      const items = within(card("session-k")).getAllByRole("listitem");
+      const items = activityRows(card("session-k"));
       expect(items).toHaveLength(2);
       expect(items[0]?.textContent).toContain("First?");
       expect(items[1]?.textContent).toContain("Second?");
@@ -344,7 +351,7 @@ describe("T191 session card", () => {
       ],
     });
 
-    const item = within(card("session-w")).getAllByRole("listitem")[0];
+    const item = activityRows(card("session-w"))[0];
     expect(item?.textContent).toContain(
       ui("agent.activity.restore").replace("{state}", ui("agent.activity.windowMaximized")),
     );
@@ -387,7 +394,7 @@ describe("T191 session card", () => {
       ],
     });
 
-    const items = within(card("session-v")).getAllByRole("listitem");
+    const items = activityRows(card("session-v"));
     expect(items[0]?.textContent).toContain("Viewport cleared");
     expect(items[1]?.textContent).toContain("Viewport set to 375x812");
     expect(items[1]?.textContent).not.toContain("{size}");
@@ -409,9 +416,10 @@ describe("T191 session card", () => {
       ],
     });
 
-    const item = within(card("session-i")).getAllByRole("listitem")[0];
+    const item = activityRows(card("session-i"))[0];
+    // 036 FR-549: the row says what the owner did, with no outcome word under it.
     expect(item?.textContent).toContain(ui("agent.activity.interrupt"));
-    expect(item?.textContent).toContain(ui("agent.activity.interrupted"));
+    expect(item?.querySelector(".agent-activity-result")).toBeNull();
   });
 
   /**
@@ -460,10 +468,11 @@ describe("T191 session card", () => {
         { sessionId: "session-c", agentId: "agent-1", tabs: [], sites: [], state: "working", activity: [consent] },
       ],
     });
-    const item = within(card("session-c")).getAllByRole("listitem")[0];
-    expect(item?.textContent).toContain(`頁面操作 · ${WIKI} · 允許這個工作階段（在終端機）`);
-    // The answer is in the sentence; there is no outcome word to repeat it.
-    expect(item?.querySelector(".agent-activity-outcome")).toBeNull();
+    const item = activityRows(card("session-c"))[0];
+    // 036 FR-549: the question and the site in the row, the answer as its result, and where it was given as a place.
+    expect(item?.querySelector(".agent-activity-text")?.textContent).toBe("頁面操作 www.wikipedia.org");
+    expect(item?.querySelector(".agent-activity-result")?.textContent).toBe("允許這個工作階段");
+    expect(item?.querySelector(".agent-session-place")?.textContent).toBe("終端機");
   });
 
   it("does not read a kind it has no sentence for as a dialog", () => {
@@ -518,7 +527,7 @@ describe("T191 session card", () => {
       ],
     });
 
-    const item = within(card("session-u")).getAllByRole("listitem")[0];
+    const item = activityRows(card("session-u"))[0];
     expect(item?.textContent).toContain("File put into a form on fixtures.test");
     expect(item?.textContent).toContain(ui("agent.activity.delivered"));
     expect(item?.textContent).not.toContain("{site}");
@@ -581,14 +590,15 @@ describe("016 T437 session card", () => {
     if (!(node instanceof HTMLElement)) throw new Error("no card");
     return node;
   };
-  const buttons = (): string[] => within(only()).getAllByRole("button").map((button) => button.textContent ?? "");
 
-  it("titles the card with its folder, the agent under it, as inert text (T606 B3)", () => {
+  it("titles the card with its folder, the agent in the state line, as inert text (T606 B3, 036 FR-541)", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...base, label: "shop-frontend" }] });
 
-    expect(within(only()).getByRole("heading").textContent).toBe("shop-frontend");
-    expect(only().querySelector(".agent-session-meta")?.textContent).toBe("Claude Code · started 14:02");
+    expect(within(only()).getByRole("heading", { level: 2 }).textContent).toBe("shop-frontend");
+    expect(only().querySelector(".agent-session-agent")?.textContent).toBe("Claude Code");
+    // FR-544: when it started is on the quiet last line, not under the name.
+    expect(only().querySelector(".agent-session-tech summary")?.textContent).toBe("14:02 · Technical details");
   });
 
   it("cuts a long folder name with an ellipsis and keeps the full text in the title", () => {
@@ -596,63 +606,66 @@ describe("016 T437 session card", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...base, label: long }] });
 
-    const heading = within(only()).getByRole("heading");
+    const heading = within(only()).getByRole("heading", { level: 2 });
     expect(heading.textContent).not.toContain(long);
     expect(heading.textContent).toContain("…");
     expect(heading.querySelector(`[title="${long}"]`)).not.toBeNull();
   });
 
-  it("falls back to the agent and the start time when no folder was reported, in both locales", () => {
+  it("falls back to the agent for the title, and says the start on the last line, in both locales", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [base] });
-    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code");
-    expect(only().querySelector(".agent-session-meta")?.textContent).toBe("started 14:02");
+    expect(within(only()).getByRole("heading", { level: 2 }).textContent).toBe("Claude Code");
+    expect(only().querySelector(".agent-session-tech summary")?.textContent).toBe("14:02 · Technical details");
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [base] });
-    expect(within(only()).getByRole("heading").textContent).toBe("Claude Code");
-    expect(only().querySelector(".agent-session-meta")?.textContent).toBe("14:02 開始");
+    expect(within(only()).getByRole("heading", { level: 2 }).textContent).toBe("Claude Code");
+    expect(only().querySelector(".agent-session-tech summary")?.textContent).toBe("14:02 開始 · 技術資訊");
   });
 
-  it("says when it started and what it holds, or that it holds nothing, in both locales", () => {
-    // T606 (B3): when it started is under the name; the line under the head is what it holds.
+  it("says what it holds as a count in the state line and every site once, or nothing, in both locales", () => {
+    // 036 FR-541, FR-545: the count is in the line under the name; the sites are their own section.
     const labelled = { ...base, label: "shop-frontend" };
-    const sites = () => only().querySelector(".agent-session-sites")?.textContent;
-    const meta = () => only().querySelector(".agent-session-meta")?.textContent;
+    const tabs = () => only().querySelector(".agent-session-tabs")?.textContent;
+    const siteNames = () => [...only().querySelectorAll(".agent-session-site-name")].map((node) => node.textContent);
     renderShell();
     project(port, { ...IDLE, sessions: [labelled] });
-    expect(meta()).toBe("Claude Code · started 14:02");
-    expect(sites()).toBe("holds 2 tabs: shop.test, localhost:3100");
+    expect(tabs()).toBe("2 tabs");
+    expect(siteNames()).toEqual(["shop.test", "localhost:3100"]);
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [labelled] });
-    expect(meta()).toBe("Claude Code · 14:02 開始");
-    expect(sites()).toBe("持有 2 個分頁：shop.test、localhost:3100");
+    expect(tabs()).toBe("2 個分頁");
+    expect(siteNames()).toEqual(["shop.test", "localhost:3100"]);
+    expect(only().querySelector(".agent-session-section h3")?.textContent).toBe("網站與權限");
     cleanup();
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [], sites: [] }] });
-    expect(sites()).toBe("沒有持有分頁");
+    expect(tabs()).toBeUndefined();
+    expect(siteNames()).toEqual([]);
     cleanup();
 
     renderShell();
-    project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [], sites: [] }] });
-    expect(sites()).toBe("holds no tabs");
+    project(port, { ...IDLE, sessions: [{ ...labelled, tabs: [TWO_TABS[0]!], sites: ["shop.test"] }] });
+    expect(tabs()).toBe("1 tab");
   });
 
-  // 0.9.0 owner check: without a folder the title already ends in the start time, so the subtitle
-  // does not say it a second time.
-  it("does not repeat the start time in the subtitle when the title carries it, in both locales", () => {
+  it("marks a site a tab is on, and a site only the plan covers with the plan mark alone", () => {
     renderShell();
-    project(port, { ...IDLE, sessions: [{ ...base, tabs: [], sites: [] }] });
-    expect(only().querySelector(".agent-session-sites")?.textContent).toBe("holds no tabs");
-    cleanup();
-
-    renderShell("zh-TW");
-    project(port, { ...IDLE, sessions: [base] });
-    expect(only().querySelector(".agent-session-sites")?.textContent).toBe("持有 2 個分頁：shop.test、localhost:3100");
+    project(port, {
+      ...IDLE,
+      sessions: [{ ...base, tabs: [TWO_TABS[0]!], sites: ["shop.test"], sitePlan: { origins: ["https://shop.test", "https://api.test"] } }],
+    });
+    const rows = [...only().querySelectorAll<HTMLElement>(".agent-session-sites > li")];
+    expect(rows.map((row) => row.querySelector(".agent-session-site-name")?.textContent)).toEqual(["shop.test", "api.test"]);
+    expect(rows[0]?.querySelector('[data-mark="tab"]')?.textContent).toBe("Tab here");
+    expect(rows[0]?.querySelector('[data-mark="plan"]')?.textContent).toBe("In site plan");
+    expect(rows[1]?.querySelector('[data-mark="tab"]')).toBeNull();
+    expect(rows[1]?.querySelector('[data-mark="plan"]')?.textContent).toBe("In site plan");
   });
 
   it("says working, waiting for you, or idle with the last action, and marks a waiting card", () => {
@@ -665,11 +678,11 @@ describe("016 T437 session card", () => {
     expect(only().getAttribute("data-session-state")).toBe("waiting");
 
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(30_000) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action just now");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · just now");
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(12 * MINUTE) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action 12 min ago");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · 12 min ago");
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(75 * MINUTE) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action 1 h 15 min ago");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · 1 h 15 min ago");
   });
 
   it("says the three states and the last action in zh-TW", () => {
@@ -679,23 +692,23 @@ describe("016 T437 session card", () => {
     project(port, { ...IDLE, sessions: [{ ...base, state: "waiting" }] });
     expect(only().querySelector(".agent-session-state")?.textContent).toBe("等你回答");
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(10_000) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 上次動作：剛剛");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 剛剛");
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(12 * MINUTE) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 上次動作：12 分鐘前");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 12 分鐘前");
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(75 * MINUTE) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 上次動作：1 小時 15 分鐘前");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("待命中 · 1 小時 15 分鐘前");
   });
 
   it("moves the last action on once a minute without a new projection", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, lastActivityAt: ago(30_000) }] });
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action just now");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · just now");
 
     act(() => {
       vi.advanceTimersByTime(MINUTE);
     });
 
-    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · last action 1 min ago");
+    expect(only().querySelector(".agent-session-state")?.textContent).toBe("Idle · 1 min ago");
     expect(port.sent, "the clock is the panel's own; it asks the worker for nothing").toEqual([]);
   });
 
@@ -705,7 +718,7 @@ describe("016 T437 session card", () => {
 
     const details = only().querySelector("details");
     expect(details?.open).toBe(false);
-    expect(details?.querySelector("summary")?.textContent).toBe("Technical details");
+    expect(details?.querySelector("summary")?.textContent).toBe("14:02 · Technical details");
     expect(details?.textContent).toContain(`Session ID: ${base.sessionId}`);
     const rest = only().cloneNode(true) as HTMLElement;
     rest.querySelector("details")?.remove();
@@ -715,26 +728,39 @@ describe("016 T437 session card", () => {
 
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [base] });
-    expect(only().querySelector("details summary")?.textContent).toBe("技術資訊");
+    expect(only().querySelector("details summary")?.textContent).toBe("14:02 開始 · 技術資訊");
     expect(only().querySelector("details")?.textContent).toContain(`工作階段 ID：${base.sessionId}`);
   });
 
-  it("offers only the controls that would do something, end session always first", () => {
+  it("offers only the controls that would do something: the primary action in the header, the rest in the footer", () => {
+    // The open/fold press is the title; the other button in the header is the primary action.
+    const header = () =>
+      within(only().querySelector<HTMLElement>(".agent-session-head")!)
+        .queryAllByRole("button")
+        .filter((button) => !button.classList.contains("agent-session-toggle"))
+        .map((button) => button.textContent);
+    const footer = () => within(only().querySelector<HTMLElement>(".agent-session-foot")!).getAllByRole("button").map((button) => button.textContent);
     renderShell();
     project(port, { ...IDLE, sessions: [base] });
-    expect(buttons()).toEqual(["End session", "Interrupt this step", "Take back tabs (2)"]);
+    expect(header()).toEqual(["Interrupt"]);
+    expect(footer()).toEqual(["Take back tabs (2)", "End session"]);
 
     project(port, { ...IDLE, sessions: [{ ...base, state: "waiting", tabs: [TWO_TABS[0]!] }] });
-    expect(buttons()).toEqual(["End session", "Take back tabs (1)"]);
+    expect(header()).toEqual(["Answer"]);
+    expect(footer()).toEqual(["Take back tabs (1)", "End session"]);
 
     project(port, { ...IDLE, sessions: [{ ...base, state: "idle", inFlight: 0, tabs: [], sites: [] }] });
-    expect(buttons()).toEqual(["End session"]);
+    expect(header()).toEqual([]);
+    expect(footer()).toEqual(["End session"]);
   });
 
-  it("names the three controls in zh-TW", () => {
+  it("names the controls in zh-TW", () => {
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [base] });
-    expect(buttons()).toEqual(["結束工作階段", "中斷這一步", "收回分頁（2）"]);
+    expect(within(only().querySelector<HTMLElement>(".agent-session-head")!).getByRole("button", { name: "中斷" })).toBeTruthy();
+    expect(
+      within(only().querySelector<HTMLElement>(".agent-session-foot")!).getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["收回分頁（2）", "結束工作階段"]);
   });
 
   it("ends and takes back tabs for exactly this session", () => {
@@ -751,29 +777,30 @@ describe("016 T437 session card", () => {
   });
 
   it.each(["cyan", "green", "purple", "pink", "orange", "grey", "blue"] as const)(
-    "draws a %s stripe",
+    "draws a %s bar",
     (colour) => {
       renderShell();
       project(port, { ...IDLE, sessions: [{ ...base, colour }] });
 
-      const stripe = only().querySelector(".agent-session-stripe");
-      expect(stripe?.getAttribute("data-colour")).toBe(colour);
-      expect(stripe?.getAttribute("aria-hidden")).toBe("true");
+      const bar = only().querySelector(".agent-session-bar");
+      expect(bar?.getAttribute("data-colour")).toBe(colour);
+      expect(bar?.getAttribute("aria-hidden")).toBe("true");
     },
   );
 
-  it("draws no stripe for a session the worker gave no colour", () => {
+  it("draws no bar for a session the worker gave no colour", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [base] });
 
-    expect(only().querySelector(".agent-session-stripe")).toBeNull();
+    expect(only().querySelector(".agent-session-bar")).toBeNull();
   });
 
-  it("styles a waiting card's border and each stripe from tokens, light and dark", () => {
+  it("styles a waiting card's border and each bar from tokens, light and dark", () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const css = readFileSync(resolve(here, "../src/side-panel/agent/agent.css"), "utf8");
     const tokens = readFileSync(resolve(here, "../src/side-panel/agent/tokens.css"), "utf8");
-    expect(css).toMatch(/\.agent-session\[data-session-state="waiting"\]\s*\{[^}]*border-color:\s*var\(--warn\)/);
+    // 036 FR-553: a card that needs the owner is outlined in the warning token, with a soft ring from the same token.
+    expect(css).toMatch(/\.agent-session\[data-attention="true"\]\s*\{[^}]*border-color:[^;}]*var\(--warn\)/);
     const dark = tokens.indexOf("@media (prefers-color-scheme: dark)");
     for (const colour of ["cyan", "green", "purple", "pink", "orange", "grey", "blue"]) {
       expect(css).toMatch(new RegExp(`\\[data-colour="${colour}"\\]\\s*\\{[^}]*var\\(--group-${colour}\\)`));
@@ -782,7 +809,7 @@ describe("016 T437 session card", () => {
     }
   });
 
-  it("never lets the shell's column squeeze a card to nothing (its overflow is hidden for the stripe)", () => {
+  it("never lets the shell's column squeeze a card to nothing", () => {
     // Measured on the real panel 2026-09-27: with a question card and the site list in the same
     // column, both session cards rendered 0 px tall - a flex item whose overflow is not visible has
     // no content-based minimum height, so the column shrank it away. jsdom cannot lay out, so the
@@ -816,6 +843,7 @@ describe("017 T484 session card site plan", () => {
     if (!(node instanceof HTMLElement)) throw new Error("no card");
     return node;
   };
+  const activityRows = (node: HTMLElement): HTMLElement[] => [...node.querySelectorAll<HTMLElement>(".agent-session-activity > li")];
 
   beforeEach(() => {
     port = installAgentPort();
@@ -829,25 +857,30 @@ describe("017 T484 session card site plan", () => {
   it("shows nothing about a plan while the session has none", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [SESSION] });
-    expect(only().querySelector(".agent-session-site-plan")).toBeNull();
+    expect(only().querySelector('[data-mark="plan"]')).toBeNull();
     expect(within(only()).queryByRole("button", { name: ui("agent.session.sitePlanWithdraw") })).toBeNull();
     expect(only().textContent).not.toContain("Site plan");
   });
 
-  it("says how many sites the plan covers and unfolds to the list", () => {
+  it("lists the plan's sites in the sites section, marked as in the plan, with Withdraw on the section title", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: ORIGINS } }] });
 
-    const plan = only().querySelector<HTMLDetailsElement>("details.agent-session-site-plan");
-    expect(plan?.querySelector("summary")?.textContent).toBe("Site plan: 3 sites");
-    expect([...(plan?.querySelectorAll("li") ?? [])].map((item) => item.textContent)).toEqual(ORIGINS);
-
-    project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: [ORIGINS[0] as string] } }] });
-    expect(only().querySelector("details.agent-session-site-plan summary")?.textContent).toBe("Site plan: 1 site");
+    const rows = [...only().querySelectorAll<HTMLElement>(".agent-session-sites > li")];
+    expect(rows.map((row) => row.querySelector(".agent-session-site-name")?.textContent)).toEqual([
+      "shop.test",
+      "docs.test:8443",
+      "api.test",
+    ]);
+    for (const row of rows) expect(row.querySelector('[data-mark="plan"]')?.textContent).toBe("In site plan");
+    // Withdraw sits on the section's title line, once, and not on any site row.
+    const head = only().querySelector<HTMLElement>(".agent-session-section-head")!;
+    expect(within(head).getByRole("button", { name: ui("agent.session.sitePlanWithdraw") })).toBeTruthy();
+    expect(within(only()).getAllByRole("button", { name: ui("agent.session.sitePlanWithdraw") })).toHaveLength(1);
 
     // 017 follow-up: an IDN origin is listed in both forms.
     project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: ["https://xn--r8jz45g.jp"] } }] });
-    expect(only().querySelector("details.agent-session-site-plan li")?.textContent).toBe("https://例え.jp (xn--r8jz45g.jp)");
+    expect(only().querySelector(".agent-session-site-name")?.textContent).toBe("例え.jp (xn--r8jz45g.jp)");
   });
 
   it("withdraws the plan of exactly this session", () => {
@@ -888,7 +921,15 @@ describe("017 T484 session card site plan", () => {
         },
       ],
     });
-    const lines = within(only()).getAllByRole("listitem").map((entry) => entry.textContent);
+    const text = (entry: HTMLElement): string => entry.querySelector(".agent-activity-text")?.textContent ?? "";
+    // The newest three show first (FR-550); the rest are one press away.
+    expect(activityRows(only()).map((entry) => `${text(entry)} ${entry.querySelector(".agent-activity-result")?.textContent}`)).toEqual([
+      `Site plan for 3 sites ${ui("agent.activity.withdrawn")}`,
+      `Site plan for 2 sites ${ui("agent.activity.replaced")}`,
+      `Site plan for 3 sites ${ui("agent.activity.approved")}`,
+    ]);
+    fireEvent.click(within(only()).getByRole("button", { name: ui("agent.session.showAll").replace("{n}", "4") }));
+    const lines = activityRows(only()).map((entry) => `${text(entry)} ${entry.querySelector(".agent-activity-result")?.textContent}`);
     expect(lines).toEqual([
       `Site plan for 3 sites ${ui("agent.activity.withdrawn")}`,
       `Site plan for 2 sites ${ui("agent.activity.replaced")}`,
@@ -897,13 +938,11 @@ describe("017 T484 session card site plan", () => {
     ]);
   });
 
-  it("renders the summary and the withdraw control in zh-TW", () => {
+  it("renders the withdraw control and the plan mark in zh-TW", () => {
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [{ ...SESSION, sitePlan: { origins: ORIGINS } }] });
-    expect(only().querySelector("details.agent-session-site-plan summary")?.textContent).toBe(
-      lookup("agent.session.sitePlan", "zh-TW").replace("{n}", "3"),
-    );
     expect(within(only()).getByRole("button", { name: lookup("agent.session.sitePlanWithdraw", "zh-TW") })).toBeTruthy();
+    expect(only().querySelector('[data-mark="plan"]')?.textContent).toBe(lookup("agent.session.markPlan", "zh-TW"));
   });
 });
 
@@ -941,30 +980,32 @@ describe("031 T925 session card grants", () => {
     uninstallAgentPort();
   });
 
-  it("renders no grants list when the session holds none", () => {
+  it("renders no grants when the session holds none", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [SESSION] });
-    expect(within(only()).queryByRole("list", { name: ui("agent.session.grants") })).toBeNull();
+    expect(only().querySelector(".agent-session-grant")).toBeNull();
   });
 
-  it("lists each grant on one line, in the order given, with its site, kind, scope and source", () => {
+  it("puts each grant on its site's row with what was allowed and where it was given", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [{ ...SESSION, grants: GRANTS }] });
-    const list = within(only()).getByRole("list", { name: ui("agent.session.grants") });
-    expect(within(list).getAllByRole("listitem").map((entry) => entry.textContent)).toEqual([
-      "https://shop.test · page actions · this session · from terminal",
-      "https://docs.test:8443 · diagnostics · this session · from Chrome",
-    ]);
+    const rows = [...only().querySelectorAll<HTMLElement>(".agent-session-sites > li")];
+    expect(rows.map((row) => row.querySelector(".agent-session-site-name")?.textContent)).toEqual(["shop.test", "docs.test:8443"]);
+    const grant = (row: HTMLElement | undefined): string | null | undefined => row?.querySelector(".agent-session-grant")?.textContent;
+    expect(grant(rows[0])).toBe("page actions" + "Terminal");
+    expect(grant(rows[1])).toBe("diagnostics" + "Chrome");
+    // FR-547: where it was given is also a tooltip on the icon.
+    expect(rows[0]?.querySelector(".agent-session-place")?.getAttribute("title")).toBe(
+      ui("agent.session.grantPlace").replace("{place}", ui("agent.session.place.client")),
+    );
   });
 
   it("says the same in zh-TW", () => {
     renderShell("zh-TW");
     project(port, { ...IDLE, sessions: [{ ...SESSION, grants: GRANTS }] });
-    const list = within(only()).getByRole("list", { name: lookup("agent.session.grants", "zh-TW") });
-    const lines = within(list).getAllByRole("listitem").map((entry) => entry.textContent);
-    expect(lines[0]).toContain("來自終端機");
-    expect(lines[1]).toContain("來自 Chrome");
-    expect(lines[0]).toContain("https://shop.test");
-    expect(lines.join("")).not.toMatch(/terminal|this session|page actions/);
+    const grants = [...only().querySelectorAll(".agent-session-grant")].map((entry) => entry.textContent ?? "");
+    expect(grants[0]).toContain("終端機");
+    expect(grants[1]).toContain("Chrome");
+    expect(grants.join("")).not.toMatch(/terminal|this session|page actions/);
   });
 });

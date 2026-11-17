@@ -33,7 +33,9 @@ const SCHEMES = ["light", "dark"] as const;
  *
  * The composition: two sessions spawned in two scratch folders, `shop-frontend` (idle, holding a
  * tab on a skip-checks site) and `report-tool` (waiting on the owner, its consent card on top,
- * holding a tab on an `ask` site with diagnostics granted). Each picture is written to the run's
+ * holding a tab on an `ask` site with diagnostics granted). Since 036 the picture is also a gate on the
+ * card's grouping: the waiting card is open in the attention group with Answer in its header, the idle
+ * card is folded in the Idle group, and Answer moves focus to the consent card. Each picture is written to the run's
  * output directory and copied to `docs/media/016-panel-{locale}-{scheme}.png` for the owner.
  *
  * The tab strip cannot be captured from the panel's CDP session, so the group titles and colours
@@ -93,6 +95,14 @@ test.describe("agent panel screenshots", () => {
 
       for (const locale of LOCALES) {
         if (locale !== LOCALES[0]) override = await speak(panel, locale, override);
+        else {
+          // The panel's open/fold memory is per document: a session seen working and then idle keeps its card
+          // open (036 FR-539), so the first locale starts from a fresh document too, as the second one does
+          // after `speak`. Both cards are then first seen idle, and the waiting one opens when it starts to ask.
+          await panel.sendToPanel("Page.reload");
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          await waitForAgentPanel(panel);
+        }
         const ui = (key: string): string => lookup(key, locale);
         await expect
           .poll(() => panel.evaluatePanel("document.querySelectorAll('section[data-session-id]').length"), { timeout: 20_000 })
@@ -109,9 +119,32 @@ test.describe("agent panel screenshots", () => {
         await expect
           .poll(() => panel.evaluatePanel(`document.querySelector('section[data-session-state="idle"]') !== null`), { timeout: 15_000 })
           .toBe(true);
+        // 036 FR-541: the card is titled by its folder, and the line under the title names the agent.
+        const titles = (await panel.evaluatePanel(
+          "[...document.querySelectorAll('section[data-session-id]')].map((c)=>[c.querySelector('.agent-session-agent')?.textContent??'',c.querySelector('.agent-session-label')?.getAttribute('title')??''].join(' · '))",
+        )) as string[];
         for (const label of [LABEL_A, LABEL_B]) {
-          expect(await panel.panelText(), `the card for ${label}`).toContain(`${AGENT} · ${label}`);
+          expect(titles, `the card for ${label}`).toContain(`${AGENT} · ${label}`);
         }
+
+        // 036 FR-538 - FR-542: the waiting card is in the attention group, open, with Answer in its header;
+        // the idle card is in the Idle group, folded.
+        const grouped = (await panel.evaluatePanel(
+          `(()=>{const read=(group,state)=>{const c=document.querySelector('[data-group="'+group+'"] section[data-session-state="'+state+'"]');` +
+            `return c?{open:c.getAttribute('data-open'),expanded:c.querySelector('button.agent-session-toggle')?.getAttribute('aria-expanded')??null,` +
+            `primary:[...c.querySelectorAll('button.agent-session-primary')].map((b)=>(b.textContent??'').trim())}:null};` +
+            `return {waiting:read('attention','waiting'),idle:read('idle','idle')}})()`,
+        )) as {
+          waiting: { open: string; expanded: string | null; primary: string[] } | null;
+          idle: { open: string; expanded: string | null; primary: string[] } | null;
+        };
+        expect(grouped.waiting, "the waiting card is in [data-group=attention]").not.toBeNull();
+        expect(grouped.waiting?.open, "the waiting card is open").toBe("true");
+        expect(grouped.waiting?.expanded).toBe("true");
+        expect(grouped.waiting?.primary, "the waiting card's header offers Answer").toEqual([ui("agent.session.answer")]);
+        expect(grouped.idle, "the idle card is in [data-group=idle]").not.toBeNull();
+        expect(grouped.idle?.open, "the idle card is folded").toBe("false");
+        expect(grouped.idle?.expanded).toBe("false");
 
         const groups = {
           [LABEL_A]: await groupOf(extensionWorker, tabA),
@@ -152,6 +185,21 @@ test.describe("agent panel screenshots", () => {
           .soft(leak, `${lowerName} shows ${JSON.stringify(listPath)}; launch the browser with a neutral LOCALAPPDATA (e.g. C:\\hallpass-demo) and retake. Kept only at ${lowerSaved}`)
           .toBe(false);
         if (!leak) copyFileSync(lowerSaved, join(MEDIA, lowerName));
+
+        // 036 R-538: Answer answers nothing and sends nothing; it moves focus to the question's card. Focus is
+        // taken off the card first, so the check is of the press and not of where focus already was.
+        await panel.evaluatePanel("document.activeElement instanceof HTMLElement && document.activeElement.blur()");
+        expect(await panel.evaluatePanel("document.activeElement?.id ?? ''"), "focus starts off the consent card").not.toBe("agent-consent-card");
+        const pressedAnswer = await panel.evaluatePanel(
+          `(()=>{const b=[...document.querySelectorAll('[data-group="attention"] section[data-session-state="waiting"] button.agent-session-primary')].find((x)=>(x.textContent??'').trim()===${JSON.stringify(ui("agent.session.answer"))});` +
+            `if(!b)return false;b.click();return true})()`,
+          true,
+        );
+        expect(pressedAnswer, "no Answer on the waiting card").toBe(true);
+        await expect
+          .poll(() => panel.evaluatePanel("document.activeElement?.id ?? ''"), { timeout: 5_000, message: "Answer did not focus the consent card" })
+          .toBe("agent-consent-card");
+        expect(await panel.panelText(), "Answer answered nothing: the question is still up").toContain(ui("agent.promptTitle"));
 
         await panel.clickButton(ui("agent.refuse"));
         const refused = await pending;

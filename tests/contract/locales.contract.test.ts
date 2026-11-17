@@ -264,7 +264,7 @@ describe("T013 locales contract", () => {
       "agent.tabs.sessions",
       "agent.sessions.empty",
       "agent.sessions.openSettings",
-      "agent.session.manageSite",
+      "agent.session.sitesTitle",
       "agent.session.manageSiteLabel",
       "agent.status.settings",
       "conversation.agentMenu.notReady",

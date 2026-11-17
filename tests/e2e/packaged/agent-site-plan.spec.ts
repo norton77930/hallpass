@@ -3,6 +3,7 @@ import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.
 import { pairWithFirstCall, unpairAgent } from "../fixtures/agent-pairing.js";
 import { openSettingsPage } from "../fixtures/settings-page-driver.js";
 import {
+  clickOnCard,
   copyFor,
   localeFromEnv,
   openSidePanel,
@@ -102,12 +103,13 @@ test.describe("agent site plan", () => {
       expect(proposed.json, proposed.text).toMatchObject({ approved: [A, B], leftOut: [C] });
       await expectNoPrompt(panel, "the site-plan card stayed up after Approve");
 
-      // FR-259: the session card says a plan is in force, and FR-263: the activity list says so too.
+      // FR-259: the session card says a plan is in force (036 FR-545/FR-548: two sites marked "In site plan" and the
+      // Withdraw control on the "Sites and permissions" title), and FR-263: the activity list says so too.
       await expect.poll(() => sessionIds(panel), { timeout: 15_000 }).toHaveLength(1);
       const sessionId = (await sessionIds(panel))[0] as string;
       await expect
-        .poll(() => planSummary(panel, sessionId), { timeout: 15_000 })
-        .toBe(ui("agent.session.sitePlan").replace("{n}", "2"));
+        .poll(() => planSiteCount(panel, sessionId), { timeout: 15_000 })
+        .toBe(2);
       await expect
         .poll(() => activityText(panel, sessionId), { timeout: 15_000 })
         .toContain(ui("agent.activity.sitePlan").replace("{n}", "2"));
@@ -249,10 +251,10 @@ test.describe("agent site plan", () => {
 
       // ============ (a) Withdraw on the session card ends it at once (FR-259) ============
       await expect
-        .poll(() => planSummary(panel, sessionId), { timeout: 15_000 })
-        .toBe(ui("agent.session.sitePlan").replace("{n}", "2"));
+        .poll(() => planSiteCount(panel, sessionId), { timeout: 15_000 })
+        .toBe(2);
       await clickOnCard(panel, sessionId, ui("agent.session.sitePlanWithdraw"));
-      await expect.poll(() => planSummary(panel, sessionId), { timeout: 15_000 }).toBeNull();
+      await expect.poll(() => planSiteCount(panel, sessionId), { timeout: 15_000 }).toBeNull();
       await refuseConsent(panel, live.callTool("click", await press()), live, "click after Withdraw");
 
       // ============ (b) an interrupt ends the step, not the plan (FR-258) ============
@@ -265,9 +267,7 @@ test.describe("agent site plan", () => {
         outcome: "stopped",
         reason: "owner-interrupted",
       });
-      expect(await planSummary(panel, sessionId), "an interrupt took the plan away").toBe(
-        ui("agent.session.sitePlan").replace("{n}", "2"),
-      );
+      expect(await planSiteCount(panel, sessionId), "an interrupt took the plan away").toBe(2);
       await actWithoutCard(panel, live, "click", await press());
 
       // ============ (c) unpair ends the plan of every session of the agent (FR-258) ============
@@ -282,7 +282,7 @@ test.describe("agent site plan", () => {
       expect(answerOf(afterUnpair), `text: ${afterUnpair.text}\nstderr:\n${live.stderr()}`).toMatchObject({
         outcome: "denied",
       });
-      expect(await planSummary(panel, sessionId), "the plan outlived the unpair").toBeNull();
+      expect(await planSiteCount(panel, sessionId), "the plan outlived the unpair").toBeNull();
       await closeTab(extensionWorker, tab);
       await client.close();
       client = undefined;
@@ -355,7 +355,7 @@ test.describe("agent site plan", () => {
       await expectNoPrompt(panel, "the site-plan card stayed up after Decline");
       await expect.poll(() => sessionIds(panel), { timeout: 15_000 }).toHaveLength(1);
       const sessionId = (await sessionIds(panel))[0] as string;
-      expect(await planSummary(panel, sessionId), "a declined proposal shows a plan").toBeNull();
+      expect(await planSiteCount(panel, sessionId), "a declined proposal shows a plan").toBeNull();
       const tab = ((await call("tabs_create", { url: `${A}/ordinary` })) as { tabId: number }).tabId;
       await refuseConsent(
         panel,
@@ -608,11 +608,20 @@ async function sessionIds(panel: SidePanelDriver): Promise<string[]> {
   )) as string[];
 }
 
-/** The plan summary on a session card (FR-259), or `null` when the card shows no plan. */
-async function planSummary(panel: SidePanelDriver, sessionId: string): Promise<string | null> {
+/**
+ * How many sites a session card marks as in its site plan (FR-259, 036 FR-546), or `null` when the card shows
+ * no plan: a plan is in force while the card's "Sites and permissions" title carries the Withdraw control.
+ * The rows are in the card's body, so a folded card answers `"folded"` rather than a count: a journey that
+ * reads it with several sessions on the panel opens the card first (these journeys have one session, which is
+ * open), and is never told "no plan" by a card that merely hides it.
+ */
+async function planSiteCount(panel: SidePanelDriver, sessionId: string): Promise<number | null | "folded"> {
   return (await panel.evaluatePanel(
-    `document.querySelector('[data-session-id=${JSON.stringify(sessionId)}] .agent-session-site-plan summary')?.textContent?.trim() ?? null`,
-  )) as string | null;
+    `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');if(!card)return null;` +
+      `if(card.getAttribute('data-open')!=='true')return 'folded';` +
+      `const withdraw=[...card.querySelectorAll('.agent-session-section-head button')].some((b)=>(b.textContent??'').trim()===${JSON.stringify(ui("agent.session.sitePlanWithdraw"))});` +
+      `return withdraw?card.querySelectorAll('.agent-session-mark[data-mark="plan"]').length:null})()`,
+  )) as number | null | "folded";
 }
 
 async function activityText(panel: SidePanelDriver, sessionId: string): Promise<string> {
@@ -621,21 +630,11 @@ async function activityText(panel: SidePanelDriver, sessionId: string): Promise<
   )) as string;
 }
 
-async function clickOnCard(panel: SidePanelDriver, sessionId: string, label: string): Promise<void> {
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `const b=card&&[...card.querySelectorAll('button')].find((x)=>x.textContent?.trim()===${JSON.stringify(label)});` +
-      `if(!b)return false;b.click();return true})()`,
-    true,
-  );
-  expect(clicked, `no ${label} on the card for ${sessionId}\n${await panel.panelText()}`).toBe(true);
-}
-
 /** Whether the card says there is anything to interrupt (014 FR-178). */
 async function inFlightOnCard(panel: SidePanelDriver, sessionId: string): Promise<boolean> {
   const disabled = await panel.evaluatePanel(
     `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `return card?.querySelector('.agent-interrupt')?.getAttribute('aria-disabled') ?? null})()`,
+      `return card?.querySelector('button.agent-session-primary')?.getAttribute('aria-disabled') ?? null})()`,
   );
   return disabled === "false";
 }

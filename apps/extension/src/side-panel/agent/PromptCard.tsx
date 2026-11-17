@@ -4,6 +4,7 @@ import { lookup } from "../../locales/catalog.js";
 import { TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
 import type { SendCommand } from "./AgentShell.js";
 import { displayOrigin } from "./display-origin.js";
+import { CONSENT_CARD_ID } from "./session-card-model.js";
 import { SitePlanCard } from "./SitePlanCard.js";
 
 /**
@@ -15,7 +16,8 @@ import { SitePlanCard } from "./SitePlanCard.js";
  * worker dates each question, and the earliest is on top until it is answered. A projection with
  * no dates - a 004 worker - falls back to pairing first, then the consent, then the plan. The
  * card is a non-modal dialog: the page under it stays readable, because the owner may need the
- * site list to decide.
+ * site list to decide. (036 R-538: the card is also a focus target - `id` and `tabIndex={-1}` - so
+ * Answer in a session's header can bring it into view and move focus to it.)
  */
 
 /** Which question is on top: the earliest dated one, undated ones in fixed order. */
@@ -244,6 +246,8 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     return (
       <section
         ref={cardRef}
+        id={CONSENT_CARD_ID}
+        tabIndex={-1}
         role="dialog"
         aria-modal="false"
         aria-labelledby="agent-prompt-title"
@@ -300,6 +304,8 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     return (
       <section
         ref={cardRef}
+        id={CONSENT_CARD_ID}
+        tabIndex={-1}
         role="dialog"
         aria-modal="false"
         aria-labelledby="agent-prompt-title"
@@ -357,6 +363,8 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     return (
       <section
         ref={cardRef}
+        id={CONSENT_CARD_ID}
+        tabIndex={-1}
         role="dialog"
         aria-modal="false"
         aria-labelledby="agent-prompt-title"
@@ -415,6 +423,8 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     return (
       <section
         ref={cardRef}
+        id={CONSENT_CARD_ID}
+        tabIndex={-1}
         role="dialog"
         aria-modal="false"
         aria-labelledby="agent-prompt-title"
@@ -471,7 +481,7 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
       });
     };
     return (
-      <section ref={cardRef} role="dialog" aria-modal="false" aria-labelledby="agent-prompt-title" className="agent-prompt" data-prompt="consent">
+      <section ref={cardRef} id={CONSENT_CARD_ID} tabIndex={-1} role="dialog" aria-modal="false" aria-labelledby="agent-prompt-title" className="agent-prompt" data-prompt="consent">
         <h2 id="agent-prompt-title">{t("agent.promptTitle")}</h2>
         {/*
           What the call would do, in reviewed copy for the owner's locale (003/T068): the tool is a
@@ -582,7 +592,7 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
       setExcluded({ planId: "", steps: [] });
     };
     return (
-      <section ref={cardRef} role="dialog" aria-modal="false" aria-labelledby="agent-prompt-title" className="agent-prompt" data-prompt="plan">
+      <section ref={cardRef} id={CONSENT_CARD_ID} tabIndex={-1} role="dialog" aria-modal="false" aria-labelledby="agent-prompt-title" className="agent-prompt" data-prompt="plan">
         <h2 id="agent-prompt-title">{t("agent.planTitle")}</h2>
         <p>{t("agent.planSite").replace("{site}", () => displayOrigin(plan.site))}</p>
         <ol>
@@ -650,6 +660,8 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     return (
       <section
         ref={cardRef}
+        id={CONSENT_CARD_ID}
+        tabIndex={-1}
         role="dialog"
         aria-modal="false"
         aria-labelledby="agent-prompt-title"

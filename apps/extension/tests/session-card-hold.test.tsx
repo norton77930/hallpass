@@ -79,34 +79,39 @@ describe("034 T1015 session card held from the page", () => {
       expect(free.getByRole("button", { name: w("agent.session.interrupt") })).toBeTruthy();
     });
 
-    it(`renders the hold and resume activity lines with their outcome words (${locale})`, () => {
+    it(`reads a hold followed by a resume as one row, and each alone as its own row, without outcome words (${locale})`, () => {
+      const rowsFor = (activity: AgentPanelState["sessions"][number]["activity"]): string[] => {
+        project(port, {
+          ...IDLE,
+          sessions: [{ sessionId: "session-act", agentId: "agent-1", tabs: [], sites: [], state: "working", activity }],
+        });
+        return [...card("session-act").querySelectorAll(".agent-session-activity > li")].map(
+          (row) => row.querySelector(".agent-activity-text")?.textContent ?? "",
+        );
+      };
       renderShell(locale);
-      project(port, {
-        ...IDLE,
-        sessions: [
-          {
-            sessionId: "session-act",
-            agentId: "agent-1",
-            tabs: [],
-            sites: [],
-            state: "working",
-            activity: [
-              { at: 1_700_000_002_000, kind: "resume", outcome: "resumed" },
-              { at: 1_700_000_001_000, kind: "hold", outcome: "held" },
-            ],
-          },
-        ],
-      });
 
-      const items = within(card("session-act")).getAllByRole("listitem");
-      expect(items[0]?.textContent).toContain(w("agent.activity.resume"));
-      expect(items[0]?.textContent).toContain(w("agent.activity.resumed"));
-      expect(items[1]?.textContent).toContain(w("agent.activity.hold"));
-      expect(items[1]?.textContent).toContain(w("agent.activity.held"));
+      // 036 FR-549, R-539: the pair collapses into one sentence; the sentence says both halves, so there is no result under it.
+      expect(
+        rowsFor([
+          { at: 1_700_000_002_000, kind: "resume", outcome: "resumed" },
+          { at: 1_700_000_001_000, kind: "hold", outcome: "held" },
+        ]),
+      ).toEqual([w("agent.activity.holdResume")]);
+      expect(card("session-act").querySelector(".agent-activity-result")).toBeNull();
+      expect(rowsFor([{ at: 1_700_000_001_000, kind: "hold", outcome: "held" }])).toEqual([w("agent.activity.hold")]);
+      expect(rowsFor([{ at: 1_700_000_002_000, kind: "resume", outcome: "resumed" }])).toEqual([w("agent.activity.resume")]);
       expect(activityText({ at: 1, kind: "hold", outcome: "held" }, w)).toBe(w("agent.activity.hold"));
       expect(activityText({ at: 1, kind: "resume", outcome: "resumed" }, w)).toBe(w("agent.activity.resume"));
     });
   }
+
+  it("addresses the owner in the second person in zh-TW (FR-555)", () => {
+    const zh = (key: string): string => lookup(key, "zh-TW");
+    for (const key of ["agent.activity.interrupt", "agent.activity.hold", "agent.activity.resume", "agent.activity.holdResume"]) {
+      expect(zh(key), key).toContain("你");
+    }
+  });
 
   it("sends exactly one session-resume for this session when Resume is pressed", () => {
     renderShell();

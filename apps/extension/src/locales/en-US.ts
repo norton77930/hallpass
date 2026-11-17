@@ -280,13 +280,9 @@ export const messages = {
   "agent.session.release": "Give my tabs back",
   // 016 FR-228 – FR-234: the card's title, subtitle, state line, technical details and controls.
   "agent.session.started": "started {time}",
-  "agent.session.holds": "holds {n} tabs: {sites}",
-  "agent.session.holdsOne": "holds 1 tab: {sites}",
-  "agent.session.noSites": "holds no tabs",
-  "agent.session.siteSeparator": ", ",
   "agent.session.working": "Working",
   "agent.session.waiting": "Waiting for you",
-  "agent.session.idle": "Idle · last action {ago}",
+  "agent.session.idle": "Idle · {ago}",
   "agent.session.idleUnknown": "Idle",
   "agent.session.justNow": "just now",
   "agent.session.minutesAgo": "{m} min ago",
@@ -294,19 +290,30 @@ export const messages = {
   "agent.session.id": "Session ID: {id}",
   "agent.session.stop": "End session",
   "agent.session.takeBack": "Take back tabs ({n})",
+  // 036 FR-541, FR-542, FR-544, FR-556: the redesigned card - header (state, count of tabs, the one primary action),
+  // the two sections, the fold of the activity rows, and the quiet last line.
+  "agent.session.tabCount": "{n} tabs",
+  "agent.session.tabCountOne": "1 tab",
+  "agent.session.answer": "Answer",
+  "agent.session.toggleShow": "Show details for {name}",
+  "agent.session.toggleHide": "Hide details for {name}",
+  "agent.session.groupIdle": "Idle",
+  "agent.session.sitesTitle": "Sites and permissions",
+  "agent.session.markTab": "Tab here",
+  "agent.session.markPlan": "In site plan",
+  "agent.session.place.client": "Terminal",
+  "agent.session.place.browser": "Chrome",
+  "agent.session.grantPlace": "Allowed in {place}",
+  "agent.session.showAll": "Show all {n}",
+  "agent.session.showLess": "Show less",
+  "agent.session.startedDetails": "{time} · Technical details",
   // 017 FR-259: the session's approved site plan, folded, and the control that ends it.
-  "agent.session.sitePlan": "Site plan: {n} sites",
-  "agent.session.sitePlanOne": "Site plan: 1 site",
   "agent.session.sitePlanWithdraw": "Withdraw site plan",
-  // 031 FR-475, R-458: what the owner allowed this session, one line each: site, kind, scope, source.
-  "agent.session.grants": "Allowed for this session",
-  "agent.session.grant": "{site} · {kind} · this session · {source}",
+  // 031 FR-475, R-458, 036 FR-546: the kinds of a session grant, shown as a mark and the kind on the site's row.
   "agent.session.grantKind.page-actions": "page actions",
   "agent.session.grantKind.diagnostics": "diagnostics",
-  "agent.session.grantSource.client": "from terminal",
-  "agent.session.grantSource.browser": "from Chrome",
   // 014 FR-178: the second control, and the line for a press that found nothing running.
-  "agent.session.interrupt": "Interrupt this step",
+  "agent.session.interrupt": "Interrupt",
   "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",
   // 034 FR-523: a session the owner stopped from the page says so and offers Resume (R-521).
   "agent.session.heldFromPage": "Stopped from the page",
@@ -334,6 +341,11 @@ export const messages = {
   // 034 R-521: the two lines the owner's Stop on the page and Resume leave on the card.
   "agent.activity.hold": "You pressed Stop on the page",
   "agent.activity.resume": "You resumed the session",
+  // 036 FR-550, FR-556: a Stop and its Resume read as one row, k of them as one row with the count; a consent row is the
+  // question and the site, its answer is the result beside the place.
+  "agent.activity.holdResume": "You stopped it from the page, then resumed",
+  "agent.activity.holdResumeMany": "You stopped and resumed it from the page {k} times",
+  "agent.activity.consentRow": "{question} · {site}",
   // 032 FR-494: one line per settled question - what was asked, which site, where and how it was answered.
   "agent.activity.consent": "{question} · {site} · {answer}",
   "agent.activity.consentAnswered": "{answer} {place}",
@@ -787,7 +799,6 @@ export const messages = {
   "agent.tabs.sessions": "Sessions",
   "agent.sessions.empty": "No agent is acting on this browser.",
   "agent.sessions.openSettings": "Open settings",
-  "agent.session.manageSite": "Manage this site's permissions ↗",
   "agent.session.manageSiteLabel": "Manage permissions for {site} (opens settings)",
   "agent.status.settings": "Settings",
   "conversation.agentMenu.notReady": "{agent} is not ready yet.",

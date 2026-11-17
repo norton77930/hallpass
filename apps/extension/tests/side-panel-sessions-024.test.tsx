@@ -111,14 +111,15 @@ describe("T781 the Sessions tab", () => {
   });
 
   describe("a session card that acts on a site", () => {
-    it("offers 'Manage this site's permissions' and opens the page at that site", async () => {
+    it("offers a manage-permissions button on the site's row and opens the page at that site", async () => {
       await show({ ...IDLE, sessions: [{ ...WORKING, site: SITE }] });
 
       const card = document.querySelector<HTMLElement>("[data-session-id='s-1']")!;
-      const link = within(card).getByRole("button", {
-        name: ui("agent.session.manageSiteLabel").replace("{site}", SITE),
+      const row = card.querySelector<HTMLElement>(".agent-session-sites > li")!;
+      expect(row.querySelector(".agent-session-site-name")?.textContent).toBe("fixtures.test:19443");
+      const link = within(row).getByRole("button", {
+        name: ui("agent.session.manageSiteLabel").replace("{site}", "fixtures.test:19443"),
       });
-      expect(link.textContent).toBe(ui("agent.session.manageSite"));
       fireEvent.click(link);
 
       expect(commandsSent(port)).toEqual([
@@ -127,11 +128,11 @@ describe("T781 the Sessions tab", () => {
       expectValidCommands(port);
     });
 
-    it("offers no link on a card that acts on no site, and keeps Stop where it was", async () => {
+    it("offers no such button on a card that acts on no site, and keeps End session where it was", async () => {
       await show({ ...IDLE, sessions: [WORKING] });
 
       const card = document.querySelector<HTMLElement>("[data-session-id='s-1']")!;
-      expect(within(card).queryByRole("button", { name: new RegExp(ui("agent.session.manageSite").slice(0, 10)) })).toBeNull();
+      expect(card.querySelector(".agent-session-manage")).toBeNull();
       fireEvent.click(within(card).getByRole("button", { name: ui("agent.session.stop") }));
       expect(commandsSent(port)).toEqual([{ type: "ui.agent.session-stop", payload: { sessionId: "s-1" } }]);
     });

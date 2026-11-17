@@ -120,17 +120,6 @@
   opacity: 1;
 }
 
-/* Stop ends a session: danger, outlined, never filled. */
-.agent-shell .agent-danger {
-  border-color: var(--danger);
-  background: var(--surface);
-  color: var(--danger);
-}
-
-.agent-shell .agent-danger:hover {
-  background: var(--surface-2);
-}
-
 .agent-shell select {
   max-width: 100%;
   min-height: 32px;
@@ -162,8 +151,7 @@
 /* ---------- cards ---------- */
 
 .agent-page,
-.agent-prompt,
-.agent-session {
+.agent-prompt {
   padding: var(--sp-3);
   border: 1px solid var(--line);
   border-radius: var(--r-2);
@@ -357,221 +345,548 @@
   border-left: 3px solid var(--warn);
 }
 
-/* 017: the session card's plan summary beside its withdraw control. */
-.agent-session-site-plan-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  margin-top: var(--sp-2);
-}
-
-.agent-session-site-plan-row .agent-details {
-  flex: 1 1 auto;
-  margin-top: 0;
-}
-
-.agent-session-site-plan li {
-  overflow-wrap: anywhere;
-}
-
-.agent-prompt-actions,
-.agent-session-actions {
+.agent-prompt-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--sp-2);
   margin-top: var(--sp-2);
 }
 
-/*
-  014 FR-178: 中斷 reads as unavailable while the session has nothing in flight, and stays
-  pressable - the count it reads is a picture that can be a moment old, and a control that did
-  nothing at all in that moment would look broken rather than idle.
-*/
-.agent-interrupt[aria-disabled="true"] {
-  opacity: 0.55;
-}
-
-.agent-session-nothing {
-  font-size: var(--fs-1);
-  color: var(--text-3);
-}
-
-/* ---------- session cards ---------- */
+/* ---------- session cards (016, 036) ---------- */
 
 /*
-  016 FR-225: the card is a stripe and a body. The stripe is the session's tab-group colour, the
-  width of a thumbnail's edge; a card with no colour has no stripe and its body takes the width.
+  036 FR-538, FR-552: the cards come in two lists. The attention list is one surface per card (a hairline
+  border and a faint shadow); the idle list is one shared surface with a hairline between its rows. Nothing
+  inside a card is a filled box or a bordered tile: sections, site rows and activity rows are told apart by
+  hairlines (--line-soft) alone. Colour other than text greys is for the primary action, the state, the
+  "tab here" and grant marks, result words, danger text buttons and the session bar (FR-553).
 */
-.agent-shell .agent-session {
+.agent-session-list {
   display: flex;
-  /* A flex item whose overflow is hidden has no content-based minimum height: without this the
-     shell's column squeezed the cards to 0 px when a question card and the sites shared it. */
+  flex-direction: column;
   flex-shrink: 0;
-  padding: 0;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.agent-shell .agent-session-list[data-group="idle"] {
+  gap: 0;
   overflow: hidden;
-  /* T605: a small bordered card on the panel ground. */
+  border: 1px solid var(--line);
   border-radius: var(--r-3);
   background: var(--bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 5%, transparent);
 }
 
-.agent-session-body {
-  flex: 1 1 auto;
+.agent-shell .agent-session {
+  flex-shrink: 0;
   min-width: 0;
-  padding: var(--sp-2) 10px;
-}
-
-.agent-shell .agent-session h2 {
-  margin-bottom: 2px;
-}
-
-.agent-shell .agent-session-actions button {
-  min-height: 28px;
-  padding: 2px 10px;
-  border-color: var(--line);
-  border-radius: var(--r-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
   background: var(--bg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 5%, transparent);
 }
 
-.agent-shell .agent-session-actions button:hover {
-  background: var(--surface-2);
+/* FR-553: a card that waits for the owner, or was stopped from the page, is outlined in the warning colour with a soft ring. */
+.agent-shell .agent-session[data-attention="true"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 10%, transparent);
 }
 
-.agent-shell .agent-session-actions button.agent-danger {
-  border-color: var(--danger);
-  color: var(--danger);
+.agent-shell .agent-session-list[data-group="idle"] .agent-session {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
-/* T606 (B3): the session's tab-group colour is a dot before its name, not a stripe down the card. */
-.agent-session-stripe {
-  flex: none;
-  width: 10px;
-  height: 10px;
-  margin-top: 5px;
-  border-radius: 50%;
+.agent-shell .agent-session-list[data-group="idle"] .agent-session + .agent-session {
+  border-top: 1px solid var(--line-soft);
 }
 
-/*
-  T608 (Y1): the dot and the name sit side by side; the state pill is the next row under the name,
-  never beside it, so a long state ("Idle · last action just now") cannot squeeze the "agent ·
-  started" line into two. With no dot the first column is empty and takes no room.
-*/
-.agent-session-head {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  column-gap: var(--sp-2);
-  row-gap: 2px;
-  min-width: 0;
-}
-
-.agent-session-head > .agent-session-titles {
-  grid-column: 2;
-}
-
-.agent-session-titles {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.agent-shell .agent-session-titles h2 {
-  overflow: hidden;
-  margin: 0;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-session-meta {
-  overflow: hidden;
+.agent-shell .agent-session-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: var(--sp-2) 2px 0;
   color: var(--text-3);
   font-size: var(--fs-1);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 500;
 }
 
-/* The state as a pill under the name and its "agent · started" line. */
-.agent-session-head .agent-session-state {
-  grid-column: 2;
-  justify-self: start;
-  max-width: 100%;
-  overflow: hidden;
-  padding: 1px var(--sp-2);
+.agent-session-count {
+  padding: 0 6px;
   border-radius: var(--r-pill);
   background: var(--surface-2);
+  color: var(--text-2);
   font-size: var(--fs-1);
+  line-height: 1.4;
+}
+
+/* The header: the open/fold block on the left, the one primary action on the right. */
+.agent-session-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-3) var(--sp-3) 6px;
+}
+
+.agent-session-headmain {
+  position: relative;
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: 16px auto minmax(0, 1fr);
+  column-gap: var(--sp-2);
+  row-gap: 2px;
+  align-items: center;
+  min-width: 0;
+}
+
+.agent-session-chevron {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  display: flex;
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+  transition: transform 0.15s;
+}
+
+.agent-session[data-open="true"] .agent-session-chevron {
+  transform: rotate(90deg);
+}
+
+.agent-session-chevron .agent-icon {
+  width: 100%;
+  height: 100%;
+}
+
+/* 016 FR-225, 036 FR-541: the session's tab-group colour as a narrow bar beside the title. */
+.agent-session-bar {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: stretch;
+  width: 4px;
+  min-height: 28px;
+  border-radius: 2px;
+  background: var(--group-grey);
+}
+
+.agent-session-bar[data-colour="cyan"] { background: var(--group-cyan); }
+.agent-session-bar[data-colour="green"] { background: var(--group-green); }
+.agent-session-bar[data-colour="purple"] { background: var(--group-purple); }
+.agent-session-bar[data-colour="pink"] { background: var(--group-pink); }
+.agent-session-bar[data-colour="orange"] { background: var(--group-orange); }
+.agent-session-bar[data-colour="grey"] { background: var(--group-grey); }
+.agent-session-bar[data-colour="blue"] { background: var(--group-blue); }
+
+/* FR-554: the title is the largest text on the card. */
+.agent-shell .agent-session-title {
+  grid-column: 3;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.agent-shell .agent-session-toggle {
+  display: block;
+  max-width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  font-weight: inherit;
+  text-align: left;
+}
+
+.agent-shell .agent-session-toggle:hover {
+  background: none;
+}
+
+/* The press covers the whole of the header block, not only the title text. */
+.agent-session-toggle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.agent-shell .agent-session-toggle:focus-visible {
+  outline: none;
+}
+
+.agent-shell .agent-session-toggle:focus-visible::after {
+  border-radius: var(--r-2);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.agent-session-name {
+  display: block;
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-session[data-session-state="working"] .agent-session-head .agent-session-state {
-  background: var(--accent-soft);
-}
-
-.agent-session[data-session-state="waiting"] .agent-session-head .agent-session-state {
-  background: var(--warn-soft);
-}
-
-.agent-session-stripe[data-colour="cyan"] { background: var(--group-cyan); }
-.agent-session-stripe[data-colour="green"] { background: var(--group-green); }
-.agent-session-stripe[data-colour="purple"] { background: var(--group-purple); }
-.agent-session-stripe[data-colour="pink"] { background: var(--group-pink); }
-.agent-session-stripe[data-colour="orange"] { background: var(--group-orange); }
-.agent-session-stripe[data-colour="grey"] { background: var(--group-grey); }
-.agent-session-stripe[data-colour="blue"] { background: var(--group-blue); }
-
-/* 016 FR-230: a card waiting on the owner is outlined in the warning colour, not filled. */
-.agent-session[data-session-state="waiting"] {
-  border-color: var(--warn);
-}
-
-.agent-session-sites {
-  margin-top: var(--sp-1);
-  font-size: var(--fs-1);
+.agent-shell .agent-session-sub {
+  grid-column: 3;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   color: var(--text-3);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+}
+
+.agent-session-sub > span {
+  flex: none;
+}
+
+.agent-session-sub > .agent-session-agent {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .agent-session-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--text-2);
 }
 
-.agent-session[data-session-state="working"] .agent-session-state {
-  color: var(--accent);
-  font-weight: 600;
+.agent-session-state::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
 }
 
-.agent-session[data-session-state="waiting"] .agent-session-state {
+/* FR-541: working is the accent colour with a slowly pulsing dot; waiting and stopped are the warning colour. */
+.agent-session-state[data-tone="busy"] {
+  color: var(--accent);
+}
+
+.agent-session-state[data-tone="busy"]::before {
+  background: var(--accent);
+  animation: agent-session-pulse 1.4s ease-in-out infinite;
+}
+
+.agent-session-state[data-tone="attention"] {
   color: var(--warn);
   font-weight: 600;
 }
 
-.agent-session .agent-details {
-  margin-top: var(--sp-2);
+.agent-session-state[data-tone="attention"]::before {
+  background: var(--warn);
 }
 
-.agent-session .agent-details p {
-  margin: var(--sp-1) 0 0;
-  overflow-wrap: anywhere;
+@keyframes agent-session-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-session-state[data-tone="busy"]::before {
+    animation: none;
+  }
+
+  .agent-session-chevron {
+    transition: none;
+  }
+}
+
+/* FR-542: the one primary action. Answer and Resume are filled in the accent; Interrupt is a plain button. */
+.agent-shell .agent-session-primary {
+  flex: none;
+  min-height: 0;
+  padding: 5px var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--bg);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text);
+  font-size: var(--fs-2);
+  font-weight: 500;
+}
+
+.agent-shell .agent-session-primary:hover {
+  background: var(--surface);
+}
+
+.agent-shell .agent-session-primary[data-strong="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.agent-shell .agent-session-primary[data-strong="true"]:hover {
+  background: var(--accent);
+  filter: brightness(0.94);
 }
 
 /*
-  008 FR-113: the card's activity list. Bounded, quiet, and second to everything the owner can act
-  on - it is a record, not a control.
+  014 FR-178: Interrupt reads as unavailable while the session has nothing in flight, and stays
+  pressable - the count it reads is a picture that can be a moment old, and a control that did
+  nothing at all in that moment would look broken rather than idle.
 */
-.agent-session-activity {
-  margin: var(--sp-2) 0 0;
-  padding: 0;
-  list-style: none;
+.agent-shell .agent-session-primary[aria-disabled="true"] {
+  opacity: 0.55;
+}
+
+.agent-shell .agent-session-nothing {
+  margin: 0;
+  padding: 0 var(--sp-3) var(--sp-3) 34px;
+  color: var(--text-3);
   font-size: var(--fs-1);
 }
 
-.agent-session-activity li {
-  padding: var(--sp-1) 0;
-  border-top: 1px solid var(--line);
+/* The body: sections on hairlines, then the footer and the quiet last line. */
+.agent-session-body {
+  padding: 0 14px 10px;
 }
 
-.agent-activity-outcome {
+.agent-shell .agent-session-recording {
+  margin: 0 0 var(--sp-2);
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-session-section {
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.agent-session-section + .agent-session-section {
+  margin-top: 10px;
+}
+
+.agent-session-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-1);
+}
+
+/* FR-554: section titles are small and muted. */
+.agent-shell .agent-session-section-head h3 {
+  margin: 0;
   color: var(--text-3);
+  font-size: var(--fs-1);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* Text buttons: Withdraw site plan, Show all, End session. No fill until hovered. */
+.agent-shell .agent-session-textbutton {
+  min-height: 0;
+  padding: 2px var(--sp-1);
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-shell .agent-session-textbutton:hover {
+  background: var(--surface);
+}
+
+.agent-shell .agent-session-textbutton[data-tone="danger"] {
+  color: var(--danger);
+}
+
+.agent-shell .agent-session-textbutton[data-tone="accent"] {
+  color: var(--accent);
+}
+
+.agent-shell .agent-session-iconbutton {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-3);
+}
+
+.agent-shell .agent-session-iconbutton:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Sites and permissions: one row per site. */
+.agent-session-sites li {
+  padding: 7px 0;
+}
+
+.agent-session-sites li + li {
+  border-top: 1px solid var(--line-soft);
+}
+
+.agent-session-site-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-session-site-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--fs-2);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-session-marks {
+  display: inline-flex;
+  flex: 1 0 auto;
+  gap: 6px;
+}
+
+.agent-session-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  white-space: nowrap;
+}
+
+.agent-session-mark[data-mark="tab"] {
+  color: var(--ok);
+}
+
+.agent-session-grants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  margin-top: 3px;
+  color: var(--text-2);
+  font-size: var(--fs-1);
+}
+
+.agent-session-grant {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.agent-session-grant > .agent-icon {
+  color: var(--ok);
+}
+
+.agent-session-place {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-3);
+}
+
+/*
+  008 FR-113, 036 FR-549: the card's activity rows. Bounded, quiet, and second to everything the owner
+  can act on - it is a record, not a control. A time column, then the sentence and, under it, the result.
+*/
+.agent-session-activity li {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  column-gap: var(--sp-2);
+  padding: 6px 0;
+}
+
+.agent-activity-time {
+  padding-top: 1px;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-shell .agent-activity-text {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.agent-shell .agent-activity-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 10px;
+  margin: 1px 0 0;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+}
+
+.agent-activity-result[data-tone="ok"] { color: var(--ok); }
+.agent-activity-result[data-tone="warn"] { color: var(--warn); }
+.agent-activity-result[data-tone="danger"] { color: var(--danger); }
+.agent-activity-result[data-tone="muted"] { color: var(--text-3); }
+
+.agent-shell .agent-session-more {
+  margin: var(--sp-1) 0 0 38px;
+}
+
+/* FR-551: Take back tabs on the left, End session on the right. */
+.agent-session-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.agent-shell .agent-session-takeback {
+  min-height: 0;
+  padding: 5px var(--sp-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  background: var(--bg);
+  font-size: var(--fs-2);
+  font-weight: 500;
+}
+
+.agent-shell .agent-session-takeback:hover {
+  background: var(--surface);
+}
+
+.agent-session-end {
+  margin-left: auto;
+}
+
+/* The quiet last line: the start time and the folded technical details (016 FR-231, 036 FR-544). */
+.agent-session-tech {
+  margin-top: 6px;
+}
+
+.agent-session-tech summary {
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: var(--fs-1);
+  list-style: none;
+}
+
+.agent-session-tech summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-shell .agent-session-tech p {
+  margin: var(--sp-1) 0 0;
+  color: var(--text-3);
+  font-size: var(--fs-1);
+  overflow-wrap: anywhere;
 }
 
 /*

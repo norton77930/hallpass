@@ -18,7 +18,7 @@ import { useComposerMemory } from "./conversation/attachments/drafts.js";
 import { panelWindowMessage } from "../../panel-window.js";
 import { NotConnected } from "./NotConnected.js";
 import { NoticeCard, PromptCard } from "./PromptCard.js";
-import { SessionCard } from "./SessionCard.js";
+import { SessionList } from "./SessionList.js";
 import { StatusRow } from "./StatusRow.js";
 import "./tokens.css";
 import "./appearance.css";
@@ -618,10 +618,8 @@ export function AgentShell(props: { locale: string }): ReactElement {
   const agentName = (agentId: string): string =>
     state.paired.find((agent) => agent.agentId === agentId)?.displayName ?? agentId;
 
-  // Newest activity first (US3 scenario 1); a session without a timestamp sorts last.
-  const sessions = [...state.sessions].sort((a, b) =>
-    (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""),
-  );
+  // Newest activity first within each group (US3 scenario 1, 036 FR-538) is `SessionList`'s to do.
+  const sessions = state.sessions;
 
   /**
    * Whose question the consent card is about: the session the worker marked `waiting` (R-127), or
@@ -675,31 +673,30 @@ export function AgentShell(props: { locale: string }): ReactElement {
             {t("agent.sessionsTitle")}
           </h2>
         )}
-        {sessions.map((session) => (
-          <SessionCard
-            key={session.sessionId}
-            session={session}
-            agentName={agentName(session.agentId)}
-            locale={props.locale}
-            now={now}
-            onManageSite={(site) => openSettings(`#sites?site=${encodeURIComponent(site)}`)}
-            onStop={() => {
-              send({ type: "ui.agent.session-stop", payload: { sessionId: session.sessionId } });
-            }}
-            onRelease={() => {
-              send({ type: "ui.agent.session-release", payload: { sessionId: session.sessionId } });
-            }}
-            onInterrupt={() => {
-              send({ type: "ui.agent.session-interrupt", payload: { sessionId: session.sessionId } });
-            }}
-            onResume={() => {
-              send({ type: "ui.agent.session-resume", payload: { sessionId: session.sessionId } });
-            }}
-            onWithdrawSitePlan={() => {
-              send({ type: "ui.agent.site-plan-withdraw", payload: { sessionId: session.sessionId } });
-            }}
-          />
-        ))}
+        <SessionList
+          sessions={state.sessions}
+          locale={props.locale}
+          now={now}
+          agentName={agentName}
+          handlers={{
+            onManageSite: (site) => openSettings(`#sites?site=${encodeURIComponent(site)}`),
+            onStop: (sessionId) => {
+              send({ type: "ui.agent.session-stop", payload: { sessionId } });
+            },
+            onRelease: (sessionId) => {
+              send({ type: "ui.agent.session-release", payload: { sessionId } });
+            },
+            onInterrupt: (sessionId) => {
+              send({ type: "ui.agent.session-interrupt", payload: { sessionId } });
+            },
+            onResume: (sessionId) => {
+              send({ type: "ui.agent.session-resume", payload: { sessionId } });
+            },
+            onWithdrawSitePlan: (sessionId) => {
+              send({ type: "ui.agent.site-plan-withdraw", payload: { sessionId } });
+            },
+          }}
+        />
       </>
     );
 

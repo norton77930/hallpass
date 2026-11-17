@@ -1,109 +1,36 @@
 import { useEffect, useState, type ReactElement } from "react";
-import type { AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
+import { SESSION_GRANT_KIND_KEYS, SESSION_PLACE_KEYS } from "../agent-panel-keys.js";
+import { activityText } from "./activity-text.js";
 import {
-  ACTIVITY_OUTCOME_KEYS,
-  CONSENT_ANSWER_KEYS,
-  CONSENT_PLACE_KEYS,
-  CONSENT_QUESTION_KEYS,
-  SESSION_GRANT_KIND_KEYS,
-  SESSION_GRANT_SOURCE_KEYS,
-  WINDOW_STATE_KEYS,
-} from "../agent-panel-keys.js";
-import { displayOrigin } from "./display-origin.js";
+  CONSENT_CARD_ID,
+  clockOfMs,
+  primaryAction,
+  rowsOf,
+  sitesOf,
+  type SessionView,
+} from "./session-card-model.js";
+import { CheckIcon, ChevronIcon, ExternalIcon, PlaceIcon, PlanIcon, TabIcon } from "./session-icons.js";
 
 /**
  * One live session (006 FR-087, D-006-5): which agent, where it is working, whether it is waiting
- * on the owner, and the two things the owner can do about it.
+ * on the owner, and what the owner can do about it.
  *
  * "Where" is the sites it holds tabs on, by host name, and never a title or a url: a title is the
- * page's word, and this panel shows nothing a page authored. Stop ends the session; Release tabs
- * hands every tab back and lets the session go on. Neither is per tab (D-006-5).
+ * page's word, and this panel shows nothing a page authored. End session ends the session; Take back
+ * tabs hands every tab back and lets the session go on. Neither is per tab (D-006-5).
  *
- * 016 (FR-225 – FR-234) makes it readable: a stripe in the session's tab-group colour, a title of
- * the agent and the folder it was started in, a subtitle of when and what it holds, a state line
- * that can say idle, the id folded under technical details, and only the controls that would do
- * something - "End session" always, "Interrupt this step" while working, "Take back tabs" while it
- * holds any.
+ * 036 rebuilds the card as a header and a body. The header is always shown: the session's colour,
+ * its title, one line of state, agent and tabs, and the one action that matters now - Answer,
+ * Resume or Interrupt (FR-541, FR-542). The body is shown when the card is open: the recording
+ * line, "Sites and permissions" (one row per site), "Recent activity" (the newest three rows), the
+ * footer and one quiet last line (FR-544). What the card shows is made by `session-card-model.ts`
+ * from the picture the worker already sends; every control sends the frame it always did (SC-244).
  */
-export type SessionView = AgentPanelState["sessions"][number];
+export type { SessionView };
 
-type ActivityItem = NonNullable<SessionView["activity"]>[number];
-
-/**
- * The line an activity item reads as (008 FR-113, FR-119).
- *
- * One template per kind, because the kinds are different sentences about different things: a
- * dialog is something a *page* said, a restore is something this extension did to the owner's own
- * window. Both are written here from pieces - a state word, a host, the page's own message - so no
- * worker English ever reaches the card.
- */
-export function activityText(item: ActivityItem, t: (key: string) => string): string {
-  if (item.kind === "interrupt") {
-    // 014 FR-182: one line for the owner's own action, with no site and no message - they ended a
-    // step, and which step it was is not something the card should claim to know afterwards.
-    return t("agent.activity.interrupt");
-  }
-  if (item.kind === "hold") {
-    // 034 R-521: the owner pressed Stop on the page - one line, no site and no message, as an interrupt.
-    return t("agent.activity.hold");
-  }
-  if (item.kind === "resume") {
-    return t("agent.activity.resume");
-  }
-  if (item.kind === "restore") {
-    const state = item.message === "fullscreen" ? WINDOW_STATE_KEYS.fullscreen : WINDOW_STATE_KEYS.maximized;
-    return t("agent.activity.restore").replace("{state}", () => t(state));
-  }
-  if (item.kind === "viewport") {
-    // 012 FR-159: a third sentence, because this is a third kind of thing. The size is the
-    // worker's own `"WxH"` - two numbers it chose, never a word from the page - and a cleared
-    // viewport carries none, so the two outcomes are two templates rather than one with a hole.
-    return item.outcome === "set"
-      ? t("agent.activity.viewportSet").replace("{size}", () => item.message ?? "")
-      : t("agent.activity.viewportCleared");
-  }
-  if (item.kind === "upload") {
-    // 013 FR-174: a fourth sentence - a picture the session took, now in the owner's page. The
-    // worker sends the delivery the *page* reported, `input` or `drop`, and the two read as two
-    // different things: a file handed to a form, and a file dropped on the page. A site the worker
-    // could not name leaves no hole in either, the way a restore's missing state does not.
-    const sentence =
-      item.message === "input" ? t("agent.activity.uploadInput") : t("agent.activity.uploadDrop");
-    return sentence.replace("{site}", () => (item.site === undefined ? t("agent.activity.unknownSite") : displayOrigin(item.site)));
-  }
-  if (item.kind === "site-plan") {
-    // 017 FR-263: one sentence per plan event, from the site count the worker sends; the outcome word
-    // (approved, replaced, withdrawn, ended) is the card's, as for every other kind.
-    return item.message === "1"
-      ? t("agent.activity.sitePlanOne")
-      : t("agent.activity.sitePlan").replace("{n}", () => item.message ?? "");
-  }
-  if (item.kind === "consent") {
-    // 032 FR-494, R-488: one sentence for a settled question, put together from the panel's own
-    // words: what was asked, the site, and where and how it was answered (or that nobody did).
-    const site = displayOrigin(item.site ?? "");
-    const question = item.question === undefined ? "" : t(CONSENT_QUESTION_KEYS[item.question]);
-    const { answer: given, channel } = item;
-    const answer =
-      given === undefined || given === "timed-out" || channel === undefined || channel === "none"
-        ? t("agent.activity.consentTimedOut")
-        : t("agent.activity.consentAnswered")
-            .replace("{answer}", () => t(CONSENT_ANSWER_KEYS[given]))
-            .replace("{place}", () => t(CONSENT_PLACE_KEYS[channel]));
-    return t("agent.activity.consent")
-      .replace("{question}", () => question)
-      .replace("{site}", () => site)
-      .replace("{answer}", () => answer);
-  }
-  if (item.kind === "dialog") {
-    return t("agent.activity.dialog")
-      .replace("{site}", () => displayOrigin(item.site ?? ""))
-      .replace("{message}", () => item.message ?? "");
-  }
-  // A kind a newer worker sends and this panel has no sentence for: said plainly, never as a dialog.
-  return t("agent.activity.other");
-}
+/** 008 FR-113: the line an activity item reads as. It lives in `activity-text.ts` and is exported from here as before. */
+export { activityText };
 
 /**
  * How many characters of the folder the title shows before it cuts (016 FR-227).
@@ -147,29 +74,24 @@ export function lastActionText(iso: string, now: number, t: (key: string) => str
     .replace("{m}", String(minutes % 60));
 }
 
-/**
- * The card's state line (016 FR-230): working, waiting for you, or idle with the last action. A
- * projection from before 016 carries no state and reads as working, as it always did.
- */
-function stateText(session: SessionView, now: number, t: (key: string) => string): string {
-  const state = session.state ?? "working";
-  if (state === "waiting") return t("agent.session.waiting");
-  if (state === "working") return t("agent.session.working");
-  const ago = session.lastActivityAt === undefined ? undefined : lastActionText(session.lastActivityAt, now, t);
-  return ago === undefined ? t("agent.session.idleUnknown") : t("agent.session.idle").replace("{ago}", () => ago);
-}
+/** The tone a card's state line is drawn in: warning, accent, or quiet (FR-541). */
+export type StateTone = "attention" | "busy" | "idle";
 
 /**
- * The subtitle (016 FR-229): when the session started, and how many tabs it holds on which sites -
- * or that it holds none. Sites by host name only, never a title (006 R-127).
+ * The card's state line (016 FR-230, 036 FR-541): waiting for you, stopped from the page, working,
+ * or idle with how long ago. A projection from before 016 carries no state and reads as working, as it
+ * always did.
  */
-function holdsText(session: SessionView, t: (key: string) => string): string {
-  const count = session.tabs.length;
-  const sites = (session.sites ?? []).join(t("agent.session.siteSeparator"));
-  // T606 (B3): when it started is said under the name now, so this line is what it holds.
-  return count === 0
-    ? t("agent.session.noSites")
-    : (count === 1 ? t("agent.session.holdsOne") : t("agent.session.holds").replace("{n}", String(count))).replace("{sites}", () => sites);
+function stateOf(session: SessionView, now: number, t: (key: string) => string): { text: string; tone: StateTone } {
+  const state = session.state ?? "working";
+  if (state === "waiting") return { text: t("agent.session.waiting"), tone: "attention" };
+  if (session.heldAt !== undefined) return { text: t("agent.session.heldFromPage"), tone: "attention" };
+  if (state === "working") return { text: t("agent.session.working"), tone: "busy" };
+  const ago = session.lastActivityAt === undefined ? undefined : lastActionText(session.lastActivityAt, now, t);
+  return {
+    text: ago === undefined ? t("agent.session.idleUnknown") : t("agent.session.idle").replace("{ago}", () => ago),
+    tone: "idle",
+  };
 }
 
 /**
@@ -196,8 +118,8 @@ export function recordingLine(
 /**
  * What a session is called on a card (016 FR-226 – FR-228): the agent's name, then the folder its
  * host reported, else when it started. Both are remote input and rendered as inert text; the folder
- * is cut past a couple of dozen characters with the whole of it in `title`. The session card's title
- * and the site-plan question (017 FR-251) both use this, so the owner sees one name for one session.
+ * is cut past a couple of dozen characters with the whole of it in `title`. The site-plan question
+ * (017 FR-251) uses this, so the owner sees one name for one session.
  */
 export function SessionTitle(props: {
   agentName: string;
@@ -226,12 +148,33 @@ export function SessionTitle(props: {
 /** How long the "nothing was running" line stays up (FR-178): long enough to read, then gone. */
 export const NOTHING_TO_INTERRUPT_MS = 4_000;
 
+/** How many activity rows show before "Show all" (FR-550). */
+export const VISIBLE_ACTIVITY_ROWS = 3;
+
+/**
+ * 036 R-538: Answer brings the question slot's card into view and moves focus to it; it answers
+ * nothing and sends nothing. With no card on screen (a stale picture) it brings the top of the panel
+ * into view instead, and changes nothing.
+ */
+function bringConsentIntoView(): void {
+  const target = document.getElementById(CONSENT_CARD_ID);
+  if (target === null) {
+    document.querySelector(".agent-shell")?.scrollTo?.({ top: 0 });
+    return;
+  }
+  target.scrollIntoView?.({ block: "nearest" });
+  target.focus();
+}
+
 export function SessionCard(props: {
   session: SessionView;
   agentName: string;
   locale: string;
   /** The shell's minute clock (016 FR-230): "last action" is measured against it, not re-fetched. */
   now: number;
+  /** 036 FR-539, FR-540: whether the body shows, and the header's open/fold press (panel-local, sends nothing). */
+  open: boolean;
+  onToggle: () => void;
   onStop: () => void;
   onRelease: () => void;
   onInterrupt: () => void;
@@ -240,13 +183,14 @@ export function SessionCard(props: {
   /** 017 FR-259: ends this session's site plan at once; the session goes on. */
   onWithdrawSitePlan: () => void;
   /**
-   * 024 FR-393, R-381: opens the settings page at the site this session acts on. The card offers the
-   * link only when the worker named a site; the panel sends one `ui.agent.open-settings`.
+   * 024 FR-393, R-381: opens the settings page at a site, by its origin (036 FR-547: one per site
+   * row). A row offers it only for a site with a known origin; the panel sends one
+   * `ui.agent.open-settings`.
    */
-  onManageSite?: (site: string) => void;
+  onManageSite?: (origin: string) => void;
 }): ReactElement {
   const t = (key: string): string => lookup(key, props.locale);
-  const { session } = props;
+  const { session, open } = props;
   const state = session.state ?? "working";
   // 034 R-521: the owner stopped this session from the page and has not resumed it yet.
   const heldFromPage = session.heldAt !== undefined;
@@ -264,205 +208,294 @@ export function SessionCard(props: {
     const timer = setTimeout(() => setSaidNothing(false), NOTHING_TO_INTERRUPT_MS);
     return () => clearTimeout(timer);
   }, [saidNothing]);
-  // Newest first, as the worker keeps it; the panel never re-orders what it is told (FR-113).
-  const activity = session.activity ?? [];
+  const [allRows, setAllRows] = useState(false);
+
   const titleId = `agent-session-${session.sessionId}`;
+  const subId = `${titleId}-state`;
+  const bodyId = `${titleId}-body`;
   const held = session.tabs.length;
-  const sitePlan = session.sitePlan;
   const agentNameOf = session.agentName ?? props.agentName;
+  const titleText = session.label ?? agentNameOf;
+  const status = stateOf(session, props.now, t);
+  const primary = primaryAction(session);
+  const attention = state === "waiting" || heldFromPage;
   const started = clockTime(session.startedAt);
-  const startedText = started === undefined ? undefined : t("agent.session.started").replace("{time}", started);
-  // With a folder for a name the agent goes under it; without one the name is the agent already.
-  const metaText = session.label !== undefined ? [agentNameOf, startedText].filter((part) => part !== undefined).join(" · ") : startedText;
+
+  const sites = open ? sitesOf(session) : [];
+  // Newest first, as the worker keeps it; the panel merges rows but never re-orders what it is told (FR-113, FR-550).
+  const rows = open ? rowsOf(session.activity ?? [], t) : [];
+  const shownRows = allRows ? rows : rows.slice(0, VISIBLE_ACTIVITY_ROWS);
+  const recording = recordingLine(session.recording, t);
 
   return (
     <section
       className="agent-session"
       data-session-id={session.sessionId}
       data-session-state={state}
+      data-open={open ? "true" : "false"}
+      data-attention={attention ? "true" : "false"}
       aria-labelledby={titleId}
     >
-      {/* 016 FR-225: the same colour as the session's tab group, so a card and its tabs are found
-          together. Decoration only - the title already says which session - and absent when the
-          worker gave the session no colour, rather than a colour the panel made up. */}
-      <div className="agent-session-body">
-        {/* T606 (B3): a dot, the name in bold with "agent · started" under it, the state as a pill. */}
-        <div className="agent-session-head">
+      <div className="agent-session-head">
+        {/* The whole of this block is the open/fold press: the button inside the title is stretched over it. */}
+        <div className="agent-session-headmain">
+          <span className="agent-session-chevron" aria-hidden="true">
+            <ChevronIcon />
+          </span>
+          {/* 016 FR-225: the same colour as the session's tab group, so a card and its tabs are found
+              together. Decoration only - the title already says which session - and absent when the
+              worker gave the session no colour, rather than a colour the panel made up. */}
           {session.colour === undefined ? null : (
-            <span className="agent-session-stripe" data-colour={session.colour} aria-hidden="true" />
+            <span className="agent-session-bar" data-colour={session.colour} aria-hidden="true" />
           )}
-          <div className="agent-session-titles">
-            <h2 id={titleId}>
+          <h2 className="agent-session-title">
+            <button
+              type="button"
+              className="agent-session-toggle"
+              aria-expanded={open}
+              {...(open ? { "aria-controls": bodyId } : {})}
+              aria-describedby={subId}
+              aria-label={t(open ? "agent.session.toggleHide" : "agent.session.toggleShow").replace("{name}", () => titleText)}
+              onClick={props.onToggle}
+            >
               {/* The folder its host reported (016 FR-226 - FR-228), else the name this session's
                   greeting carried - both inert text, remote input. The paired record's name is only a
                   fallback: one agent id is shared by every MCP client on the machine. */}
-              {session.label !== undefined ? (
-                <span className="agent-session-label" title={session.label}>
-                  {visibleLabel(session.label)}
+              <span id={titleId} className="agent-session-name">
+                {session.label !== undefined ? (
+                  <span className="agent-session-label" title={session.label}>
+                    {visibleLabel(session.label)}
+                  </span>
+                ) : (
+                  agentNameOf
+                )}
+              </span>
+            </button>
+          </h2>
+          <p className="agent-session-sub" id={subId}>
+            <span className="agent-session-state" data-tone={status.tone}>
+              {status.text}
+            </span>
+            <span className="agent-session-sep" aria-hidden="true">
+              ·
+            </span>
+            <span className="agent-session-agent">{agentNameOf}</span>
+            {held === 0 ? null : (
+              <>
+                <span className="agent-session-sep" aria-hidden="true">
+                  ·
                 </span>
-              ) : (
-                agentNameOf
-              )}
-            </h2>
-            {metaText === undefined ? null : <p className="agent-session-meta">{metaText}</p>}
-          </div>
-          <p className="agent-session-state">{stateText(session, props.now, t)}</p>
-        </div>
-        <p className="agent-session-sites">{holdsText(session, t)}</p>
-        {heldFromPage ? (
-          <p className="agent-session-held" role="status">
-            {t("agent.session.heldFromPage")}
+                <span className="agent-session-tabs">
+                  {held === 1 ? t("agent.session.tabCountOne") : t("agent.session.tabCount").replace("{n}", String(held))}
+                </span>
+              </>
+            )}
           </p>
-        ) : null}
-        {/* 024 FR-393: the standing permissions are on the settings page; this card links to the site it acts on. */}
-        {session.site === undefined || props.onManageSite === undefined ? null : (
+        </div>
+        {/*
+          036 FR-542: the one action that matters now, shown even while the card is folded. Answer only
+          brings the question into view (R-538); Resume is 034's, Interrupt is 014 FR-178's: deliberately
+          not `disabled` when the count says nothing is in flight - the picture can be a moment old, and a
+          control that did nothing in that moment would look broken - so it is marked unavailable for the
+          eye and assistive technology, and pressing it anyway says what happened.
+        */}
+        {primary === "answer" ? (
+          <button type="button" className="agent-session-primary" data-strong="true" onClick={bringConsentIntoView}>
+            {t("agent.session.answer")}
+          </button>
+        ) : primary === "resume" ? (
+          <button type="button" className="agent-session-primary" data-strong="true" onClick={props.onResume}>
+            {t("agent.session.resume")}
+          </button>
+        ) : primary === "interrupt" ? (
           <button
             type="button"
-            className="agent-quiet agent-session-manage"
-            aria-label={t("agent.session.manageSiteLabel").replace("{site}", () => displayOrigin(session.site ?? ""))}
-            onClick={() => props.onManageSite?.(session.site ?? "")}
+            className="agent-session-primary"
+            aria-disabled={inFlight === 0}
+            onClick={() => {
+              if (inFlight === 0) {
+                setSaidNothing(true);
+                return;
+              }
+              setSaidNothing(false);
+              props.onInterrupt();
+            }}
           >
-            {t("agent.session.manageSite")}
+            {t("agent.session.interrupt")}
           </button>
-        )}
-        {/* 031 FR-475, R-458: what the owner allowed this session and where they said so, one line per
-            grant in the order given. Absent with none - an empty list is a fact about nothing. */}
-        {session.grants === undefined || session.grants.length === 0 ? null : (
-          <ul className="agent-session-grants" aria-label={t("agent.session.grants")}>
-            {session.grants.map((grant) => (
-              <li key={`${grant.site}-${grant.kind}-${grant.source}`}>
-                {t("agent.session.grant")
-                  .replace("{site}", () => displayOrigin(grant.site))
-                  .replace("{kind}", () => t(SESSION_GRANT_KIND_KEYS[grant.kind]))
-                  .replace("{source}", () => t(SESSION_GRANT_SOURCE_KEYS[grant.source]))}
-              </li>
-            ))}
-          </ul>
-        )}
-        {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
-            recording and none has been exported - a card that said "no recording" would be a fact
-            about nothing on every card the owner ever sees. */}
-        {recordingLine(session.recording, t) === undefined ? null : (
-          <p className="agent-session-recording">{recordingLine(session.recording, t)}</p>
-        )}
-        {/*
-          008 FR-113: what happened on this session's tabs while the owner may have been looking
-          elsewhere. Every dialog is here whatever the mode decided, because an accept in `skip-checks`
-          is over in a moment and this is the only trace of it. The page's words are rendered as the
-          page wrote them - inert text, never markup - and the sentence around them is the panel's own.
-          Absent entirely when nothing has happened: an empty list is a fact about nothing.
-        */}
-        {activity.length === 0 ? null : (
-          <ul className="agent-session-activity" aria-label={t("agent.activity.title")}>
-            {/*
-              The position is part of the identity: two dialogs can be answered inside one
-              millisecond and end the same way, and a key of the timestamp and the outcome alone
-              would make them one item as far as React is concerned.
-            */}
-            {activity.map((item, index) => (
-              <li key={`${item.at}-${item.outcome ?? item.answer}-${index}`}>
-                <span className="agent-activity-text">{activityText(item, t)}</span>
-                {/* 032: a consent line says its answer in the sentence, so it has no outcome word. */}
-                {item.outcome === undefined ? null : (
-                  <>
-                    {" "}
-                    <span className="agent-activity-outcome">{t(ACTIVITY_OUTCOME_KEYS[item.outcome])}</span>
-                  </>
+        ) : null}
+      </div>
+      {/*
+        014 FR-178: what the owner is told when they interrupt a session that was not doing
+        anything. A line rather than a card, announced rather than focused: nothing was decided and
+        nothing is being asked, so it must not take the place their next action is heading for.
+      */}
+      {saidNothing ? (
+        <p className="agent-session-nothing" role="status">
+          {t("agent.session.nothingToInterrupt")}
+        </p>
+      ) : null}
+      {open ? (
+        <div className="agent-session-body" id={bodyId}>
+          {/* 008 FR-109: what the session's recording is doing, in one line. Absent while there is no
+              recording and none has been exported - a card that said "no recording" would be a fact
+              about nothing on every card the owner ever sees. */}
+          {recording === undefined ? null : <p className="agent-session-recording">{recording}</p>}
+          {/*
+            036 FR-545 - FR-548: every site once, with what the session may do there. The site plan's
+            withdraw (017 FR-259) sits on the title: one press, always in view, leaving the session,
+            its tabs and its remembered sites untouched. Absent entirely with nothing to list.
+          */}
+          {sites.length === 0 ? null : (
+            <section className="agent-session-section" aria-labelledby={`${titleId}-sites`}>
+              <div className="agent-session-section-head">
+                <h3 id={`${titleId}-sites`}>{t("agent.session.sitesTitle")}</h3>
+                {session.sitePlan === undefined ? null : (
+                  <button type="button" className="agent-session-textbutton" data-tone="danger" onClick={props.onWithdrawSitePlan}>
+                    {t("agent.session.sitePlanWithdraw")}
+                  </button>
                 )}
-              </li>
-            ))}
-          </ul>
-        )}
-        {/*
-          017 FR-259, R-252: the plan this session works under, where the owner can see it and end it.
-          The count is the summary and the sites unfold beneath it, as inert text; withdrawing is one
-          press, always in view, and leaves the session, its tabs and its remembered sites untouched.
-          Absent entirely with no plan.
-        */}
-        {sitePlan === undefined ? null : (
-          <div className="agent-session-site-plan-row">
-            <details className="agent-details agent-session-site-plan">
-              <summary>
-                {sitePlan.origins.length === 1
-                  ? t("agent.session.sitePlanOne")
-                  : t("agent.session.sitePlan").replace("{n}", String(sitePlan.origins.length))}
-              </summary>
-              <ul>
-                {sitePlan.origins.map((origin) => (
-                  <li key={origin}>{displayOrigin(origin)}</li>
+              </div>
+              <ul className="agent-session-sites">
+                {sites.map((site) => (
+                  <li key={site.origin ?? `host:${site.host}`}>
+                    <div className="agent-session-site-line">
+                      <span className="agent-session-site-name" title={site.host}>
+                        {site.host}
+                      </span>
+                      <span className="agent-session-marks">
+                        {site.tabHere ? (
+                          <span className="agent-session-mark" data-mark="tab">
+                            <TabIcon />
+                            {t("agent.session.markTab")}
+                          </span>
+                        ) : null}
+                        {site.inPlan ? (
+                          <span className="agent-session-mark" data-mark="plan">
+                            <PlanIcon />
+                            {t("agent.session.markPlan")}
+                          </span>
+                        ) : null}
+                      </span>
+                      {/* 024 FR-393, 036 FR-547: the standing permissions are on the settings page; each site with a known origin links there. */}
+                      {site.origin === undefined || props.onManageSite === undefined ? null : (
+                        <button
+                          type="button"
+                          className="agent-session-iconbutton agent-session-manage"
+                          aria-label={t("agent.session.manageSiteLabel").replace("{site}", () => site.host)}
+                          title={t("agent.session.manageSiteLabel").replace("{site}", () => site.host)}
+                          onClick={() => props.onManageSite?.(site.origin ?? "")}
+                        >
+                          <ExternalIcon />
+                        </button>
+                      )}
+                    </div>
+                    {site.grants.length === 0 ? null : (
+                      <div className="agent-session-grants">
+                        {/* 031 FR-475: what the owner allowed this session here, and where they said so. */}
+                        {site.grants.map((grant) => (
+                          <span className="agent-session-grant" key={`${grant.kind}-${grant.source}`}>
+                            <CheckIcon />
+                            {t(SESSION_GRANT_KIND_KEYS[grant.kind])}
+                            <span
+                              className="agent-session-place"
+                              title={t("agent.session.grantPlace").replace("{place}", () => t(SESSION_PLACE_KEYS[grant.source]))}
+                            >
+                              <PlaceIcon place={grant.source} />
+                              <span className="agent-sr-only">{t(SESSION_PLACE_KEYS[grant.source])}</span>
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </li>
                 ))}
               </ul>
-            </details>
-            <button type="button" onClick={props.onWithdrawSitePlan}>
-              {t("agent.session.sitePlanWithdraw")}
+            </section>
+          )}
+          {/*
+            008 FR-113: what happened on this session's tabs while the owner may have been looking
+            elsewhere. Every dialog is here whatever the mode decided, because an accept in `skip-checks`
+            is over in a moment and this is the only trace of it. The page's words are rendered as the
+            page wrote them - inert text, never markup - and the sentence around them is the panel's own.
+            Absent entirely when nothing has happened: an empty list is a fact about nothing.
+          */}
+          {rows.length === 0 ? null : (
+            <section className="agent-session-section" aria-labelledby={`${titleId}-activity`}>
+              <div className="agent-session-section-head">
+                <h3 id={`${titleId}-activity`}>{t("agent.activity.title")}</h3>
+              </div>
+              {/*
+                The position is part of the identity: two dialogs can be answered inside one
+                millisecond and end the same way, and a key of the timestamp alone would make them one
+                item as far as React is concerned.
+              */}
+              <ol className="agent-session-activity">
+                {shownRows.map((row, index) => (
+                  <li key={`${row.at}-${row.kind}-${index}`}>
+                    <time className="agent-activity-time" dateTime={new Date(row.at).toISOString()}>
+                      {clockOfMs(row.at)}
+                    </time>
+                    <div className="agent-activity-main">
+                      <p className="agent-activity-text">{row.text}</p>
+                      {row.result === undefined && row.place === undefined ? null : (
+                        <p className="agent-activity-meta">
+                          {row.result === undefined ? null : (
+                            <span className="agent-activity-result" data-tone={row.tone}>
+                              {row.result}
+                            </span>
+                          )}
+                          {row.place === undefined ? null : (
+                            <span className="agent-session-place">
+                              <PlaceIcon place={row.place} />
+                              {t(SESSION_PLACE_KEYS[row.place])}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+              {rows.length <= VISIBLE_ACTIVITY_ROWS ? null : (
+                <button
+                  type="button"
+                  className="agent-session-textbutton agent-session-more"
+                  data-tone="accent"
+                  aria-expanded={allRows}
+                  onClick={() => setAllRows(!allRows)}
+                >
+                  {allRows ? t("agent.session.showLess") : t("agent.session.showAll").replace("{n}", String(rows.length))}
+                </button>
+              )}
+            </section>
+          )}
+          {/*
+            036 FR-551: Take back tabs on the left while there is something to take back (016 FR-234), End
+            session on the right as a danger text button, always there. Interrupt and Resume are in the header.
+          */}
+          <div className="agent-session-foot">
+            {held >= 1 ? (
+              <button type="button" className="agent-session-takeback" onClick={props.onRelease}>
+                {t("agent.session.takeBack").replace("{n}", String(held))}
+              </button>
+            ) : null}
+            <button type="button" className="agent-session-textbutton agent-session-end" data-tone="danger" onClick={props.onStop}>
+              {t("agent.session.stop")}
             </button>
           </div>
-        )}
-        {/*
-          014 FR-178: what the owner is told when they interrupt a session that was not doing
-          anything. A line rather than a card, announced rather than focused: nothing was decided and
-          nothing is being asked, so it must not take the place their next action is heading for.
-        */}
-        {saidNothing ? (
-          <p className="agent-session-nothing" role="status">
-            {t("agent.session.nothingToInterrupt")}
-          </p>
-        ) : null}
-        {/*
-          016 FR-232 – FR-234, T608 (Y1): one left-aligned row that wraps. "End session" always and
-          first, so its place never moves (FR-232); the rest only when they would do something.
-        */}
-        <div className="agent-session-actions">
-          <button type="button" className="agent-danger" onClick={props.onStop}>
-            {t("agent.session.stop")}
-          </button>
           {/*
-            014 FR-178, 016 FR-233: shown only while the session is working. Still deliberately not
-            `disabled` when the count says nothing is in flight: the picture can be a moment old - the
-            call it named may have answered while the owner was reaching for the mouse - and a control
-            that simply did nothing in that moment would look broken. So it is marked unavailable for
-            assistive technology and for the eye, and pressing it anyway says what happened instead
-            (014 US1 scenario 5). With a call in flight it is the plain control it looks like.
+            016 FR-231, 036 FR-544: the host-minted id, for the owner who is asked for it and for nobody
+            else - so it is here, folded under the start time, and nowhere else on the card.
           */}
-          {/* 034 R-521: a held session has nothing to interrupt; the way on is Resume, or End session. */}
-          {heldFromPage ? (
-            <button type="button" className="agent-resume" onClick={props.onResume}>
-              {t("agent.session.resume")}
-            </button>
-          ) : null}
-          {state === "working" && !heldFromPage ? (
-            <button
-              type="button"
-              className="agent-interrupt"
-              aria-disabled={inFlight === 0}
-              onClick={() => {
-                if (inFlight === 0) {
-                  setSaidNothing(true);
-                  return;
-                }
-                setSaidNothing(false);
-                props.onInterrupt();
-              }}
-            >
-              {t("agent.session.interrupt")}
-            </button>
-          ) : null}
-          {/* 016 FR-234: today's release, counted, and only while there is something to take back. */}
-          {held >= 1 ? (
-            <button type="button" onClick={props.onRelease}>
-              {t("agent.session.takeBack").replace("{n}", String(held))}
-            </button>
-          ) : null}
+          <details className="agent-session-tech">
+            <summary>
+              {started === undefined ? t("agent.details.title") : t("agent.session.startedDetails").replace("{time}", started)}
+            </summary>
+            <p>{t("agent.session.id").replace("{id}", () => session.sessionId)}</p>
+          </details>
         </div>
-        {/*
-          016 FR-231: the host-minted id, for the owner who is asked for it and for nobody else - so it
-          is here, folded, and nowhere else on the card. The `<details>` idiom is NotConnected's.
-        */}
-        <details className="agent-details">
-          <summary>{t("agent.details.title")}</summary>
-          <p>{t("agent.session.id").replace("{id}", () => session.sessionId)}</p>
-        </details>
-      </div>
+      ) : null}
     </section>
   );
 }

@@ -5,6 +5,19 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.24.0 — 2026-11-17
+
+- **Session cards that read at a glance.** The side panel's Sessions tab now puts the sessions that
+  need you on top, open, and folds idle ones into an "Idle" list underneath; you can open or fold any
+  card yourself. Each card's header shows the state in words and one main button for what to do next:
+  Answer (brings the question's card into view), Resume (a session you stopped from the page) or
+  Interrupt. Inside, "Sites and permissions" lists each site once with its marks (tab here, in the
+  site plan), its permissions and where you gave them, and a manage button per site; "Recent activity"
+  shows the newest three entries, merges a Stop followed by its Resume, and expands to all of them.
+  Take back tabs and End session sit at the bottom of the card. The look is quieter: thin lines
+  instead of nested boxes, and colour only where it means something. Only the panel changed: agents,
+  tools and permissions behave exactly as before.
+
 ## 0.23.0 — 2026-11-16
 
 - **Stop an agent from the page (#64).** The pill on a tab an agent is working in now has a Stop

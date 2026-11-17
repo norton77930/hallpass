@@ -5,7 +5,7 @@ import { isAgentGroupTitle } from "../fixtures/agent-group.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage } from "../fixtures/settings-page-driver.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { clickOnCard, copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -202,7 +202,7 @@ test.describe("agent interrupt", () => {
       await panel.waitForText(ui("agent.promptTitle"));
       /**
        * 016 FR-230 / FR-233: a session whose question waits on the owner is `waiting`, and
-       * "Interrupt this step" is shown only while it is working - so the card offers no interrupt
+       * "Interrupt" (the header's primary button) is shown only while it is working - so the card offers no interrupt
        * here, and the owner ends the call from the question itself. (0.8.0 pressed Interrupt on the
        * card at this point and expected `owner-interrupted`; that path no longer has a control.)
        */
@@ -343,7 +343,7 @@ async function sessionIdOnPanel(panel: SidePanelDriver): Promise<string | null> 
 async function inFlightOnCard(panel: SidePanelDriver, sessionId: string): Promise<boolean> {
   const disabled = await panel.evaluatePanel(
     `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `return card?.querySelector('.agent-interrupt')?.getAttribute('aria-disabled') ?? null})()`,
+      `return card?.querySelector('button.agent-session-primary')?.getAttribute('aria-disabled') ?? null})()`,
   );
   return disabled === 'false';
 }
@@ -356,16 +356,6 @@ async function hasButtonOnCard(panel: SidePanelDriver, sessionId: string, label:
         `return !!card&&[...card.querySelectorAll('button')].some((x)=>x.textContent?.trim()===${JSON.stringify(label)})})()`,
     )) === true
   );
-}
-
-async function clickOnCard(panel: SidePanelDriver, sessionId: string, label: string): Promise<void> {
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `const b=card&&[...card.querySelectorAll('button')].find((x)=>x.textContent?.trim()===${JSON.stringify(label)});` +
-      `if(!b)return false;b.click();return true})()`,
-    true,
-  );
-  expect(clicked, `no ${label} on the card for ${sessionId}`).toBe(true);
 }
 
 /** Which group the browser has the tab in; `-1` is "no group". */

@@ -133,22 +133,29 @@ describe("T198 every control has a name and a place in the tab order", () => {
     expectNamedAndReachable();
   });
 
-  it("two session cards, each a labelled section with only the controls that apply (016 FR-232 – FR-234)", () => {
+  it("two session cards, each a labelled section with an expanded-state press and only the controls that apply (036 FR-541 - FR-551)", () => {
     renderShell();
     project(port, TWO_SESSIONS);
     expectNamedAndReachable();
     const card = (id: string): HTMLElement => document.querySelector<HTMLElement>(`[data-session-id="${id}"]`) as HTMLElement;
     for (const id of ["sess-aaaa1111", "sess-bbbb2222"]) {
       expect(card(id).getAttribute("aria-labelledby")).toBeTruthy();
+      // Both need the owner or are working, so both are open and say so on their one open/fold press.
+      const toggle = card(id).querySelector<HTMLElement>(".agent-session-toggle")!;
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      expect(toggle.getAttribute("aria-label")).toMatch(/^Hide details for /);
+      expect(toggle.getAttribute("aria-describedby")).toBeTruthy();
       expect(within(card(id)).getByRole("button", { name: ui("agent.session.stop") })).toBeTruthy();
     }
-    // Waiting and holding one tab: take back, no interrupt. Working and holding none: the reverse.
+    // Waiting and holding one tab: Answer, take back, no interrupt. Working and holding none: the reverse.
     expect(within(card("sess-aaaa1111")).getByRole("button", { name: ui("agent.session.takeBack").replace("{n}", "1") })).toBeTruthy();
+    expect(within(card("sess-aaaa1111")).getByRole("button", { name: ui("agent.session.answer") })).toBeTruthy();
     expect(within(card("sess-aaaa1111")).queryByRole("button", { name: ui("agent.session.interrupt") })).toBeNull();
     expect(within(card("sess-bbbb2222")).getByRole("button", { name: ui("agent.session.interrupt") })).toBeTruthy();
     expect(within(card("sess-bbbb2222")).queryByRole("button", { name: /Take back/ })).toBeNull();
-    // The stripe is decoration, out of the accessibility tree.
-    expect(card("sess-aaaa1111").querySelector(".agent-session-stripe")?.getAttribute("aria-hidden")).toBe("true");
+    // The bar and the chevron are decoration, out of the accessibility tree.
+    expect(card("sess-aaaa1111").querySelector(".agent-session-bar")?.getAttribute("aria-hidden")).toBe("true");
+    expect(card("sess-aaaa1111").querySelector(".agent-session-chevron")?.getAttribute("aria-hidden")).toBe("true");
   });
 
   it.each([
@@ -233,6 +240,8 @@ const REQUIRED_TOKENS = [
   "bg", "surface", "surface-2", "text", "text-2", "line", "accent", "accent-text", "ok", "warn", "danger", "focus",
   // 020 FR-322: the indigo set's extra names.
   "code", "line-strong", "text-3", "accent-soft", "accent-line", "warn-soft", "danger-soft",
+  // 036 R-539: the hairline inside a session card (a separator, never text).
+  "line-soft",
   // 016 FR-225: the session stripes, Chrome's tab-group palette in each theme (decoration, not text).
   "group-cyan", "group-green", "group-purple", "group-pink", "group-orange", "group-grey", "group-blue",
 ];

@@ -10,7 +10,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient, type ToolCallResult } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage, type SettingsPageDriver } from "../fixtures/settings-page-driver.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { clickOnCard, copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, readLiveBrowserRecords, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -448,7 +448,7 @@ test.describe("pill stop", () => {
       }
       await chooseTab(panel, "sessions");
       expect(
-        await panel.evaluatePanel("document.querySelectorAll('.agent-session-held').length"),
+        (await cardViews(panel)).filter((card) => card.held !== null).length,
         "no session card says stopped from the page",
       ).toBe(0);
       await chooseTab(panel, "conversation");
@@ -708,6 +708,12 @@ async function pageMadeClicks(page: Page, label: string, times: number): Promise
  * The session card, read and pressed through the side panel's own DOM.
  * ---------------------------------------------------------------------------------------------- */
 
+/**
+ * The card as the panel draws it: `held` is the state line's text while the session is stopped from the page
+ * (034 FR-520; 036 FR-541 draws it as the state line in the attention tone, and a waiting session's line says
+ * waiting, so it is not read as held), else null. `buttons` is every button on the card, the header's
+ * Answer/Resume/Interrupt and the open body's footer among them.
+ */
 type CardView = { sessionId: string; held: string | null; buttons: string[] };
 
 async function cardViews(panel: SidePanelDriver): Promise<CardView[]> {
@@ -716,7 +722,7 @@ async function cardViews(panel: SidePanelDriver): Promise<CardView[]> {
       panel.evaluatePanel(
         `[...document.querySelectorAll('[data-session-id]')].map((card) => ({` +
           `sessionId: card.getAttribute('data-session-id') ?? '',` +
-          `held: card.querySelector('.agent-session-held')?.textContent?.trim() ?? null,` +
+          `held: (()=>{const s=card.querySelector('.agent-session-state');return s&&s.getAttribute('data-tone')==='attention'&&card.getAttribute('data-session-state')!=='waiting'?(s.textContent??'').trim():null})(),` +
           `buttons: [...card.querySelectorAll('button')].map((button) => button.textContent?.trim() ?? '')}))`,
       ),
     [],
@@ -739,16 +745,6 @@ async function sessionIdOnPanel(panel: SidePanelDriver): Promise<string> {
   await expect.poll(async () => (await cardViews(panel)).length, { timeout: 15_000 }).toBeGreaterThan(0);
   const [first] = await cardViews(panel);
   return first?.sessionId ?? "";
-}
-
-async function clickOnCard(panel: SidePanelDriver, sessionId: string, label: string): Promise<void> {
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `const b=card&&[...card.querySelectorAll('button')].find((x)=>x.textContent?.trim()===${JSON.stringify(label)});` +
-      `if(!b)return false;b.click();return true})()`,
-    true,
-  );
-  expect(clicked, `no ${label} on the card for ${sessionId}`).toBe(true);
 }
 
 /* ------------------------------------------------------------------------------------------------

@@ -54,15 +54,16 @@ export const UPLOAD_DELIVERY_SUMMARY_KEYS: Record<"input" | "drop", string> = {
   drop: "agent.summary.upload_image.drop",
 };
 
-/** 031 FR-475, R-458: what a session grant allows, and where it was given (the contract's own values). */
+/** 031 FR-475, R-458: what a session grant allows (the contract's own values). */
 export const SESSION_GRANT_KIND_KEYS: Record<"page-actions" | "diagnostics", string> = {
   "page-actions": "agent.session.grantKind.page-actions",
   diagnostics: "agent.session.grantKind.diagnostics",
 };
 
-export const SESSION_GRANT_SOURCE_KEYS: Record<"client" | "browser", string> = {
-  client: "agent.session.grantSource.client",
-  browser: "agent.session.grantSource.browser",
+/** 036 FR-546, FR-556: where a grant or an answer was given, as a name - Chrome or the terminal. */
+export const SESSION_PLACE_KEYS: Record<"client" | "browser", string> = {
+  client: "agent.session.place.client",
+  browser: "agent.session.place.browser",
 };
 
 /**
@@ -220,10 +221,6 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // 016 FR-228 – FR-234: title, subtitle, the three states, the last action, the id under technical
   // details, and the controls that are shown only when they would do something.
   "agent.session.started",
-  "agent.session.holds",
-  "agent.session.holdsOne",
-  "agent.session.noSites",
-  "agent.session.siteSeparator",
   "agent.session.working",
   "agent.session.waiting",
   "agent.session.idle",
@@ -234,13 +231,24 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.session.id",
   "agent.session.stop",
   "agent.session.takeBack",
-  // 017 FR-259: the active site plan on the card.
-  "agent.session.sitePlan",
-  "agent.session.sitePlanOne",
+  // 036 FR-541 - FR-546, FR-556: the redesigned card - the count of tabs in the header, the primary action, the
+  // open/fold name, the Idle heading, the "Sites and permissions" section with its marks, the grant place, the
+  // fold of the activity rows and the quiet last line. The place names are expanded below.
+  "agent.session.tabCount",
+  "agent.session.tabCountOne",
+  "agent.session.answer",
+  "agent.session.toggleShow",
+  "agent.session.toggleHide",
+  "agent.session.groupIdle",
+  "agent.session.sitesTitle",
+  "agent.session.markTab",
+  "agent.session.markPlan",
+  "agent.session.grantPlace",
+  "agent.session.showAll",
+  "agent.session.showLess",
+  "agent.session.startedDetails",
+  // 017 FR-259: the control on the "Sites and permissions" title that ends the site plan.
   "agent.session.sitePlanWithdraw",
-  // 031 FR-475, R-458: the session's "this session" grants on the card.
-  "agent.session.grants",
-  "agent.session.grant",
   // The second control beside Stop, and what it says when nothing was running (014 FR-178).
   "agent.session.interrupt",
   "agent.session.nothingToInterrupt",
@@ -273,6 +281,10 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   // 034 R-521: the owner's Stop on the page and the resume that lifted it.
   "agent.activity.hold",
   "agent.activity.resume",
+  // 036 FR-550: a Stop with its Resume as one row, k of them as one, and the consent row's question and site.
+  "agent.activity.holdResume",
+  "agent.activity.holdResumeMany",
+  "agent.activity.consentRow",
   // 032 FR-494: the settled-question line and the sentence for a kind the panel has no words for.
   // The question, place and answer words are expanded below from the contract's own values.
   "agent.activity.consent",
@@ -485,7 +497,6 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.tabs.sessions",
   "agent.sessions.empty",
   "agent.sessions.openSettings",
-  "agent.session.manageSite",
   "agent.session.manageSiteLabel",
   "agent.status.settings",
   // The agent picker's reason line for an enabled agent that is not ready, and its settings link.
@@ -505,7 +516,7 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   ...Object.values(CONSENT_PLACE_KEYS),
   ...Object.values(CONSENT_ANSWER_KEYS),
   ...Object.values(SESSION_GRANT_KIND_KEYS),
-  ...Object.values(SESSION_GRANT_SOURCE_KEYS),
+  ...Object.values(SESSION_PLACE_KEYS),
   ...Object.values(WINDOW_STATE_KEYS),
   ...Object.values(CONVERSATION_NOTICE_KEYS),
 ];

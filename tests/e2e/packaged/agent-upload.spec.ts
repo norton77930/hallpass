@@ -135,7 +135,8 @@ test.describe("agent file upload", () => {
        * thing that says one of their files went into a page. 013 wrote it for `upload_image`
        * alone; the parity is decided here.
        */
-      await panel.waitForText(ui("agent.activity.uploadInput").replace("{site}", SITE), 15_000);
+      // 036 FR-549: the card writes the site as its rows do, without the scheme.
+      await panel.waitForText(ui("agent.activity.uploadInput").replace("{site}", new URL(SITE).host), 15_000);
 
       /**
        * ============ a file outside every root ============

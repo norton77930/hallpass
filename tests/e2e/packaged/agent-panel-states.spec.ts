@@ -2,7 +2,16 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall, isAgentPaired } from "../fixtures/agent-pairing.js";
 import { openSettingsPage } from "../fixtures/settings-page-driver.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import {
+  clickOnCard,
+  copyFor,
+  localeFromEnv,
+  openSidePanel,
+  waitForAgentPanel,
+  waitForCardHoldingNoTabs,
+  waitForSiteWithTab,
+  type SidePanelDriver,
+} from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -107,13 +116,14 @@ test.describe("agent panel states", () => {
       expect(await panel.panelText()).not.toContain(ui("agent.notPaired.title"));
       // The session greeted the relay, so its card is up; it holds nothing yet.
       await expect.poll(() => shellState(panel), { timeout: 15_000 }).toBe("sessions");
-      await panel.waitForText(ui("agent.session.noSites"));
+      // 036 FR-541: no tab count in the card's header while it holds none.
+      await waitForCardHoldingNoTabs(panel);
       // 016 FR-223: the status row names no agent; the card's title does.
       expect(await panel.panelText()).toContain("Claude Code");
 
       const tabA = ((await callOn(a, "tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
-      // The card names the site it is on, and never the page's title.
-      await panel.waitForText(ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1"));
+      // The card names the site it is on (in "Sites and permissions", marked "Tab here"), and never the page's title.
+      await waitForSiteWithTab(panel, "127.0.0.1");
 
       // --- switching the site to `ask` makes the next effect prompt; the consent card is on top ---
       // 024 FR-385: the site's mode is set on the settings page.
@@ -195,7 +205,7 @@ ${a.stderr()}`).toMatchObject({ outcome: "stopped", reason: "owner-stopped" });
 
       // --- Release tabs on B: its next read answers not-yours, and it is still paired ---
       await clickOnCard(panel, sessionB, ui("agent.session.takeBack").replace("{n}", "1"));
-      await panel.waitForText(ui("agent.session.noSites"));
+      await waitForCardHoldingNoTabs(panel, { sessionId: sessionB });
       const afterRelease = await b.callTool("get_page_text", { tabId: tabB });
       expect(afterRelease.isError).toBe(true);
       expect(afterRelease.json).toMatchObject({ outcome: "denied", reason: "not-yours" });
@@ -227,17 +237,6 @@ async function storedModeOf(worker: PackagedWorker, site: string): Promise<unkno
     const records = (raw.agentSiteModes ?? {}) as Record<string, { mode?: string }>;
     return records[origin]?.mode;
   }, site);
-}
-
-/** Presses one of a session card's controls, found by the session the card is about. */
-async function clickOnCard(panel: SidePanelDriver, sessionId: string, label: string): Promise<void> {
-  const clicked = await panel.evaluatePanel(
-    `(()=>{const card=document.querySelector('[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `const b=card&&[...card.querySelectorAll('button')].find((x)=>x.textContent?.trim()===${JSON.stringify(label)});` +
-      `if(!b)return false;b.click();return true})()`,
-    true,
-  );
-  expect(clicked, `no ${label} on the card for ${sessionId}`).toBe(true);
 }
 
 async function refFor(

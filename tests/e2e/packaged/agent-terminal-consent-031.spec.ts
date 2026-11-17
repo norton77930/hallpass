@@ -55,7 +55,7 @@ const FORM = `${SITE}/form`;
 /** The worker's one bound for a question (`CLOSED_PANEL_TIMEOUT_MS`, R-453). The claim in the no-answer branch. */
 const QUESTION_BOUND_MS = 120_000;
 
-/** How the grant's source reads on a session card (R-458, FR-475): the word for a client answer. */
+/** How the grant's place reads on a session card (R-458, FR-475, 036 FR-546): the name of the terminal. */
 const FROM_TERMINAL = locale === "zh-TW" ? /終端/u : /terminal/iu;
 
 test.describe("031 terminal consent", () => {
@@ -613,13 +613,18 @@ async function hasButton(panel: SidePanelDriver, label: string): Promise<boolean
 }
 
 /**
- * Whether the session cards list a grant for the site marked as given from the terminal (R-458).
- * Read as text, because the exact line is the card's wording (T925); the site and the source word
- * are the claim.
+ * Whether a session card lists a grant on the site's row of "Sites and permissions" marked as given from the
+ * terminal (R-458, 036 FR-546). The row is found by the site as the card writes it (no scheme) and the place is
+ * read as text, because its wording is the card's (T925); the site, the grant and the place's name are the claim.
  */
 async function grantFromTerminalShown(panel: SidePanelDriver): Promise<boolean> {
-  const text = await panel.panelText();
-  return text.includes(SITE) && FROM_TERMINAL.test(text);
+  const found = await panel.evaluatePanel(
+    `(()=>{const place=new RegExp(${JSON.stringify(FROM_TERMINAL.source)},${JSON.stringify(FROM_TERMINAL.flags)});` +
+      `return [...document.querySelectorAll('section[data-session-id] .agent-session-sites li')].some((li)=>` +
+      `(li.querySelector('.agent-session-site-name')?.textContent??'').trim()===${JSON.stringify(new URL(SITE).host)}` +
+      `&&[...li.querySelectorAll('.agent-session-grant .agent-session-place')].some((p)=>place.test(p.textContent??'')))})()`,
+  );
+  return found === true;
 }
 
 /** A site's mode, set on the settings page as the sibling journeys do; the page is closed again. */

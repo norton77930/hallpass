@@ -6,8 +6,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { IDLE, installAgentPort, project, renderShell, uninstallAgentPort, type FakeAgentPort } from "./helpers/agent-shell-harness.js";
 
 /**
- * 020/T608 (Y1) - a session card's buttons are one left-aligned row that wraps, in one order with
- * "End session" first (016 FR-232), and its "agent - started" line stays on one line whatever the state pill says.
+ * 020/T608 (Y1), 036 FR-542, FR-551 - a session card's controls: the one primary action is in the header,
+ * the footer has Take back tabs on the left and End session on the right as a text button, and the state
+ * line stays on one line whatever the state says. (016 FR-232's "End session first" is superseded by FR-551.)
  */
 
 const css = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../src/side-panel/agent/agent.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
@@ -47,28 +48,30 @@ describe("T608 Y1 a session card's controls", () => {
   });
 
   const card = () => document.querySelector<HTMLElement>("[data-session-id]")!;
-  const buttons = () => within(card().querySelector<HTMLElement>(".agent-session-actions")!).getAllByRole("button").map((button) => button.textContent);
+  const header = () => card().querySelector<HTMLElement>(".agent-session-head")!;
+  const footer = () => within(card().querySelector<HTMLElement>(".agent-session-foot")!).getAllByRole("button").map((button) => button.textContent);
 
-  it("keeps End session first (016 FR-232 fixed position), then Interrupt this step and Take back tabs", () => {
+  it("puts Interrupt in the header and Take back tabs, then End session in the footer", () => {
     renderShell();
     project(port, { ...IDLE, sessions: [SESSION] });
-    expect(buttons()).toEqual(["End session", "Interrupt this step", "Take back tabs (2)"]);
+    expect(within(header()).getByRole("button", { name: "Interrupt" })).toBeTruthy();
+    expect(footer()).toEqual(["Take back tabs (2)", "End session"]);
     expect(card().querySelector(".agent-session-spacer")).toBeNull();
   });
 
-  it("lays the buttons out as one left-aligned row that wraps", () => {
-    const row = rule(".agent-session-actions");
-    expect(row).toMatch(/display:\s*flex/);
-    expect(row).toMatch(/flex-wrap:\s*wrap/);
-    expect(row).not.toMatch(/justify-content:\s*(space-between|flex-end|end|center)/);
-    expect(css).not.toMatch(/\.agent-session-spacer/);
+  it("lays the footer out as a row with End session pushed to the right, as a text button", () => {
+    expect(rule(".agent-session-foot")).toMatch(/display:\s*flex/);
+    expect(rule(".agent-session-end")).toMatch(/margin-left:\s*auto/);
+    expect(rule(".agent-shell .agent-session-textbutton")).toMatch(/border:\s*0/);
+    expect(rule(".agent-shell .agent-session-textbutton[data-tone=\"danger\"]")).toMatch(/color:\s*var\(--danger\)/);
   });
 
-  it("keeps the meta line on one line and puts the state pill under the name", () => {
-    expect(rule(".agent-session-meta")).toMatch(/white-space:\s*nowrap/);
-    expect(rule(".agent-session-meta")).toMatch(/text-overflow:\s*ellipsis/);
-    expect(rule(".agent-session-head")).toMatch(/display:\s*grid/);
-    expect(rule(".agent-session-head .agent-session-state")).toMatch(/grid-column:\s*2/);
-    expect(rule(".agent-session-head .agent-session-state")).toMatch(/justify-self:\s*start/);
+  it("keeps the state line on one line and gives the title room to ellipsise", () => {
+    expect(rule(".agent-shell .agent-session-sub")).toMatch(/white-space:\s*nowrap/);
+    expect(rule(".agent-shell .agent-session-sub")).toMatch(/overflow:\s*hidden/);
+    expect(rule(".agent-session-name")).toMatch(/text-overflow:\s*ellipsis/);
+    expect(rule(".agent-session-name")).toMatch(/white-space:\s*nowrap/);
+    expect(rule(".agent-session-headmain")).toMatch(/display:\s*grid/);
+    expect(rule(".agent-session-headmain")).toMatch(/minmax\(0,\s*1fr\)/);
   });
 });

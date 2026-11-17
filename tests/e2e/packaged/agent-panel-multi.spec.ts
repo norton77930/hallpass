@@ -3,7 +3,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage } from "../fixtures/settings-page-driver.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, waitForSiteWithTab } from "../fixtures/side-panel-driver.js";
 import { expect, test } from "../fixtures/packaged-extension.js";
 
 const locale = localeFromEnv();
@@ -80,9 +80,9 @@ test.describe("agent panel: two panel documents at once", () => {
 
       // A session's tab appears on BOTH panels - the older one included.
       const tabA = ((await callOn("tabs_create", { url: `${SITE}/ordinary` })) as { tabId: number }).tabId;
-      const siteLine = ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1");
-      await panelB.waitForText(siteLine);
-      await panelA.waitForText(siteLine, 15_000);
+      // 036 FR-545, FR-546: the card lists the site with the "Tab here" mark (the card is open: it is the only session).
+      await waitForSiteWithTab(panelB, "127.0.0.1");
+      await waitForSiteWithTab(panelA, "127.0.0.1", { timeoutMs: 15_000 });
 
       // An effect on an undecided site asks the owner - on BOTH panels - and the older one answers.
       const ref = await refFor(callOn, tabA, "Safe action");
@@ -260,7 +260,7 @@ test.describe("overnight fixes of 2026-09-16, live", () => {
       // The panel reconnects on its own; the fresh worker publishes the whole picture on accept,
       // and a new session tab shows up on the very same panel document, never reopened.
       const tabB = ((await callOn("tabs_create", { url: `${SITE}/form` })) as { tabId: number }).tabId;
-      await panel.waitForText(ui("agent.session.holdsOne").replace("{sites}", "127.0.0.1"), 30_000);
+      await waitForSiteWithTab(panel, "127.0.0.1");
       // Through the agent, not the worker handle: that handle was bound to the worker just killed.
       await callOn("tabs_close", { tabId: tabB });
       await callOn("tabs_claim", { tabId: tabA });

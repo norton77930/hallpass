@@ -274,3 +274,126 @@ export async function clickLabelled(panel: Pick<SidePanelDriver, "evaluatePanel"
   );
   expect(clicked, `no button labelled ${label}`).toBe(true);
 }
+
+/* ------------------------------------------------------------------------------------------------
+ * The session card (036). A card is a header, always shown, and a body that is shown only when the card
+ * is open: a session that is waiting, working or stopped from the page is open, an idle one is folded
+ * unless it is the only session. The footer controls (Take back tabs, End session), the site rows and
+ * the activity rows are all in the body, so a journey that presses or reads one of them opens the card
+ * first. The header's own controls (Answer, Resume, Interrupt) are always there.
+ * ---------------------------------------------------------------------------------------------- */
+
+type PanelEvaluator = Pick<SidePanelDriver, "evaluatePanel">;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The selector of one session card by its id, or of the first card when no id is given. */
+export function cardSelector(sessionId?: string): string {
+  return sessionId === undefined ? "section[data-session-id]" : `section[data-session-id=${JSON.stringify(sessionId)}]`;
+}
+
+/**
+ * Opens the card if it is folded, through the header's open/fold button (`aria-expanded`), and waits
+ * until it shows open. The press happens once per attempt and the wait that follows only reads, so a slow
+ * render never turns one press into two (which would fold the card again).
+ */
+export async function openCard(panel: PanelEvaluator, sessionId?: string, timeoutMs = 10_000): Promise<void> {
+  const selector = cardSelector(sessionId);
+  const read = `(()=>{const c=document.querySelector(${JSON.stringify(selector)});return c?c.getAttribute('data-open'):null})()`;
+  const press = `(()=>{const b=document.querySelector(${JSON.stringify(selector)})?.querySelector('button.agent-session-toggle');if(!b)return false;b.click();return true})()`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const open = await panel.evaluatePanel(read);
+    if (open === "true") return;
+    if (open === "false") {
+      await panel.evaluatePanel(press, true);
+      const settled = Date.now() + 3_000;
+      while (Date.now() < settled) {
+        if ((await panel.evaluatePanel(read)) === "true") return;
+        await sleep(100);
+      }
+    } else {
+      await sleep(100);
+    }
+  }
+  throw new Error(`session-card-not-open:${sessionId ?? "first"}`);
+}
+
+/**
+ * Presses one of a session card's controls by its visible text, found by the session the card is about.
+ * A control that is in the body of a folded card is reached by opening the card first.
+ */
+export async function clickOnCard(panel: PanelEvaluator, sessionId: string, label: string): Promise<void> {
+  const press = (): Promise<unknown> =>
+    panel.evaluatePanel(
+      `(()=>{const card=document.querySelector(${JSON.stringify(cardSelector(sessionId))});` +
+        `const b=card&&[...card.querySelectorAll('button')].find((x)=>x.textContent?.trim()===${JSON.stringify(label)});` +
+        `if(!b)return false;b.click();return true})()`,
+      true,
+    );
+  if ((await press()) !== true) {
+    await openCard(panel, sessionId);
+    const deadline = Date.now() + 5_000;
+    let clicked = false;
+    while (!clicked && Date.now() < deadline) {
+      clicked = (await press()) === true;
+      if (!clicked) await sleep(100);
+    }
+    expect(clicked, `no ${label} on the card for ${sessionId}`).toBe(true);
+  }
+}
+
+/** Presses every "Show all" under a card's recent activity, so the rows past the newest three are on screen (036 FR-550). */
+export async function showAllActivity(panel: PanelEvaluator): Promise<void> {
+  await panel.evaluatePanel(
+    `(()=>{for(const b of document.querySelectorAll('section[data-session-id] button.agent-session-more'))` +
+      `if(b.getAttribute('aria-expanded')==='false')b.click()})()`,
+    true,
+  );
+  await sleep(150);
+}
+
+/**
+ * Waits until the card (the first one, or the one for `sessionId`) lists `host` in "Sites and permissions"
+ * with the "Tab here" mark: the session holds a tab there (036 FR-545, FR-546). `host` is the host as the
+ * card writes it, without a scheme and with the port when it is not the default; a prefix is enough,
+ * so `127.0.0.1` matches `127.0.0.1:19443`. Opens the card if it is folded.
+ */
+export async function waitForSiteWithTab(
+  panel: PanelEvaluator,
+  host: string,
+  options: { sessionId?: string; timeoutMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const deadline = Date.now() + timeoutMs;
+  await openCard(panel, options.sessionId, Math.min(timeoutMs, 10_000));
+  const expression =
+    `(()=>{const card=document.querySelector(${JSON.stringify(cardSelector(options.sessionId))});if(!card)return false;` +
+    `return [...card.querySelectorAll('.agent-session-sites li')].some((li)=>` +
+    `(li.querySelector('.agent-session-site-name')?.textContent??'').trim().startsWith(${JSON.stringify(host)})` +
+    `&&li.querySelector('.agent-session-mark[data-mark="tab"]')!==null)})()`;
+  while (Date.now() < deadline) {
+    if ((await panel.evaluatePanel(expression)) === true) return;
+    await sleep(100);
+  }
+  throw new Error(`session-card-site-timeout:${host}`);
+}
+
+/**
+ * Waits until the card (the first one, or the one for `sessionId`) is up and holds no tab: its header
+ * carries no tab count (036 FR-541), which is shown only while the session holds at least one.
+ */
+export async function waitForCardHoldingNoTabs(
+  panel: PanelEvaluator,
+  options: { sessionId?: string; timeoutMs?: number } = {},
+): Promise<void> {
+  const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+  const expression =
+    `(()=>{const card=document.querySelector(${JSON.stringify(cardSelector(options.sessionId))});` +
+    `return !!card&&card.querySelector('.agent-session-tabs')===null})()`;
+  while (Date.now() < deadline) {
+    if ((await panel.evaluatePanel(expression)) === true) return;
+    await sleep(100);
+  }
+  throw new Error("session-card-no-tabs-timeout");
+}

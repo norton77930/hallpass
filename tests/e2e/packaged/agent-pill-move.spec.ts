@@ -898,6 +898,12 @@ async function closePanels(journey: Journey): Promise<void> {
  * The session card, read through the side panel's own DOM (034 held state).
  * ---------------------------------------------------------------------------------------------- */
 
+/**
+ * The card as the panel draws it: `held` is the state line's text while the session is stopped from the page
+ * (034 FR-520; 036 FR-541 draws it as the state line in the attention tone, and a waiting session's line says
+ * waiting, so it is not read as held), else null. `buttons` is every button on the card, the header's
+ * Answer/Resume/Interrupt and the open body's footer among them.
+ */
 type CardView = { sessionId: string; held: string | null; buttons: string[] };
 
 async function cardViews(panel: SidePanelDriver): Promise<CardView[]> {
@@ -906,7 +912,7 @@ async function cardViews(panel: SidePanelDriver): Promise<CardView[]> {
       panel.evaluatePanel(
         `[...document.querySelectorAll('[data-session-id]')].map((card) => ({` +
           `sessionId: card.getAttribute('data-session-id') ?? '',` +
-          `held: card.querySelector('.agent-session-held')?.textContent?.trim() ?? null,` +
+          `held: (()=>{const s=card.querySelector('.agent-session-state');return s&&s.getAttribute('data-tone')==='attention'&&card.getAttribute('data-session-state')!=='waiting'?(s.textContent??'').trim():null})(),` +
           `buttons: [...card.querySelectorAll('button')].map((button) => button.textContent?.trim() ?? '')}))`,
       ),
     [],

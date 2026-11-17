@@ -12,7 +12,7 @@ import { lookup } from "../../../apps/extension/src/locales/catalog.js";
 import { startMcpClient, type McpHarnessClient } from "../../harness/mcp-client.js";
 import { pairWithFirstCall } from "../fixtures/agent-pairing.js";
 import { openSettingsPage, type SettingsPageDriver, type SiteMode } from "../fixtures/settings-page-driver.js";
-import { copyFor, localeFromEnv, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
+import { copyFor, localeFromEnv, openCard, openSidePanel, waitForAgentPanel, type SidePanelDriver } from "../fixtures/side-panel-driver.js";
 import { expect, test, type PackagedWorker } from "../fixtures/packaged-extension.js";
 
 /**
@@ -25,9 +25,10 @@ import { expect, test, type PackagedWorker } from "../fixtures/packaged-extensio
  * panel or off the browser (`chrome.tabGroups` through the extension worker), never off the answer
  * the agent was given:
  *   - the status row counts the sessions and names no agent; the menu names the paired agent;
- *   - each card is titled by its folder, and its stripe colour is its tab group's colour, and the
- *     two differ;
- *   - a session with a call in flight is `working` (interrupt + take back shown) and its group is
+ *   - each card is titled by its folder (the agent's name is in the line under it), and its bar colour is
+ *     its tab group's colour, and the two differ;
+ *   - a session with a call in flight is `working` (Interrupt in the header, take back and end in the
+ *     footer of its open card) and its group is
  *     `⌛ Hallpass`; a moment after the call answers it is `idle · last action just now` and `Hallpass`;
  *   - a session whose question waits on the owner is `waiting` and its group is `🔔 Hallpass`;
  *   - a keystroke whose keydown handler opens `alert` is answered with the dialog at once (FR-242).
@@ -50,6 +51,7 @@ type CardView = {
   label: string | null;
   colour: string | null;
   stateText: string;
+  /** The header's primary button, then the footer's buttons, in the order the card draws them (036 FR-551). */
   buttons: string[];
   interrupt: { present: boolean; ariaDisabled: string | null };
 };
@@ -107,7 +109,7 @@ test.describe("016 readable panel", () => {
       await expect.poll(() => statusText(panel), { timeout: 15_000 }).toBe(statusExpected);
       expect(await statusText(panel), "the status row names no agent (FR-223)").not.toContain(AGENT);
 
-      // ================= US2: cards titled by folder, stripe = group colour =================
+      // ================= US2: cards titled by folder, bar = group colour =================
       await expect.poll(async () => (await cardOf(panel, sessionA))?.label ?? null, { timeout: 15_000 }).toBe(LABEL_A);
       await expect.poll(async () => (await cardOf(panel, sessionB))?.label ?? null, { timeout: 15_000 }).toBe(LABEL_B);
       const cardA = (await cardOf(panel, sessionA))!;
@@ -135,17 +137,21 @@ test.describe("016 readable panel", () => {
       const working = (await cardOf(panel, sessionA))!;
       expect(working.stateText).toBe(ui("agent.session.working"));
       expect(working.interrupt, "interrupt is shown, and actionable, while a call is in flight").toEqual({ present: true, ariaDisabled: "false" });
+      // 036 FR-542, FR-551: Interrupt is the header's primary button; the footer has Take back tabs on the
+      // left and End session on the right.
       expect(working.buttons).toEqual([
-        ui("agent.session.stop"),
         ui("agent.session.interrupt"),
         ui("agent.session.takeBack").replace("{n}", "1"),
+        ui("agent.session.stop"),
       ]);
-      // The other session, meanwhile, is idle: plain title, end + take back only.
+      // The other session, meanwhile, is idle: plain title, no header action, take back + end only (in its
+      // footer, so its folded card is opened first - 036 FR-539).
       await expect.poll(async () => (await cardOf(panel, sessionB))?.state ?? null, { timeout: 10_000 }).toBe("idle");
       await expect.poll(async () => (await groupOf(extensionWorker, tabB)).title, { timeout: 5_000, intervals: [200] }).toBe(AGENT_GROUP_TITLE);
+      await openCard(panel, sessionB);
       const idleB = (await cardOf(panel, sessionB))!;
       expect(idleB.interrupt.present).toBe(false);
-      expect(idleB.buttons).toEqual([ui("agent.session.stop"), ui("agent.session.takeBack").replace("{n}", "1")]);
+      expect(idleB.buttons).toEqual([ui("agent.session.takeBack").replace("{n}", "1"), ui("agent.session.stop")]);
 
       const waited = await inFlight;
       expect(waited.isError, `wait: ${waited.text}\nstderr:\n${a.stderr()}`).toBe(false);
@@ -154,10 +160,11 @@ test.describe("016 readable panel", () => {
       await new Promise((resolve) => setTimeout(resolve, 1_500));
       await expect.poll(async () => (await groupOf(extensionWorker, tabA)).title, { timeout: 3_000, intervals: [200] }).toBe(AGENT_GROUP_TITLE);
       await expect.poll(async () => (await cardOf(panel, sessionA))?.state ?? null, { timeout: 3_000, intervals: [200] }).toBe("idle");
+      await openCard(panel, sessionA);
       const idleA = (await cardOf(panel, sessionA))!;
       expect(idleA.stateText).toBe(ui("agent.session.idle").replace("{ago}", ui("agent.session.justNow")));
       expect(idleA.interrupt.present).toBe(false);
-      expect(idleA.buttons).toEqual([ui("agent.session.stop"), ui("agent.session.takeBack").replace("{n}", "1")]);
+      expect(idleA.buttons).toEqual([ui("agent.session.takeBack").replace("{n}", "1"), ui("agent.session.stop")]);
 
       // ================= US2 + US4: waiting on the owner =================
       await setSiteMode(settings, SITE, "ask");
@@ -271,17 +278,17 @@ async function statusText(panel: SidePanelDriver): Promise<string> {
   return typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
 }
 
-/** One card as rendered: its state attribute, title, stripe colour, state line and controls. */
+/** One card as rendered: its state attribute, title, bar colour, state line and controls. */
 async function cardOf(panel: SidePanelDriver, sessionId: string): Promise<CardView | undefined> {
   const view = await panel.evaluatePanel(
     `(()=>{const card=document.querySelector('section[data-session-id=${JSON.stringify(sessionId)}]');` +
-      `if(!card)return null;const interrupt=card.querySelector('button.agent-interrupt');` +
+      `if(!card)return null;const interrupt=[...card.querySelectorAll('button.agent-session-primary')].find((b)=>(b.textContent??'').trim()===${JSON.stringify(ui("agent.session.interrupt"))})??null;` +
       `return {sessionId:card.getAttribute('data-session-id'),state:card.getAttribute('data-session-state'),` +
-      `title:[(card.querySelector('.agent-session-meta')?.textContent??'').split(' · ')[0],(card.querySelector('h2')?.textContent??'')].join(' · ').replace(/\\s+/g,' ').trim(),` +
+      `title:[(card.querySelector('.agent-session-agent')?.textContent??''),(card.querySelector('h2')?.textContent??'')].join(' · ').replace(/\\s+/g,' ').trim(),` +
       `label:card.querySelector('.agent-session-label')?.getAttribute('title')??null,` +
-      `colour:card.querySelector('.agent-session-stripe')?.getAttribute('data-colour')??null,` +
+      `colour:card.querySelector('.agent-session-bar')?.getAttribute('data-colour')??null,` +
       `stateText:(card.querySelector('.agent-session-state')?.textContent??'').trim(),` +
-      `buttons:[...card.querySelectorAll('.agent-session-actions button')].map((b)=>(b.textContent??'').trim()),` +
+      `buttons:[...card.querySelectorAll('button.agent-session-primary, .agent-session-foot button')].map((b)=>(b.textContent??'').trim()),` +
       `interrupt:{present:interrupt!==null,ariaDisabled:interrupt?.getAttribute('aria-disabled')??null}}})()`,
   );
   return (view ?? undefined) as CardView | undefined;
