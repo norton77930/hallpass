@@ -190,6 +190,14 @@ const PAGE_FILES = [
    */
   "pill-move-035",
   /**
+   * 039: `editor-039` - a contenteditable editor with text in nested spans, a `label for` with a separate
+   * input, and a control whose click moves focus to an unrelated input. `drag-039` - a canvas recording
+   * pointer down/up points. `link-039` - an `a[href]` around a `span` whose navigation the page cancels.
+   */
+  "editor-039",
+  "drag-039",
+  "link-039",
+  /**
    * 038: the point-click live checks. `popover-038` is a button that opens a `ul[role=menu]` of
    * `li[role=menuitemradio]` > `div` > `span` items ("7 days", "Custom", "No expiration"; the choice is
    * on `document.body.dataset.chosen`) beside a `div[role=listbox]` of `div[role=option]` ("Issues",

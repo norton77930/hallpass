@@ -128,7 +128,8 @@ async function effectsHarness(
     prompts: createAgentPromptController({ timeoutMs: 60 }),
     tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
     attachments: browser.attachments,
-    locate: async () => rect,
+    // A drop target is somewhere else (039 FR-570): two refs at one centre would be a drag that does not move.
+    locate: async ({ ref }) => (ref === "t_2" ? { ...rect, x: rect.x + 300 } : rect),
     confirm: async () => ({ outcome: "hit" }),
     probe: async () => ({ ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE }),
     settleMs: 0,

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drag 039 fixture</title>
+<style>
+  /* 039 - the page a drag inside one element stands on (SC-255).
+
+     #board is one 600 x 300 canvas at page (40, 40). It records where the pointer went down on it and
+     where it came up (anywhere in the window), in viewport CSS pixels, on window.__drag039:
+       { downs: [{x, y}], ups: [{x, y}], moves: n }
+     A drag between two points inside the canvas has one element at both ends. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  #board { position: absolute; top: 40px; left: 40px; width: 600px; height: 300px; background: #eef; display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="board" width="600" height="300" aria-label="Board"></canvas>
+<script>
+  (function () {
+    var record = { downs: [], ups: [], moves: 0 };
+    window.__drag039 = record;
+    document.getElementById('board').addEventListener('pointerdown', function (event) {
+      record.downs.push({ x: event.clientX, y: event.clientY });
+    });
+    window.addEventListener('pointermove', function () {
+      record.moves += 1;
+    });
+    window.addEventListener('pointerup', function (event) {
+      record.ups.push({ x: event.clientX, y: event.clientY });
+    });
+  })();
+</script>
+</body>
+</html>

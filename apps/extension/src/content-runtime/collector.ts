@@ -256,6 +256,13 @@ type TargetSnapshot = {
    * Only the document can answer it, because only it knows the size of its own viewport.
    */
   offscreen?: boolean;
+  /**
+   * Set on the root of a rooted collection only (039/FR-571, R-549): the element, or its nearest
+   * ancestor in the same document, is `a[href]` or has the role `link`. A point click lands on the
+   * innermost element, a `span` inside the link, and the press-outcome hint still has to know it
+   * pressed a link.
+   */
+  inLink?: true;
   target: NonNullable<TargetRecord["target"]>;
 };
 
@@ -417,7 +424,7 @@ export function snapshotDocument(
   const rootDetached = (root as { isConnected?: unknown } | undefined)?.isConnected === false;
   if (root && !rootDetached && !withinIndicator(root)) {
     const rootTarget = snapshotTarget(root, maxLabelChars, 0, true);
-    if (rootTarget) targets.push(rootTarget);
+    if (rootTarget) targets.push(isOnLink(root) ? { ...rootTarget, inLink: true } : rootTarget);
   }
   for (let index = 0; index < nodes.length; index += 1) {
     const node = nodes[index];
@@ -438,6 +445,35 @@ export function snapshotDocument(
     controls,
     targets,
   };
+}
+
+/**
+ * Whether an element is a link or sits inside one (039/FR-571, D-039-3): the element or its nearest
+ * ancestor in the same document is `a[href]` or has the role `link`. The walk is over the composed
+ * tree - a slotted element continues through its slot, a shadow root through its host - and stops at
+ * the document, so a link around an iframe is not a link around what the frame holds. An `<a>`
+ * without `href` is a placeholder, not a link.
+ */
+function isOnLink(start: unknown): boolean {
+  type Step = {
+    tagName?: string;
+    getAttribute?: (name: string) => string | null;
+    hasAttribute?: (name: string) => boolean;
+    assignedSlot?: unknown;
+    parentNode?: unknown;
+    host?: unknown;
+  };
+  let current = start as Step | null | undefined;
+  // A document is shallow in practice; the cap only keeps a cyclic fake from looping forever.
+  for (let steps = 0; current && steps < 4096; steps += 1) {
+    if (typeof current.getAttribute === "function") {
+      const role = current.getAttribute("role")?.trim().split(/\s+/)[0]?.toLowerCase();
+      if (role === "link") return true;
+      if ((current.tagName ?? "").toUpperCase() === "A" && current.hasAttribute?.("href")) return true;
+    }
+    current = (current.assignedSlot ?? current.parentNode ?? current.host) as Step | null | undefined;
+  }
+  return false;
 }
 
 function snapshotControl(node: unknown): FormControlSnapshot | undefined {
@@ -837,6 +873,7 @@ export function collectPage(input: CollectPageInput): {
     frameOwner?: boolean;
     rect?: { x: number; y: number; width: number; height: number };
     offscreen?: boolean;
+    inLink?: boolean;
     href?: string;
     type?: string;
     placeholder?: string;
@@ -938,6 +975,8 @@ export function collectPage(input: CollectPageInput): {
           ...(mintPolicy === "all-controls"
             ? {
                 ...(target.offscreen === true ? { offscreen: true } : {}),
+                // 039/FR-571: the root of a rooted collection, when it is or sits inside a link.
+                ...(target.inLink === true ? { inLink: true } : {}),
                 ...(target.href ? { href: target.href } : {}),
                 ...(target.controlType ? { type: target.controlType } : {}),
                 ...(target.placeholder ? { placeholder: target.placeholder } : {}),

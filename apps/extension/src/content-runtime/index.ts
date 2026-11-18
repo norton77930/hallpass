@@ -112,6 +112,102 @@ function containsAcrossShadow(target: unknown, hit: unknown): boolean {
   return false;
 }
 
+/** Whether an element is an editing host: the focus it holds is a field's, wherever it sits. */
+function isEditableElement(element: unknown): boolean {
+  const node = element as {
+    isContentEditable?: unknown;
+    getAttribute?: (name: string) => string | null;
+    ownerDocument?: { designMode?: unknown } | null;
+  };
+  // A browser answers `isContentEditable` itself (designMode and inheritance included); the
+  // attribute and designMode reading is only for an environment that does not (jsdom).
+  if (typeof node.isContentEditable === "boolean") return node.isContentEditable;
+  const attribute = node.getAttribute?.("contenteditable");
+  if (attribute != null && attribute.toLowerCase() !== "false") return true;
+  return String(node.ownerDocument?.designMode ?? "").toLowerCase() === "on";
+}
+
+/**
+ * The elements holding focus, outermost first: `document.activeElement` is the outermost open shadow
+ * host, and each host's `shadowRoot.activeElement` is the element one root down, so every entry is
+ * the focus as it reads from inside its own tree scope (a retargeted view). The body and the root
+ * element are where focus rests when nothing is focused, so they are left out unless they are the
+ * element named (handle equality, as before), or an editing host in a document that holds focus: in
+ * a subframe without focus the body is `activeElement` however the click moved focus elsewhere, so
+ * it must not stand for every target there (039 review I2, re-review I1; fail-closed).
+ */
+function focusChain(
+  documentRef: { activeElement?: unknown; hasFocus?: () => boolean } | undefined,
+  target: unknown,
+): unknown[] {
+  const chain: unknown[] = [];
+  let current: unknown = documentRef?.activeElement;
+  while (current) {
+    chain.push(current);
+    current = (current as { shadowRoot?: { activeElement?: unknown } | null }).shadowRoot?.activeElement;
+  }
+  return chain.filter((element) => {
+    const tagName = String((element as { tagName?: unknown }).tagName ?? "").toUpperCase();
+    if (tagName !== "BODY" && tagName !== "HTML") return true;
+    if (element === target) return true;
+    return isEditableElement(element) && documentRef?.hasFocus?.() === true;
+  });
+}
+
+/**
+ * Whether `focused` (one entry of the focus chain) is `target` or an ancestor of it. The walk crosses
+ * out of a shadow root through its host, but a host reached that way does not count: a target inside
+ * a host's own shadow tree is not "in" the field that host stands for, so an unrelated field in the
+ * same shadow tree still misses. A host reached as an ordinary parent (a light-DOM or slotted target)
+ * counts. The deepest focused element is the exception (`throughHost`): focus on a host that has no
+ * focused field below it is on the host itself, which is an ancestor of its own shadow content in the
+ * composed tree.
+ */
+function isSelfOrAncestor(focused: unknown, target: unknown, throughHost: boolean): boolean {
+  let current: unknown = target;
+  while (current) {
+    if (current === focused) return true;
+    const node = current as { parentNode?: unknown; host?: unknown };
+    if (node.parentNode) {
+      current = node.parentNode;
+      continue;
+    }
+    // Out of a shadow root: the host matches only for the deepest focused element; otherwise step past it.
+    const host = node.host as { parentNode?: unknown; host?: unknown } | null | undefined;
+    if (throughHost) current = host ?? null;
+    else current = host ? (host.parentNode ?? host.host ?? null) : null;
+  }
+  return false;
+}
+
+/**
+ * The element of the focus chain that is on the path a click at `target` took (039 D-039-1): the
+ * element itself, an ancestor of it across shadow roots, or the control of the nearest `<label>`
+ * around it. The deepest such element wins. The label rule follows `label.control` only; a label
+ * inside a shadow root follows its own root.
+ */
+function focusedOnPathOf(chain: unknown[], target: unknown): unknown {
+  const label = (target as { closest?: (selector: string) => unknown } | undefined)?.closest?.("label");
+  const control = label == null ? undefined : (label as { control?: unknown }).control;
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const focused = chain[index];
+    if (isSelfOrAncestor(focused, target, index === chain.length - 1) || (control != null && control === focused)) return focused;
+  }
+  return undefined;
+}
+
+/** The role and label a read already shows for an element, bounded as a `find` candidate is. */
+function describeField(element: unknown): { role?: string; label?: string } {
+  const snapshot = snapshotTarget(element, DEFAULT_BOUNDS.maxLabelChars);
+  const live = readLiveTarget(element);
+  const role = snapshot?.role ?? live?.role ?? live?.tagName.toLowerCase();
+  const label = snapshot?.label;
+  return {
+    ...(role ? { role: role.slice(0, 100) } : {}),
+    ...(label ? { label } : {}),
+  };
+}
+
 export function createContentRuntimeContext(input?: {
   documentEpoch?: string;
   documentUrl?: string;
@@ -411,8 +507,30 @@ export function handleContentMessage(
     });
   }
   if (message.type === "content.resolve-active-element") {
-    const documentRef = (globalThis as { document?: { activeElement?: unknown } }).document;
-    return registerLiveElement(context.registry, context.documentEpoch, documentRef?.activeElement);
+    const documentRef = (globalThis as { document?: { activeElement?: unknown; hasFocus?: () => boolean } }).document;
+    const targetHandle = message.payload.targetHandle;
+    if (targetHandle === undefined) {
+      return registerLiveElement(context.registry, context.documentEpoch, documentRef?.activeElement);
+    }
+    // 039 FR-568: the focus check between a placing click and the first key. The element holding
+    // focus counts when it is on the path the click took, not only when it is the element named -
+    // a point on the inner span of a rich-text editor focuses the editing host above it.
+    const targetElement = context.registry.resolve(targetHandle, context.documentEpoch)?.element;
+    const chain = focusChain(documentRef, targetElement);
+    const onPath = targetElement ? focusedOnPathOf(chain, targetElement) : undefined;
+    if (onPath !== undefined) {
+      // The ref itself, as `content.resolve-point` answers a confirmation (no re-mint). When focus is
+      // on another element than the ref's own, say which field holds it (FR-569).
+      return {
+        ok: true,
+        outcome: "resolved",
+        candidates: [{ targetHandle }],
+        ...(onPath === targetElement ? {} : { receivedBy: describeField(onPath) }),
+      };
+    }
+    // A real miss: what holds focus, by role and label, or nothing when nothing does.
+    const active = chain[chain.length - 1];
+    return { ok: true, outcome: "missed", ...(active === undefined ? {} : describeField(active)) };
   }
   const resolvedSink = sink ?? pageSinkFromGlobal();
   // The action and its arguments arrived as one closed pair, so nothing has to be re-checked here:

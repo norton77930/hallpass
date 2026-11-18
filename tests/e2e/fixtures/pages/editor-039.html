@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Editor 039 fixture</title>
+<style>
+  /* 039 - the page typing at a point stands on (SC-253, SC-254).
+
+     #editor is a contenteditable host whose text sits in nested spans (#word is two spans deep), so a
+     point on that text names an inner span while focus lands on the editing host above it.
+     <label for="name"> holds its text in a span (#label-text) and its control is a separate #name input
+     below it, so a point on the label text names the span and focus lands on the input. The input also
+     carries aria-labelledby: a read names a control by aria-labelledby, aria-label, text, name or
+     placeholder and not by label[for], so this is what gives the hint a label to say.
+     #grab is a button whose click handler moves focus to the unrelated #other input, so typing at a
+     point on it must be refused with #other unchanged.
+     What a spec reads: #editor's text, the value of #name and #other, and document.body.dataset.focus,
+     the id of whatever holds focus after the last focus change. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font: 18px/1.4 system-ui, sans-serif; color: #222; padding: 24px; }
+  #editor { width: 420px; min-height: 60px; border: 1px solid #888; padding: 8px; margin: 0 0 28px; }
+  #editor p { margin: 0; }
+  label { display: block; width: 300px; padding: 6px 0; }
+  input { display: block; width: 300px; font: inherit; margin: 0 0 28px; box-sizing: border-box; }
+  #grab { font: inherit; padding: 8px 16px; margin: 0 0 28px; }
+</style>
+</head>
+<body data-focus="">
+<div id="editor" contenteditable="true" aria-label="Notes"><p><span><span id="word">Draft</span></span> <span id="rest">notes</span></p></div>
+
+<label for="name" id="label"><span id="label-text">Full name</span></label>
+<input id="name" type="text" autocomplete="off" aria-labelledby="label-text">
+
+<button type="button" id="grab">Apply coupon</button>
+<input id="other" type="text" aria-label="Coupon code" autocomplete="off">
+
+<script>
+  (function () {
+    document.addEventListener('focusin', function (event) {
+      var target = event.target;
+      document.body.dataset.focus = target && target.id ? target.id : '';
+    });
+    document.getElementById('grab').addEventListener('click', function () {
+      document.getElementById('other').focus();
+    });
+  })();
+</script>
+</body>
+</html>

@@ -188,7 +188,8 @@ async function harness(
     prompts,
     tabOwnership: async (_sessionId, tabId) => (tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" }),
     attachments: browser.attachments,
-    locate: async () => rect,
+    // A drop target is somewhere else (039 FR-570): two refs at one centre would be a drag that does not move.
+    locate: async ({ ref }) => (ref === "t_drop" ? { ...rect, x: rect.x + 300 } : rect),
     confirm: async () => ({ outcome: "hit" }),
     probe: async () => {
       browser.hooks.onProbe?.();

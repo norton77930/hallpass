@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Link 039 fixture</title>
+<style>
+  /* 039 - the page the link-ancestor point click stands on (SC-256).
+
+     An a[href] wraps a span. A point click lands on the span, the innermost element at the point, whose
+     own role is not "link"; the link is its ancestor (FR-571). The page cancels the navigation itself
+     (preventDefault on click), so nothing navigates, opens or downloads and the press answers with the
+     link hint. The click is counted on document.body.dataset.clicks so a journey can tell the link got it. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { min-height: 100vh; font: 16px/1.4 system-ui, sans-serif; color: #222; }
+  a#go { position: absolute; top: 40px; left: 40px; display: inline-block; padding: 8px 12px; border: 1px solid #888; color: #036; }
+  a#go span { display: inline-block; padding: 0 4px; }
+</style>
+</head>
+<body>
+<a id="go" href="/ordinary?from=link-039"><span id="label">Open the details</span></a>
+<script>
+  (function () {
+    document.getElementById('go').addEventListener('click', function (event) {
+      // The page handles the link itself: no navigation, no new tab, no download.
+      event.preventDefault();
+      document.body.dataset.clicks = String(Number(document.body.dataset.clicks || '0') + 1);
+    });
+  })();
+</script>
+</body>
+</html>

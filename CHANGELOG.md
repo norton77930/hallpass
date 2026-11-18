@@ -5,6 +5,18 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.26.1 — 2026-11-18
+
+- **Typing at a point inside an editor.** `type` at coordinates on the text of a rich-text editor (whose
+  text sits in nested elements) used to refuse with `focus-lost` and type nothing. Focus on the editor
+  around the point now counts, as does the field a `<label>` points to; when the text goes to a field other
+  than the one named, the answer says which. A click that moves focus to an unrelated field is still
+  refused before any key is sent.
+- **Dragging within one element.** A drag between two points on the same canvas, slider track or map used
+  to be refused as `same-endpoints`. It is now refused only when the two points are the same.
+- **Text inside a link counts as the link.** A press on the text inside a link that does nothing yet now
+  gets the same "a link was pressed" hint as a press on the link itself.
+
 ## 0.26.0 — 2026-11-18
 
 - **Clicks on menu items go through.** On sites that build their menus from their own elements (GitHub's

@@ -25,6 +25,8 @@ const PAGE_URL = `${SITE}/ordinary`;
 /** The located box: centre (400, 300), away from every point named below. */
 const BOX = { x: 300, y: 250, width: 200, height: 100 };
 const CENTRE = { x: 400, y: 300 };
+/** `t_beta` sits elsewhere: a drag between two refs at one centre would not move (039 FR-570). */
+const BETA_BOX = { x: 600, y: 250, width: 200, height: 100 };
 
 function installChrome(): void {
   const local: Record<string, unknown> = {};
@@ -78,7 +80,7 @@ function harness() {
   const located: Array<{ ref: string; scroll: boolean }> = [];
   const locate: TargetLocator = async ({ ref, scroll }) => {
     located.push({ ref, scroll });
-    return { ...BOX };
+    return { ...(ref === "t_beta" ? BETA_BOX : BOX) };
   };
   const confirmed: Array<{ ref: string; point: { x: number; y: number }; frameId?: number }> = [];
   const confirm: TargetConfirmer = async ({ ref, point, frameId }) => {

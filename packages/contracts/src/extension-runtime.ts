@@ -218,7 +218,17 @@ function createExtensionRuntimeSchemas(bounds: ProtocolBounds = DEFAULT_BOUNDS) 
     z.strictObject({
       ...contentBase,
       type: z.literal("content.resolve-active-element"),
-      payload: z.strictObject({ generalPageReadGrantId: z.string().min(1) }),
+      payload: z.strictObject({
+        generalPageReadGrantId: z.string().min(1),
+        /**
+         * The ref a placing click was aimed at (039 FR-568, R-547), mirroring `content.resolve-point`'s
+         * confirmation form. When present, focus on that ref's own element, on an ancestor of it in the
+         * composed tree (a contenteditable's editing host), or on the control of the `<label>` it sits
+         * in answers with that same handle; any other focus answers `missed` with what holds it.
+         * Absent for the ordinary "mint whatever has focus" read, unchanged.
+         */
+        targetHandle: z.string().min(1).max(256).optional(),
+      }),
     }),
     z.strictObject({
       ...contentBase,
@@ -295,6 +305,17 @@ function createExtensionRuntimeSchemas(bounds: ProtocolBounds = DEFAULT_BOUNDS) 
         .array(z.strictObject({ targetHandle: z.string().min(1) }))
         .min(1)
         .max(bounds.maxResolutionCandidates),
+      /**
+       * Only on `content.resolve-active-element`'s confirmation form (039 FR-569): focus is on the
+       * path of the ref named, but on another element than the ref itself, so which field holds it is
+       * said - its role and label, bounded the way a `find` candidate's are.
+       */
+      receivedBy: z
+        .strictObject({
+          role: z.string().max(100).optional(),
+          label: z.string().max(bounds.maxLabelChars).optional(),
+        })
+        .optional(),
     }),
     // Neither outcome names a candidate, so neither carries the field at all.
     z.strictObject({ ok: z.literal(true), outcome: z.enum(["no-match", "too-broad"]) }),

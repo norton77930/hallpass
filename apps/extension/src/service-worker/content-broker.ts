@@ -523,6 +523,8 @@ function sanitizeSemanticNodes(
       ...(includeVisibility && node.offscreen === true ? { offscreen: true } : {}),
       ...(depth === undefined ? {} : { depth }),
       ...(includeFrameFacts && node.frameOwner === true ? { frameOwner: true } : {}),
+      // 039/FR-571: the root of a rooted collection that is or sits inside a link (the locate asks).
+      ...(includeFrameFacts && node.inLink === true ? { inLink: true } : {}),
       ...(includeFrameFacts ? sanitizeRect(node.rect) : {}),
       ...(includeFields ? sanitizeNodeFields(node, bounds) : {}),
     }];
@@ -826,8 +828,9 @@ export async function resolveHandleOnTab(input: {
   /** A viewport point, or the focused element when absent. */
   point?: { x: number; y: number };
   /**
-   * The ref this point is confirming (004/T128 gap 1). Only meaningful alongside `point`; carried
-   * through to `content.resolve-point` unchanged.
+   * The ref this call is confirming (004/T128 gap 1): with `point`, carried through to
+   * `content.resolve-point` unchanged; without it, to `content.resolve-active-element` (039
+   * FR-568), asking whether focus is on that ref's path.
    */
   targetHandle?: string;
   /**
@@ -872,7 +875,9 @@ export async function resolveHandleOnTab(input: {
         payload: {
           generalPageReadGrantId: input.generalPageReadGrantId,
           ...(input.point ? { x: input.point.x, y: input.point.y } : {}),
-          ...(input.point && input.targetHandle !== undefined ? { targetHandle: input.targetHandle } : {}),
+          // A point's confirmation (004/T128 gap 1), or the focus check after a placing click (039
+          // FR-568): the ref the answer is checking, which the page answers with itself when it hit.
+          ...(input.targetHandle !== undefined ? { targetHandle: input.targetHandle } : {}),
         },
       }),
       { frameId: input.frameId ?? 0 },

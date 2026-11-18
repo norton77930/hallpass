@@ -3,6 +3,7 @@ import {
   AGENT_CALL_TIMEOUT_MS,
   AGENT_CALL_TIMEOUT_SLACK_MS,
   agentToolArgSchemas,
+  DEFAULT_BOUNDS,
   isAgentEffectTool,
   type AgentEffectObservation,
   type AgentEffectVerdict,
@@ -542,6 +543,23 @@ function linkHint(windowMs: number): string {
 }
 
 /**
+ * Which field took the keys when focus was on the clicked ref's path but not on the ref's own
+ * element (039 FR-569). Role and label are what a read already shows for that field, the label cut
+ * to a `find` label's bound and held to one line without quotes, so nothing it holds can end the
+ * sentence early or run past the hint's own bound.
+ */
+function receivedByHint(tool: "type" | "key", field: FocusReceivedBy): string {
+  const label = (field.label ?? "")
+    .replace(/[\u0000-\u001f\u007f"]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, DEFAULT_BOUNDS.maxLabelChars);
+  const role = (field.role ?? "field").replace(/[^\w -]/gu, "").slice(0, 40) || "field";
+  const named = label === "" ? `the ${role}` : `the ${role} "${label}"`;
+  return `The ${tool === "type" ? "text" : "key"} went to ${named}: focus is on that field, not on the element named.`;
+}
+
+/**
  * The tabs a press opened, and the one move that makes them this session's (015 FR-200, contracts
  * rule 7). Seeing a tab open does not hold it; `tabs_claim` does. One tab is named with its
  * address, as the contract words it; an address too long for the hint, or several tabs, are named
@@ -855,13 +873,31 @@ export type FocusConfirmer = (input: {
    * it - or absent for the top document, whose origin is the binding's own.
    */
   frameOrigin?: string;
-}) => Promise<boolean | undefined>;
+}) => Promise<FocusConfirmResult>;
+
+/**
+ * The field that holds focus when it is on the clicked ref's path (039 FR-568) but is not the ref's
+ * own element: the editing host above a span, or the control of the label a point landed on. Its
+ * role and label are what a read already shows for it, bounded as a `find` label is (FR-569).
+ */
+export type FocusReceivedBy = { role?: string; label?: string };
+
+/**
+ * What a focus check answers: `true` for focus on the ref's own element, an object when it is on
+ * the ref's path but another element holds it (039 D-039-1), `false` for a confirmed miss, and
+ * `undefined` when the round trip could not run (004/T161).
+ */
+export type FocusConfirmResult = boolean | undefined | { retained: true; receivedBy: FocusReceivedBy };
 
 /**
  * The default confirmer: the same round trip the click confirmation uses, with no point at all - a
  * point resolves what is under it, and its absence resolves the document's own `activeElement`
  * (`content-broker.ts`, `content.resolve-active-element`). A fact about the document, never this
  * worker's own bookkeeping.
+ *
+ * The clicked ref rides along (039 FR-568, R-547), so the document can say focus is on the path the
+ * click took - the ref's element, an ancestor of it across shadow roots, or the control of the label
+ * it sits in - rather than only that the very same element holds it.
  */
 export function createFocusConfirmer(resolve: typeof resolveHandleOnTab = resolveHandleOnTab): FocusConfirmer {
   return async ({ context, binding, ref, frameId, documentEpoch, frameOrigin }) => {
@@ -889,6 +925,7 @@ export function createFocusConfirmer(resolve: typeof resolveHandleOnTab = resolv
         // never moved.
         frameOrigin: frameOrigin ?? binding.canonicalOrigin,
         generalPageReadGrantId: context.generalPageReadGrantId,
+        targetHandle: ref,
         ...(frameId === undefined ? {} : { frameId }),
         tab: binding.tabId,
       });
@@ -903,7 +940,13 @@ export function createFocusConfirmer(resolve: typeof resolveHandleOnTab = resolv
     // confirmed miss.
     if (reply.ok === false) return undefined;
     if (reply.outcome !== "resolved") return false;
-    return reply.candidates.some((candidate) => candidate.targetHandle === ref);
+    if (!reply.candidates.some((candidate) => candidate.targetHandle === ref)) return false;
+    if (reply.receivedBy === undefined) return true;
+    const { role, label } = reply.receivedBy;
+    return {
+      retained: true,
+      receivedBy: { ...(role === undefined ? {} : { role }), ...(label === undefined ? {} : { label }) },
+    };
   };
 }
 
@@ -971,14 +1014,15 @@ async function locateInFrame(
     tab: input.binding.tabId,
   });
   for (const node of collected.semanticNodes ?? []) {
-    const entry = node as { targetHandle?: unknown; rect?: TargetRect; role?: unknown };
+    const entry = node as { targetHandle?: unknown; rect?: TargetRect; role?: unknown; inLink?: unknown };
     if (entry.targetHandle === input.ref && entry.rect) {
       return {
         rect: entry.rect,
         documentEpoch: collected.documentEpoch,
         canonicalOrigin: collected.canonicalOrigin,
         // 015/T406: whether it is a link rides beside its box, for the press that needs to know.
-        ...(entry.role === "link" ? { link: true as const } : {}),
+        // 039/FR-571: or the collection says the element sits inside a link (a point click lands on the span).
+        ...(entry.role === "link" || entry.inLink === true ? { link: true as const } : {}),
       };
     }
   }
@@ -1281,6 +1325,16 @@ function centreOf(rect: TargetRect): { x: number; y: number } {
 function namedPointOf(target: AgentTarget | undefined): ViewportPoint | undefined {
   const value = target as { x?: unknown; y?: unknown } | undefined;
   return typeof value?.x === "number" && typeof value.y === "number" ? { x: value.x, y: value.y } : undefined;
+}
+
+/**
+ * Whether two drag ends would not move the pointer at all (039 FR-570, R-548): the two points that
+ * would be delivered are less than one CSS pixel apart. Two ends on one canvas, slider track or map
+ * are a real drag when they are named at different points; the element they resolve to decides
+ * nothing here.
+ */
+function pointsAreTheSame(from: ViewportPoint, to: ViewportPoint): boolean {
+  return Math.hypot(from.x - to.x, from.y - to.y) < 1;
 }
 
 /**
@@ -1746,11 +1800,11 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     ref: string,
     /** The frame that claimed `ref` (004/T155); absent asks the top document. */
     frame?: TargetRect["frame"],
-  ): Promise<boolean | undefined> {
+  ): Promise<{ retained: boolean | undefined; receivedBy?: FocusReceivedBy }> {
     const ceilingMs = 50;
     const intervalMs = 10;
     for (let waited = 0; ; waited += intervalMs) {
-      const retained = await confirmFocus({
+      const answered = await confirmFocus({
         context,
         binding,
         ref,
@@ -1758,7 +1812,11 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
           ? { frameId: frame.frameId, documentEpoch: frame.documentEpoch, frameOrigin: frame.canonicalOrigin }
           : {}),
       });
-      if (retained || waited >= ceilingMs) return retained;
+      if (answered || waited >= ceilingMs) {
+        return typeof answered === "object"
+          ? { retained: true, receivedBy: answered.receivedBy }
+          : { retained: answered };
+      }
       await sleep(intervalMs);
     }
   }
@@ -1814,7 +1872,15 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (!from.ok) return from;
       const to = await ref(args.to as AgentTarget);
       if (!to.ok) return to;
-      if (from.ref === to.ref) return { ok: false, outcome: "failed", reason: "same-endpoints" };
+      // Two point ends are compared by where they were named; two ref ends by the ref; a ref and a
+      // point are let through, and the delivery compares the points it would use (039 FR-570).
+      const fromNamed = namedPointOf(args.from as AgentTarget);
+      const toNamed = namedPointOf(args.to as AgentTarget);
+      const same =
+        fromNamed !== undefined && toNamed !== undefined
+          ? pointsAreTheSame(fromNamed, toNamed)
+          : fromNamed === undefined && toNamed === undefined && from.ref === to.ref;
+      if (same) return { ok: false, outcome: "failed", reason: "same-endpoints" };
       return {
         ok: true,
         plan: {
@@ -1940,6 +2006,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
      * is not a press. The caller armed it before the input left and stops it when this returns.
      */
     press?: { watch: PressWatch; link: boolean },
+    /** What the call itself has to say beside the verdict (039 FR-569); a press's own hint comes first. */
+    hint?: string,
   ): Promise<AgentNativeResponse> {
     // What was open before this effect, so a dialog found afterwards can be told from one that was
     // already there (008/T226): only a *new* one is this call's own doing.
@@ -2017,7 +2085,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         observed: { ...observed, ...described, ...outcomes?.fields },
         ...(raised === undefined ? {} : { dialog: raised }),
       },
-      ...(outcomes?.hint === undefined ? {} : { hint: outcomes.hint }),
+      ...((outcomes?.hint ?? hint) === undefined ? {} : { hint: outcomes?.hint ?? hint }),
     };
   }
 
@@ -2143,7 +2211,6 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (!from.ok) return from.response;
       const to = await resolve(args.to as AgentTarget);
       if (!to.ok) return to.response;
-      if (from.ref === to.ref) return answer(callId, "failed", "same-endpoints");
       // An endpoint the agent named as a point is delivered at that point (038 FR-563, R-545).
       const fromNamed = namedPointOf(args.from as AgentTarget);
       const toNamed = namedPointOf(args.to as AgentTarget);
@@ -2191,6 +2258,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // Each end at its named point, or a ref's at its box centre (038 FR-563).
       const fromAt = fromNamed ?? centreOf(fromRect);
       const toAt = toNamed ?? centreOf(toRect);
+      // A drag that would not move is no drag (039 FR-570, R-548): decided on the two points that
+      // would be delivered, not on the elements they resolve to - two points on one canvas are a
+      // real gesture. Nothing has been sent to the page yet.
+      if (pointsAreTheSame(fromAt, toAt)) return answer(callId, "failed", "same-endpoints");
       // Both ends, for the path a recorded frame draws (008/FR-105), once the check let it go.
       await pointer.drag(binding.tabId, fromAt, toAt, {
         // 035 R-526: the start target's box goes with the press move; the end names no box.
@@ -2477,8 +2548,11 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // that case apart from a genuine wrong-field click after the fact. The only fact it can stand
       // behind honestly is whether the caret was in the named target *before* typing started, which
       // is also the only moment a wrong-field click can still be refused rather than merely confessed.
-      const focusRetained =
-        clickedRef === undefined ? undefined : await pollFocusRetained(context, binding, clickedRef, clickedFrame);
+      const focus =
+        clickedRef === undefined
+          ? undefined
+          : await pollFocusRetained(context, binding, clickedRef, clickedFrame);
+      const focusRetained = focus?.retained;
       if (focusRetained === false) {
         return verifyDelivered(
           callId,
@@ -2512,7 +2586,16 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         }),
       );
       if (dialogAnswer !== undefined) return dialogAnswer;
-      return verifyDelivered(callId, "browser.enter-text", typed, binding, context);
+      return verifyDelivered(
+        callId,
+        "browser.enter-text",
+        typed,
+        binding,
+        context,
+        undefined,
+        undefined,
+        focus?.receivedBy === undefined ? undefined : receivedByHint("type", focus.receivedBy),
+      );
     }
 
     const key = String(args.key ?? "");
@@ -2530,8 +2613,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     // target names nothing to check focus against, so it verifies exactly as before (undefined
     // stays undefined, the pre-existing behaviour this fix does not touch). `pollFocusRetained`
     // is the bounded poll, not a fixed wait (T128 follow-up, B66).
-    const focusRetained =
+    const focus =
       clickedRef === undefined ? undefined : await pollFocusRetained(context, binding, clickedRef, clickedFrame);
+    const focusRetained = focus?.retained;
     return verifyDelivered(
       callId,
       "browser.key-press",
@@ -2544,6 +2628,9 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       } as Extract<PageExecutionOutcome, { ok: true }>,
       binding,
       context,
+      undefined,
+      undefined,
+      focus?.receivedBy === undefined ? undefined : receivedByHint("key", focus.receivedBy),
     );
   }
 

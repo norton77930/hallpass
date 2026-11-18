@@ -37,7 +37,8 @@ const DOCUMENTS: Record<number, { url: string; origin: string; epoch: string; te
     nodes: [
       { role: "iframe", label: "same-origin child", targetHandle: "t_same", depth: 1, frameOwner: true },
       { role: "iframe", label: "cross-origin child", targetHandle: "t_cross", depth: 1, frameOwner: true },
-      { role: "button", label: "Top action", targetHandle: "t_top_btn", depth: 1 },
+      // 039/FR-571: the root of a rooted collection that sits inside a link carries `inLink`.
+      { role: "button", label: "Top action", targetHandle: "t_top_btn", depth: 1, inLink: true },
     ],
   },
   11: {
@@ -213,6 +214,18 @@ describe("T115 per-frame delivery", () => {
 
     const without = await collectFromActiveTab({ ...collectArgs(0), includeFrameFacts: false });
     expect(without.semanticNodes?.[0]).not.toHaveProperty("frameOwner");
+  });
+
+  it("carries the root's link flag with the frame facts (039/FR-571), and only with them", async () => {
+    installChrome();
+    const topAction = (nodes: unknown[] | undefined) =>
+      nodes?.find((node) => (node as { targetHandle?: string }).targetHandle === "t_top_btn");
+
+    const withFacts = await collectFromActiveTab(collectArgs(0));
+    expect(topAction(withFacts.semanticNodes)).toMatchObject({ inLink: true });
+
+    const without = await collectFromActiveTab({ ...collectArgs(0), includeFrameFacts: false });
+    expect(topAction(without.semanticNodes)).not.toHaveProperty("inLink");
   });
 
   /**

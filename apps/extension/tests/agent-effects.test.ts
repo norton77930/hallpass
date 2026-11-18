@@ -652,7 +652,8 @@ describe("T028 agent effect tools", () => {
     const { runner, siteModes } = harness({
       locate: async ({ ref, scroll }) => {
         calls.push({ ref, scroll });
-        return { x: 100, y: 40, width: 80, height: 20 };
+        // Two elements, two places (039 FR-570): a drag whose delivery points coincide would not move.
+        return ref === "t_beta" ? { x: 300, y: 40, width: 80, height: 20 } : { x: 100, y: 40, width: 80, height: 20 };
       },
     });
     await siteModes.set(SITE, { mode: "skip-checks" });
