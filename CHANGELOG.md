@@ -5,6 +5,21 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.26.0 — 2026-11-18
+
+- **Clicks on menu items go through.** On sites that build their menus from their own elements (GitHub's
+  token form, its branch picker and the like), a click at an item's coordinates, or on the ref `find`
+  returned for it, used to answer `target-not-located`. Hallpass now locates any element an earlier read
+  or click named, whatever its tag, so those clicks land and are confirmed.
+- **A click by coordinates lands at those coordinates.** It used to go to the centre of the element found
+  there, which on a large element could press another control sitting at its centre, and the page could
+  scroll first. Now the press lands at the point the agent named and the page does not scroll. The site
+  and frame under that point still decide what needs your permission. A click on a ref is unchanged.
+- **Menus, options and tabs read by name.** `read_page` and `find` now list the items a page builds with
+  ARIA roles (menu items, options, tabs, radio buttons, combo boxes, sliders, tree items and the like) with
+  their role and their visible text as their name, and `filter: "interactive"` keeps menu items and tree
+  items.
+
 ## 0.25.1 — 2026-11-17
 
 - **Up-to-date screenshots (#78).** The side-panel and settings screenshots in the README's media now

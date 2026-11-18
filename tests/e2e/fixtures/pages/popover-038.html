@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Popover 038 fixture</title>
+<style>
+  /* 038 - the page the popover-menu point clicks stand on (SC-248, SC-249).
+
+     A button opens a menu the way a design system builds one: ul[role=menu] of li[role=menuitemradio],
+     each holding a div that holds a span with the label, so the innermost element at a label's
+     coordinates is the span - three levels inside the item the page listens on. Choosing an item
+     records its label on document.body.dataset.chosen and closes the menu.
+
+     The second widget is a div[role=listbox] of div[role=option] ("Issues", "Contents"); choosing an
+     option records it on document.body.dataset.option. Everything is laid out at fixed positions so a
+     capture and a coordinate mean the same thing on every run. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { min-height: 100vh; font: 16px/1.4 system-ui, sans-serif; color: #222; }
+  button { font: inherit; }
+  #open { position: absolute; top: 20px; left: 20px; width: 160px; height: 36px; }
+  ul[role=menu] { position: absolute; top: 64px; left: 20px; width: 220px; margin: 0; padding: 4px 0; list-style: none;
+                  border: 1px solid #888; background: #fff; }
+  ul[role=menu][hidden] { display: none; }
+  li[role=menuitemradio] { height: 36px; padding: 0 12px; cursor: pointer; }
+  li[role=menuitemradio] > div { height: 100%; display: flex; align-items: center; }
+  li[role=menuitemradio] span { display: inline-block; padding: 0 4px; }
+  li[role=menuitemradio][aria-checked=true] { background: #dde; }
+  div[role=listbox] { position: absolute; top: 64px; left: 300px; width: 200px; border: 1px solid #888; background: #fff; }
+  div[role=option] { height: 32px; line-height: 32px; padding: 0 12px; cursor: pointer; }
+  div[role=option][aria-selected=true] { background: #dde; }
+</style>
+</head>
+<body>
+<button type="button" id="open" aria-haspopup="menu" aria-expanded="false">Expiration</button>
+<ul role="menu" id="menu" aria-label="Expiration options" hidden>
+  <li role="menuitemradio" aria-checked="false"><div><span>7 days</span></div></li>
+  <li role="menuitemradio" aria-checked="false"><div><span>Custom</span></div></li>
+  <li role="menuitemradio" aria-checked="false"><div><span>No expiration</span></div></li>
+</ul>
+<div role="listbox" id="listbox" aria-label="Permissions">
+  <div role="option" aria-selected="false">Issues</div>
+  <div role="option" aria-selected="false">Contents</div>
+</div>
+<script>
+  (function () {
+    var open = document.getElementById('open');
+    var menu = document.getElementById('menu');
+    open.addEventListener('click', function () {
+      var show = menu.hidden;
+      menu.hidden = !show;
+      open.setAttribute('aria-expanded', show ? 'true' : 'false');
+    });
+    menu.addEventListener('click', function (event) {
+      var item = event.target instanceof Element ? event.target.closest('[role=menuitemradio]') : null;
+      if (!item) return;
+      Array.prototype.forEach.call(menu.querySelectorAll('[role=menuitemradio]'), function (other) {
+        other.setAttribute('aria-checked', other === item ? 'true' : 'false');
+      });
+      document.body.dataset.chosen = item.textContent.trim();
+      menu.hidden = true;
+      open.setAttribute('aria-expanded', 'false');
+    });
+    var listbox = document.getElementById('listbox');
+    listbox.addEventListener('click', function (event) {
+      var option = event.target instanceof Element ? event.target.closest('[role=option]') : null;
+      if (!option) return;
+      Array.prototype.forEach.call(listbox.querySelectorAll('[role=option]'), function (other) {
+        other.setAttribute('aria-selected', other === option ? 'true' : 'false');
+      });
+      document.body.dataset.option = option.textContent.trim();
+    });
+  })();
+</script>
+</body>
+</html>

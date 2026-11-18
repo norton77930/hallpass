@@ -184,6 +184,8 @@ describe("the collector over the registry", () => {
       rootTargetHandle: handle as string,
     });
     expect(rootedOnGone.rootTargetGone).toBe(true);
+    // 038 FR-562: a root that has left the document is not collected (no ghost node, no fresh ref).
+    expect(rootedOnGone.semanticNodes ?? []).toEqual([]);
 
     const rootedOnUnknown = collectPage({
       snapshotId: "snapshot-2",

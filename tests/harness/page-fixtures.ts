@@ -189,6 +189,15 @@ const PAGE_FILES = [
    * the journey), and a probe (`window.__pill035`) that records where the pill was when a press arrived.
    */
   "pill-move-035",
+  /**
+   * 038: the point-click live checks. `popover-038` is a button that opens a `ul[role=menu]` of
+   * `li[role=menuitemradio]` > `div` > `span` items ("7 days", "Custom", "No expiration"; the choice is
+   * on `document.body.dataset.chosen`) beside a `div[role=listbox]` of `div[role=option]` ("Issues",
+   * "Contents"). `cover-038` is a 600x300 `div` recording its own clicks with a button covering its
+   * centre recording its own, on a page taller than the viewport.
+   */
+  "popover-038",
+  "cover-038",
 ] as const;
 
 type PageFileName = (typeof PAGE_FILES)[number];

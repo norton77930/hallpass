@@ -1275,6 +1275,28 @@ function centreOf(rect: TargetRect): { x: number; y: number } {
 }
 
 /**
+ * The point a target names, when it is a point rather than a ref (038 FR-563, R-545): already in
+ * the top document's viewport pixels (`toViewportArgs`), where a person's pointer would land.
+ */
+function namedPointOf(target: AgentTarget | undefined): ViewportPoint | undefined {
+  const value = target as { x?: unknown; y?: unknown } | undefined;
+  return typeof value?.x === "number" && typeof value.y === "number" ? { x: value.x, y: value.y } : undefined;
+}
+
+/**
+ * Where a located target's own hit confirmation asks (004/T128 gap 2): a framed ref at its box's
+ * centre in its own frame, any other ref at its delivered point - and a point target always at the
+ * point it was named at (038 FR-564). A point resolves in the top document only, so the landing check
+ * (`landedWhereDecided`) has already refused a point whose ref any child frame claimed; the one frame
+ * a point's locate can still name is the top document (frame 0 of a page with several), whose own
+ * coordinates are the named point's.
+ */
+function confirmationPointOf(rect: TargetRect, deliveredAt: ViewportPoint, named: ViewportPoint | undefined): ViewportPoint {
+  if (named !== undefined) return named;
+  return rect.frame ? centreOf(rect.frame.rect) : deliveredAt;
+}
+
+/**
  * What the pre-gate claim found (030 R-443, data-model DecidingSite): which frame held each named
  * ref, and the site that decides the action. It lives for one call.
  *
@@ -2052,15 +2074,30 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     claim: PreGateClaim,
   ): (
     target: AgentTarget | undefined,
-  ) => Promise<{ ok: true; ref: string; rect: TargetRect } | { ok: false; response: AgentNativeResponse }> {
+  ) => Promise<
+    | {
+        ok: true;
+        ref: string;
+        rect: TargetRect;
+        /** Where the pointer goes: the named point for a point target (038 FR-563), else the box centre. */
+        at: ViewportPoint;
+        /** The point the agent named, when the target was one (038 FR-564). */
+        named?: ViewportPoint;
+      }
+    | { ok: false; response: AgentNativeResponse }
+  > {
     const resolve = targetResolver(context, binding, callId);
     return async (target) => {
+      const named = namedPointOf(target);
       const resolved = await resolve(target);
       if (!resolved.ok) return resolved;
-      // Every caller of this wrapper names and locates one point at a time, so this locate is
-      // always the scrolling kind (004/T128, B70) - a drag's two endpoints go through
-      // `targetResolver` and this locator's scroll-once rule directly, below, rather than here.
-      const rect = await locate({ context, binding, ref: resolved.ref, scroll: true });
+      // Every caller of this wrapper names and locates one point at a time, so a ref's locate is
+      // the scrolling kind (004/T128, B70) - a drag's two endpoints go through `targetResolver` and
+      // its own scroll-once rule directly, below, rather than here. A point target's never is (038
+      // FR-563, R-545): the agent read it off the page as it is now, and a scroll moves the page out
+      // from under it. Its element is still located - it decides the frame (030 R-443), the link
+      // flag (015/T406) and the box the pill steps aside from (035 R-526).
+      const rect = await locate({ context, binding, ref: resolved.ref, scroll: named === undefined });
       // 004/T161: named ahead of the generic "not located" below - a page this extension may not
       // act on at all is not a ref that reading the page again could ever find.
       if (rect !== undefined && "notActionable" in rect) {
@@ -2074,7 +2111,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // 030 R-443: the gate decided for the frame the pre-gate claim found; a delivery claim that
       // lands anywhere else is not what the owner was asked about, so nothing is sent.
       if (!landedWhereDecided(claim, resolved.ref, rect)) return { ok: false, response: frameMovedAnswer(callId, claim) };
-      return { ok: true, ref: resolved.ref, rect };
+      return { ok: true, ref: resolved.ref, rect, at: named ?? centreOf(rect), ...(named === undefined ? {} : { named }) };
     };
   }
 
@@ -2107,10 +2144,20 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       const to = await resolve(args.to as AgentTarget);
       if (!to.ok) return to.response;
       if (from.ref === to.ref) return answer(callId, "failed", "same-endpoints");
+      // An endpoint the agent named as a point is delivered at that point (038 FR-563, R-545).
+      const fromNamed = namedPointOf(args.from as AgentTarget);
+      const toNamed = namedPointOf(args.to as AgentTarget);
       // A drag scrolls, if at all, once: the first endpoint's locate scrolls it into view, and the
       // second is measured in whatever scroll state that established, or the two coordinates
-      // `pointer.drag` is about to use would describe two different scroll positions.
-      const fromLocated = await locate({ context, binding, ref: from.ref, scroll: true });
+      // `pointer.drag` is about to use would describe two different scroll positions. A drag that
+      // names a point at either end does not scroll at all (038 R-545): a scroll for the other end
+      // would move the page out from under the point, which was named against the page as it is.
+      const fromLocated = await locate({
+        context,
+        binding,
+        ref: from.ref,
+        scroll: fromNamed === undefined && toNamed === undefined,
+      });
       // 004/T161: named ahead of "not located" for the same reason `locator` above does.
       if (fromLocated !== undefined && "notActionable" in fromLocated) {
         return answer(callId, "not-actionable", "unsupported-page");
@@ -2141,16 +2188,20 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       if (fromRect.frame?.sessionId !== toRect.frame?.sessionId) {
         return answer(callId, "failed", "cross-frame-drag");
       }
+      // Each end at its named point, or a ref's at its box centre (038 FR-563).
+      const fromAt = fromNamed ?? centreOf(fromRect);
+      const toAt = toNamed ?? centreOf(toRect);
       // Both ends, for the path a recorded frame draws (008/FR-105), once the check let it go.
-      await pointer.drag(binding.tabId, centreOf(fromRect), centreOf(toRect), {
+      await pointer.drag(binding.tabId, fromAt, toAt, {
         // 035 R-526: the start target's box goes with the press move; the end names no box.
         box: fromRect,
         ...(fromRect.frame?.sessionId === undefined ? {} : { sessionId: fromRect.frame.sessionId }),
         beforeDispatch: onGatedSiteThenDelivered(
           binding,
           callId,
-          { from: centreOf(fromRect), to: centreOf(toRect) },
-          frameRecheck(binding, claim, { from: centreOf(fromRect), to: centreOf(toRect) }),
+          { from: fromAt, to: toAt },
+          // 030 R-446: the walk again at the points the gesture leaves at (038 FR-564).
+          frameRecheck(binding, claim, { from: fromAt, to: toAt }),
         ),
       });
       // Whether it moved is measured, not assumed: the dragged element's box is asked for again
@@ -2172,7 +2223,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
 
     const target = await at(args.target as AgentTarget | undefined);
     if (!target.ok) return target.response;
-    const point = centreOf(target.rect);
+    // 038 FR-563: the named point for a point target, the located box's centre for a ref.
+    const point = target.at;
     // The one place the point a click or a hover was aimed at exists (008/FR-105, R-136); it is
     // told once the gesture's last check has let it go.
     const deliveredAt = onGatedSiteThenDelivered(binding, callId, { point }, frameRecheck(binding, claim, { target: point }));
@@ -2195,7 +2247,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         context,
         binding,
         ref: target.ref,
-        point: target.rect.frame ? centreOf(target.rect.frame.rect) : point,
+        point: confirmationPointOf(target.rect, point, target.named),
         ...(target.rect.frame
           ? {
               frameId: target.rect.frame.frameId,
@@ -2215,9 +2267,11 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
 
     const gesture = POINTER_CLICKS[tool as keyof typeof POINTER_CLICKS];
-    // 004/T128: the point is this worker's own arithmetic on the rect `at` reported - never page
-    // semantics - and it is checked rather than assumed, because the rect it came from is exactly
-    // the thing that has been wrong before with nothing to catch it. The confirmation itself has to
+    // 004/T128: for a ref the point is this worker's own arithmetic on the rect `at` reported - never
+    // page semantics - and it is checked rather than assumed, because the rect it came from is exactly
+    // the thing that has been wrong before with nothing to catch it. A point target is delivered at
+    // the point the agent named and asked about there (038 FR-563, FR-564): the question is still
+    // whether that point resolves to the element found at it. The confirmation itself has to
     // ask the frame that claimed the target, in that frame's own coordinates (gap 2): frame 0 asked
     // about a page-level point refuses a framed click whether or not the delivered point was right,
     // which is unmeasurable rather than honest.
@@ -2234,7 +2288,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       context,
       binding,
       ref: target.ref,
-      point: target.rect.frame ? centreOf(target.rect.frame.rect) : point,
+      point: confirmationPointOf(target.rect, point, target.named),
       ...(target.rect.frame
         ? {
             frameId: target.rect.frame.frameId,
@@ -2369,7 +2423,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
        * given nothing (review S1-F1: not before - a click the check refused gave it nothing).
        */
       const focusing = await racedDelivery(beforeKeys(), () =>
-        pointer.click(binding.tabId, centreOf(target.rect), {
+        // 038 FR-563: a point target's placing click lands on the named point; a ref's at its centre.
+        pointer.click(binding.tabId, target.at, {
           button: "left",
           clickCount: 1,
           // 035 R-526: the focusing click aims at the target, so the page can step the pill aside.
@@ -2379,7 +2434,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
             binding,
             callId,
             {},
-            frameRecheck(binding, claim, { target: centreOf(target.rect) }),
+            frameRecheck(binding, claim, { target: target.at }),
           ),
         }),
       );

@@ -175,6 +175,9 @@ const INTERACTIVE_ROLES = new Set([
   "link",
   "listbox",
   "menuitem",
+  // 038/FR-567: the menu-item and tree-item roles a page builds its own menus and trees from.
+  "menuitemcheckbox",
+  "menuitemradio",
   "option",
   "radio",
   "searchbox",
@@ -183,6 +186,7 @@ const INTERACTIVE_ROLES = new Set([
   "switch",
   "tab",
   "textbox",
+  "treeitem",
 ]);
 
 /**

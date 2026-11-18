@@ -116,7 +116,13 @@ const WALK_SELECTORS: Record<TargetMintPolicy, string> = {
     "[role=paragraph], [role=list], [role=listitem], [role=table], [role=row], " +
     "[role=cell], [role=columnheader], [role=rowheader], [role=img], " +
     "[role=main], [role=navigation], [role=banner], [role=contentinfo], " +
-    "[role=complementary], [role=region], [role=search], [role=article]",
+    "[role=complementary], [role=region], [role=search], [role=article], " +
+    // 038/FR-565, R-546: the widget roles a page builds its own controls from. A popover menu is
+    // `li[role=menuitemradio]` and a picker is `div[role=option]`; without these they were invisible
+    // to `read_page` and `find`. The reviewed walk above does not change.
+    "[role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=option], [role=tab], " +
+    "[role=radio], [role=combobox], [role=textbox], [role=searchbox], [role=slider], " +
+    "[role=spinbutton], [role=treeitem], [role=listbox]",
 };
 
 /**
@@ -160,6 +166,30 @@ const STRUCTURAL_ROLES: Record<string, string> = {
  * the name the page gave it and stays a container the reader can see the shape of.
  */
 const TEXT_NAMED_TAGS = new Set(["P", "BLOCKQUOTE", "PRE", "LI", "DT", "DD", "TD", "TH", "CAPTION"]);
+
+/**
+ * The explicit roles whose name comes from content (038/FR-566, R-546): an element a page gave one of
+ * these takes its text as its name, the way a `button` already does. The input-like roles
+ * (`combobox`, `textbox`, `searchbox`, `slider`, `spinbutton`, `listbox`) are not here - their text is
+ * a value or an option list, not a label.
+ */
+const NAME_FROM_CONTENT_ROLES = new Set([
+  "button",
+  "link",
+  "checkbox",
+  "switch",
+  "radio",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "tab",
+  "treeitem",
+  "heading",
+  "cell",
+  "columnheader",
+  "rowheader",
+]);
 
 /** The sectioning elements that turn a `header`/`footer` into an ordinary container, not a landmark. */
 const SECTIONING_ANCESTORS = "article, aside, main, nav, section";
@@ -378,12 +408,25 @@ export function snapshotDocument(
   const controls: FormControlSnapshot[] = [];
   const targets: TargetSnapshot[] = [];
   const nodes = walkElements(doc, WALK_SELECTORS[mintPolicy], mintPolicy === "all-controls");
+  // 038/FR-562, R-544: a collection rooted at a ref always carries that ref's own element, whatever
+  // its tag or role. The walk's selector decides what else is shown; it never makes a ref the page
+  // already issued unlocatable. First, at depth 0, so a reader meets the root before what is under it.
+  // Whether the root is in the walk does not matter - only whether it is still in the document (a
+  // detached root is the caller's `rootTargetGone`, and minting a ref for it would be a ghost) and
+  // not the extension's own indicator. The root alone skips the sectioned header/footer rule.
+  const rootDetached = (root as { isConnected?: unknown } | undefined)?.isConnected === false;
+  if (root && !rootDetached && !withinIndicator(root)) {
+    const rootTarget = snapshotTarget(root, maxLabelChars, 0, true);
+    if (rootTarget) targets.push(rootTarget);
+  }
   for (let index = 0; index < nodes.length; index += 1) {
     const node = nodes[index];
     if (withinIndicator(node)) continue;
     const control = snapshotControl(node);
     if (control) controls.push(control);
     if (!withinRoot(node, root)) continue;
+    // The root was handled above, once.
+    if (root && node === root) continue;
     const target = snapshotTarget(node, maxLabelChars, depthUnder(node, root));
     if (target) targets.push(target);
   }
@@ -552,7 +595,13 @@ function isOffscreen(
   return rect.x + rect.width <= 0 || rect.y + rect.height <= 0 || rect.x >= width || rect.y >= height;
 }
 
-export function snapshotTarget(node: unknown, maxLabelChars: number, depth = 0): TargetSnapshot | undefined {
+export function snapshotTarget(
+  node: unknown,
+  maxLabelChars: number,
+  depth = 0,
+  /** The root of a rooted collection (038/FR-562): it is described whatever its sectioning. */
+  isRoot = false,
+): TargetSnapshot | undefined {
   if (!node || typeof node !== "object") return undefined;
   const element = node as {
     tagName?: string;
@@ -594,7 +643,7 @@ export function snapshotTarget(node: unknown, maxLabelChars: number, depth = 0):
    * tree reports as an ordinary container - so this walk leaves it out rather than telling an agent
    * a page has four banners.
    */
-  if ((tagName === "HEADER" || tagName === "FOOTER") && !explicitRole) {
+  if ((tagName === "HEADER" || tagName === "FOOTER") && !explicitRole && !isRoot) {
     const closest = (element as { closest?: (selector: string) => unknown }).closest;
     let sectioned = false;
     try {
@@ -650,7 +699,11 @@ export function snapshotTarget(node: unknown, maxLabelChars: number, depth = 0):
    * be handed a value to display.
    */
   const ownText =
-    tagName === "BUTTON" || tagName === "A" || heading || TEXT_NAMED_TAGS.has(tagName)
+    tagName === "BUTTON" ||
+    tagName === "A" ||
+    heading ||
+    TEXT_NAMED_TAGS.has(tagName) ||
+    (explicitRole !== undefined && NAME_FROM_CONTENT_ROLES.has(explicitRole))
       ? nameFromContent(node).trim() || undefined
       : undefined;
   /**
@@ -838,7 +891,13 @@ export function collectPage(input: CollectPageInput): {
         // effect could land on, and the agent's names anything the walk saw that is actually on
         // the page. Neither of them decides whether the effect is *allowed* - that is the site
         // mode's answer for the agent and the review's for the remote path.
-        const mintable = mintPolicy === "all-controls" ? !target.hidden : target.actionable;
+        //
+        // 038/FR-562: the root of a rooted collection keeps the handle it already has even when the
+        // node is `hidden` - the ref was issued before this walk, and a locate has to find it again.
+        const mintable =
+          mintPolicy === "all-controls"
+            ? !target.hidden || (rootRecord?.element !== undefined && target.element === rootRecord.element)
+            : target.actionable;
         // The document's own register decides the name (004/R-115): an element seen before keeps
         // the handle it already has, and only an element seen for the first time gets a new one.
         const targetHandle = includeTargets && mintable ? input.registry.handleFor(target.element) : undefined;

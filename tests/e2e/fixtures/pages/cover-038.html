@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cover 038 fixture</title>
+<style>
+  /* 038 - the page the point-delivery check stands on (SC-250).
+
+     #big is a 600 x 300 div at page (40, 1000) that records its own clicks. #cover is a 120 x 60 button
+     covering its centre (the centre is (340, 1150), so the button spans 280..400 x 1120..1180) and
+     records its own. A click inside #big away from the button must reach #big and not #cover. The page
+     is taller than the viewport (a 3000px spacer) and #big sits down the page, so a run that scrolls
+     the element to the middle of the viewport shows as window.scrollY changing once the page has been
+     scrolled to put #big near the top of the viewport.
+     Counts are on document.body.dataset.big / .cover; the pointer events are not recorded because the
+     claim is which element received the click. */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { font: 16px/1.4 system-ui, sans-serif; color: #222; }
+  #big { position: absolute; top: 1000px; left: 40px; width: 600px; height: 300px; background: #eef; border: 0; box-sizing: border-box; }
+  #cover { position: absolute; top: 1120px; left: 280px; width: 120px; height: 60px; font: inherit; }
+  #spacer { position: absolute; top: 0; left: 0; width: 1px; height: 3000px; }
+</style>
+</head>
+<body data-big="0" data-cover="0">
+<div id="spacer"></div>
+<div id="big" aria-label="Large area"></div>
+<button type="button" id="cover">Centre</button>
+<script>
+  (function () {
+    function count(id) {
+      document.getElementById(id).addEventListener('click', function () {
+        document.body.dataset[id] = String(Number(document.body.dataset[id]) + 1);
+      });
+    }
+    count('big');
+    count('cover');
+  })();
+</script>
+</body>
+</html>
