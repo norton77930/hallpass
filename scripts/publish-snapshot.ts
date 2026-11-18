@@ -16,8 +16,10 @@ import { fileURLToPath } from "node:url";
  * 4. the public checkout is a clean `main`, fast-forwarded to its remote;
  * 5. its tracked files are replaced by `git archive HEAD` of the private one and exactly those files
  *    are staged (untracked and ignored files there, such as `node_modules` or a stray note, are left
- *    alone and never published), committed as `Hallpass <version>` and tagged `v<version>`;
- * 6. with `--push` only: `main` and the tag are pushed. Without it the commands are printed.
+ *    alone and never published), committed as `Hallpass <version>` (always as the GitHub noreply
+ *    identity, whatever the git config or the GIT_AUTHOR_ and GIT_COMMITTER_ variables say) and tagged `v<version>`;
+ * 6. with `--push` only: `main` and the tag are pushed. Without it the commands are printed. A commit
+ *    whose author or committer is not a noreply address is never tagged or pushed.
  *
  * The public checkout's path is an argument (or HALLPASS_PUBLIC_CHECKOUT): a local path must never be
  * written into a tracked file (the snapshot check fails on it).
@@ -41,7 +43,20 @@ export type PublishOutcome = { published: true; version: string; commit: string 
 
 export class PublishRefused extends Error {}
 
-const git = (cwd: string, args: string[]): string => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+/** The release commit is always made as this identity, whatever the public checkout's config or the environment says. */
+export const PUBLIC_COMMIT_NAME = "norton77930";
+export const PUBLIC_COMMIT_EMAIL = "75159321+norton77930@users.noreply.github.com";
+export const NOREPLY_SUFFIX = "@users.noreply.github.com";
+
+const git = (cwd: string, args: string[], env?: NodeJS.ProcessEnv): string =>
+  execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...(env === undefined ? {} : { env }) }).trim();
+
+/** `process.env` without GIT_AUTHOR_* / GIT_COMMITTER_* (compared upper-cased: Windows env names are case-insensitive). */
+function envWithoutGitIdentity(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_AUTHOR_") && !key.toUpperCase().startsWith("GIT_COMMITTER_")),
+  );
+}
 
 /** bsdtar on Windows (the Git Bash `tar` mangles paths), as `snapshot-check.ts` does. */
 function systemTar(): string {
@@ -141,12 +156,22 @@ export function publishSnapshot(options: PublishOptions): PublishOutcome {
     rmSync(scratch, { recursive: true, force: true });
   }
   const changed = git(publicRoot, ["diff", "--cached", "--name-only"]) !== "";
-  if (changed) git(publicRoot, ["commit", "-q", "-m", `Hallpass ${version}`]);
+  if (changed) {
+    git(
+      publicRoot,
+      ["-c", `user.name=${PUBLIC_COMMIT_NAME}`, "-c", `user.email=${PUBLIC_COMMIT_EMAIL}`, "commit", "-q", "-m", `Hallpass ${version}`],
+      envWithoutGitIdentity(),
+    );
+  }
   // The extracted files may differ from the commit only in line endings: the checkout ends on it.
   git(publicRoot, ["reset", "-q", "--hard", "HEAD"]);
   if (!changed) {
     log(`Hallpass ${version}: the public tree already matches; nothing to publish.`);
     return { published: false, version, reason: "unchanged" };
+  }
+  const [authorEmail = "", committerEmail = ""] = git(publicRoot, ["log", "-1", "--format=%ae|%ce"]).split("|");
+  if (!authorEmail.endsWith(NOREPLY_SUFFIX) || !committerEmail.endsWith(NOREPLY_SUFFIX)) {
+    throw new PublishRefused(`the release commit is not a noreply commit (author ${authorEmail}, committer ${committerEmail}); not tagging or pushing`);
   }
   git(publicRoot, ["tag", tag]);
   const commit = git(publicRoot, ["rev-parse", "--short", "HEAD"]);

@@ -540,8 +540,9 @@ test.describe("agent frame consent", () => {
       expect(top?.site, JSON.stringify(frames)).toBe(SITE);
       expect(child?.site, JSON.stringify(frames)).toBe(SECOND);
       const inFrame = read.nodes.filter((node) => node.frame === child?.frame && node.ref !== undefined);
+      // 040/FR-573: the field is named by its <label> ("Frame note"), not by its name attribute.
       expect(inFrame.map((node) => node.name), JSON.stringify(read.nodes)).toEqual(
-        expect.arrayContaining(["frame-field", "Frame action"]),
+        expect.arrayContaining(["Frame note", "Frame action"]),
       );
       expect(inFrame.every((node) => node.site === SECOND), JSON.stringify(inFrame)).toBe(true);
       const outside = read.nodes.filter((node) => (node.frame ?? "0") !== child?.frame);
@@ -818,7 +819,7 @@ test.describe("agent frame consent", () => {
 
 type ReadNode ={ ref?: string; role?: string; name?: string; frame?: string; site?: string };
 
-/** The fixtures' one text field, inside the frame (`#frame-field`; read_page names it by its `name`). */
+/** The fixtures' one text field, inside the frame (`#frame-field`; read_page names it by its label, "Frame note"). */
 const frameTextbox = (node: ReadNode): boolean => node.role === "textbox";
 type ReadPage = {
   frames?: Array<{ frame: string; parent?: string; url: string; readable: boolean; site?: string }>;

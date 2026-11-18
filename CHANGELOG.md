@@ -5,6 +5,18 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.26.2 — 2026-11-19
+
+- **A drag inside one element is verified.** A drag between two points on the same canvas, slider track or
+  map used to come back `not-moved`, since nothing on the page moves. It is now judged the way a click is,
+  by whether the press landed on that element, and reports `verified` when it did.
+- **Labels name their controls.** An input, checkbox or select named by a `<label for>` or a label around it
+  is now called by that label's text in `read_page` and `find`, after any `aria-labelledby` or
+  `aria-label`, instead of by its `name` attribute.
+- **`find` knows more kinds of control.** "the remember me checkbox", "the pricing link", "dark mode toggle"
+  and "the settings tab" now resolve: every role's own name counts as a word for its kind, and checkboxes,
+  radio buttons, switches and links have their everyday English and Chinese words.
+
 ## 0.26.1 — 2026-11-18
 
 - **Typing at a point inside an editor.** `type` at coordinates on the text of a rich-text editor (whose

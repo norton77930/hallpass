@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Label 040 fixture</title>
+<style>
+  /* 040 - the page the control-name-from-label read stands on (SC-259).
+
+     Three controls with no aria-label, no title and no placeholder, named only by their <label>: an input
+     by a <label for>, a checkbox and a select by a wrapping <label>. The select's option text must not
+     become part of the name (FR-573). */
+  html, body { margin: 0; padding: 0; background: #fff; }
+  body { min-height: 100vh; font: 16px/1.4 system-ui, sans-serif; color: #222; padding: 24px; }
+  p { margin: 0 0 16px; }
+</style>
+</head>
+<body>
+<p><label for="email">Email address</label> <input id="email" type="email"></p>
+<p><label>Remember me <input type="checkbox" id="remember"></label></p>
+<p><label>Country <select id="country"><option>Taiwan</option><option>Japan</option></select></label></p>
+</body>
+</html>

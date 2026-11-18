@@ -22,7 +22,7 @@ type Typed = {
   observed?: { effect?: string; verified?: boolean; verdict?: string; charactersChanged?: number };
   hint?: string;
 };
-type Dragged = { outcome?: string; reason?: string; observed?: { effect?: string } };
+type Dragged = { outcome?: string; reason?: string; observed?: { effect?: string; verified?: boolean; verdict?: string } };
 
 /**
  * 039 live checks (SC-253..SC-255): typing and dragging after a point, on the pages 039's fixtures
@@ -35,7 +35,8 @@ type Dragged = { outcome?: string; reason?: string; observed?: { effect?: string
  *   hint names that input (FR-568, FR-569); `type` at a point on a control whose click moves focus to an
  *   unrelated input is refused `focus-lost` with that input unchanged.
  * - SC-255: `drag` between two points inside one canvas is delivered, and the canvas records the press
- *   and the release at the named points (FR-570). Before 039 it answered `same-endpoints`.
+ *   and the release at the named points (FR-570), and the answer is `verified` (040 FR-572, SC-258). Before
+ *   039 it answered `same-endpoints`, before 040 `not-moved`.
  *
  * Attach mode only, like every sibling `agent-*` journey: the bridge starts with a machine install of the
  * native host, which a browser the runner launched is not registered against.
@@ -101,7 +102,8 @@ test.describe("agent typing and dragging after a point (spec 039)", () => {
       const dragged = (await call("drag", { tabId, from, to })) as Dragged;
 
       expect(dragged.reason, JSON.stringify(dragged)).not.toBe("same-endpoints");
-      expect(dragged, JSON.stringify(dragged)).toMatchObject({ observed: { effect: "dragged" } });
+      // 040 FR-572, SC-258: both ends are the one canvas, so the answer is the press point's confirmation.
+      expect(dragged, JSON.stringify(dragged)).toMatchObject({ observed: { effect: "dragged", verified: true, verdict: "verified" } });
       const recorded = await page.evaluate(
         () => (window as unknown as { __drag039: { downs: Point[]; ups: Point[] } }).__drag039,
       );

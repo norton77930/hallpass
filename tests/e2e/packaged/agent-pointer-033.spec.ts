@@ -23,6 +23,8 @@ const CSP_PATH = "/pointer-033-csp";
 /** One animation frame at 60 Hz, and the slack the brief allows a frame-sampled measurement. */
 const FRAME_MS = 17;
 const SLACK_MS = 40;
+/** The most a caption's one-second fade timer may run late after the pointer arrives (FR-501 says "about"). */
+const FADE_SLACK_MS = 300;
 
 /**
  * 033 live checks 1-6 (quickstart.md "Live"; acceptance gates live-1..live-6): the pointer says what
@@ -242,9 +244,21 @@ test.describe("agent pointer captions (spec 033)", () => {
           // FR-501: a caption at a pointing position fades about a second after the pointer arrives;
           // one at the rest spot does not fade.
           if (row.id === "click") {
-            const fade = await watchFade(page, returnedAt);
-            record["fadedAfterMsFromReturn"] = fade;
-            check.ok(fade !== null && fade >= 300 && fade <= 1800, `click: the pointing caption should fade about 1 s after arrival, it faded at ${String(fade)} ms after the call returned`);
+            // 040 FR-574: measured from the pointer's arrival (the end of its travel in the per-frame
+            // samples), the instant FR-501 names - not from when the call returned, which is whenever
+            // the host answered and moved with the load (870-1923 ms after the call started).
+            const samples = await settle(() => page.evaluate(readSamples, startedAt - 20));
+            const travel = analyseTravel(samples, tip ?? { x: 0, y: 0 });
+            const fadedAt = await watchFadeEvent(page, mark);
+            const fadeMs = fadedAt !== null && travel.endT !== null ? fadedAt - travel.endT : null;
+            record["fadedAfterMsFromReturn"] = fadedAt === null ? null : fadedAt - returnedAt;
+            record["arrivalAfterStartMs"] = travel.endT === null ? null : travel.endT - startedAt;
+            record["fadedAfterMsFromArrival"] = fadeMs;
+            check.ok(samples.length > 0, "click: no pointer samples were taken during the call (is the tab visible?)");
+            check.ok(
+              fadeMs !== null && fadeMs >= 1000 - SLACK_MS && fadeMs <= 1000 + FADE_SLACK_MS,
+              `click: FR-501 - the pointing caption should fade about 1 s after the pointer arrives, it faded ${String(fadeMs)} ms after arrival (${String(fadedAt === null ? null : fadedAt - returnedAt)} ms after the call returned)`,
+            );
           }
           if (row.id === "form_input") {
             await sleep(1600);
@@ -1642,12 +1656,16 @@ async function stillPointer(page: Page, maxMs: number): Promise<PageState> {
   return state;
 }
 
-/** Polls the caption's `data-faded` and returns how long after `returnedAt` it appeared, or null. */
-async function watchFade(page: Page, returnedAt: number): Promise<number | null> {
-  const deadline = Date.now() + 3000;
+/**
+ * Polls the probe's log for the caption's `data-faded` being set after entry `mark`, and returns the
+ * page's epoch-ms time of that entry, or null. The time is the page's own, taken when the attribute
+ * changed, so it does not depend on how often or how late this polls.
+ */
+async function watchFadeEvent(page: Page, mark: number): Promise<number | null> {
+  const deadline = Date.now() + 4000;
   while (Date.now() < deadline) {
-    const state = await settle(() => page.evaluate(readPageState));
-    if (state.caption?.faded === true) return Date.now() - returnedAt;
+    const faded = (await readLog(page)).find((entry) => (entry["n"] as number) > mark && entry["k"] === "faded" && entry["on"] === true);
+    if (faded && typeof faded["t"] === "number") return faded["t"] as number;
     await sleep(40);
   }
   return null;

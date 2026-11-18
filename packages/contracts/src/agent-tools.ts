@@ -2437,7 +2437,10 @@ export const AGENT_TOOL_DESCRIPTORS: readonly AgentToolDescriptor[] = [
     title: "Drag and drop",
     description:
       "Drags one element onto another using the HTML drag-and-drop events. Each endpoint is a ref or a point, " +
-      `and they must be different. The result says whether the dragged element actually moved. ${POINT_SPACE_NOTE} ${FRAME_SITE_NOTE}`,
+      "and they must not be the same point. A drag between two different elements reports whether the dragged " +
+      "element actually moved; a drag inside one element (two points on one canvas, or a ref and a point in it) " +
+      "reports whether the press landed on that element, as a click does, and not what the page did with it. " +
+      `${POINT_SPACE_NOTE} ${FRAME_SITE_NOTE}`,
     inputShape: agentDragShape,
   },
   {

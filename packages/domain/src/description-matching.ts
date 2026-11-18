@@ -55,11 +55,20 @@ export const NOISE_WORDS_ZH_TW: ReadonlySet<string> = new Set([
   "請", "點", "按", "點擊", "點選", "輸入", "在", "的", "這個", "那個", "把", "然後", "一下", "幫我", "我要",
 ]);
 
-/** Words a person uses for a control's kind; a role's own name is always among them. */
+/**
+ * Words a person uses for a control's kind. A role's own name is always a word for its kind, even
+ * for a role with no entry here (`matchDescription` adds it), so "the settings tab" names a tab;
+ * the entries are the everyday words beyond that name (040/FR-577 added checkbox, radio, switch and
+ * link, which had none, so "the remember me checkbox" used to name nothing).
+ */
 export const ROLE_WORDS: Record<string, readonly string[]> = {
   textbox: ["textbox", "text", "box", "field", "input", "entry", "textarea"],
   button: ["button", "btn"],
   combobox: ["combobox", "dropdown", "select", "selector", "picker", "list", "menu"],
+  checkbox: ["checkbox", "check", "box", "tickbox"],
+  radio: ["radio", "button", "option"],
+  switch: ["switch", "toggle"],
+  link: ["link", "hyperlink"],
 };
 
 /** The zh-TW half of the same vocabulary, entry for entry ("選單" mirrors "menu"). */
@@ -67,6 +76,10 @@ export const ROLE_WORDS_ZH_TW: Record<string, readonly string[]> = {
   textbox: ["文字框", "輸入框", "欄位", "輸入欄", "文字欄"],
   button: ["按鈕", "按鍵"],
   combobox: ["下拉", "下拉選單", "選單", "選擇器", "選項"],
+  checkbox: ["核取方塊", "勾選框", "勾選方塊", "複選框"],
+  radio: ["單選按鈕", "選項按鈕", "單選框", "選項"],
+  switch: ["開關", "切換"],
+  link: ["連結", "超連結", "鏈接"],
 };
 
 export const ANY_ROLE_WORDS: readonly string[] = ["control", "element", "item", "thing"];
@@ -333,6 +346,8 @@ export function matchDescription(description: string, candidate: DescriptionCand
   // An input-type combobox is both a combobox and a text field; a select is only the former.
   const typedInto = role === "combobox" && TEXT_ENTRY_TAGS.has((candidate.tagName ?? "").toUpperCase());
   const kindWords = [
+    // 040/FR-577: the role's own name, whether or not the vocabulary has an entry for it.
+    ...(role === "" ? [] : [role]),
     ...(ROLE_WORDS[role] ?? []),
     ...(ROLE_WORDS_ZH_TW[role] ?? []),
     ...(typedInto ? [...(ROLE_WORDS.textbox ?? []), ...(ROLE_WORDS_ZH_TW.textbox ?? [])] : []),

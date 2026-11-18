@@ -208,6 +208,13 @@ export async function verifyPageEffect(input: VerifyEffectInput): Promise<Effect
       if (input.pointConfirmation === "hit") return "verified";
       return executed.targetVisible === true ? "verified" : "target-not-visible";
     case "browser.drag":
+      // 040 D-040-1, FR-572: a drag whose two ends are one element has no second box to compare - the
+      // element is the thing dragged *within*, so it need not move. The caller asked the press
+      // point's confirmation then, and it decides as a hover's does. Absent for a drag between two
+      // different elements, whose answer stays whether the dragged one moved.
+      if (input.pointConfirmation === "missed") return "target-missed";
+      if (input.pointConfirmation === "unconfirmed") return "target-unconfirmed";
+      if (input.pointConfirmation === "hit") return "verified";
       return executed.moved === true ? "verified" : "not-moved";
     default:
       return noVerdict(capability);

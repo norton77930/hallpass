@@ -231,3 +231,37 @@ describe("002 T074a description matching without a segmenter", () => {
     expect(matching.matchDescription("notes field", { role: "textbox", label: "Notes" })).toBe(true);
   });
 });
+
+/**
+ * 040/FR-577. Every role's own name is a word for its kind, and the controls people name by kind
+ * (checkbox, radio, switch, link) carry their everyday words in both languages - before this, only
+ * textbox, button and combobox had any, so "the remember me checkbox" named nothing.
+ */
+describe("040 FR-577 kind words for every role", () => {
+  it("names a checkbox, radio, switch and link by their English kind words, and no other kind", () => {
+    expect(matchDescription("the remember me checkbox", { role: "checkbox", label: "Remember me" })).toBe(true);
+    expect(matchDescription("remember me check box", { role: "checkbox", label: "Remember me" })).toBe(true);
+    expect(matchDescription("monthly radio button", { role: "radio", label: "Monthly" })).toBe(true);
+    expect(matchDescription("dark mode toggle", { role: "switch", label: "Dark mode" })).toBe(true);
+    expect(matchDescription("the pricing link", { role: "link", label: "Pricing" })).toBe(true);
+    // A kind word names only its own kind.
+    expect(matchDescription("the remember me checkbox", { role: "textbox", label: "Remember me" })).toBe(false);
+    expect(matchDescription("the pricing link", { role: "button", text: "Pricing" })).toBe(false);
+  });
+
+  it("names any role by its own role name", () => {
+    expect(matchDescription("the settings tab", { role: "tab", label: "Settings" })).toBe(true);
+    expect(matchDescription("pricing heading", { role: "heading", label: "Pricing" })).toBe(true);
+    expect(matchDescription("the settings tab", { role: "link", label: "Settings" })).toBe(false);
+  });
+
+  it("names a checkbox, radio, switch and link by their zh-TW kind words", () => {
+    expect(matchDescription("記住我核取方塊", { role: "checkbox", label: "記住我" })).toBe(true);
+    expect(matchDescription("記住我勾選框", { role: "checkbox", label: "記住我" })).toBe(true);
+    // Phrases the segmenter glues "的" into ("我的") stay unmatched, as for every kind (002 header).
+    expect(matchDescription("每月的單選按鈕", { role: "radio", label: "每月" })).toBe(true);
+    expect(matchDescription("深色模式開關", { role: "switch", label: "深色模式" })).toBe(true);
+    expect(matchDescription("價格連結", { role: "link", label: "價格" })).toBe(true);
+    expect(matchDescription("價格連結", { role: "button", text: "價格" })).toBe(false);
+  });
+});

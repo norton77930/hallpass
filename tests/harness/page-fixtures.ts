@@ -197,6 +197,8 @@ const PAGE_FILES = [
   "editor-039",
   "drag-039",
   "link-039",
+  /** 040: `label-040` - inputs named only by `<label for>`, a checkbox and a select inside wrapping labels. */
+  "label-040",
   /**
    * 038: the point-click live checks. `popover-038` is a button that opens a `ul[role=menu]` of
    * `li[role=menuitemradio]` > `div` > `span` items ("7 days", "Custom", "No expiration"; the choice is

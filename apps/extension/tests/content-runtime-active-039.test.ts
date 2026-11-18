@@ -273,3 +273,37 @@ describe("a focused host and a target inside its own shadow (039 re-review I2)",
     expect(ask()).toMatchObject({ ok: true, outcome: "resolved", receivedBy: { label: "Widget" } });
   });
 });
+
+describe("the focus check's real-browser editing-host branch (040 FR-576)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.removeAttribute("contenteditable");
+  });
+
+  it("trusts a browser's isContentEditable=false over a contenteditable=\"true\" attribute on the body", () => {
+    document.body.setAttribute("contenteditable", "true");
+    document.body.innerHTML = '<p id="t">x</p>';
+    // A browser answers this itself; jsdom does not, so the boolean path is pinned by a stub.
+    Object.defineProperty(document.body, "isContentEditable", { value: false, configurable: true });
+    document.body.focus();
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const { ask } = setup(document.querySelector("#t") as HTMLElement);
+
+    try {
+      expect(ask()).toMatchObject({ ok: true, outcome: "missed" });
+    } finally {
+      delete (document.body as { isContentEditable?: boolean }).isContentEditable;
+    }
+  });
+});
+
+describe("the receiving-field hint names a field by its label (040 FR-573)", () => {
+  it("says the label of a wrapped control that holds focus", () => {
+    document.body.innerHTML =
+      '<label for="x"><span id="text">Your name</span></label><label>Remember me <input id="other" type="checkbox"></label><input id="x" type="text" />';
+    (document.querySelector("#other") as HTMLInputElement).focus();
+    const { ask } = setup(document.querySelector("#text") as HTMLElement);
+
+    expect(ask()).toMatchObject({ ok: true, outcome: "missed", role: "checkbox", label: "Remember me" });
+  });
+});

@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.26.2 — 2026-11-19
+
+- **同一個元素內的拖曳會確認成功**:在同一個 canvas、滑桿或地圖上兩點之間拖曳，以前因為頁面上沒有東西移動而回 `not-moved`。現在改用和點擊相同的判斷：按下的點落在那個元素上，就回 `verified`。
+- **用 label 為控制項命名**:由 `<label for>` 或外層 label 標示的輸入框、核取方塊、下拉選單，在 `read_page` 和 `find` 裡改用 label 的文字當名字(`aria-labelledby`、`aria-label` 仍優先),不再用 `name` 屬性。
+- **`find` 認得更多種控制項**:「the remember me checkbox」、「價格連結」、「深色模式開關」這類說法現在找得到：每種角色自己的名字都算種類詞，核取方塊、單選按鈕、開關和連結也有常用的中英文說法。
+
 ## 0.26.1 — 2026-11-18
 
 - **在編輯器裡用座標打字**:在富文字編輯器(文字包在多層元素裡)的文字上用座標 `type`,以前會回 `focus-lost`、一個字都不打。現在焦點在那個點外圍的編輯區也算，`<label>` 指向的輸入框也算;字進的欄位不是指定的那個時，回覆會說是哪個。點擊後焦點跑到無關欄位，照樣在送出任何按鍵前拒絕。

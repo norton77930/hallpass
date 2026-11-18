@@ -101,6 +101,26 @@ describe("publish:snapshot", { timeout: SLOW_GIT_MS }, () => {
     expect(git(publicRoot, "status", "--porcelain")).toBe("?? node_modules/\n?? stray-note.md");
   });
 
+  it("commits as the GitHub noreply identity whatever the public checkout's git config or the environment says", () => {
+    const names = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+    const saved = names.map((name) => process.env[name]);
+    process.env.GIT_AUTHOR_NAME = "Env Person";
+    process.env.GIT_AUTHOR_EMAIL = "env@example.invalid";
+    process.env.GIT_COMMITTER_NAME = "Env Person";
+    process.env.GIT_COMMITTER_EMAIL = "env@example.invalid";
+    try {
+      publish();
+    } finally {
+      names.forEach((name, index) => {
+        const previous = saved[index];
+        if (previous === undefined) delete process.env[name];
+        else process.env[name] = previous;
+      });
+    }
+    const noreply = "75159321+norton77930@users.noreply.github.com";
+    expect(git(publicRoot, "log", "-1", "--format=%an|%ae|%cn|%ce")).toBe(`norton77930|${noreply}|norton77930|${noreply}`);
+  });
+
   it("mirrors the private file modes: 100755 stays executable and a file no longer executable privately loses the bit", () => {
     // --chmod in the index works whatever core.filemode says, as on a Windows checkout; where
     // core.filemode is true (POSIX) the work tree must carry the same bit or the checkout is dirty.

@@ -74,7 +74,15 @@ function installChrome(sameElementEverywhere: boolean): void {
   };
 }
 
-function harness(options: { confirmFocus?: FocusConfirmer } = {}) {
+function harness(
+  options: {
+    confirmFocus?: FocusConfirmer;
+    /** What the press point's confirmation answers (040 FR-572); a hit by default. */
+    confirmOutcome?: "hit" | "missed" | "unconfirmed";
+    /** The box a located ref has, the n-th time it is located (default: the one box, never moving). */
+    box?: (ref: string, nth: number) => typeof BOX;
+  } = {},
+) {
   const input = testInputAttachments();
   const recorded = input.attachments.send.bind(input.attachments);
   input.attachments.send = async (tabId, method, params, sessionId) => {
@@ -84,9 +92,13 @@ function harness(options: { confirmFocus?: FocusConfirmer } = {}) {
   const located: Array<{ ref: string; scroll: boolean }> = [];
   const locate: TargetLocator = async ({ ref, scroll }) => {
     located.push({ ref, scroll });
-    return { ...BOX };
+    return { ...(options.box?.(ref, located.filter((entry) => entry.ref === ref).length) ?? BOX) };
   };
-  const confirm: TargetConfirmer = async () => ({ outcome: "hit" });
+  const confirmed: Array<{ ref: string; point: { x: number; y: number } }> = [];
+  const confirm: TargetConfirmer = async (asked) => {
+    confirmed.push({ ref: asked.ref, point: asked.point });
+    return { outcome: options.confirmOutcome ?? "hit" };
+  };
   const focusAsked: string[] = [];
   const confirmFocus: FocusConfirmer = async (asked) => {
     focusAsked.push(asked.ref);
@@ -110,7 +122,7 @@ function harness(options: { confirmFocus?: FocusConfirmer } = {}) {
     readFrameFocus: oneDocumentFocus,
     settleMs: 0,
   });
-  return { runner, siteModes, input, located, focusAsked };
+  return { runner, siteModes, input, located, focusAsked, confirmed };
 }
 
 function request(tool: string, args: Record<string, unknown>): AgentNativeRequest {
@@ -349,5 +361,87 @@ describe("039/T1091 a drag is refused only when it would not move (FR-570)", () 
 
     expect(response).toMatchObject({ outcome: "failed", reason: "same-endpoints" });
     expect(mousePoints(input.commands)).toEqual([]);
+  });
+});
+
+describe("040/T1101 a drag inside one element is verified by its press point (FR-572, D-040-1)", () => {
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const FROM = { x: 310, y: 260 };
+  const TO = { x: 480, y: 330 };
+  /** The observed verdict of an `ok` answer. */
+  const verdictOf = (response: { result?: unknown }) => (response.result as { observed?: { verdict?: string } }).observed?.verdict;
+
+  it("answers verified for two points on one element when the press point resolves to it, though nothing moved", async () => {
+    installChrome(true);
+    const { runner, siteModes, confirmed } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(request("drag", { from: FROM, to: TO }));
+
+    expect(response.outcome).toBe("ok");
+    expect(verdictOf(response)).toBe("verified");
+    // Asked at the point the press lands on, about the element both ends resolved to.
+    expect(confirmed).toEqual([{ ref: "t_canvas", point: FROM }]);
+  });
+
+  it("answers verified for a ref and a point inside that ref's element, asking at the ref's own centre", async () => {
+    installChrome(true);
+    const { runner, siteModes, confirmed } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(request("drag", { from: { ref: "t_canvas" }, to: FROM }));
+
+    expect(verdictOf(response)).toBe("verified");
+    expect(confirmed).toEqual([{ ref: "t_canvas", point: CENTRE }]);
+  });
+
+  it("answers verified for a point and a ref whose element it is, asking at the named point", async () => {
+    installChrome(true);
+    const { runner, siteModes, confirmed } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(request("drag", { from: FROM, to: { ref: "t_canvas" } }));
+
+    expect(verdictOf(response)).toBe("verified");
+    expect(confirmed).toEqual([{ ref: "t_canvas", point: FROM }]);
+  });
+
+  it("answers target-missed when the press point resolves to something else, and target-unconfirmed when it could not be asked", async () => {
+    installChrome(true);
+    const missed = harness({ confirmOutcome: "missed" });
+    await missed.siteModes.set(SITE, { mode: "skip-checks" });
+    expect(verdictOf(await missed.runner.run(request("drag", { from: FROM, to: TO })))).toBe("target-missed");
+
+    const unconfirmed = harness({ confirmOutcome: "unconfirmed" });
+    await unconfirmed.siteModes.set(SITE, { mode: "skip-checks" });
+    expect(verdictOf(await unconfirmed.runner.run(request("drag", { from: FROM, to: TO })))).toBe("target-unconfirmed");
+  });
+
+  it("keeps the moved-box rule for two different elements: no confirmation is asked, an unmoved box is not-moved", async () => {
+    installChrome(false);
+    const { runner, siteModes, confirmed } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(request("drag", { from: FROM, to: TO }));
+
+    expect(verdictOf(response)).toBe("not-moved");
+    expect(confirmed).toEqual([]);
+  });
+
+  it("keeps the moved-box rule for two different elements: a box that moved is verified", async () => {
+    installChrome(false);
+    // The dragged element's box, located again after the gesture, is somewhere else.
+    const { runner, siteModes, confirmed } = harness({
+      box: (_ref, nth) => (nth === 1 ? BOX : { ...BOX, x: BOX.x + 170, y: BOX.y + 70 }),
+    });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const response = await runner.run(request("drag", { from: FROM, to: TO }));
+
+    expect(verdictOf(response)).toBe("verified");
+    expect(confirmed).toEqual([]);
   });
 });

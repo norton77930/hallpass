@@ -146,7 +146,8 @@ test.describe("agent refs", () => {
       const beforeRemoval = (await call("read_page", { tabId, filter: "interactive" })) as {
         nodes: Array<{ ref?: string; name?: string }>;
       };
-      const notesRef = beforeRemoval.nodes.find((node) => node.name === "notes")?.ref;
+      // 040/FR-573: the field is named by its <label> ("Notes"), not by its name attribute.
+      const notesRef = beforeRemoval.nodes.find((node) => node.name === "Notes")?.ref;
       expect(notesRef, `no ref for "notes" before removal: ${JSON.stringify(beforeRemoval.nodes)}`).toBeTruthy();
 
       // The element is taken out of the document itself - not merely scrolled away or hidden - so

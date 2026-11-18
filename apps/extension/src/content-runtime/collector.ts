@@ -612,6 +612,35 @@ function labelledByText(element: {
 }
 
 /**
+ * A control's name taken from its `<label>`s (040/FR-573, R-551): the text of `control.labels` - a
+ * `<label for>` and a wrapping `<label>` - the way the browser's accessible name reads it, in
+ * document order and joined by one space. The label's own form controls are left out (a wrapping
+ * label's input, a select's option text), since they are the thing being named, not its name. A
+ * `display:none` label still names: the page wrote it for this control. Only controls have `labels`
+ * (and jsdom omits it on some), so anything else answers nothing. The caller bounds the result.
+ *
+ * Shared with `describeField` (039/FR-569) through `snapshotTarget`, so the receiving-field hint and a
+ * read name a control the same way.
+ */
+function labelsText(element: { labels?: ArrayLike<unknown> | null }): string | undefined {
+  const labels = element.labels;
+  if (!labels || typeof labels.length !== "number") return undefined;
+  const parts: string[] = [];
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index] as { cloneNode?: (deep: boolean) => unknown } | undefined;
+    const copy = label?.cloneNode?.(true) as
+      | { querySelectorAll?: (selector: string) => ArrayLike<{ remove?: () => void }>; textContent?: string | null }
+      | undefined;
+    if (!copy) continue;
+    const controls = copy.querySelectorAll?.("input, select, textarea, button");
+    for (let at = 0; controls && at < controls.length; at += 1) controls[at]?.remove?.();
+    const text = (copy.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (text !== "") parts.push(text);
+  }
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+/**
  * Whether the element's box lies wholly outside the viewport of its own document (004/FR-067).
  *
  * Only "wholly": an element half on screen is one a person can see and act on, and calling it
@@ -649,6 +678,7 @@ export function snapshotTarget(
     textContent?: string | null;
     getAttribute?: (name: string) => string | null;
     options?: ArrayLike<{ textContent?: string | null; label?: string }>;
+    labels?: ArrayLike<unknown> | null;
     ownerDocument?: {
       defaultView?: { innerWidth?: number; innerHeight?: number } | null;
       getElementById?: (id: string) => unknown;
@@ -756,6 +786,7 @@ export function snapshotTarget(
   const labelRaw =
     labelledByText(element) ||
     element.getAttribute?.("aria-label") ||
+    labelsText(element) ||
     (frameOwner ? element.getAttribute?.("title") || undefined : undefined) ||
     // An image's `alt` is the whole reason it is in this walk: it is the description the page wrote
     // for a reader who cannot see the picture, which is exactly the agent's position.

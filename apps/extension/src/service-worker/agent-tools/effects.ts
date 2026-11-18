@@ -1867,29 +1867,6 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         : { ok: false, outcome: "failed", reason: resolved.reason };
     };
 
-    if (tool === "drag") {
-      const from = await ref(args.from as AgentTarget);
-      if (!from.ok) return from;
-      const to = await ref(args.to as AgentTarget);
-      if (!to.ok) return to;
-      // Two point ends are compared by where they were named; two ref ends by the ref; a ref and a
-      // point are let through, and the delivery compares the points it would use (039 FR-570).
-      const fromNamed = namedPointOf(args.from as AgentTarget);
-      const toNamed = namedPointOf(args.to as AgentTarget);
-      const same =
-        fromNamed !== undefined && toNamed !== undefined
-          ? pointsAreTheSame(fromNamed, toNamed)
-          : fromNamed === undefined && toNamed === undefined && from.ref === to.ref;
-      if (same) return { ok: false, outcome: "failed", reason: "same-endpoints" };
-      return {
-        ok: true,
-        plan: {
-          capability: "browser.drag",
-          args: { targetHandle: from.ref, dropTargetHandle: to.ref },
-          repeat: 1,
-        },
-      };
-    }
     if (tool === "form_input") {
       // The one effect whose target is a `ref` and never a point: setting a control's value is
       // about that control's identity, and a coordinate names whatever is painted there when the
@@ -2262,6 +2239,26 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       // would be delivered, not on the elements they resolve to - two points on one canvas are a
       // real gesture. Nothing has been sent to the page yet.
       if (pointsAreTheSame(fromAt, toAt)) return answer(callId, "failed", "same-endpoints");
+      // 040 FR-572, D-040-1: two ends that resolve to one element have no second box to compare, so
+      // that element is not expected to move; the press point is asked about instead, as a click's is
+      // (004/T128) and before the gesture leaves, for the reason a click's is (T168). A drag between
+      // two elements asks nothing and keeps the moved-box rule below.
+      const withinOne = from.ref === to.ref;
+      const pressConfirmation = withinOne
+        ? await confirmPoint({
+            context,
+            binding,
+            ref: from.ref,
+            point: confirmationPointOf(fromRect, fromAt, fromNamed),
+            ...(fromRect.frame
+              ? {
+                  frameId: fromRect.frame.frameId,
+                  documentEpoch: fromRect.frame.documentEpoch,
+                  frameOrigin: fromRect.frame.canonicalOrigin,
+                }
+              : {}),
+          })
+        : undefined;
       // Both ends, for the path a recorded frame draws (008/FR-105), once the check let it go.
       await pointer.drag(binding.tabId, fromAt, toAt, {
         // 035 R-526: the start target's box goes with the press move; the end names no box.
@@ -2289,6 +2286,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         { ok: true, effect: "dragged", moved, documentChanged: false },
         binding,
         context,
+        pressConfirmation,
       );
     }
 

@@ -286,6 +286,8 @@ pointer and caption are up and inspect the image.
 
 ## Change log
 
+- **2026-11-19 (040, test only)**: live-1 measures the caption fade from the pointer's arrival (FR-501)
+  instead of the call's return, which varied with how long the call kept working after arrival (040 FR-574).
 - **2026-11-13 (first live run)**: the `scroll` tool's rows (directions and to-element) are `stay`, not
   `travel`: the tool scrolls through the content runtime and never sends the pointer a move, so a
   `travel` step (held until the next move) was never drawn. The `computer` tool's scroll still goes

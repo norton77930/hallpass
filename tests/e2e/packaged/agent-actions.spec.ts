@@ -188,6 +188,7 @@ test.describe("agent actions", () => {
       const controls = (await call("read_page", { tabId, filter: "interactive" })) as {
         nodes: Array<{ ref?: string; role: string; name?: string }>;
       };
+      // 040/FR-573: a control is named by its <label> text ("Agree", "Plan"), not by its name attribute.
       const control = (name: string, role: string): string => {
         const node = controls.nodes.find((candidate) => candidate.name === name && candidate.ref !== undefined);
         expect(node, `read_page offered no ${role} named '${name}': ${JSON.stringify(controls.nodes)}`).toBeTruthy();
@@ -195,11 +196,11 @@ test.describe("agent actions", () => {
         return node?.ref as string;
       };
 
-      const ticked = await call("form_input", { tabId, ref: control("agree", "checkbox"), value: true });
+      const ticked = await call("form_input", { tabId, ref: control("Agree", "checkbox"), value: true });
       expect(ticked).toMatchObject({ observed: { effect: "value-set", valueMatched: true, verified: true } });
       await expect(form.locator('input[name="agree"]')).toBeChecked();
 
-      const chosen = await call("form_input", { tabId, ref: control("plan", "combobox"), value: "pro" });
+      const chosen = await call("form_input", { tabId, ref: control("Plan", "combobox"), value: "pro" });
       expect(chosen).toMatchObject({ observed: { effect: "value-set", valueMatched: true, verified: true } });
       await expect(form.locator('select[name="plan"]')).toHaveValue("pro");
 
