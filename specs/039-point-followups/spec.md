@@ -94,3 +94,9 @@ on label retargeting and positional drags was consulted.
 ## Assumptions
 
 - Point coordinates and frames behave as in 038; nothing here changes where a press is delivered.
+
+## Change Log
+
+| Date | Change | Origin |
+| --- | --- | --- |
+| 2026-11-19 | Follow-ups from the 039 review, settled by spec 041. A (a frame's stale focus passing FR-568) does not reproduce in Chromium 151, so it is pinned by a packaged test and needs no code. B (an editable body in a cross-site frame) is proven with the window in front and behind. C (the FR-568 check failing open when it cannot run) is fixed: the check refuses with `focus-unconfirmed` before any key. | spec 041, owner 2026-11-19 |

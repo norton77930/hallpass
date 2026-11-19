@@ -92,7 +92,10 @@ export type CapabilityResultStatus = (typeof CAPABILITY_RESULT_STATUSES)[number]
 export const ATTENTION_REQUIRED_CAUSES = [
   /** The effect replaced or navigated the document; bindings to it are dead and a plan expires. */
   "document-changed",
-  /** A key press whose target lost focus: delivered, but not to the element that was reviewed. */
+  /**
+   * A `type` or `key` whose named target did not hold focus: the check ran and found focus elsewhere. Before
+   * any key the keys are held back; after a key, it was delivered, but not to the element that was reviewed.
+   */
   "focus-lost",
   /** A hover whose target is no longer shown. */
   "target-not-visible",
@@ -113,6 +116,13 @@ export const ATTENTION_REQUIRED_CAUSES = [
    * the point landed. Reporting the two the same way would claim an observation nobody made.
    */
   "target-unconfirmed",
+  /**
+   * A `type` or `key` whose focus check could not run (041): the frame or document that would have said
+   * where focus is was gone or never answered within its budget. Distinct from `focus-lost`, which
+   * means the check ran and found focus elsewhere - the same split `target-unconfirmed` makes for
+   * a click. Nothing is known about where the keys went, or, before any key, none was sent.
+   */
+  "focus-unconfirmed",
   /** The executor threw after the effect may have begun; nothing observed it either way. */
   "execute-uncertain",
   /**

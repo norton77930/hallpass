@@ -560,6 +560,46 @@ function receivedByHint(tool: "type" | "key", field: FocusReceivedBy): string {
 }
 
 /**
+ * The most one focus check may take from its first ask: each ask is cut off at what is left of it, so a hung
+ * ask cannot hold the call, and a check before the keys re-asks an unknown answer until it is spent (041 D-041-6).
+ */
+const FOCUS_UNKNOWN_BUDGET_MS = 2000;
+
+/**
+ * A confirmed focus answer settles inside this poll. The check after a key re-asks an unknown answer only
+ * inside it (the key is sent, and a key that navigates must not wait), but an ask already under way is
+ * still given the whole budget above, so a renderer that is busy after the key is awaited, not dropped.
+ */
+const FOCUS_POLL_MS = 50;
+
+const TIMED_OUT = Symbol("timed-out");
+
+/** `work`'s answer, or `TIMED_OUT` once `ms` has passed - on a real timer, so a hung ask cannot hold the call. */
+function withinMs<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cutoff = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), ms);
+  });
+  return Promise.race([work, cutoff]).finally(() => clearTimeout(timer));
+}
+
+/** What a `key` says when its target did not hold focus before the key: the miss was seen, so the key was held back. */
+const KEY_NOT_SENT_FOCUS_LOST_HINT =
+  "The key was not sent: focus was not on the element named. Read the page again before retrying.";
+
+/**
+ * What a call says when its focus check could not run (041 D-041-4). Before any key it says nothing
+ * was sent; after the key it says the key went and where focus ended up is not known. Either way the
+ * agent is told to read the page again, because the frame or document it named may be gone.
+ */
+function focusUnconfirmedHint(tool: "type" | "key", sent: boolean): string {
+  const what = tool === "type" ? "text" : "key";
+  return sent
+    ? `The ${what} was sent, but where focus ended up could not be checked. Read the page again before relying on it.`
+    : `The ${what} was not sent: where focus is could not be checked (the frame or page may have changed under the click). Read the page again before retrying.`;
+}
+
+/**
  * The tabs a press opened, and the one move that makes them this session's (015 FR-200, contracts
  * rule 7). Seeing a tab open does not hold it; `tabs_claim` does. One tab is named with its
  * address, as the contract words it; an address too long for the hint, or several tabs, are named
@@ -1792,7 +1832,16 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
    * queued the event, not once the renderer has run the page's own handler and settled focus
    * (measured live, T128/B65) - a constant sleep either over-pays once focus has already settled
    * or still loses the race on a loaded machine. This checks immediately, then again at short
-   * intervals up to a ceiling, and stops the moment focus is confirmed.
+   * intervals, and stops the moment focus is confirmed.
+   *
+   * Bounded by time, not by attempts (041 FR-585). A confirmed miss settles in the short poll
+   * (`FOCUS_POLL_MS` of polling, counted in sleeps as before): the renderer either moved focus by then or
+   * it did not, and an unknown answer after a miss does not undo it. A check that has seen no miss and
+   * could not run (`undefined`) is asked again until `retryWindowMs` after the first ask - `FOCUS_UNKNOWN_BUDGET_MS`
+   * before the keys, `FOCUS_POLL_MS` after a key. Each ask, whenever it starts, is cut off at what is
+   * left of `FOCUS_UNKNOWN_BUDGET_MS`: one ask can otherwise wait the content broker's own deadline
+   * (10 s), six times over. A reply that comes after its ask was cut off is ignored, and an unknown
+   * answer never replaces a confirmed miss seen earlier in the same check (a later hit still wins).
    */
   async function pollFocusRetained(
     context: AgentToolContext,
@@ -1800,11 +1849,19 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     ref: string,
     /** The frame that claimed `ref` (004/T155); absent asks the top document. */
     frame?: TargetRect["frame"],
+    retryWindowMs: number = FOCUS_UNKNOWN_BUDGET_MS,
   ): Promise<{ retained: boolean | undefined; receivedBy?: FocusReceivedBy }> {
-    const ceilingMs = 50;
+    const settleMs = FOCUS_POLL_MS;
     const intervalMs = 10;
+    const startedAt = now();
+    let last: boolean | undefined;
     for (let waited = 0; ; waited += intervalMs) {
-      const answered = await confirmFocus({
+      const spent = now() - startedAt;
+      // The retry window ends an unknown check; a confirmed miss is settled by its own poll below. Either way
+      // no ask starts once the budget is spent, so a hung ask holds the call no longer than the budget.
+      if (spent >= FOCUS_UNKNOWN_BUDGET_MS || (last === undefined && spent >= retryWindowMs)) return { retained: last };
+      const left = FOCUS_UNKNOWN_BUDGET_MS - spent;
+      const asked = confirmFocus({
         context,
         binding,
         ref,
@@ -1812,10 +1869,22 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
           ? { frameId: frame.frameId, documentEpoch: frame.documentEpoch, frameOrigin: frame.canonicalOrigin }
           : {}),
       });
-      if (answered || waited >= ceilingMs) {
+      // A reply that arrives after the cut-off, or a rejection nobody is waiting for, is not news.
+      void asked.catch(() => undefined);
+      const raced = await withinMs(asked, left);
+      const answered = raced === TIMED_OUT ? undefined : raced;
+      if (answered === true || typeof answered === "object") {
         return typeof answered === "object"
           ? { retained: true, receivedBy: answered.receivedBy }
-          : { retained: answered };
+          : { retained: true };
+      }
+      if (answered === false) last = false;
+      // A confirmed miss settles on 50 ms of polling (as in 0.26.2), whatever came after it; an unknown answer
+      // never replaces it. Only a check that has seen no miss is ended by the retry window.
+      if (last === false && waited >= settleMs) return { retained: false };
+      const spentNow = now() - startedAt;
+      if (spentNow >= FOCUS_UNKNOWN_BUDGET_MS || (last === undefined && spentNow >= retryWindowMs)) {
+        return { retained: last };
       }
       await sleep(intervalMs);
     }
@@ -1985,6 +2054,8 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     press?: { watch: PressWatch; link: boolean },
     /** What the call itself has to say beside the verdict (039 FR-569); a press's own hint comes first. */
     hint?: string,
+    /** The focus check could not run (041): the verdict is `focus-unconfirmed`, whatever `focusRetained` holds. */
+    focusUnconfirmed?: boolean,
   ): Promise<AgentNativeResponse> {
     // What was open before this effect, so a dialog found afterwards can be told from one that was
     // already there (008/T226): only a *new* one is this call's own doing.
@@ -2007,6 +2078,7 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       probe,
       tab: binding.tabId,
       ...(pointConfirmation === undefined ? {} : { pointConfirmation: pointConfirmation.outcome }),
+      ...(focusUnconfirmed === true ? { focusUnconfirmed } : {}),
       ...(press === undefined
         ? {}
         : {
@@ -2566,6 +2638,26 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
           context,
         );
       }
+      // 041 FR-582: a check that could not run is not a pass. The frame the click went to may be gone,
+      // and focus may sit in another field; no character is sent until the agent has read the page again.
+      if (focus !== undefined && focusRetained === undefined) {
+        return verifyDelivered(
+          callId,
+          "browser.enter-text",
+          {
+            ok: true,
+            effect: "text-entered",
+            charactersChanged: 0,
+            documentChanged: false,
+          } as Extract<PageExecutionOutcome, { ok: true }>,
+          binding,
+          context,
+          undefined,
+          undefined,
+          focusUnconfirmedHint("type", false),
+          true,
+        );
+      }
       // The keys themselves, with or without a target above (014 FR-181).
       const typed = {
         ok: true,
@@ -2597,6 +2689,30 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     }
 
     const key = String(args.key ?? "");
+    // 041 FR-583: the check `type` runs before its first character, `key` runs before its key. A key
+    // is not undone by the answer that follows it (an Enter submits, a Delete deletes), so a target that
+    // did not hold focus, or whose focus could not be read, is given no key at all.
+    const before =
+      clickedRef === undefined ? undefined : await pollFocusRetained(context, binding, clickedRef, clickedFrame);
+    if (before !== undefined && before.retained !== true) {
+      return verifyDelivered(
+        callId,
+        "browser.key-press",
+        {
+          ok: true,
+          effect: "key-pressed",
+          key,
+          documentChanged: false,
+          ...(before.retained === false ? { focusRetained: false } : {}),
+        } as Extract<PageExecutionOutcome, { ok: true }>,
+        binding,
+        context,
+        undefined,
+        undefined,
+        before.retained === undefined ? focusUnconfirmedHint("key", false) : KEY_NOT_SENT_FOCUS_LOST_HINT,
+        before.retained === undefined,
+      );
+    }
     if (!(await keysMayLeave())) return siteMovedAnswer(callId);
     const pressedDialog = await racedDelivery(beforeKeys(), () =>
       keyboard.press(binding.tabId, key, {
@@ -2610,10 +2726,14 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
     // way the click family confirms its point - fresh, after delivery, never assumed. An absent
     // target names nothing to check focus against, so it verifies exactly as before (undefined
     // stays undefined, the pre-existing behaviour this fix does not touch). `pollFocusRetained`
-    // is the bounded poll, not a fixed wait (T128 follow-up, B66).
+    // is the bounded poll, not a fixed wait (T128 follow-up, B66). An answer that could not be had is
+    // `focus-unconfirmed`, never `focus-lost` (041 FR-584): the key was sent and nothing observed where it went.
     const focus =
-      clickedRef === undefined ? undefined : await pollFocusRetained(context, binding, clickedRef, clickedFrame);
+      clickedRef === undefined
+        ? undefined
+        : await pollFocusRetained(context, binding, clickedRef, clickedFrame, FOCUS_POLL_MS);
     const focusRetained = focus?.retained;
+    const focusUnconfirmed = focus !== undefined && focusRetained === undefined;
     return verifyDelivered(
       callId,
       "browser.key-press",
@@ -2628,7 +2748,12 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
       context,
       undefined,
       undefined,
-      focus?.receivedBy === undefined ? undefined : receivedByHint("key", focus.receivedBy),
+      focusUnconfirmed
+        ? focusUnconfirmedHint("key", true)
+        : before?.receivedBy === undefined
+          ? undefined
+          : receivedByHint("key", before.receivedBy),
+      focusUnconfirmed,
     );
   }
 

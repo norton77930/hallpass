@@ -208,6 +208,19 @@ const PAGE_FILES = [
    */
   "popover-038",
   "cover-038",
+  /**
+   * 041 FR-581: `frame-body-041` frames `frame-body-041-child` from the second site (`__OOPIF_ORIGIN__`, an
+   * out-of-process frame), whose whole `body` is contenteditable and echoes its text to the top document.
+   */
+  "frame-body-041",
+  "frame-body-041-child",
+  /**
+   * 041 US3: `frame-removal-041` frames `frame-removal-041-child` (same site) whose field, on taking focus, moves
+   * focus to a top-document input and removes its own frame (or replaces its document): the focus check that
+   * follows has no frame to ask.
+   */
+  "frame-removal-041",
+  "frame-removal-041-child",
 ] as const;
 
 type PageFileName = (typeof PAGE_FILES)[number];

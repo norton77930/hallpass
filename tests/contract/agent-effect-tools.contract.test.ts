@@ -128,6 +128,20 @@ describe("T026 agent effect tool contracts", () => {
       },
       "a hover the page hid",
     );
+    // 041 FR-587: a focus check that could not run is its own verdict, never a miss.
+    expectAccepted(
+      result,
+      {
+        observed: {
+          effect: "text-entered",
+          documentChanged: false,
+          verified: false,
+          verdict: "focus-unconfirmed",
+          charactersChanged: 0,
+        },
+      },
+      "text refused because the focus check could not run",
+    );
     expectRejected(result, { observed: { effect: "activated", documentChanged: false } }, "no verification");
     // 003/B2: an unverified observation has to say *why*, in the closed causes' own words.
     expectRejected(

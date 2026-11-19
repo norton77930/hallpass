@@ -1378,6 +1378,10 @@ describe("T028 agent effect tools", () => {
     expect(lostResponse.result).toMatchObject({
       observed: { effect: "key-pressed", key: "Enter", verified: false, verdict: "focus-lost" },
     });
+    // 041 FR-583: the check runs before the key now, so a target that never held focus is given no key.
+    expect(
+      lost.input.commands.some((command) => command.method === "Input.dispatchKeyEvent"),
+    ).toBe(false);
   });
 
   /**
@@ -1459,8 +1463,9 @@ describe("T028 agent effect tools", () => {
     expect(response.result).toMatchObject({
       observed: { effect: "key-pressed", key: "Enter", verified: true, verdict: "verified" },
     });
-    expect(calls).toBe(2);
-    // One short wait between the two checks, not one fixed 50ms wait before the only check.
+    // Two asks before the key (miss, then hit) and one after it (041 FR-583).
+    expect(calls).toBe(3);
+    // One short wait between the first two checks, not one fixed 50ms wait before the only check.
     expect(sleeps).toEqual([10]);
   });
 

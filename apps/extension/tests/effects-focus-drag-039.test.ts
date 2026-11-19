@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentNativeRequest } from "@hallpass/contracts";
 import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import {
   createAgentEffects,
   createFocusConfirmer,
   type FocusConfirmer,
+  type FocusConfirmResult,
   type TargetConfirmer,
   type TargetLocator,
 } from "../src/service-worker/agent-tools/effects.js";
@@ -81,6 +82,8 @@ function harness(
     confirmOutcome?: "hit" | "missed" | "unconfirmed";
     /** The box a located ref has, the n-th time it is located (default: the one box, never moving). */
     box?: (ref: string, nth: number) => typeof BOX;
+    /** The worker's clock and its sleep (041 FR-585): a test that fakes one fakes both. */
+    clock?: { now: () => number; sleep: (ms: number) => Promise<void> };
   } = {},
 ) {
   const input = testInputAttachments();
@@ -121,6 +124,7 @@ function harness(
     probe: async () => ({ ok: true, documentEpoch: "doc-1", canonicalOrigin: SITE }),
     readFrameFocus: oneDocumentFocus,
     settleMs: 0,
+    ...(options.clock ? { now: options.clock.now, sleep: options.clock.sleep } : {}),
   });
   return { runner, siteModes, input, located, focusAsked, confirmed };
 }
@@ -141,6 +145,18 @@ function mousePoints(commands: Command[]) {
   return commands
     .filter((command) => command.method === "Input.dispatchMouseEvent")
     .map((command) => ({ type: command.params.type, x: command.params.x, y: command.params.y }));
+}
+
+/** A clock the worker's own sleep moves, so a retry loop that waits for time costs a test none (041). */
+function fakeClock() {
+  let at = 0;
+  return {
+    now: () => at,
+    sleep: async (ms: number) => {
+      at += ms;
+    },
+    at: () => at,
+  };
 }
 
 const keysSent = (commands: Command[]) =>
@@ -252,14 +268,19 @@ describe("039/T1090 the focus check after a placing click (FR-568, FR-569)", () 
     expect(response.hint).toBeUndefined();
   });
 
-  it("does not type at all when the focus check could not run: the answer stays what it was (T161)", async () => {
-    const { runner, siteModes } = harness({ confirmFocus: async () => undefined });
+  it("does not type at all when the focus check could not run: it refuses focus-unconfirmed (041 FR-582, T161)", async () => {
+    const { runner, siteModes, input } = harness({ confirmFocus: async () => undefined, clock: fakeClock() });
     await siteModes.set(SITE, { mode: "skip-checks" });
 
     const response = await runner.run(request("type", { target: POINT, text: "a", mode: "insert" }));
 
     expect(response.outcome).toBe("ok");
-    expect(response.hint).toBeUndefined();
+    expect(response.result).toMatchObject({
+      observed: { effect: "text-entered", charactersChanged: 0, verified: false, verdict: "focus-unconfirmed" },
+    });
+    expect(keysSent(input.commands)).toBe(false);
+    expect(response.hint).toMatch(/could not be checked/);
+    expect(response.hint).toMatch(/read the page again/i);
   });
 
   it("checks key with a target against the clicked ref too, and names the receiving field", async () => {
@@ -282,6 +303,313 @@ describe("039/T1090 the focus check after a placing click (FR-568, FR-569)", () 
     await runner.run(request("type", { target: POINT, text: "abc", mode: "insert" }));
 
     expect(focusAsked).toHaveLength(1);
+  });
+});
+
+describe("041 the focus check before the keys: refuse when it cannot run (FR-582..585)", () => {
+  beforeEach(() => installChrome(false));
+  afterEach(() => {
+    vi.useRealTimers();
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const POINT = { x: 310, y: 260 };
+  const keyEvents = (commands: Command[]) =>
+    commands.filter((command) => command.method === "Input.dispatchKeyEvent" || command.method === "Input.insertText");
+  const observed = (response: { result?: unknown }) => (response.result as { observed?: Record<string, unknown> }).observed;
+
+  describe("key with a named target checks before the key (FR-583)", () => {
+    it("a confirmed miss answers focus-lost and no key is delivered", async () => {
+      const { runner, siteModes, input } = harness({ confirmFocus: async () => false });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Enter" }));
+
+      expect(observed(response)).toMatchObject({ effect: "key-pressed", verified: false, verdict: "focus-lost" });
+      expect(keyEvents(input.commands)).toEqual([]);
+      expect(response.hint).toMatch(/key was not sent/);
+    });
+
+    it("an unknown check answers focus-unconfirmed and no key is delivered", async () => {
+      const { runner, siteModes, input } = harness({ confirmFocus: async () => undefined, clock: fakeClock() });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Backspace" }));
+
+      expect(observed(response)).toMatchObject({ effect: "key-pressed", verified: false, verdict: "focus-unconfirmed" });
+      expect(keyEvents(input.commands)).toEqual([]);
+      expect(response.hint).toMatch(/read the page again/i);
+    });
+
+    it("names the field that holds focus when it is on the path but not the element named", async () => {
+      const { runner, siteModes, input } = harness({
+        confirmFocus: async () => ({ retained: true, receivedBy: { role: "textbox", label: "Full name" } }),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Backspace" }));
+
+      expect(observed(response)).toMatchObject({ verified: true, verdict: "verified" });
+      expect(keyEvents(input.commands).length).toBeGreaterThan(0);
+      expect(response.hint).toContain("Full name");
+    });
+  });
+
+  describe("the check after the key (FR-584)", () => {
+    /** Answers the first ask (before the key) as given, and every later one (after it) as `after`. */
+    const askedTwice = (before: FocusConfirmResult, after: FocusConfirmResult) => {
+      let asks = 0;
+      return async () => {
+        asks += 1;
+        return asks === 1 ? before : after;
+      };
+    };
+
+    it("an unknown answer after the key is focus-unconfirmed, not focus-lost; the key was sent", async () => {
+      const { runner, siteModes, input } = harness({ confirmFocus: askedTwice(true, undefined), clock: fakeClock() });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Backspace" }));
+
+      expect(observed(response)).toMatchObject({ effect: "key-pressed", verified: false, verdict: "focus-unconfirmed" });
+      expect(keyEvents(input.commands).length).toBeGreaterThan(0);
+    });
+
+    it("a confirmed miss after the key is still focus-lost: the key was sent and the page moved focus", async () => {
+      const { runner, siteModes, input } = harness({ confirmFocus: askedTwice(true, false) });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Backspace" }));
+
+      expect(observed(response)).toMatchObject({ effect: "key-pressed", verified: false, verdict: "focus-lost" });
+      expect(keyEvents(input.commands).length).toBeGreaterThan(0);
+    });
+
+    it("an unknown answer after the key is re-asked only inside the 50 ms poll, not the 2000 ms budget", async () => {
+      const clock = fakeClock();
+      const asks: number[] = [];
+      let asked = 0;
+      const { runner, siteModes } = harness({
+        clock,
+        confirmFocus: async () => {
+          asked += 1;
+          if (asked === 1) return true;
+          asks.push(clock.at());
+          return undefined;
+        },
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Backspace" }));
+
+      expect(observed(response)).toMatchObject({ verdict: "focus-unconfirmed" });
+      expect(asks.length).toBeGreaterThan(1);
+      expect(asks[asks.length - 1]! - asks[0]!).toBeLessThanOrEqual(50);
+    });
+
+    it("an ask after the key that never answers is cut off at the 2000 ms budget: the call ends within it plus one interval", async () => {
+      vi.useFakeTimers();
+      let asked = 0;
+      const { runner, siteModes, input } = harness({
+        confirmFocus: () => (++asked === 1 ? Promise.resolve(true) : new Promise<boolean>(() => {})),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      let answered: Awaited<ReturnType<typeof runner.run>> | undefined;
+      const call = runner.run(request("key", { target: POINT, key: "Backspace" })).then((done) => {
+        answered = done;
+      });
+      await vi.advanceTimersByTimeAsync(2000 + 10);
+      expect(answered).toBeDefined();
+      await call;
+
+      expect(answered && observed(answered)).toMatchObject({ effect: "key-pressed", verdict: "focus-unconfirmed" });
+      expect(keyEvents(input.commands).length).toBeGreaterThan(0);
+    });
+
+    it("an ask after the key that answers late (120 ms, a busy renderer) is awaited: verified, not dropped", async () => {
+      vi.useFakeTimers();
+      let asked = 0;
+      const { runner, siteModes } = harness({
+        confirmFocus: () =>
+          ++asked === 1 ? Promise.resolve(true) : new Promise<boolean>((r) => setTimeout(() => r(true), 120)),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+      let answered: Awaited<ReturnType<typeof runner.run>> | undefined;
+      const call = runner.run(request("key", { target: POINT, key: "Enter" })).then((d) => {
+        answered = d;
+      });
+      await vi.advanceTimersByTimeAsync(400);
+      await call;
+      expect(answered && observed(answered)).toMatchObject({ verified: true, verdict: "verified" });
+    });
+
+    it("a miss that arrives late after the key (25 ms per ask) still settles as focus-lost", async () => {
+      vi.useFakeTimers();
+      let asked = 0;
+      const { runner, siteModes } = harness({
+        confirmFocus: () =>
+          ++asked === 1 ? Promise.resolve(true) : new Promise<boolean>((r) => setTimeout(() => r(false), 25)),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+      let answered: Awaited<ReturnType<typeof runner.run>> | undefined;
+      const call = runner.run(request("key", { target: POINT, key: "Backspace" })).then((d) => { answered = d; });
+      await vi.advanceTimersByTimeAsync(200);
+      await call;
+      expect(answered && observed(answered)).toMatchObject({ verdict: "focus-lost" });
+    });
+
+    it("a miss after the key is settled by 50 ms of polling, not by the clock: five misses then a hit is verified", async () => {
+      const clock = fakeClock();
+      let asked = 0;
+      const { runner, siteModes } = harness({
+        clock,
+        // The ask before the key, five misses, then the hit - what 0.26.2's six-ask poll accepted.
+        confirmFocus: async () => (++asked === 1 ? true : asked <= 6 ? false : true),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { target: POINT, key: "Backspace" }));
+
+      expect(observed(response)).toMatchObject({ verified: true, verdict: "verified" });
+      expect(asked).toBe(7);
+    });
+
+    it("a miss seen after the key stays focus-lost when a later ask never answers (the guard on `last`)", async () => {
+      vi.useFakeTimers();
+      let asked = 0;
+      const { runner, siteModes } = harness({
+        // Before the key: a hit. After it: a miss, then an ask that never answers.
+        confirmFocus: () =>
+          ++asked === 1 ? Promise.resolve(true) : asked === 2 ? Promise.resolve(false) : new Promise<boolean>(() => {}),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+      let answered: Awaited<ReturnType<typeof runner.run>> | undefined;
+      const call = runner.run(request("key", { target: POINT, key: "Backspace" })).then((d) => {
+        answered = d;
+      });
+      await vi.advanceTimersByTimeAsync(2000 + 10);
+      expect(answered).toBeDefined();
+      await call;
+
+      expect(answered && observed(answered)).toMatchObject({ verified: false, verdict: "focus-lost" });
+    });
+
+    it("a key with no target names nothing to check: it is verified, never focus-lost", async () => {
+      const { runner, siteModes, input, focusAsked } = harness({ confirmFocus: async () => false });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("key", { key: "ArrowDown" }));
+
+      expect(observed(response)).toMatchObject({ effect: "key-pressed", verified: true, verdict: "verified" });
+      expect(focusAsked).toEqual([]);
+      expect(keyEvents(input.commands).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("the check is bounded by time, not by attempts (FR-585)", () => {
+    it("a confirmed miss still settles inside the short poll, not the unknown budget", async () => {
+      const clock = fakeClock();
+      const asks: number[] = [];
+      const { runner, siteModes } = harness({
+        clock,
+        confirmFocus: async () => {
+          asks.push(clock.at());
+          return false;
+        },
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("type", { target: POINT, text: "a", mode: "insert" }));
+
+      expect(observed(response)).toMatchObject({ verdict: "focus-lost" });
+      expect(asks.length).toBeGreaterThan(1);
+      expect(asks[asks.length - 1]! - asks[0]!).toBeLessThanOrEqual(60);
+    });
+
+    it("an unknown answer is asked again until 2000 ms after the first ask, then refused", async () => {
+      const clock = fakeClock();
+      const asks: number[] = [];
+      const { runner, siteModes, input } = harness({
+        clock,
+        confirmFocus: async () => {
+          asks.push(clock.at());
+          return undefined;
+        },
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("type", { target: POINT, text: "a", mode: "insert" }));
+
+      expect(observed(response)).toMatchObject({ verdict: "focus-unconfirmed", charactersChanged: 0 });
+      const spent = asks[asks.length - 1]! - asks[0]!;
+      expect(spent).toBeGreaterThanOrEqual(1900);
+      expect(spent).toBeLessThanOrEqual(2000);
+      expect(keysSent(input.commands)).toBe(false);
+    });
+
+    it("a miss followed by prompt unknown answers settles as focus-lost inside the 50 ms poll, no key sent", async () => {
+      const clock = fakeClock();
+      const asks: number[] = [];
+      const { runner, siteModes, input } = harness({
+        clock,
+        confirmFocus: async () => {
+          asks.push(clock.at());
+          return asks.length === 1 ? false : undefined;
+        },
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("type", { target: POINT, text: "a", mode: "insert" }));
+
+      expect(observed(response)).toMatchObject({ verified: false, verdict: "focus-lost", charactersChanged: 0 });
+      expect(keysSent(input.commands)).toBe(false);
+      expect(asks[asks.length - 1]! - asks[0]!).toBeLessThanOrEqual(60);
+    });
+
+    it("a miss and then a hit before the key goes on to type", async () => {
+      const clock = fakeClock();
+      let asked = 0;
+      const { runner, siteModes, input } = harness({ clock, confirmFocus: async () => ++asked > 1 });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("type", { target: POINT, text: "a", mode: "insert" }));
+
+      expect(observed(response)).toMatchObject({ verified: true, verdict: "verified" });
+      expect(keysSent(input.commands)).toBe(true);
+    });
+
+    it("an unknown answer that turns into a confirmed one inside the budget goes on to type", async () => {
+      const clock = fakeClock();
+      const { runner, siteModes, input } = harness({
+        clock,
+        confirmFocus: async () => (clock.at() >= 300 ? true : undefined),
+      });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      const response = await runner.run(request("type", { target: POINT, text: "a", mode: "insert" }));
+
+      expect(observed(response)).toMatchObject({ verified: true, verdict: "verified" });
+      expect(keysSent(input.commands)).toBe(true);
+    });
+
+    it("an ask that never answers is cut off at the budget: the call ends within 2000 ms plus one interval", async () => {
+      vi.useFakeTimers();
+      const { runner, siteModes, input } = harness({ confirmFocus: () => new Promise<boolean>(() => {}) });
+      await siteModes.set(SITE, { mode: "skip-checks" });
+
+      let answered: Awaited<ReturnType<typeof runner.run>> | undefined;
+      const call = runner.run(request("type", { target: POINT, text: "a", mode: "insert" })).then((done) => {
+        answered = done;
+      });
+      // Drive the click and the first ask, then spend exactly the budget and one poll interval.
+      await vi.advanceTimersByTimeAsync(2000 + 10);
+      expect(answered).toBeDefined();
+      await call;
+
+      expect(answered && observed(answered)).toMatchObject({ verdict: "focus-unconfirmed", charactersChanged: 0 });
+      expect(keysSent(input.commands)).toBe(false);
+    });
   });
 });
 

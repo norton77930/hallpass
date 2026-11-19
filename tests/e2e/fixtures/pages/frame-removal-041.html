@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame removal 041</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  input { font: inherit; padding: 4px; width: 260px; }
+  iframe { display: block; width: 360px; height: 90px; border: 1px solid #999; margin-top: 8px; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">A frame field whose focus takes its own frame away</h1>
+<p>
+  The field in the frame, when it takes focus, hands focus to the input below and then removes its own frame
+  (or replaces its own document, by `window.hp041Mode`). A focus check asked afterwards has no frame to ask.
+</p>
+<label for="top-field">Top field</label>
+<input type="text" id="top-field" value="keep" aria-label="top-field-041">
+<div id="holder"></div>
+<p id="top-echo">top field: keep</p>
+<script>
+  // `remove` (default) takes the frame out of the page; `replace` navigates its document away.
+  window.hp041Mode = 'remove';
+  var topField = document.getElementById('top-field');
+  topField.addEventListener('input', function () {
+    document.getElementById('top-echo').textContent = 'top field: ' + topField.value;
+  });
+  // A fresh frame with a fresh field, and the top field back to its text, for the next call.
+  window.hp041Rebuild = function () {
+    topField.value = 'keep';
+    document.getElementById('top-echo').textContent = 'top field: keep';
+    var holder = document.getElementById('holder');
+    holder.textContent = '';
+    var frame = document.createElement('iframe');
+    frame.id = 'gone-frame';
+    frame.title = 'frame that goes away';
+    frame.src = '/frame-removal-041-child';
+    holder.appendChild(frame);
+  };
+  window.hp041Rebuild();
+</script>
+</body>
+</html>

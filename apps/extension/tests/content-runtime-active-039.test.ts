@@ -31,6 +31,7 @@ function frame(type: "content.probe" | "content.resolve-active-element", payload
 
 type Reply = {
   ok: boolean;
+  reason?: string;
   outcome?: string;
   role?: string;
   label?: string;
@@ -149,6 +150,23 @@ describe("content.resolve-active-element with a targetHandle (039/FR-568)", () =
     const { ask } = setup(document.querySelector("#text") as HTMLElement);
 
     expect(ask()).toMatchObject({ ok: true, outcome: "missed" });
+  });
+
+  it("answers that it could not check, not a miss, when the registry cannot resolve the named handle (041 FR-586)", () => {
+    document.body.innerHTML = '<input id="a" type="text" /><input id="b" type="text" />';
+    (document.querySelector("#b") as HTMLInputElement).focus();
+    const context = createContentRuntimeContext({ documentEpoch: "doc-1", canonicalOrigin: "https://example.test" });
+    handleContentMessage(frame("content.probe", {}), undefined, context);
+
+    // No handle was ever issued here: nothing was compared with the focused element.
+    const reply = handleContentMessage(
+      frame("content.resolve-active-element", { generalPageReadGrantId: "grant-general", targetHandle: "tgt-gone" }),
+      undefined,
+      context,
+    ) as Reply;
+
+    expect(reply).toMatchObject({ ok: false, reason: "stale-target" });
+    expect(reply.outcome).toBeUndefined();
   });
 
   it("still mints the focused element's own handle when no targetHandle is named (003)", () => {

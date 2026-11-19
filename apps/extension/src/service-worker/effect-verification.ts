@@ -33,6 +33,7 @@ export const POST_EFFECT_VERDICTS = [
   "not-moved",
   "target-missed",
   "target-unconfirmed",
+  "focus-unconfirmed",
 ] as const satisfies readonly AttentionRequiredCause[];
 
 export type EffectVerdict = "verified" | (typeof POST_EFFECT_VERDICTS)[number];
@@ -98,6 +99,13 @@ export type VerifyEffectInput = {
    */
   pointConfirmation?: "hit" | "missed" | "unconfirmed" | undefined;
   /**
+   * A `type` or `key` whose focus check could not run (041 FR-582, FR-584): the document that would
+   * say where focus is never answered. Kept beside `executed.focusRetained`, which stays a fact the
+   * check observed - `false` is a miss it saw, absent is nothing it saw - so that "could not ask" is
+   * never read as either a loss or a success.
+   */
+  focusUnconfirmed?: boolean | undefined;
+  /**
    * Told the moment the settle wait ends, before the re-probe (015/T406, FR-200, FR-202).
    *
    * A press's outcomes - where the tab is now, the tabs and downloads it started - are collected
@@ -114,8 +122,11 @@ export type VerifyEffectInput = {
  * the document. A click, text entry or key press is verified only when the runtime saw no
  * synchronous URL change, the leased tab reported no new top-level document during the settle
  * window, and a re-probe of the already-bound runtime returns the same document epoch and origin.
- * A key press additionally needs the focused element to have kept its identity (002 R-026); that
- * is checked last, once the document is known to be intact, so the cause it names is exact.
+ * A key press or typed text with a named target additionally needs the focused element to have kept its
+ * identity (002 R-026); that is checked last, once the document is known to be intact, so the cause it
+ * names is exact. `focus-lost` says the check ran and found focus elsewhere (the key may have been held
+ * back before it was sent, or delivered and then seen to have moved focus); `focus-unconfirmed` says the
+ * check could not run (041).
  */
 export async function verifyPageEffect(input: VerifyEffectInput): Promise<EffectVerdict> {
   const { executed, effect, capability } = input;
@@ -167,6 +178,7 @@ export async function verifyPageEffect(input: VerifyEffectInput): Promise<Effect
       // arithmetic that click confirms. `focusRetained` is absent when nothing was clicked first (no
       // target named), which verifies exactly as before; `false` is a real check that ran and found
       // the caret somewhere else.
+      if (input.focusUnconfirmed === true) return "focus-unconfirmed";
       return executed.focusRetained === false ? "focus-lost" : "verified";
     // The click family verifies the same way an activation does for the document: the events were
     // delivered and the document they were delivered into is still the one they were aimed at. A
@@ -195,7 +207,11 @@ export async function verifyPageEffect(input: VerifyEffectInput): Promise<Effect
     case "browser.form-input":
       return "verified";
     case "browser.key-press":
-      return executed.focusRetained === true ? "verified" : "focus-lost";
+      // 041 FR-584: `focusRetained` is absent when no target was named, and a key with nothing to
+      // check focus against is verified exactly as typed text is; only a check that ran and found
+      // focus elsewhere is `focus-lost`, and a check that could not run is `focus-unconfirmed`.
+      if (input.focusUnconfirmed === true) return "focus-unconfirmed";
+      return executed.focusRetained === false ? "focus-lost" : "verified";
     case "browser.hover":
       // 004/T150: `pointConfirmation` is the browser-level path's own check that the delivered
       // point actually resolves to the target (004/T128) - the only evidence a hover has, since its

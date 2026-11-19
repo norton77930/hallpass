@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame removal 041 child</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  input { font: inherit; padding: 4px; width: 260px; }
+</style>
+</head>
+<body>
+<label for="child-field">Child field</label>
+<input type="text" id="child-field" aria-label="Child field">
+<script>
+  // 041 US3: taking focus is what takes the frame away. Focus goes to the top document's input
+  // first, synchronously, with its text selected, so a key sent afterwards would change that input.
+  document.getElementById('child-field').addEventListener('focus', function () {
+    var top = parent.document.getElementById('top-field');
+    top.focus();
+    top.select();
+    if (parent.hp041Mode === 'replace') location.replace('about:blank');
+    else frameElement.remove();
+  });
+</script>
+</body>
+</html>

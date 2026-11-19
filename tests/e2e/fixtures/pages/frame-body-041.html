@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame editable body 041</title>
+<style>
+  body { font: 16px/1.4 system-ui, sans-serif; margin: 8px; }
+  h1 { font-size: 22px; margin: 4px 0 8px; }
+  p { margin: 4px 0 8px; }
+  iframe { display: block; width: 480px; height: 160px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+<h1 id="top-heading">Frame with an editable body</h1>
+<p>One frame from the second site (an out-of-process frame) whose whole body is the editor. Its text is echoed here.</p>
+<iframe id="body-frame" title="editable body frame" width="480" height="160" src="__OOPIF_ORIGIN__/frame-body-041-child"></iframe>
+<p id="echo">not typed yet</p>
+<script>
+  window.addEventListener('message', function (event) {
+    var data = event.data;
+    if (data && data.source === 'frame-body-041') document.getElementById('echo').textContent = 'typed: ' + data.text;
+  });
+</script>
+</body>
+</html>

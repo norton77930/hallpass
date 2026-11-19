@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Frame editable body 041 child</title>
+<style>
+  html, body { margin: 0; min-height: 100%; }
+  body { font: 20px/1.4 system-ui, sans-serif; padding: 12px; }
+</style>
+</head>
+<body contenteditable="true" aria-label="Editable body">Draft text</body>
+<script>
+  // 041 FR-581: the body itself is the editing host. Its text goes up to the page that frames it, so
+  // a run can read what landed from the top document as well as from this one.
+  document.body.addEventListener('input', function () {
+    parent.postMessage({ source: 'frame-body-041', text: document.body.innerText }, '*');
+  });
+</script>
+</html>

@@ -516,8 +516,12 @@ export function handleContentMessage(
     // focus counts when it is on the path the click took, not only when it is the element named -
     // a point on the inner span of a rich-text editor focuses the editing host above it.
     const targetElement = context.registry.resolve(targetHandle, context.documentEpoch)?.element;
+    // 041 FR-586: a ref this frame's registry cannot resolve has no element to compare focus with, so
+    // nothing was checked. Answered as the point confirmation answers a target that left the
+    // document (`stale-target`, read by the worker as "could not check"), never as a confirmed miss.
+    if (targetElement === undefined) return { ok: false, reason: "stale-target" };
     const chain = focusChain(documentRef, targetElement);
-    const onPath = targetElement ? focusedOnPathOf(chain, targetElement) : undefined;
+    const onPath = focusedOnPathOf(chain, targetElement);
     if (onPath !== undefined) {
       // The ref itself, as `content.resolve-point` answers a confirmation (no re-mint). When focus is
       // on another element than the ref's own, say which field holds it (FR-569).

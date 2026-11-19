@@ -2055,6 +2055,7 @@ export const AGENT_EFFECT_VERDICTS = [
   "not-moved",
   "target-missed",
   "target-unconfirmed",
+  "focus-unconfirmed",
 ] as const;
 
 export type AgentEffectVerdict = (typeof AGENT_EFFECT_VERDICTS)[number];

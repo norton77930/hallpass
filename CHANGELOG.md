@@ -5,6 +5,17 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.26.3 — 2026-11-20
+
+- **`type` and `key` send nothing when focus cannot be checked.** When a call names a field and the check of
+  where focus went cannot answer (the field's frame was removed or replaced by the focusing click, or the page
+  did not reply within 2 seconds), the call now sends no key and answers the new verdict `focus-unconfirmed`.
+  Before, `type` went on typing, into whatever field held focus.
+- **`key` checks focus before the key, too.** As `type` already did, a `key` that names a field is refused
+  with `focus-lost` before the key is sent when focus left that field after the click. The answer says the key
+  was not sent.
+- **`key` with no target answers `verified`.** It used to answer `focus-lost` every time.
+
 ## 0.26.2 — 2026-11-19
 
 - **A drag inside one element is verified.** A drag between two points on the same canvas, slider track or

@@ -3,6 +3,12 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.26.3 — 2026-11-20
+
+- **確認不了焦點時,`type` 和 `key` 一個鍵都不送**:指定了欄位的呼叫，如果查不到焦點去了哪裡(例如點擊讓欄位所在的 frame 被移除或換掉，或頁面 2 秒內沒回應),現在不送任何按鍵，回新的結果 `focus-unconfirmed`。以前 `type` 會照打，字打進當時有焦點的欄位。
+- **`key` 送出前也先檢查焦點**:和 `type` 一樣，指定欄位的 `key` 如果點擊後焦點離開那個欄位，會在送鍵前回 `focus-lost`,回覆會說明鍵沒有送出。
+- **沒指定目標的 `key` 回 `verified`**:以前一律回 `focus-lost`。
+
 ## 0.26.2 — 2026-11-19
 
 - **同一個元素內的拖曳會確認成功**:在同一個 canvas、滑桿或地圖上兩點之間拖曳，以前因為頁面上沒有東西移動而回 `not-moved`。現在改用和點擊相同的判斷：按下的點落在那個元素上，就回 `verified`。
