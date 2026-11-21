@@ -5,6 +5,14 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.26.5 — 2026-11-22
+
+- **One agent pointer on the page, always.** If the extension was reloaded while an agent held a tab, the
+  page could fill with agent pointers - one more for every step, each keeping its caption ("Click", "Type
+  text") instead of fading. The page now shows a single pointer, and when the tab leaves the session every
+  pointer goes with it. Pointers already stranded on an open page go at the agent's next step there, or
+  when you refresh it.
+
 ## 0.26.4 — 2026-11-21
 
 - **The consent card names the control.** For a click, hover, `type`, `key` or `form_input` on one element,

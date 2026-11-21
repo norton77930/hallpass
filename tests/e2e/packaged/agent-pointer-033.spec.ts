@@ -876,6 +876,101 @@ test.describe("agent pointer captions (spec 033)", () => {
     }
     check.verify();
   });
+
+  // ===========================================================================================
+  // live-7 - a second injection of agent-content.js leaves one pointer (fix to FR-501)
+  // ===========================================================================================
+  test("live-7: agent-content.js injected again into a held tab still leaves one pointer, the caption fades, and the release takes it away", async ({ extensionContext, extensionId, extensionWorker }, testInfo) => {
+    test.setTimeout(240_000);
+    const check = checker();
+    const evidence: Record<string, unknown> = {
+      locale,
+      note: "the owner reloads the extension while an agent holds a tab; the indicator's raise path then injects agent-content.js again (agent-tools/indicator.ts)",
+      steps: [] as unknown[],
+    };
+    const steps = evidence["steps"] as unknown[];
+
+    let session: Session | undefined;
+    let tab: Tab | undefined;
+    try {
+      session = await openSession({ extensionContext, extensionId, extensionWorker });
+      tab = await useTab(session, MAIN_PATH);
+      const { page, tabId } = tab;
+      const live = session.client;
+      const pointerCount = (): Promise<number> =>
+        settle(() => page.evaluate(() => document.querySelectorAll("[data-hallpass-cursor]").length));
+      const unfadedCaptions = (): Promise<number> =>
+        settle(() => page.evaluate(() => document.querySelectorAll("[data-hallpass-words]:not([data-faded])").length));
+      const record = async (label: string, expected: number): Promise<void> => {
+        const pointers = await pointerCount();
+        steps.push({ label, pointers, unfadedCaptions: await unfadedCaptions() });
+        check.ok(pointers === expected, `${label}: expected ${expected} [data-hallpass-cursor] in the page, found ${pointers}`);
+      };
+
+      // Refs for the fixture's own controls.
+      const read = await live.callTool("read_page", { tabId, filter: "all" });
+      const refs: Record<string, string> = {};
+      for (const node of (read.json as { nodes?: Array<{ ref?: string; name?: string }> } | undefined)?.nodes ?? []) {
+        if (node.ref !== undefined && node.name !== undefined) refs[node.name] = node.ref;
+      }
+      const go = { ref: refs["Go button"] ?? "missing-ref:Go button" };
+      const nameField = { ref: refs["Name field"] ?? "missing-ref:Name field" };
+
+      // ---- 1. the first injection draws its pointer ----
+      const first = await live.callTool("click", { tabId, target: go });
+      check.ok(!first.isError, `the first click failed: ${first.text.slice(0, 200)}`);
+      await record("first injection: after click", 1);
+
+      // ---- 2. the raise path's own injection, exactly as the worker does it ----
+      await extensionWorker.evaluate(
+        (id) => chrome.scripting.executeScript({ target: { tabId: id, frameIds: [0] }, files: ["agent-content.js"], world: "ISOLATED" }),
+        tabId,
+      );
+      await sleep(300); // the new script's announce is answered by the worker
+      await record("after the second injection", 1);
+
+      // ---- 3. every step the second instance takes ----
+      const calls: Array<{ label: string; tool: string; args: Record<string, unknown> }> = [
+        { label: "click", tool: "click", args: { target: go } },
+        { label: "type", tool: "type", args: { target: nameField, text: "abc" } },
+        { label: "click again", tool: "click", args: { target: go } },
+        { label: "wait", tool: "wait", args: { forMs: 500 } },
+        { label: "find", tool: "find", args: { query: "Go button" } },
+      ];
+      for (const entry of calls) {
+        const result = await live.callTool(entry.tool, { tabId, ...entry.args });
+        check.ok(!result.isError, `${entry.label} failed: ${result.text.slice(0, 200)}`);
+        await record(`second injection: after ${entry.label}`, 1);
+      }
+
+      // ---- 4. the caption of the last step fades about a second after it ----
+      await sleep(1300);
+      const late = await settle(() => page.evaluate(readPageState));
+      const unfaded = await unfadedCaptions();
+      evidence["afterFade"] = { ...summarise(late), pointers: await pointerCount(), unfadedCaptions: unfaded };
+      await saveShot(page, testInfo, "live-7-after-fade.png");
+      check.ok(unfaded === 0, `${unfaded} caption(s) still unfaded 1.3 s after the last step (the pointer's own caption must fade, and no frozen one may be left)`);
+
+      // ---- 5. the tab leaves the session: no pointer is left ----
+      await call(session, "tabs_release", { tabId });
+      let left = await pointerCount();
+      for (let attempt = 0; attempt < 20 && left !== 0; attempt += 1) {
+        await sleep(100);
+        left = await pointerCount();
+      }
+      evidence["afterRelease"] = { pointers: left };
+      await saveShot(page, testInfo, "live-7-after-release.png");
+      check.ok(left === 0, `after tabs_release ${left} [data-hallpass-cursor] are still in the page`);
+      // The tab is the owner's again, so the runner closes it.
+      await page.close().catch(() => undefined);
+      tab = undefined;
+    } finally {
+      await writeEvidence(testInfo, "live-7-reinjection.json", evidence);
+      if (tab && session) await call(session, "tabs_close", { tabId: tab.tabId }).catch(() => undefined);
+      await session?.close();
+    }
+    check.verify();
+  });
 });
 
 // =============================================================================================

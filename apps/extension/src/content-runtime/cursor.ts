@@ -41,7 +41,10 @@ import { adoptMark } from "./marks.js";
  * - **The top document only.** Coordinates are the top-level viewport's (R-113/R-114), so one page
  *   gets one mark; a copy in each frame would be several marks with all but one in the wrong place.
  *   Child frames still *receive* nothing - the worker addresses frame 0 - and this is the second
- *   guard for the case where they do.
+ *   guard for the case where they do. One mark per page also holds across a second injection of this
+ *   script (the bundle is an IIFE, so the second copy starts with no memory of the first one's pointer):
+ *   a pointer is "gone" when its element is no longer in the document, drawing one first removes any
+ *   other, and a hide removes every one.
  * - **The indicator's own marker attribute**, so the single exclusion the collector already has
  *   (`withinIndicator`, and the visible-text pass) covers the cursor too. A second mechanism would
  *   be a second thing to keep in step, and the failure it would allow - an agent reading its own
@@ -203,10 +206,6 @@ export function isPointerStep(message: unknown): message is PointerStepMessage {
   return mode === "travel" || mode === "stay" || mode === "rest";
 }
 
-function findCursor(doc: Document): HTMLElement | null {
-  return doc.querySelector<HTMLElement>(`[${CURSOR_MARKER_ATTRIBUTE}]`);
-}
-
 /** What the page remembers of one document's pointer. Nothing here survives the pointer's removal. */
 type PointerState = {
   /** The pointer element this state belongs to; a state whose element the page removed is reset. */
@@ -270,14 +269,16 @@ function stateOf(doc: Document): PointerState {
     states.set(doc, state);
   }
   // The page took the pointer out of its own document (or it was never drawn): what was bound to
-  // that element is bound to nothing.
-  if (state.element && findCursor(doc) !== state.element) releaseElement(doc, state);
+  // that element is bound to nothing. "Gone" is the element's own connection, not "it is the first
+  // pointer in the document": a page can hold a pointer this instance did not draw (see `drawPointer`),
+  // and that must not make a live pointer of ours look removed on every step.
+  if (state.element && !state.element.isConnected) releaseElement(doc, state);
   return state;
 }
 
 export function removeCursor(doc: Document): void {
   const state = stateOf(doc);
-  findCursor(doc)?.remove();
+  for (const mark of doc.querySelectorAll(`[${CURSOR_MARKER_ATTRIBUTE}]`)) mark.remove();
   for (const ring of doc.querySelectorAll(`[${RING_ATTRIBUTE}]`)) ring.remove();
   doc.querySelector(`style[${STYLE_ATTRIBUTE}]`)?.remove();
   releaseElement(doc, state);
@@ -552,6 +553,10 @@ function jumpTo(state: PointerState, element: HTMLElement, to: TravelPoint): voi
 function drawPointer(doc: Document, state: PointerState, at: TravelPoint, resting: boolean): HTMLElement | undefined {
   if (!doc.body) return undefined;
   ensureStyle(doc);
+  // One pointer per page: a copy of this script injected earlier (the indicator's raise path injects
+  // again after an extension reload) has drawn one this instance knows nothing of, and its caption
+  // would never fade.
+  for (const orphan of doc.querySelectorAll(`[${CURSOR_MARKER_ATTRIBUTE}]`)) orphan.remove();
   const element = createPointer(doc);
   element.style.transform = placementTransform(at.x, at.y);
   doc.body.appendChild(element);

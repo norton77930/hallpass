@@ -1391,3 +1391,86 @@ describe("033/T996 marks hidden for an agent capture", () => {
     for (const mark of marks()) expect(mark.hasAttribute(HIDDEN)).toBe(false);
   });
 });
+
+/**
+ * A fix to 033 FR-501 ("the top document only": one mark per page). `agent-content.js` is an IIFE, so a
+ * second injection into a page that already runs it (the indicator's raise path after the owner reloaded
+ * the extension while an agent held the tab) is a second module instance with its own empty state: it
+ * knows nothing of the pointer the first one drew. The second instance used to decide on every step that
+ * its own pointer was gone and draw another, each with a caption nobody would fade.
+ */
+describe("033/FR-501 a second injection of the runtime into the same page", () => {
+  type CursorModule = typeof import("../src/content-runtime/cursor.js");
+
+  function pointers(): number {
+    return document.querySelectorAll(`[${CURSOR_MARKER_ATTRIBUTE}]`).length;
+  }
+
+  /** A fresh copy of the module, as a second `agent-content.js` would load it. */
+  async function secondInjection(): Promise<CursorModule> {
+    vi.resetModules();
+    return import("../src/content-runtime/cursor.js");
+  }
+
+  function stepOf(module: CursorModule, words: string, mode: Mode): void {
+    module.applyPointerStep({ type: "pointer-step", words, mode }, top());
+  }
+
+  it("leaves exactly one pointer through click, type, click, wait and find", async () => {
+    vi.useFakeTimers();
+    step("Clicking", "travel");
+    await moveCursor({ type: "cursor", x: 140, y: 50 }, top());
+    expect(pointers(), "the first injection's own pointer").toBe(1);
+
+    const second = await secondInjection();
+    const seen: number[] = [];
+
+    stepOf(second, "Clicking", "travel");
+    await second.moveCursor({ type: "cursor", x: 300, y: 90 }, top());
+    seen.push(pointers());
+    stepOf(second, "Typing", "stay");
+    seen.push(pointers());
+    stepOf(second, "Clicking", "travel");
+    await second.moveCursor({ type: "cursor", x: 200, y: 120 }, top());
+    seen.push(pointers());
+    stepOf(second, "Waiting 0.5 seconds", "stay");
+    seen.push(pointers());
+    stepOf(second, "Finding “Go button”", "stay");
+    seen.push(pointers());
+
+    expect(seen, "pointers on the page after each step of the second injection").toEqual([1, 1, 1, 1, 1]);
+  });
+
+  it("fades the caption of the last pointing step after a second", async () => {
+    vi.useFakeTimers();
+    step("Clicking", "travel");
+    await moveCursor({ type: "cursor", x: 140, y: 50 }, top());
+
+    const second = await secondInjection();
+    stepOf(second, "Clicking", "travel");
+    await second.moveCursor({ type: "cursor", x: 300, y: 90 }, top());
+    stepOf(second, "Typing", "stay");
+    stepOf(second, "Clicking", "travel");
+    await second.moveCursor({ type: "cursor", x: 200, y: 120 }, top());
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const captions = [...document.querySelectorAll<HTMLElement>("[data-hallpass-words]")];
+    expect(
+      captions.filter((each) => !each.hasAttribute("data-faded")).length,
+      "captions still unfaded one second after the last pointing step",
+    ).toBe(0);
+    expect(captions.length, "one caption on the page").toBe(1);
+  });
+
+  it("is gone entirely on the indicator's hide", async () => {
+    step("Clicking", "travel");
+    await moveCursor({ type: "cursor", x: 140, y: 50 }, top());
+    const second = await secondInjection();
+    await second.moveCursor({ type: "cursor", x: 300, y: 90 }, top());
+    stepOf(second, "Typing", "stay");
+
+    second.removeCursor(document);
+
+    expect(pointers(), "pointers left after the hide").toBe(0);
+  });
+});
