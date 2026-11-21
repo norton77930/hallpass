@@ -112,6 +112,13 @@ const FIXTURES = [
   "keydown-alert",
   /** Issue #37: paragraphs the owner can reach and paragraphs that are hidden. */
   "hidden-text",
+  /**
+   * 040 change log 2026-11-21: labelled inputs that are not typed into (a range, a date, a time and a
+   * colour) beside one ordinary text input, for `find` and `read_page` kind words (verify-hallpass
+   * `tools-find-kinds`, `tools-readpage-kinds`). The range and date labels carry an English and a zh-TW
+   * word, so a description in either language names them.
+   */
+  "controls",
 ] as const;
 
 /** 015/T417: how long the slow file of `/two-downloads` holds back the rest of its body. */
@@ -324,6 +331,8 @@ function page(name: FixtureName, port: number): { status: number; headers: Recor
 <button type="button" id="safe-button" onclick="document.getElementById('clicked').textContent = 'clicked at ' + new Date().toISOString()">Safe action</button>
 <p id="clicked">not clicked yet</p>
 <label>Notes <input type="text" name="notes" value="ordinary note"></label>
+<button type="button" id="unnamed-button"><svg aria-hidden="true" width="16" height="16"><circle cx="8" cy="8" r="6"/></svg></button>
+<input type="submit" id="submit-input" value="Sign in" name="commit">
 ${filler(24)}`,
       );
 
@@ -898,6 +907,18 @@ ${filler(4)}`,
 <p style="position:absolute;width:1px;height:1px;overflow:hidden">hiddenwordclipped</p>`,
         "",
         false,
+      );
+
+    case "controls":
+      return html(
+        "Controls fixture",
+        `<h1>Controls page</h1>
+<p>Inputs a person drags, picks or chooses from, beside one ordinary text field.</p>
+<p><label>Volume 音量 <input type="range" name="volume" min="0" max="10" value="4"></label></p>
+<p><label>Birthday 生日 <input type="date" name="birthday"></label></p>
+<p><label>Alarm <input type="time" name="alarm"></label></p>
+<p><label>Theme colour <input type="color" name="theme" value="#3366cc"></label></p>
+<p><label>Nickname <input type="text" name="nickname"></label></p>`,
       );
 
     case "origin-change":

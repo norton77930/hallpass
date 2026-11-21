@@ -69,9 +69,23 @@ export const ROLE_WORDS: Record<string, readonly string[]> = {
   radio: ["radio", "button", "option"],
   switch: ["switch", "toggle"],
   link: ["link", "hyperlink"],
+  // 040 change log 2026-11-21: a range input is a `slider` and a date, time or colour input a kind of
+  // its own; each keeps "field"/"input" (and the zh-TW 欄位/輸入框/輸入欄 below), which it answered to
+  // while the collector called it `textbox`.
+  slider: ["slider", "range", "scale", "field", "input"],
+  date: ["date", "field", "input", "picker", "calendar"],
+  time: ["time", "field", "input", "picker", "clock"],
+  month: ["month", "field", "input", "picker"],
+  week: ["week", "field", "input", "picker"],
+  datetime: ["datetime", "date", "time", "field", "input", "picker"],
+  color: ["color", "colour", "field", "input", "picker", "swatch"],
 };
 
-/** The zh-TW half of the same vocabulary, entry for entry ("選單" mirrors "menu"). */
+/**
+ * The zh-TW half of the same vocabulary, entry for entry ("選單" mirrors "menu"). A compound such as
+ * "日期欄位" is listed whole: a phrase names a candidate by one kind word plus its label, so a kind
+ * word followed by "欄位" with no label at all needs its own entry.
+ */
 export const ROLE_WORDS_ZH_TW: Record<string, readonly string[]> = {
   textbox: ["文字框", "輸入框", "欄位", "輸入欄", "文字欄"],
   button: ["按鈕", "按鍵"],
@@ -80,6 +94,13 @@ export const ROLE_WORDS_ZH_TW: Record<string, readonly string[]> = {
   radio: ["單選按鈕", "選項按鈕", "單選框", "選項"],
   switch: ["開關", "切換"],
   link: ["連結", "超連結", "鏈接"],
+  slider: ["滑桿", "滑塊", "拉桿", "滑動條", "輸入框", "輸入欄", "欄位"],
+  date: ["日期", "日期欄位", "日期選擇器", "選擇器", "輸入框", "輸入欄", "欄位"],
+  time: ["時間", "時間欄位", "時間選擇器", "選擇器", "輸入框", "輸入欄", "欄位"],
+  month: ["月份", "月份欄位", "選擇器", "輸入框", "輸入欄", "欄位"],
+  week: ["週", "星期", "週欄位", "選擇器", "輸入框", "輸入欄", "欄位"],
+  datetime: ["日期時間", "日期時間欄位", "日期", "時間", "日期欄位", "時間欄位", "選擇器", "輸入框", "輸入欄", "欄位"],
+  color: ["顏色", "色彩", "顏色欄位", "顏色選擇器", "選色器", "選擇器", "輸入框", "輸入欄", "欄位"],
 };
 
 export const ANY_ROLE_WORDS: readonly string[] = ["control", "element", "item", "thing"];
@@ -348,8 +369,10 @@ export function matchDescription(description: string, candidate: DescriptionCand
   const kindWords = [
     // 040/FR-577: the role's own name, whether or not the vocabulary has an entry for it.
     ...(role === "" ? [] : [role]),
-    ...(ROLE_WORDS[role] ?? []),
-    ...(ROLE_WORDS_ZH_TW[role] ?? []),
+    // The role is the page's own word: only the table's own entries count, so a role such as
+    // "constructor" or "__proto__" is an unknown role rather than an inherited value to spread.
+    ...(Object.hasOwn(ROLE_WORDS, role) ? (ROLE_WORDS[role] ?? []) : []),
+    ...(Object.hasOwn(ROLE_WORDS_ZH_TW, role) ? (ROLE_WORDS_ZH_TW[role] ?? []) : []),
     ...(typedInto ? [...(ROLE_WORDS.textbox ?? []), ...(ROLE_WORDS_ZH_TW.textbox ?? [])] : []),
     ...ANY_ROLE_WORDS,
     ...ANY_ROLE_WORDS_ZH_TW,

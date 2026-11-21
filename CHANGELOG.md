@@ -5,6 +5,23 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.26.4 — 2026-11-21
+
+- **The consent card names the control.** For a click, hover, `type`, `key` or `form_input` on one element,
+  the card now says what kind of control it is and quotes the name the page gives it ("It would act on this
+  button, which the page names: “Sign in”"). A control with no name, or one that could not be read in time,
+  is said to be so instead of left blank.
+- **The quoted name is what you see on the control.** A submit, button or reset `<input>` is named by the
+  label it shows (an image button by its alt text), never by a hidden attribute; a slider is not called a text
+  field. Quotation marks in a page's name, and marks drawn like them, are shown as `'`, so a page cannot end
+  the card's quotation and make its own words read as Hallpass's.
+- **Agents see sliders and date, time and colour inputs as what they are.** `read_page` reports a range input
+  as `slider` and date, time, month, week, datetime-local (`datetime`) and colour inputs by their own kind
+  instead of `textbox`; the interactive read still lists them. `find` knows the words for them in English and
+  zh-TW ("volume slider", "音量欄位", "the date field", "生日輸入框").
+- **A page cannot break `find` with an odd role.** A `role` attribute named like a built-in object property
+  (`constructor`) made every `find` on that page fail; it is now an unknown role.
+
 ## 0.26.3 — 2026-11-20
 
 - **`type` and `key` send nothing when focus cannot be checked.** When a call names a field and the check of

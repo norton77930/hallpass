@@ -49,6 +49,7 @@ export const FORBIDDEN_PATHS = [
   ".claude/scheduled_tasks.lock",
   ".claude/settings*.json",
   ".claude/worktrees/**",
+  ".claude/skills/verify-hallpass",
   "CLAUDE-CODE-HANDOFF.md",
   ".mcp.json",
   ".scratch/**",

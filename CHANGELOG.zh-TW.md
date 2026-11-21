@@ -3,6 +3,13 @@
 每一版 Hallpass 改了什麼,新的在上面。英文完整版見 [CHANGELOG.md](CHANGELOG.md);安裝包在 [releases](https://github.com/norton77930/hallpass/releases)。
 升級方式每一版都一樣(除非該節另有說明):重新安裝主機(zip 裡的 `install.ps1`,或從原始碼 `npm run agent-host:install`),再到 `chrome://extensions` 重新載入擴充功能。
 
+## 0.26.4 — 2026-11-21
+
+- **同意卡會寫出要操作的控制項**:對單一元素的點擊、hover、`type`、`key`、`form_input`,同意卡現在會寫出控制項的種類，並引用頁面給它的名稱。沒有名稱、或來不及讀到的控制項，卡上會直接說明，不會留白。
+- **引用的名稱就是控制項上看得到的字**:submit、button、reset 的 `<input>` 用畫面上顯示的文字命名(圖片按鈕用替代文字),不用看不到的屬性;滑桿不再被叫成文字欄位。頁面名稱裡的引號和長得像引號的字元會顯示成 `'`,頁面無法提前結束卡上的引號，讓自己的字看起來像 Hallpass 說的。
+- **agent 看得出滑桿和日期、時間、顏色欄位**:`read_page` 把 range input 回報為 `slider`,date、time、month、week、datetime-local(`datetime`)和 color 欄位各自回報自己的種類，不再是 `textbox`;互動清單照樣列出。`find` 認得這些欄位的中英文說法(「volume slider」「音量欄位」「the date field」「生日輸入框」)。
+- **頁面無法用怪的 role 弄壞 `find`**:`role` 寫成內建物件屬性名稱(如 `constructor`)時，該頁所有 `find` 都會失敗;現在當成未知的角色處理。
+
 ## 0.26.3 — 2026-11-20
 
 - **確認不了焦點時,`type` 和 `key` 一個鍵都不送**:指定了欄位的呼叫，如果查不到焦點去了哪裡(例如點擊讓欄位所在的 frame 被移除或換掉，或頁面 2 秒內沒回應),現在不送任何按鍵，回新的結果 `focus-unconfirmed`。以前 `type` 會照打，字打進當時有焦點的欄位。

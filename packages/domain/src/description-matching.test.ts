@@ -265,3 +265,78 @@ describe("040 FR-577 kind words for every role", () => {
     expect(matchDescription("價格連結", { role: "button", text: "價格" })).toBe(false);
   });
 });
+
+/**
+ * 040 change log 2026-11-21 (agent-tools statements 5 and 6). A range input is a `slider` and a
+ * date, time or colour input has a kind of its own, so each carries its own everyday words - and
+ * "field"/"input" and 欄位/輸入框/輸入欄, which they answered to while the collector still called them
+ * `textbox`.
+ */
+describe("040 kind words for sliders and date, time and colour inputs", () => {
+  it("names a slider by slider and field words, in English and zh-TW, and no other kind", () => {
+    const volume = { role: "slider", label: "Volume" };
+    for (const query of ["volume slider", "volume field", "volume range", "the volume input"]) {
+      expect(matchDescription(query, volume), query).toBe(true);
+    }
+    const zhVolume = { role: "slider", label: "音量" };
+    for (const query of ["音量滑桿", "音量欄位", "音量滑塊", "滑桿"]) {
+      expect(matchDescription(query, zhVolume), query).toBe(true);
+    }
+    expect(matchDescription("volume dropdown", volume)).toBe(false);
+    expect(matchDescription("音量按鈕", zhVolume)).toBe(false);
+    expect(matchDescription("volume slider", { role: "textbox", label: "Volume" })).toBe(false);
+    expect(matchDescription("音量滑桿", { role: "button", label: "音量" })).toBe(false);
+  });
+
+  /** Role, English label and its queries, zh-TW label and its queries (a kind word alone needs no label). */
+  const KINDS: Array<[string, string, readonly string[], string, readonly string[]]> = [
+    ["date", "Birthday", ["the date field", "birthday date", "birthday field", "birthday date picker"], "生日", ["日期欄位", "生日日期", "生日欄位"]],
+    ["time", "Alarm", ["the time field", "alarm time", "alarm field"], "鬧鐘", ["時間欄位", "鬧鐘時間", "鬧鐘欄位"]],
+    ["month", "Start", ["the month field", "start month", "start field"], "開始", ["月份欄位", "開始月份", "開始欄位"]],
+    ["week", "Sprint", ["the week field", "sprint week", "sprint field"], "衝刺", ["衝刺欄位"]],
+    ["datetime", "Meeting", ["the date field", "meeting time", "meeting datetime"], "會議", ["日期時間欄位", "會議時間", "會議欄位"]],
+    ["color", "Theme", ["the color field", "theme colour", "theme color picker"], "主題", ["顏色欄位", "主題顏色", "主題欄位"]],
+  ];
+
+  it.each(KINDS)("names a %s input by its own word and by field words with its label", (role, label, queries, zhLabel, zhQueries) => {
+    for (const query of queries) expect(matchDescription(query, { role, label }), query).toBe(true);
+    for (const query of zhQueries) expect(matchDescription(query, { role, label: zhLabel }), query).toBe(true);
+    // Another kind's word does not name it, nor its own word another kind.
+    expect(matchDescription(`${label} checkbox`, { role, label })).toBe(false);
+    expect(matchDescription(`${label} dropdown`, { role, label })).toBe(false);
+    expect(matchDescription(`${label} ${role}`, { role: "button", text: label })).toBe(false);
+  });
+
+  // These kinds were `textbox` before, so the zh-TW input words that named a textbox name them too.
+  it.each([
+    ["slider", "音量"],
+    ["date", "生日"],
+    ["time", "鬧鐘"],
+    ["month", "開始"],
+    ["week", "衝刺"],
+    ["datetime", "會議"],
+    ["color", "主題"],
+  ])("keeps the zh-TW input words for a %s input", (role, zhLabel) => {
+    for (const word of ["輸入框", "輸入欄"]) {
+      expect(matchDescription(`${zhLabel}${word}`, { role, label: zhLabel }), `${zhLabel}${word}`).toBe(true);
+      expect(matchDescription(`${zhLabel}${word}`, { role: "button", text: zhLabel }), `${zhLabel}${word} as button`).toBe(false);
+    }
+  });
+});
+
+/**
+ * The role is the page's own `role` attribute, so it can be any word, including the name of a
+ * property every object inherits. Such a role has no kind words of its own: `find` must treat it as
+ * an unknown role, not throw and leave every description on the page unanswerable.
+ */
+describe("040 a page role named like an inherited object property", () => {
+  it.each(["constructor", "__proto__", "tostring", "hasownproperty", "valueof"])(
+    "matches a %s role by label without throwing",
+    (role) => {
+      expect(() => matchDescription("save", { role, label: "Save" })).not.toThrow();
+      expect(matchDescription("save", { role, label: "Save" })).toBe(true);
+      expect(matchDescription("save control", { role, label: "Save" })).toBe(true);
+      expect(matchDescription("save field", { role, label: "Save" })).toBe(false);
+    },
+  );
+});

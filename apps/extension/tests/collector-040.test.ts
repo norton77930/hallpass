@@ -3,7 +3,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { collectPage } from "../src/content-runtime/collector.js";
-import { TargetRegistry } from "../src/content-runtime/targets.js";
+import { resolveDescription, TargetRegistry } from "../src/content-runtime/targets.js";
 import { TEST_COLLECTION_BOUNDS } from "./helpers/content-frames.js";
 
 /**
@@ -85,5 +85,79 @@ describe("040 FR-573 a control's label names it", () => {
   it("falls back to the control's own name when it has no label", () => {
     const nodes = collectFrom('<input id="a" type="text" name="fallback">');
     expect(labelOf(nodes, "textbox")).toBe("fallback");
+  });
+});
+
+/**
+ * 040 change log 2026-11-21 (agent-tools statements 5 and 6): a range input is a `slider` and a
+ * date, time or colour input carries a kind word of its own rather than `textbox`, and `find`
+ * still reaches each of them by the words a person uses - through the production collector.
+ */
+const CONTROLS =
+  '<label>Volume 音量 <input type="range" min="0" max="10"></label>' +
+  '<label>Birthday 生日 <input type="date"></label>' +
+  '<label>Alarm <input type="time"></label>' +
+  '<label>Start <input type="month"></label>' +
+  '<label>Sprint <input type="week"></label>' +
+  '<label>Meeting <input type="datetime-local"></label>' +
+  '<label>Theme <input type="color"></label>' +
+  '<label>Nickname <input type="text"></label>' +
+  '<label>Pick <input role="textbox" type="date"></label>';
+
+function collectControls() {
+  document.body.innerHTML = CONTROLS;
+  const registry = new TargetRegistry();
+  const nodes =
+    collectPage({
+      snapshotId: "snapshot-1",
+      documentEpoch: "doc-1",
+      origin: "https://frame.test",
+      requested: ["page.structure", "page.target-metadata"],
+      formGrantActive: false,
+      generalGrantActive: true,
+      bounds: TEST_COLLECTION_BOUNDS,
+      mintPolicy: "all-controls",
+      registry,
+    }).semanticNodes ?? [];
+  return { nodes, registry };
+}
+
+describe("040 change log 2026-11-21 a non-text input is reported and found by what it is", () => {
+  it("reports a range input as slider, each date, time and colour input by its own kind, and a text input as textbox", () => {
+    const { nodes } = collectControls();
+    const roleOf = (label: string) => nodes.find((node) => node.label === label)?.role;
+    expect(roleOf("Volume 音量")).toBe("slider");
+    expect(roleOf("Birthday 生日")).toBe("date");
+    expect(roleOf("Alarm")).toBe("time");
+    expect(roleOf("Start")).toBe("month");
+    expect(roleOf("Sprint")).toBe("week");
+    expect(roleOf("Meeting")).toBe("datetime");
+    expect(roleOf("Theme")).toBe("color");
+    expect(roleOf("Nickname")).toBe("textbox");
+    // The page's own role still wins, as it does for every control.
+    expect(roleOf("Pick")).toBe("textbox");
+  });
+
+  it.each([
+    ["volume slider", "Volume 音量"],
+    ["volume field", "Volume 音量"],
+    ["音量滑桿", "Volume 音量"],
+    ["音量欄位", "Volume 音量"],
+    ["birthday date", "Birthday 生日"],
+    ["the birthday field", "Birthday 生日"],
+    ["生日日期", "Birthday 生日"],
+    ["alarm time", "Alarm"],
+    ["theme color picker", "Theme"],
+    ["nickname field", "Nickname"],
+  ])("find %s answers with the %s control and nothing else", (query, label) => {
+    const { nodes, registry } = collectControls();
+    const reply = resolveDescription(registry, "doc-1", query, 3);
+    const expected = nodes.find((node) => node.label === label)?.targetHandle;
+    expect(expected).toBeDefined();
+    expect(reply).toMatchObject({ outcome: "resolved" });
+    const handles = reply.ok && reply.outcome === "resolved" ? reply.candidates.map((candidate) => candidate.targetHandle) : [];
+    // The kinds share "field", "input" and "picker", so a looser check would miss a query that also
+    // names another control on the page.
+    expect(handles).toEqual([expected]);
   });
 });

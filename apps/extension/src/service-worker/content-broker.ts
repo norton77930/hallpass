@@ -464,6 +464,12 @@ function sanitizeNodeFields(node: Record<string, unknown>, bounds: ProtocolBound
   };
 }
 
+/** A control's own type, bounded as `sanitizeNodeFields` bounds it, and nothing else. */
+function controlTypeOf(node: Record<string, unknown>): { type?: string } {
+  const type = boundedString(node.type, 64);
+  return type ? { type } : {};
+}
+
 function sanitizeSemanticNodes(
   value: unknown,
   includeTargets: boolean,
@@ -497,6 +503,12 @@ function sanitizeSemanticNodes(
    * the length a page may spend in the agent's context is the worker's to decide, not the page's.
    */
   includeFields = false,
+  /**
+   * Whether the node keeps its control's `type` alone (006 change log 2026-11-21): what the consent
+   * card needs to tell a date picker from a text field, without the value or anything else
+   * `includeFields` carries.
+   */
+  includeControlType = false,
 ): unknown[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, bounds.maxSemanticNodes).flatMap((raw) => {
@@ -527,6 +539,7 @@ function sanitizeSemanticNodes(
       ...(includeFrameFacts && node.inLink === true ? { inLink: true } : {}),
       ...(includeFrameFacts ? sanitizeRect(node.rect) : {}),
       ...(includeFields ? sanitizeNodeFields(node, bounds) : {}),
+      ...(includeControlType && !includeFields ? controlTypeOf(node) : {}),
     }];
   });
 }
@@ -589,6 +602,8 @@ export async function collectFromActiveTab(input: {
    * and what the control holds - `value`, `checked`, `redacted`, `valueTruncated` (005/FR-072).
    */
   includeFields?: boolean;
+  /** Whether each node carries its control's `type` alone, with no value (006 change log 2026-11-21). */
+  includeControlType?: boolean;
 }): Promise<{
   tabId: number;
   contextHandle: string;
@@ -693,6 +708,7 @@ export async function collectFromActiveTab(input: {
         input.includeVisibility === true,
         input.includeFrameFacts === true,
         input.includeFields === true,
+        input.includeControlType === true,
       )
     : undefined;
   const truncatedDimension = isTruncationDimension(collected.truncatedDimension)

@@ -129,7 +129,11 @@ describe("T191 prompt cards", () => {
     expect(dialog.textContent).toContain(
       ui("agent.consentBody").replace("{agent}", "Claude Code").replace("{action}", ui("agent.summary.click")).replace("{site}", SITE),
     );
-    expect(dialog.textContent).toContain(ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Save"));
+    // 006 FR-085 (2026-11-21): the control, in the panel's word for its kind, and its name quoted.
+    expect(dialog.textContent).toContain(
+      ui("agent.promptTargetNamed").replace("{role}", ui("agent.targetRole.button")) +
+        ui("agent.prompt.dialogQuote").replace("{text}", "Save"),
+    );
     // Reviewed copy for the tool, not the worker's own summary of the call (003/T068).
     expect(dialog.textContent).not.toContain(PROMPT.argsSummary);
 
@@ -309,8 +313,8 @@ describe("T191 prompt cards", () => {
    *
    * An *unchained* accept is a decision the owner has not made yet, so it is the ordinary consent
    * card with two differences: the sentence says what pressing OK means, and the page's own words
-   * are quoted beneath it - the one page-authored string this panel shows, because the owner cannot
-   * decide about a question they cannot read. Refusing dismisses the dialog, which is the worker's
+   * are quoted beneath it - page-authored text, quoted as a control's name is (006 FR-085), because
+   * the owner cannot decide about a question they cannot read. Refusing dismisses the dialog, which is the worker's
    * half; from here it is the same `allow: false` every other refusal sends.
    */
   it("asks about a dialog accept in its own words, with the page's text quoted", () => {
@@ -591,7 +595,10 @@ describe("030 frame card", () => {
     const text = screen.getByRole("dialog").textContent ?? "";
     expect(text).toContain(ui("agent.prompt.frameHeldBy").replace("{site}", PAGE));
     expect(text).toContain(ui("agent.prompt.frameAnswer").replace("{frameSite}", FRAME));
-    expect(text).toContain(ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Pay"));
+    expect(text).toContain(
+      ui("agent.promptTargetNamed").replace("{role}", ui("agent.targetRole.button")) +
+        ui("agent.prompt.dialogQuote").replace("{text}", "Pay"),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: ui("agent.allowOnce") }));
     project(port, { ...IDLE, prompt: { ...PROMPT, frame: { site: FRAME } } });
@@ -613,7 +620,8 @@ describe("030 frame card", () => {
       [
         ui("agent.promptTitle"),
         ui("agent.consentBody").replace("{agent}", "Claude Code").replace("{action}", ui("agent.summary.click")).replace("{site}", PAGE),
-        ui("agent.promptTarget").replace("{role}", "button").replace("{label}", "Pay"),
+        ui("agent.promptTargetNamed").replace("{role}", ui("agent.targetRole.button")),
+        ui("agent.prompt.dialogQuote").replace("{text}", "Pay"),
         ui("agent.allowOnce"),
         ui("agent.allowSession"),
         ui("agent.allowAlways"),
@@ -958,5 +966,96 @@ describe("030 upload frame card", () => {
         ui("agent.uploadDecline"),
       ].join(""),
     );
+  });
+});
+
+/**
+ * 006 FR-085, change log 2026-11-21 - the consent card says which control the action is on: what it
+ * is, in the panel's own words from a closed list, and the page's name for it as a quotation of its
+ * own. A control without a name is said to have none, and an unreadable one is said to be so; the
+ * page's role string is never rendered.
+ */
+describe("the consent card names the control (006 FR-085, 2026-11-21)", () => {
+  let port: FakeAgentPort;
+  const SITE = "https://fixtures.test:19443";
+  const BASE = { promptId: "prompt-t", site: SITE, tool: "click" as const, argsSummary: "click a page element" };
+  const block = (): HTMLElement | null => screen.getByRole("dialog").querySelector<HTMLElement>("[data-prompt-target]");
+
+  beforeEach(() => {
+    port = installAgentPort();
+  });
+
+  afterEach(() => {
+    cleanup();
+    uninstallAgentPort();
+  });
+
+  it.each(["en-US", "zh-TW"] as const)("in %s: a named control is said in words and its name quoted on its own", (locale) => {
+    renderShell(locale);
+    project(port, { ...IDLE, prompt: { ...BASE, targetRole: "button", targetLabel: "Save draft" } });
+
+    const target = block();
+    expect(target?.getAttribute("data-prompt-target")).toBe("named");
+    expect(target?.querySelector("p")?.textContent).toBe(
+      lookup("agent.promptTargetNamed", locale).replace("{role}", lookup("agent.targetRole.button", locale)),
+    );
+    const quote = target?.querySelector("blockquote[data-prompt-target-name]");
+    expect(quote?.className).toBe("agent-prompt-quote");
+    expect(quote?.textContent).toBe(lookup("agent.prompt.dialogQuote", locale).replace("{text}", "Save draft"));
+    // Under the sentence, above the answers.
+    const dialog = screen.getByRole("dialog");
+    const sentence = dialog.querySelector("h2 + p");
+    const actions = dialog.querySelector(".agent-prompt-actions");
+    expect(sentence!.compareDocumentPosition(target!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(target!.compareDocumentPosition(actions!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it.each(["en-US", "zh-TW"] as const)("in %s: a control with no name is said to have none, with no quotation", (locale) => {
+    renderShell(locale);
+    project(port, { ...IDLE, prompt: { ...BASE, targetRole: "button" } });
+
+    const target = block();
+    expect(target?.getAttribute("data-prompt-target")).toBe("unnamed");
+    expect(target?.textContent).toBe(
+      lookup("agent.promptTargetUnnamed", locale).replace("{role}", lookup("agent.targetRole.button", locale)),
+    );
+    expect(screen.getByRole("dialog").querySelector("blockquote, [data-prompt-target-name]")).toBeNull();
+  });
+
+  it.each(["en-US", "zh-TW"] as const)("in %s: an unreadable control is said to be so, with no quotation", (locale) => {
+    renderShell(locale);
+    project(port, { ...IDLE, prompt: { ...BASE, targetRole: "unreadable" } });
+
+    const target = block();
+    expect(target?.getAttribute("data-prompt-target")).toBe("unreadable");
+    expect(target?.textContent).toBe(lookup("agent.promptTargetUnreadable", locale));
+    expect(screen.getByRole("dialog").querySelector("blockquote, [data-prompt-target-name]")).toBeNull();
+    expect(screen.getByRole("button", { name: lookup("agent.allowOnce", locale) })).toBeTruthy();
+    expect(screen.getByRole("button", { name: lookup("agent.refuse", locale) })).toBeTruthy();
+  });
+
+  it("says a role outside the list as a page element, never in the page's spelling", () => {
+    renderShell();
+    project(port, { ...IDLE, prompt: { ...BASE, targetRole: "x-evil-role", targetLabel: "Thing" } });
+
+    const target = block();
+    expect(target?.querySelector("p")?.textContent).toBe(
+      ui("agent.promptTargetNamed").replace("{role}", ui("agent.targetRole.other")),
+    );
+    expect(screen.getByRole("dialog").textContent).not.toContain("x-evil-role");
+  });
+
+  it("treats an empty name as no name", () => {
+    renderShell();
+    project(port, { ...IDLE, prompt: { ...BASE, targetRole: "link", targetLabel: "" } });
+
+    expect(block()?.getAttribute("data-prompt-target")).toBe("unnamed");
+  });
+
+  it("renders no block when neither field is present", () => {
+    renderShell();
+    project(port, { ...IDLE, prompt: BASE });
+
+    expect(block()).toBeNull();
   });
 });

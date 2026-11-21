@@ -168,6 +168,22 @@ const STRUCTURAL_ROLES: Record<string, string> = {
 const TEXT_NAMED_TAGS = new Set(["P", "BLOCKQUOTE", "PRE", "LI", "DT", "DD", "TD", "TH", "CAPTION"]);
 
 /**
+ * Input types that are a kind of their own (040 change log 2026-11-21, agent-tools statement 6). They
+ * have no ARIA role, and calling a date picker or a colour well a `textbox` tells an agent it is a
+ * field for free text. Like the collection's `file`, each is reported by the input type it is - one
+ * word, so `datetime-local` is `datetime` - and `find`'s kind words (`@hallpass/domain`
+ * `ROLE_WORDS`) and the interactive read (`reads.ts` `INTERACTIVE_ROLES`) list the same words.
+ */
+const OWN_KIND_INPUTS: Readonly<Record<string, string>> = {
+  date: "date",
+  time: "time",
+  month: "month",
+  week: "week",
+  "datetime-local": "datetime",
+  color: "color",
+};
+
+/**
  * The explicit roles whose name comes from content (038/FR-566, R-546): an element a page gave one of
  * these takes its text as its name, the way a `button` already does. The input-like roles
  * (`combobox`, `textbox`, `searchbox`, `slider`, `spinbutton`, `listbox`) are not here - their text is
@@ -675,6 +691,8 @@ export function snapshotTarget(
     autocomplete?: string;
     multiple?: boolean;
     name?: string;
+    /** Read for an input drawn as a button only, where it is the caption (`buttonCaption`). */
+    value?: string;
     textContent?: string | null;
     getAttribute?: (name: string) => string | null;
     options?: ArrayLike<{ textContent?: string | null; label?: string }>;
@@ -751,10 +769,16 @@ export function snapshotTarget(
           ? "checkbox"
           : tagName === "INPUT" && type === "radio"
             ? "radio"
+            : tagName === "INPUT" && type === "range"
+            ? // The ARIA word for it (006 change log 2026-11-21): a range input is dragged, not typed
+              // into, and calling it a `textbox` sends an agent - and a consent card - the wrong way.
+              "slider"
             : tagName === "SELECT"
               ? element.multiple === true
                 ? "listbox"
                 : "combobox"
+              : tagName === "INPUT" && type !== undefined && Object.hasOwn(OWN_KIND_INPUTS, type)
+                ? OWN_KIND_INPUTS[type] ?? "textbox"
               : tagName === "INPUT" || tagName === "TEXTAREA"
                 ? "textbox"
                 : "control"));
@@ -783,6 +807,16 @@ export function snapshotTarget(
           .querySelector?.("caption")
           ?.textContent?.trim() || undefined
       : undefined;
+  /**
+   * An input drawn as a button (006 change log 2026-11-21, consent statement 11) is named by the
+   * caption it shows: its `value` - a caption, not something anybody typed (`field-state.ts` treats it
+   * as value-less for the same reason) - or, for an image button, its `alt`. Its `name` attribute is
+   * never shown on the page, so it never names one; with no caption it has no name of its own here.
+   */
+  const buttonInput = tagName === "INPUT" && ["button", "submit", "reset", "image"].includes(type ?? "");
+  const buttonCaption = buttonInput
+    ? (type === "image" ? element.getAttribute?.("alt") : element.value)?.trim() || undefined
+    : undefined;
   const labelRaw =
     labelledByText(element) ||
     element.getAttribute?.("aria-label") ||
@@ -793,8 +827,8 @@ export function snapshotTarget(
     (tagName === "IMG" ? element.getAttribute?.("alt") || undefined : undefined) ||
     tableCaption ||
     ownText ||
-    element.name ||
-    element.getAttribute?.("placeholder") ||
+    buttonCaption ||
+    (buttonInput ? undefined : element.name || element.getAttribute?.("placeholder")) ||
     undefined;
   const label = labelRaw?.slice(0, maxLabelChars);
   const text =

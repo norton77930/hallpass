@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import { AGENT_SITE_PLAN_COVERED_TOOLS, type AgentPanelState } from "@hallpass/contracts";
 import { lookup } from "../../locales/catalog.js";
-import { TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
+import { TARGET_ROLE_KEYS, TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
+import { isTargetRole, TARGET_UNREADABLE } from "../../target-role.js";
 import type { SendCommand } from "./AgentShell.js";
 import { displayOrigin } from "./display-origin.js";
 import { CONSENT_CARD_ID } from "./session-card-model.js";
@@ -150,6 +151,42 @@ function frameLine(
               .replace("{to}", () => displayOrigin(frame.sites![1]))
               .replace("{site}", () => displayOrigin(prompt.site))}
       </p>
+    </div>
+  );
+}
+
+/**
+ * 006 FR-085 (change log 2026-11-21): which control a single-element action is on. The kind is a
+ * word from the panel's own catalog - a `targetRole` outside the closed list is `other`, and the
+ * page's spelling is never rendered - and the page's name for it, when it gave one, is quoted on a
+ * line of its own as inert text. `unreadable` says the worker could not tell; no `targetRole` is an
+ * action that names no one element, and the card says nothing about a control.
+ */
+function targetBlock(prompt: NonNullable<AgentPanelState["prompt"]>, t: (key: string) => string): ReactElement | null {
+  const role = prompt.targetRole;
+  if (role === undefined) return null;
+  if (role === TARGET_UNREADABLE) {
+    return (
+      <div data-prompt-target="unreadable">
+        <p>{t("agent.promptTargetUnreadable")}</p>
+      </div>
+    );
+  }
+  const kind = t(TARGET_ROLE_KEYS[isTargetRole(role) ? role : "other"]);
+  const name = prompt.targetLabel;
+  if (name === undefined || name.trim().length === 0) {
+    return (
+      <div data-prompt-target="unnamed">
+        <p>{t("agent.promptTargetUnnamed").replace("{role}", () => kind)}</p>
+      </div>
+    );
+  }
+  return (
+    <div data-prompt-target="named">
+      <p>{t("agent.promptTargetNamed").replace("{role}", () => kind)}</p>
+      <blockquote className="agent-prompt-quote" data-prompt-target-name>
+        {t("agent.prompt.dialogQuote").replace("{text}", () => name)}
+      </blockquote>
     </div>
   );
 }
@@ -516,9 +553,10 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
                   .replace("{site}", () => displayOrigin(frameSite ?? prompt.site))}
         </p>
         {/*
-          The page's own words, quoted (D-008-5): the one page-authored string this panel shows,
-          because an owner cannot decide about a question they are not allowed to read. Rendered as
-          text inside a quotation, so nothing the page wrote is ever part of the panel's sentence.
+          The page's own words, quoted (D-008-5): a dialog's message, because an owner cannot decide
+          about a question they are not allowed to read. It and a control's name (below, 006 FR-085)
+          are the page-authored strings this card shows, each as text inside a quotation, so nothing
+          the page wrote is ever part of the panel's sentence.
         */}
         {/*
           030 FR-457, FR-458: the action is inside an embedded frame. Both sites are named, and the
@@ -531,13 +569,7 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
             {t("agent.prompt.dialogQuote").replace("{text}", () => prompt.dialogText ?? "")}
           </blockquote>
         )}
-        {prompt.targetLabel ? (
-          <p>
-            {t("agent.promptTarget")
-              .replace("{role}", () => prompt.targetRole ?? "")
-              .replace("{label}", () => prompt.targetLabel ?? "")}
-          </p>
-        ) : null}
+        {targetBlock(prompt, t)}
         {/*
           004/T139a (FR-069): a position effect has no label, so the projection carries a picture of
           the place. The bytes are the worker's own PNG, never page markup.

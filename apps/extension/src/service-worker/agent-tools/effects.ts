@@ -98,7 +98,17 @@ import {
   type ScreenshotSpaces,
 } from "./coordinate-space.js";
 import type { AgentPromptController } from "./prompts.js";
-import { discoverRefFrame, findOnTab, resolveRef, type AgentTarget, type RefFrame } from "./refs.js";
+import {
+  discoverRefFrame,
+  findOnTab,
+  readRefDescription,
+  resolveRef,
+  type AgentTarget,
+  type RefDescription,
+  type RefFrame,
+} from "./refs.js";
+import { shownText } from "../shown-text.js";
+import { TARGET_UNREADABLE, targetRoleOf } from "../../target-role.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
@@ -289,6 +299,13 @@ export type AgentEffectDeps = {
    * then held to the top document too, so a frame that stayed quiet here cannot take the gesture.
    */
   claimRefFrame?: (context: AgentToolContext, binding: AgentPageBinding, ref: string) => Promise<RefFrame | undefined>;
+  /**
+   * What a ref is, for the consent card that names it (006 FR-085, change log 2026-11-21):
+   * `readRefDescription` by default. Asked only once the gate has decided to ask the owner.
+   */
+  readRefDescription?: typeof readRefDescription;
+  /** How long that read may take before the card says it cannot tell (`TARGET_READ_BOUND_MS`). */
+  targetReadMs?: number;
   /** The browser's sender for one message from a claimed frame (030 R-440, T891); the adapter by default. */
   probeFrameSender?: typeof probeFrameSender;
   /**
@@ -1451,6 +1468,69 @@ function namedRefs(tool: AgentToolName, args: Record<string, unknown>): string[]
 }
 
 /**
+ * How long the consent card waits to learn which control a ref is (006 FR-085, 2026-11-21).
+ *
+ * The read happens only when the owner is about to be asked, and the owner is waiting for the card
+ * while it runs; past this the card is raised saying it could not tell which control it is.
+ */
+export const TARGET_READ_BOUND_MS = 1_500;
+
+/** The longest name the projection carries (contracts `targetLabel`, max 200). */
+const TARGET_NAME_MAX_CHARS = 200;
+
+/**
+ * The one element a single-element reference action is on (006 FR-085, 2026-11-21): a click of any
+ * kind, a hover, `type` or `key` with a ref target, and `form_input`'s own `ref`. A drag names two,
+ * a point or focus names none, and every other tool keeps the card it had: `undefined`.
+ */
+function singleTargetRef(tool: AgentToolName, args: Record<string, unknown>): string | undefined {
+  if (tool === "form_input") return typeof args.ref === "string" ? args.ref : undefined;
+  if (tool === "drag" || (!isPointerTool(tool) && !isKeyboardTool(tool))) return undefined;
+  const ref = (args.target as { ref?: unknown } | undefined)?.ref;
+  return typeof ref === "string" ? ref : undefined;
+}
+
+/** What the card says about the control: a list member, and the page's name when it gave one. */
+type CardTarget = { targetRole: string; targetLabel?: string };
+
+/**
+ * The double and corner quotation marks of both card locales and their look-alikes (consent
+ * statement 4): the panel wraps the name in “…” or 「…」, and a page name carrying a closing mark
+ * would end that quotation early, so what followed would read as the card's own words.
+ *
+ * The look-alikes are every mark drawn like a double quote or a corner bracket, whatever its
+ * Unicode category (consent-name review, Nit 1; find-kinds review, Nit 1): modifier and
+ * double/triple primes ˝ ˮ ʺ ″ ‴ ‶ ‷, the Hebrew gershayim ״, ornament quotes ❝ ❞ ❠ 🙶 🙷 🙸, the low
+ * reversed ⹂, ditto 〃, and the half, corner, ceiling and floor brackets ⸢ ⸣ ⸤ ⸥ ⌜ ⌝ ⌞ ⌟ ⌈ ⌉ ⌊ ⌋.
+ * Single quotes, guillemets and the apostrophe are left alone: none of them can close “…” or 「…」.
+ */
+const CARD_QUOTE_MARKS = /["“”„‟＂〝〞〟「」『』｢｣﹁﹂﹃﹄˝ˮʺ״″‴‶‷❝❞❠⹂〃⸢⸣⸤⸥⌜⌝⌞⌟⌈⌉⌊⌋🙶🙷🙸]/gu;
+
+/**
+ * The page's name for a control as the card shows it: the characters that restyle a sentence
+ * removed (`shownText`), every quotation mark that could close the card's quote replaced by a plain
+ * apostrophe (it closes neither locale's quote, and still shows the page quoted something), whitespace
+ * and line breaks collapsed to single spaces so a name cannot span lines, and bounded. A name that
+ * is empty after that is no name.
+ */
+function cardName(label: string | undefined): string | undefined {
+  if (label === undefined) return undefined;
+  const collapsed = shownText(label).replace(CARD_QUOTE_MARKS, "'").replace(/\s+/gu, " ").trim();
+  const name = Array.from(collapsed).slice(0, TARGET_NAME_MAX_CHARS).join("").trim();
+  return name.length === 0 ? undefined : name;
+}
+
+/** The card's fields for what the read found; nothing found is `unreadable`, never a guess. */
+function cardTargetOf(description: RefDescription | undefined): CardTarget {
+  if (description === undefined) return { targetRole: TARGET_UNREADABLE };
+  const name = cardName(description.label);
+  return {
+    targetRole: targetRoleOf(description.role, description.type),
+    ...(name === undefined ? {} : { targetLabel: name }),
+  };
+}
+
+/**
  * The points an element tool names as its target (`{target: {x, y}}`, a drag's `from`/`to`), in the
  * frame's pixels (030 T898). `computer`'s own point is the preflight's.
  */
@@ -1584,6 +1664,37 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
   const claimRefFrame =
     deps.claimRefFrame ?? ((context, binding, ref) => discoverRefFrame(context, binding, ref, enumerateCallFrames));
   const probed = deps.probeFrameSender ? { probeFrameSender: deps.probeFrameSender } : {};
+  const readDescription = deps.readRefDescription ?? readRefDescription;
+  const targetReadMs = deps.targetReadMs ?? TARGET_READ_BOUND_MS;
+
+  /**
+   * Which control the consent card names (006 FR-085, change log 2026-11-21), read in the frame the
+   * claim found the ref in (the top document when it found none, and for `form_input`, which runs
+   * there). Fail-soft and bounded: a read that throws, takes longer than `targetReadMs` or finds no
+   * node for the ref is `unreadable`. It decides nothing - the gate has already decided to ask - and
+   * nothing waits on it once the card is up. Not a single-element action: no fields at all.
+   */
+  async function cardTargetFor(
+    tool: AgentToolName,
+    args: Record<string, unknown>,
+    context: AgentToolContext,
+    binding: AgentPageBinding,
+    claim: PreGateClaim,
+  ): Promise<CardTarget | Record<string, never>> {
+    const ref = singleTargetRef(tool, args);
+    if (ref === undefined) return {};
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), targetReadMs);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    try {
+      const read = readDescription(context, binding, ref, claim.frames.get(ref)).catch(() => undefined);
+      return cardTargetOf(await Promise.race([read, bound]));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   /** A claimed child frame's site, from the browser's sender for one message it sends (030 R-440). */
   const frameSiteOf = createFrameSiteOf(deps.probeFrameSender);
   /** The site under a point (030 FR-455), over the input attachment the gesture will leave by. */
@@ -3143,8 +3254,10 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
         promptFrame,
         tabOwnership: deps.tabOwnership,
         siteModes: deps.siteModes,
-        ask: async () =>
-          deps.prompts.ask({
+        ask: async () => {
+          // 006 FR-085 (2026-11-21): which control, read now that the owner is about to be asked.
+          const cardTarget = await cardTargetFor(tool, args, context, binding, claim);
+          return deps.prompts.ask({
             // Whose question this is (B5): the host giving up on *this* call takes it down, and a
             // backstop for some other call leaves it standing.
             callId,
@@ -3157,11 +3270,13 @@ export function createAgentEffects(deps: AgentEffectDeps): AgentEffectRunner {
             ...(promptFrame === undefined ? {} : { frame: promptFrame }),
             tool,
             argsSummary: summariseToolCall(tool, args),
+            ...cardTarget,
             // The one target that cannot be described in words: a picture of the place instead.
             ...(position.point && position.viewport
               ? await promptCrop(binding, position.point, position.viewport)
               : {}),
-          }),
+          });
+        },
       });
       if (!consent.ok) return consent.response;
       // 031 R-456: "This session" - the gate's site, for this session only, with where it was given.

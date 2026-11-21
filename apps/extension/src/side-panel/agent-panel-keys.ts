@@ -5,6 +5,7 @@ import {
   type CONVERSATION_NOTICES,
   type SiteMode,
 } from "@hallpass/contracts";
+import { TARGET_ROLES, type TargetRole } from "../target-role.js";
 
 /**
  * Every message key the agent side panel can put on screen (003/T068, rebuilt in 006 S1).
@@ -53,6 +54,15 @@ export const UPLOAD_DELIVERY_SUMMARY_KEYS: Record<"input" | "drop", string> = {
   input: "agent.summary.upload_image.input",
   drop: "agent.summary.upload_image.drop",
 };
+
+/**
+ * 006 FR-085 (2026-11-21): the word for each kind of control a consent card can name. Keyed off the
+ * closed list the worker sends from (`target-role.ts`), so a member added there cannot reach a card
+ * with no word for it; a role outside the list is shown as `other`, never as the page spelled it.
+ */
+export const TARGET_ROLE_KEYS: Record<TargetRole, string> = Object.fromEntries(
+  TARGET_ROLES.map((role) => [role, `agent.targetRole.${role}`]),
+) as Record<TargetRole, string>;
 
 /** 031 FR-475, R-458: what a session grant allows (the contract's own values). */
 export const SESSION_GRANT_KIND_KEYS: Record<"page-actions" | "diagnostics", string> = {
@@ -319,7 +329,10 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   "agent.ignore",
   "agent.promptTitle",
   "agent.consentBody",
-  "agent.promptTarget",
+  // 006 FR-085 (2026-11-21): which control the action is on; the kinds are TARGET_ROLE_KEYS.
+  "agent.promptTargetNamed",
+  "agent.promptTargetUnnamed",
+  "agent.promptTargetUnreadable",
   "agent.promptCropAlt",
   "agent.allowOnce",
   // 031 FR-470, R-461: allow every covered page action of this session on this site.
@@ -511,6 +524,7 @@ export const AGENT_PANEL_KEYS: readonly string[] = [
   ...Object.values(MODE_KEYS),
   ...Object.values(TOOL_SUMMARY_KEYS),
   ...Object.values(UPLOAD_DELIVERY_SUMMARY_KEYS),
+  ...Object.values(TARGET_ROLE_KEYS),
   ...Object.values(ACTIVITY_OUTCOME_KEYS),
   ...Object.values(CONSENT_QUESTION_KEYS),
   ...Object.values(CONSENT_PLACE_KEYS),

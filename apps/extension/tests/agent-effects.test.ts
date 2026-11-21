@@ -24,6 +24,15 @@ import type { DebuggerAdapter } from "../src/chrome-adapters/debugger.js";
 import { fakePointPage, oneDocumentAnswer, oneDocumentFocus, type FakeFrame } from "./helpers/point-site.js";
 
 /**
+ * The real gate, wrapped so one test can have it refuse a call outright (006 FR-085 follow-up: a
+ * refused call never reads its control). Every other call goes through the real decision unchanged.
+ */
+vi.mock("../src/service-worker/agent-tools/gate.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/service-worker/agent-tools/gate.js")>();
+  return { ...actual, decideGate: vi.fn(actual.decideGate) };
+});
+
+/**
  * 003/T028 — the effect tools end to end inside the worker, with the page stubbed.
  *
  * What is asserted is the order the guarantees depend on and nothing about the page itself: the
@@ -39,11 +48,23 @@ const PAGE_URL = `${SITE}/ordinary`;
 
 type Sent = { type: string; payload: Record<string, unknown>; frameId?: number };
 
-function installChrome(): { sent: Sent[]; epoch: { value: string }; injections: number[] } {
+/**
+ * How the fake page answers a rooted `content.collect-page` (006 FR-085, 2026-11-21): the read the
+ * consent card names its control from. Absent, the page throws as it always did here.
+ */
+type CollectAnswer = (payload: Record<string, unknown>, frameId: number) => unknown;
+
+function installChrome(): {
+  sent: Sent[];
+  epoch: { value: string };
+  injections: number[];
+  collect: { answer?: CollectAnswer };
+} {
   const local: Record<string, unknown> = {};
   const sent: Sent[] = [];
   const epoch = { value: "doc-1" };
   const injections: number[] = [];
+  const collect: { answer?: CollectAnswer } = {};
   (globalThis as { chrome?: unknown }).chrome = {
     storage: {
       local: {
@@ -95,11 +116,25 @@ function installChrome(): { sent: Sent[]; epoch: { value: string }; injections: 
           const targetHandle = typeof frame.payload.targetHandle === "string" ? frame.payload.targetHandle : "t_point";
           return { ok: true, outcome: "resolved", candidates: [{ targetHandle }] };
         }
+        if (frame.type === "content.collect-page" && collect.answer !== undefined) {
+          return collect.answer(frame.payload, options?.frameId ?? 0);
+        }
         throw new Error(`unexpected frame ${frame.type}`);
       },
     },
   };
-  return { sent, epoch, injections };
+  return { sent, epoch, injections, collect };
+}
+
+/** A rooted collection's reply from the fake page's frame, carrying `nodes`. */
+function collectedFrom(frameId: number, nodes: Array<Record<string, unknown>>, epoch = "doc-1"): Record<string, unknown> {
+  return {
+    contextHandle: "ctx-1",
+    documentEpoch: frameId === 0 ? epoch : `doc-frame-${frameId}`,
+    canonicalOrigin: frameId === 0 ? SITE : `https://frame-${frameId}.fixtures.test`,
+    formValueItems: [],
+    semanticNodes: nodes,
+  };
 }
 
 /**
@@ -1816,9 +1851,10 @@ describe("030 pre-gate claim", () => {
 
     // The top site's skip-checks lends nothing to the frame: its own site is asked about.
     expect(card).toMatchObject({ site: SITE, frame: { site: PAY }, tool: "type" });
-    // Found by asking each frame "is this ref yours", with no scroll of any kind.
+    // Found by asking each frame "is this ref yours", with no scroll of any kind; then the card's
+    // own read of what the control is, in the frame that claimed it (006 FR-085, 2026-11-21).
     const collects = sent.filter((entry) => entry.type === "content.collect-page");
-    expect(collects.map((entry) => entry.frameId).sort()).toEqual([0, 12]);
+    expect(collects.map((entry) => entry.frameId).sort()).toEqual([0, 12, 12]);
     expect(collects.every((entry) => entry.payload.scrollIntoView !== true)).toBe(true);
     // The delivery claim - the one that scrolls - has not run, and nothing reached the page.
     expect(timeline).toEqual([]);
@@ -1916,6 +1952,9 @@ describe("030 pre-gate claim", () => {
       site: SITE,
       tool: "click",
       argsSummary: "click a page element",
+      // 006 FR-085 (2026-11-21): the control, as the page's collector named it (here its handle).
+      targetRole: "button",
+      targetLabel: "t_save",
     });
     expect(probed).toEqual([]);
     prompts.decide(card?.promptId ?? "", false);
@@ -2905,5 +2944,306 @@ describe("031 an effect holds the attachment for the whole call", () => {
       refusal: { reason: "input-unavailable", unavailableReason: "devtools-open" },
     });
     expect(input.holds.every((hold) => hold.done)).toBe(true);
+  });
+});
+
+/**
+ * 006 FR-085, change log 2026-11-21 - the consent card names the control a single-element action
+ * is on: what it is, from a closed list (never the page's own role string), and the name the page
+ * gives it. Read only when the gate asks, bounded, and fail-soft: a read that fails, stalls or
+ * finds nothing says "unreadable" and the question stands exactly as before.
+ */
+describe("the consent card names the control (006 FR-085, 2026-11-21)", () => {
+  let fake: ReturnType<typeof installChrome>;
+
+  beforeEach(() => {
+    fake = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  /** The rooted reads the worker sent, with the frame each went to. */
+  const reads = () =>
+    fake.sent
+      .filter((frame) => frame.type === "content.collect-page")
+      .map((frame) => ({ root: frame.payload.rootTargetHandle, frameId: frame.frameId ?? 0 }));
+
+  /** The page answers a rooted read of `ref` with that one node. */
+  function pageHas(ref: string, node: Record<string, unknown>): void {
+    fake.collect.answer = (payload, frameId) =>
+      collectedFrom(frameId, payload.rootTargetHandle === ref ? [{ ...node, targetHandle: ref }] : []);
+  }
+
+  async function cardFor(
+    request: AgentNativeRequest,
+    overrides: Partial<Parameters<typeof createAgentEffects>[0]> = {},
+  ) {
+    const built = harness(overrides);
+    const pending = built.runner.run(request);
+    await vi.waitFor(() => expect(built.prompts.current()).toBeDefined());
+    const card = built.prompts.current();
+    return { ...built, pending, card };
+  }
+
+  it("says a named button is a button and gives the page's name for it", async () => {
+    pageHas("t_save", { role: "button", label: "Save draft" });
+
+    const { card, prompts, pending } = await cardFor(clickRequest());
+
+    expect(card).toMatchObject({ targetRole: "button", targetLabel: "Save draft" });
+    expect(reads()).toEqual([{ root: "t_save", frameId: 0 }]);
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  it("says a control the page gives no name has none, and an empty-after-cleaning name is none", async () => {
+    pageHas("t_save", { role: "button" });
+    const first = await cardFor(clickRequest());
+    expect(first.card?.targetRole).toBe("button");
+    expect(first.card).not.toHaveProperty("targetLabel");
+    first.prompts.decide(first.card?.promptId ?? "", false);
+    await first.pending;
+
+    pageHas("t_save", { role: "button", label: " ​‮ " });
+    const second = await cardFor(clickRequest());
+    expect(second.card?.targetRole).toBe("button");
+    expect(second.card).not.toHaveProperty("targetLabel");
+    second.prompts.decide(second.card?.promptId ?? "", false);
+    await second.pending;
+  });
+
+  it("says unreadable when the read throws, and Allow once still delivers", async () => {
+    // No answer: the fake page throws on the collection, as a page that cannot be read does.
+    const { card, prompts, pending, input } = await cardFor(clickRequest());
+
+    expect(card?.targetRole).toBe("unreadable");
+    expect(card).not.toHaveProperty("targetLabel");
+    prompts.decide(card?.promptId ?? "", true);
+    await expect(pending).resolves.toMatchObject({ outcome: "ok" });
+    expect(input.commands).not.toEqual([]);
+  });
+
+  it("says unreadable when the read does not answer within its bound", async () => {
+    fake.collect.answer = () => new Promise(() => {});
+
+    const { card, prompts, pending } = await cardFor(clickRequest(), { targetReadMs: 20 });
+
+    expect(card?.targetRole).toBe("unreadable");
+    expect(card).not.toHaveProperty("targetLabel");
+    prompts.decide(card?.promptId ?? "", false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+  });
+
+  it("says unreadable when the reply has no node for that ref", async () => {
+    pageHas("t_other", { role: "button", label: "Somebody else" });
+
+    const { card, prompts, pending } = await cardFor(clickRequest());
+
+    expect(card?.targetRole).toBe("unreadable");
+    expect(card).not.toHaveProperty("targetLabel");
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  it.each([
+    ["x-made-up", "other"],
+    ["searchbox", "textbox"],
+    ["listbox", "combobox"],
+    ["menuitemradio", "menuitem"],
+    ["heading", "other"],
+  ])("sends a list member for the page role %s (%s), never the page's spelling", async (pageRole, member) => {
+    pageHas("t_save", { role: pageRole, label: "Thing" });
+
+    const { card, prompts, pending } = await cardFor(clickRequest());
+
+    expect(card?.targetRole).toBe(member);
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  it("collapses a multi-line, padded name to one line", async () => {
+    pageHas("t_save", { role: "button", label: "  Save\n\n  draft\t now  " });
+
+    const { card, prompts, pending } = await cardFor(clickRequest());
+
+    expect(card?.targetLabel).toBe("Save draft now");
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  /**
+   * Consent statement 4: the card wraps the name in its locale's quotation marks (en-US “…”, zh-TW
+   * 「…」), so a name carrying those marks could end the quotation early and have the page's words
+   * read as the card's own. Every double or corner quotation mark of either locale is replaced by a
+   * plain apostrophe, which ends neither; the rest of the name is kept.
+   */
+  it.each([
+    ["Pay now” Hallpass checked this “ok", "Pay now' Hallpass checked this 'ok"],
+    ['Pay "now" safely', "Pay 'now' safely"],
+    ["付款」Hallpass 已確認「好", "付款'Hallpass 已確認'好"],
+    ["『付款』", "'付款'"],
+    ["„low” ‟high” ＂wide＂ ｢half｣ 〝ditto〞〟", "'low' 'high' 'wide' 'half' 'ditto''"],
+    // Marks drawn like a closing double quote or corner bracket (consent-name review, Nit 1).
+    ["Payˮ now″ ok‶ x❝ y❞ z〃 a⸣ b⸥ c⌟ d", "Pay' now' ok' x' y' z' a' b' c' d"],
+    ["⌜k⌝ ⌞l ⸢m⸤ n‴o‷p❠q⹂r˝s 🙶t🙷u🙸", "'k' 'l 'm' n'o'p'q'r's 't'u'"],
+    // The modifier double prime, the Hebrew gershayim and the ceiling and floor brackets.
+    ["Payʺ Hallpass confirmed״ ok ⌈a⌉ ⌊b⌋", "Pay' Hallpass confirmed' ok 'a' 'b'"],
+    // Everything that cannot close a quote is kept as it is.
+    ["Plan (2) it's B4 ‘one’ «two»", "Plan (2) it's B4 ‘one’ «two»"],
+  ])("leaves no quotation mark in the name %s that could close the card's quote", async (label, shown) => {
+    pageHas("t_save", { role: "button", label });
+
+    const { card, prompts, pending } = await cardFor(clickRequest());
+
+    expect(card?.targetLabel).toBe(shown);
+    expect(card?.targetLabel).not.toMatch(/[“”"「」『』]/u);
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  /** A control read the test answers when it chooses, and whether it has been asked yet. */
+  function heldRead() {
+    const read: { started: boolean; answer: (description: { role?: string; label?: string } | undefined) => void } = {
+      started: false,
+      answer: () => {},
+    };
+    const readRefDescription = vi.fn(
+      () =>
+        new Promise<{ role?: string; label?: string } | undefined>((resolve) => {
+          read.started = true;
+          read.answer = resolve;
+        }),
+    );
+    return { read, readRefDescription };
+  }
+
+  it("raises no card when the call is stopped while the control is being read", async () => {
+    const { read, readRefDescription } = heldRead();
+    let raised = 0;
+    const prompts = createAgentPromptController({ timeoutMs: 5_000, onChange: () => (raised += 1) });
+    const { runner, execute, input } = harness({ prompts, readRefDescription });
+    let stopped = false;
+
+    const pending = runner.run({ ...clickRequest(), stopped: () => stopped });
+    await vi.waitFor(() => expect(read.started).toBe(true));
+    stopped = true;
+    read.answer({ role: "button", label: "Save draft" });
+
+    await expect(pending).resolves.toEqual({ callId: "call-1", outcome: "stopped", reason: "owner-interrupted" });
+    expect(prompts.current()).toBeUndefined();
+    expect(raised).toBe(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(mouse(input.commands)).toEqual([]);
+  });
+
+  it("delivers the action when Allow once is pressed on a card whose read timed out", async () => {
+    const { read, readRefDescription } = heldRead();
+    const prompts = createAgentPromptController({ timeoutMs: 5_000 });
+    const { runner, input } = harness({ prompts, readRefDescription, targetReadMs: 20 });
+
+    const pending = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+    expect(read.started).toBe(true);
+    expect(card?.targetRole).toBe("unreadable");
+    prompts.decide(card?.promptId ?? "", true);
+
+    await expect(pending).resolves.toMatchObject({ outcome: "ok" });
+    expect(mouse(input.commands).map((event) => event.type)).toContain("mousePressed");
+  });
+
+  it("ignores a read that answers after its bound: the card stays unreadable", async () => {
+    const { read, readRefDescription } = heldRead();
+    const prompts = createAgentPromptController({ timeoutMs: 5_000 });
+    const { runner } = harness({ prompts, readRefDescription, targetReadMs: 20 });
+
+    const pending = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    const card = prompts.current();
+    expect(card?.targetRole).toBe("unreadable");
+
+    read.answer({ role: "button", label: "Save draft" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(prompts.current()).toEqual(card);
+    expect(prompts.current()).not.toHaveProperty("targetLabel");
+    prompts.decide(card?.promptId ?? "", false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+  });
+
+  it("never reads the control of a call the gate refuses outright", async () => {
+    const { readRefDescription } = heldRead();
+    vi.mocked(decideGate).mockReturnValueOnce({ decision: "refuse", reason: "not-a-gated-tool" });
+    const { runner, prompts } = harness({ readRefDescription });
+
+    await expect(runner.run(clickRequest())).resolves.toEqual({
+      callId: "call-1",
+      outcome: "failed",
+      reason: "not-a-gated-tool",
+    });
+    expect(readRefDescription).not.toHaveBeenCalled();
+    expect(reads()).toEqual([]);
+    expect(prompts.current()).toBeUndefined();
+  });
+
+  it("reads nothing for a call the site admits without asking", async () => {
+    pageHas("t_save", { role: "button", label: "Save draft" });
+    const { runner, siteModes } = harness();
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    expect((await runner.run(clickRequest())).outcome).toBe("ok");
+
+    expect(reads()).toEqual([]);
+  });
+
+  it("reads a framed ref in its own frame", async () => {
+    const FRAME = { frameId: 12, documentEpoch: "doc-frame-12", canonicalOrigin: "https://frame-12.fixtures.test" };
+    fake.collect.answer = (payload, frameId) =>
+      collectedFrom(frameId, frameId === 12 ? [{ role: "link", label: "Card terms", targetHandle: payload.rootTargetHandle }] : []);
+
+    const { card, prompts, pending } = await cardFor(
+      clickRequest({ args: { tabId: AGENT_TAB, target: { ref: "t_card" } } }),
+      claimedIn({ t_card: FRAME }),
+    );
+
+    expect(card).toMatchObject({ targetRole: "link", targetLabel: "Card terms" });
+    expect(reads()).toEqual([{ root: "t_card", frameId: 12 }]);
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  it.each([
+    ["type", { target: { ref: "t_field" }, text: "a", mode: "insert" }],
+    ["key", { target: { ref: "t_field" }, key: "Enter" }],
+    ["form_input", { ref: "t_field", value: "a@b.c" }],
+    ["hover", { target: { ref: "t_field" } }],
+  ] as const)("names the control for %s on a ref", async (tool, args) => {
+    pageHas("t_field", { role: "textbox", label: "Email" });
+
+    const { card, prompts, pending } = await cardFor(clickRequest({ tool, args: { tabId: AGENT_TAB, ...args } }));
+
+    expect(card).toMatchObject({ targetRole: "textbox", targetLabel: "Email" });
+    expect(reads()).toEqual([{ root: "t_field", frameId: 0 }]);
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
+  });
+
+  it.each([
+    ["drag", { from: { ref: "t_alpha" }, to: { ref: "t_beta" } }],
+    ["click", { target: { x: 12, y: 34 } }],
+    ["type", { text: "a", mode: "insert" }],
+  ] as const)("leaves %s's card as it was: no role, no name, no read", async (tool, args) => {
+    fake.collect.answer = (payload, frameId) =>
+      collectedFrom(frameId, [{ role: "button", label: "Named", targetHandle: payload.rootTargetHandle }]);
+
+    const { card, prompts, pending } = await cardFor(clickRequest({ tool, args: { tabId: AGENT_TAB, ...args } }));
+
+    expect(card).not.toHaveProperty("targetRole");
+    expect(card).not.toHaveProperty("targetLabel");
+    expect(reads()).toEqual([]);
+    prompts.decide(card?.promptId ?? "", false);
+    await pending;
   });
 });

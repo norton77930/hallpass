@@ -4,6 +4,7 @@ tests/acceptance/probe-017/reports/** export-ignore
 .claude/scheduled_tasks.lock export-ignore
 .claude/settings*.json export-ignore
 .claude/worktrees/** export-ignore
+.claude/skills/verify-hallpass export-ignore
 CLAUDE-CODE-HANDOFF.md export-ignore
 .mcp.json export-ignore
 .scratch/** export-ignore

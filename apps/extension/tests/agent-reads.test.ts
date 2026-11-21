@@ -160,6 +160,20 @@ describe("T034 agent read tools", () => {
     });
   });
 
+  // 040 change log 2026-11-21 (agent-tools statement 6): the collection's own words for a range,
+  // date, time and colour input are as interactive as the `textbox` they used to be reported as.
+  it("keeps a slider and the date, time and colour kinds in the interactive answer", async () => {
+    const kinds = ["slider", "date", "time", "month", "week", "datetime", "color", "textbox"];
+    const nodes = kinds.map((role) => ({ role, label: role, targetHandle: `t_${role}`, depth: 1 }));
+    const filtered = await harness(collection({ semanticNodes: nodes })).runner.run(
+      request("read_page", { tabId: AGENT_TAB, filter: "interactive" }),
+    );
+    expect(filtered.result).toEqual({
+      nodes: kinds.map((role) => ({ ref: `t_${role}`, role, name: role, depth: 1 })),
+      truncated: false,
+    });
+  });
+
   /**
    * C2 — the collection says which nodes the page is not showing. `all` still lists them, because
    * the agent asked what is on the page and a wait has to be able to name an element that has not

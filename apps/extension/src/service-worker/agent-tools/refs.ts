@@ -134,6 +134,55 @@ export async function discoverRefFrame(
   return found.find((entry): entry is RefFrame => entry !== undefined);
 }
 
+/**
+ * What the page's collector said about one ref: its role and its name, as it computed them, and an
+ * input's own type (`date`, `color`, …), which says what kind of control it is and holds nothing typed.
+ */
+export type RefDescription = { role?: string; label?: string; type?: string };
+
+/**
+ * What a ref is, for the consent card that names it (006 FR-085, change log 2026-11-21).
+ *
+ * The same rooted, scroll-free collection `discoverRefFrame` asks, sent to the one frame that holds
+ * the ref (`frame`; `undefined` is the top document). The collector computes the role and the name
+ * (`snapshotTarget`) and caps the name. An input's, textarea's or select's value never enters the
+ * name and no field fact is asked for beyond the control's type; an element named from its content (an editable
+ * paragraph or cell included) is named by the text it holds. `undefined` when the reply carries no node for that ref. A failure throws: the
+ * caller decides what an unreadable control looks like.
+ */
+export async function readRefDescription(
+  context: AgentToolContext,
+  binding: AgentPageBinding,
+  ref: string,
+  frame: RefFrame | undefined,
+): Promise<RefDescription | undefined> {
+  const collected = await collectFromActiveTab({
+    taskId: context.taskId,
+    operationId: context.operationId,
+    runtimeEpochId: context.runtimeEpochId,
+    nonce: context.nonce,
+    requested: ["page.structure", "page.target-metadata"],
+    generalGrantActive: true,
+    generalPageReadGrantId: context.generalPageReadGrantId,
+    formGrantActive: false,
+    mintPolicy: "all-controls",
+    rootTargetHandle: ref,
+    // The control's type and nothing else of its field facts: never its value.
+    includeControlType: true,
+    ...(frame === undefined ? {} : { frameId: frame.frameId }),
+    tab: binding.tabId,
+  });
+  const node = (collected.semanticNodes ?? []).find(
+    (entry) => (entry as { targetHandle?: unknown }).targetHandle === ref,
+  ) as { role?: unknown; label?: unknown; type?: unknown } | undefined;
+  if (node === undefined) return undefined;
+  return {
+    ...(typeof node.role === "string" ? { role: node.role } : {}),
+    ...(typeof node.label === "string" ? { label: node.label } : {}),
+    ...(typeof node.type === "string" ? { type: node.type } : {}),
+  };
+}
+
 /** What one document answered: the resolution, and the names the worker minted for its handles. */
 type FrameResolution = {
   outcome: "resolved" | "no-match" | "too-broad";

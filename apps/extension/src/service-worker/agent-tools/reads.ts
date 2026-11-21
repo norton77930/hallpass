@@ -172,6 +172,14 @@ const INTERACTIVE_ROLES = new Set([
   // interactive as any other control - `file_upload` is aimed at exactly these - and leaving it out
   // would hide the one element that tool exists for from the working read.
   "file",
+  // The same kind of word for a date, time or colour input (040 change log 2026-11-21): the
+  // collection's `OWN_KIND_INPUTS`, as interactive as the `textbox` they were reported as before.
+  "date",
+  "time",
+  "month",
+  "week",
+  "datetime",
+  "color",
   "link",
   "listbox",
   "menuitem",

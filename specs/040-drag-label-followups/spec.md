@@ -94,3 +94,9 @@
 
 - The click confirmation (004/T128, `content.resolve-point` with a `targetHandle`) applies to a drag's press
   point unchanged.
+
+## Change Log
+
+| Date | Change | Origin |
+| --- | --- | --- |
+| 2026-11-21 | FR-577 extended: a range input is reported as `slider` (006 change log 2026-11-21), and a date, time, month, week, datetime-local or colour input is reported to agents by a kind word of its own - `date`, `time`, `month`, `week`, `datetime`, `color` - instead of `textbox`, the way a file input is `file` (003 C2); `read_page filter=interactive` keeps all of them. Each gets English and zh-TW kind words, among them "field"/"input"/"欄位"/"輸入框"/"輸入欄" which they answered to as `textbox`: "volume slider", "volume field", "音量滑桿", "音量欄位", "生日輸入框", "birthday date", "the date field", "日期欄位", "color picker", "顏色欄位" find them. A page that writes its own role keeps it; the consent card still says *slider* or *page element*. Which tools may act on these inputs is unchanged (text entry is decided by tag and type, not role) | Consent-name review (Nit 2); agent-tools statements 5 and 6 |
