@@ -17,6 +17,7 @@ export type { Session, SessionUiState, AuthorizationTransaction } from "./author
 export { classifyFormControl, discloseFormValue } from "./form-value-policy.js";
 export type { FormClassification, FormControlSnapshot } from "./form-value-policy.js";
 export { canonicalOriginFromUrl, originAssessmentBody } from "./canonical-origin.js";
+export { isLoopbackSite } from "./loopback-site.js";
 export { decideLocalSafety, combineSafety } from "./origin-safety.js";
 export type { LocalSafety, RemoteSafety, SafetyDecision } from "./origin-safety.js";
 export {

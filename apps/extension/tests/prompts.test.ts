@@ -429,6 +429,7 @@ describe("031 an answer from the agent's client", () => {
         action: "click a page element",
         choices: ["once", "session", "deny"],
         boundMs: 60_000,
+        alwaysInBrowser: true,
       },
     ]);
 
@@ -452,6 +453,94 @@ describe("031 an answer from the agent's client", () => {
       const { prompts, raised } = controller();
       void click(prompts, { tool, ...extra });
       expect(raised[0]?.choices, `${tool} ${JSON.stringify(extra)}`).toEqual(["once", "deny"]);
+    }
+  });
+
+  // 043 T1210 (R-585, FR-624, D-043-5): page JavaScript on a loopback deciding site also offers
+  // "this session"; everywhere else it stays once or deny (017 FR-255, 031 FR-470).
+  it("offers the session answer for evaluate only on a loopback deciding site (043 R-585)", async () => {
+    for (const [site, extra] of [
+      ["http://localhost:3001", {}],
+      ["https://localhost", {}],
+      ["http://127.0.0.1:8080", {}],
+      ["http://[::1]:3000", {}],
+      // The frame decides (030 R-444): a loopback frame inside another site's page.
+      [SITE, { frame: { site: "http://localhost:3001" } }],
+    ] as const) {
+      const { prompts, raised } = controller();
+      void click(prompts, { tool: "evaluate", site, argsSummary: "run a script on the page", ...extra });
+      expect(raised[0]?.choices, `${site} ${JSON.stringify(extra)}`).toEqual(["once", "session", "deny"]);
+    }
+
+    for (const [site, extra] of [
+      ["https://example.com", {}],
+      ["http://app.localhost", {}],
+      ["http://localhost.example.com", {}],
+      ["http://127.0.0.1.nip.io", {}],
+      ["http://[::ffff:7f00:1]", {}],
+      ["http://127.0.0.2", {}],
+      // A non-loopback frame inside a loopback page is decided by the frame.
+      ["http://localhost:3001", { frame: { site: "https://pay.example.com" } }],
+      // And a frame whose site is unknown has none to hold a grant for.
+      ["http://localhost:3001", { frame: { unknown: true } }],
+    ] as const) {
+      const { prompts, raised } = controller();
+      void click(prompts, { tool: "evaluate", site, argsSummary: "run a script on the page", ...extra });
+      expect(raised[0]?.choices, `${site} ${JSON.stringify(extra)}`).toEqual(["once", "deny"]);
+    }
+
+    // Only page JavaScript: uploads, a forced leave and closing a tab are unchanged on loopback (D-043-4).
+    for (const [tool, extra] of [
+      ["file_upload", {}],
+      ["upload_image", {}],
+      ["navigate", { kind: "beforeunload-force" }],
+      ["tabs_close", {}],
+    ] as const) {
+      const { prompts, raised } = controller();
+      void click(prompts, { tool, site: "http://localhost:3001", ...extra });
+      expect(raised[0]?.choices, tool).toEqual(["once", "deny"]);
+    }
+  });
+
+  it("refuses a client's session answer to evaluate off loopback, and carries it on loopback (043 FR-627)", async () => {
+    const off = controller();
+    const offPending = click(off.prompts, { tool: "evaluate", site: "https://example.com" });
+    expect(off.prompts.decideByCall("call-1", open(off.prompts), "session", "client")).toBe(false);
+    expect(off.diagnostics).toContain("agent.prompt.choice-not-offered");
+    expect(off.prompts.decideByCall("call-1", open(off.prompts), "once", "client")).toBe(true);
+    await expect(offPending).resolves.toEqual({ decision: "allow", answeredFrom: "client" });
+
+    const on = controller();
+    const onPending = click(on.prompts, { tool: "evaluate", site: "http://localhost:3001" });
+    expect(on.prompts.decideByCall("call-1", open(on.prompts), "session", "client")).toBe(true);
+    await expect(onPending).resolves.toEqual({ decision: "allow", session: true, answeredFrom: "client" });
+  });
+
+  // 043 T1201 (R-580, FR-621): the raised frame says when the side-panel card offers "Always allow on
+  // <site>" - an effect question whose deciding site is known - so the host can name the hint.
+  it("flags an effect question on a known site as alwaysInBrowser (043 R-580)", async () => {
+    for (const [tool, extra] of [
+      ["evaluate", {}],
+      ["file_upload", {}],
+      ["click", {}],
+      ["click", { frame: { site: "https://frame.test" } }],
+    ] as const) {
+      const { prompts, raised } = controller();
+      void click(prompts, { tool, ...extra });
+      expect(raised[0], `${tool} ${JSON.stringify(extra)}`).toMatchObject({ kind: "effect", alwaysInBrowser: true });
+    }
+  });
+
+  it("does not flag a frame whose site is unknown, or a diagnostics question (043 R-580)", async () => {
+    for (const [tool, extra] of [
+      ["click", { frame: { unknown: true } }],
+      ["evaluate", { frame: { unknown: true } }],
+      ["click", { kind: "diagnostics" }],
+    ] as const) {
+      const { prompts, raised } = controller();
+      void click(prompts, { tool, ...extra });
+      expect(raised[0], `${tool} ${JSON.stringify(extra)}`).toBeDefined();
+      expect(raised[0], `${tool} ${JSON.stringify(extra)}`).not.toHaveProperty("alwaysInBrowser");
     }
   });
 

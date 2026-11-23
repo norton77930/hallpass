@@ -23,7 +23,7 @@ export const CONSENT_CARD_ID = "agent-consent-card";
 // Sites and permissions (R-534, FR-545, FR-546)
 // ---------------------------------------------------------------------------------------------
 
-export type SiteGrant = { kind: "page-actions" | "diagnostics"; source: "client" | "browser" };
+export type SiteGrant = { kind: "page-actions" | "diagnostics" | "scripts"; source: "client" | "browser" };
 
 export type SiteRow = {
   /** The canonical origin; absent for a held host whose tab url did not parse. */

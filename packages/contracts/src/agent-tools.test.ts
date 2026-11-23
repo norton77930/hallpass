@@ -324,6 +324,20 @@ describe("032 prompt-raised for a transition and a site plan", () => {
     expect(parses({ kind: "diagnostics", choices: ["session", "deny"] }), "diagnostics without once").toBe(false);
     expect(parses({ choices: ["once", "deny"] })).toBe(true);
   });
+
+  // 043 T1200 (contracts/prompt-raised-043.md, R-580): `alwaysInBrowser` marks an effect question
+  // whose side-panel card offers "Always allow on <site>"; no other kind may carry it.
+  it("043 accepts alwaysInBrowser: true on an effect question only", () => {
+    expect(parses({ alwaysInBrowser: true, choices: ["once", "deny"] })).toBe(true);
+    expect(parses({ alwaysInBrowser: true })).toBe(true);
+    expect(parses({ choices: ["once", "deny"] })).toBe(true);
+    expect(agentLinkFrameSchema.safeParse(raised({ alwaysInBrowser: true })).success).toBe(true);
+    expect(parses({ alwaysInBrowser: false }), "literal true only").toBe(false);
+    expect(parses({ alwaysInBrowser: "true" }), "literal true only").toBe(false);
+    expect(parses({ kind: "diagnostics", choices: ["once", "deny"], alwaysInBrowser: true }), "diagnostics").toBe(false);
+    expect(parses({ ...transition, alwaysInBrowser: true }), "transition").toBe(false);
+    expect(parses({ ...sitePlan, alwaysInBrowser: true }), "site-plan").toBe(false);
+  });
 });
 
 /** 032 T968 - one activity line per settled consent question (contracts/activity-consent.md, R-488). */

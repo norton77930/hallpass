@@ -85,7 +85,9 @@ releases the debugger after a short idle period.
   OK on a page dialog. Page JavaScript (`evaluate`), file and image uploads, a forced leave and closing a
   tab are still asked each time. In the agent's client those questions offer only *allow this once* and
   *deny*. (Amended 2026-11-08, R-457: the first wording also excluded dialog OK, which contradicted
-  "the same as spec 017". The owner chose to follow spec 017.)
+  "the same as spec 017". The owner chose to follow spec 017.) (Amended by 043 for loopback (D-043-3):
+  on `localhost`, `127.0.0.1` and `[::1]` page JavaScript also offers *this session*, as a scripts grant
+  of its own kind.)
 - **D-031-9 - diagnostics are asked, not refused** (recommended): a diagnostics tool on a site without the
   diagnostics grant raises a question instead of a refusal. It uses the same two places. In the agent's
   client the answers are *allow this once*, *allow diagnostics on this site for this session*, and
@@ -294,7 +296,8 @@ that the next action works normally.
   admit any other session's actions, and it MUST end when the session ends (D-031-3).
 - **FR-470**: A session grant MUST admit only the page actions a spec 017 session site plan admits.
   This includes page dialog OK. Page JavaScript, uploads, a forced leave and closing a tab MUST still be
-  asked each time (D-031-8).
+  asked each time (D-031-8). (Amended by 043 for loopback (D-043-3): page JavaScript on a loopback site
+  may hold a scripts grant, which a page-actions grant never answers for, 043 FR-626.)
 - **FR-471**: The first answer given in either place MUST decide the question and withdraw it in the
   other place. A later answer MUST admit nothing (D-031-4).
 - **FR-472**: A client that dismisses, declines, cancels or fails the question without the owner's
@@ -375,3 +378,9 @@ that the next action works normally.
 - Restoring a minimized window automatically.
 - Changing the default site mode.
 - Any private protocol between a specific client and its own browser extension.
+
+## Change Log
+
+| Date | Change | Origin |
+| --- | --- | --- |
+| 2026-11-23 | D-031-8 and FR-470 amended by 043 for loopback (D-043-3, D-043-5): on `localhost`, `127.0.0.1` and `[::1]` the page JavaScript question offers *this session* in the agent's client and on the card, recorded as a scripts grant for that session and origin that ends with the session (FR-469). Every other site, and uploads, a forced leave and closing a tab everywhere, are unchanged. | spec 043 US2, owner 2026-11-23 |

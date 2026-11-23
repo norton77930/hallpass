@@ -4,6 +4,7 @@ import {
   type AgentToolName,
   type SiteMode,
 } from "@hallpass/contracts";
+import { isLoopbackSite } from "@hallpass/domain";
 
 /** The tool that answers a page's dialog (008/US3); named once, used by `requiresGate`. */
 const DIALOG_TOOL: AgentToolName = "dialog";
@@ -75,6 +76,15 @@ export type GateInput = {
    * JavaScript, uploads and a forced leave never read it (FR-255).
    */
   sitePlanCovers?: boolean | undefined;
+  /**
+   * Whether *this session* holds a `scripts` grant for `site` (043 R-584, D-043-3): the owner's
+   * "This session" answer to page JavaScript on a loopback site.
+   *
+   * Computed by the caller from the session grant store, as `sitePlanCovers` is. Absent is `false`.
+   * It is worth something only for `evaluate`, only on a site that is loopback (R-582, checked here
+   * again so a wrong caller cannot widen it), and only where the gate would otherwise ask.
+   */
+  scriptsGrantCovers?: boolean | undefined;
 };
 
 export type GateDecision =
@@ -157,7 +167,15 @@ export function decideGate(input: GateInput): GateDecision {
    * nothing else does: it never turns a refusal into an admission, and under `follow-a-plan` a
    * call the stated plan names is still admitted *as that step*, so the batch's count stays true.
    */
-  const covered = input.sitePlanCovers === true && isSitePlanCoveredTool(input.tool);
+  const planCovered = input.sitePlanCovers === true && isSitePlanCoveredTool(input.tool);
+  /**
+   * 043 R-584, D-043-3: and a session's scripts grant answers it for page JavaScript on a loopback
+   * site - the same `prompt`s and no other answer, and never a page action (FR-626). The site plan
+   * still never covers `evaluate` (017 FR-255).
+   */
+  const scriptsCovered =
+    input.scriptsGrantCovers === true && input.tool === "evaluate" && isLoopbackSite(input.site);
+  const covered = planCovered || scriptsCovered;
   const unplanned: GateDecision = covered ? { decision: "admit" } : { decision: "prompt" };
   if (input.mode === "follow-a-plan") {
     const plan = input.plan;

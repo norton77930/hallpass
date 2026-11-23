@@ -4,7 +4,7 @@ import { testSessionContexts } from "./helpers/agent-session-contexts.js";
 import { scriptedDebugger } from "./helpers/scripted-debugger.js";
 import { createAgentDiagnostics } from "../src/service-worker/agent-tools/diagnostics.js";
 import { createInputAttachments } from "../src/service-worker/agent-tools/input.js";
-import { diagnosticsGrantsFrom } from "../src/service-worker/agent-tools/page-action-grants.js";
+import { diagnosticsGrantsFrom, scriptsGrantsFrom } from "../src/service-worker/agent-tools/page-action-grants.js";
 import {
   createAgentPromptController,
   type AgentPromptController,
@@ -182,6 +182,10 @@ function harness(
       tabId === AGENT_TAB ? { state: "this" } : { state: "not-yours" },
     // 031 R-456: the sessions' "This session" answers; both test sessions belong to one agent.
     diagnosticsGrants: diagnosticsGrantsFrom(store, (sessionId) =>
+      sessionId === "session-h1" || sessionId === "session-h2" ? AGENT : undefined,
+    ),
+    // 043 R-583: and their "This session" answers to page JavaScript on a loopback site.
+    scriptsGrants: scriptsGrantsFrom(store, (sessionId) =>
       sessionId === "session-h1" || sessionId === "session-h2" ? AGENT : undefined,
     ),
     ...overrides,
@@ -1006,5 +1010,216 @@ describe("T056 agent diagnostics gate", () => {
       expect(debug.state.detached).toEqual([AGENT_TAB]);
       expect(runner.attached()).toEqual([]);
     });
+  });
+});
+
+/**
+ * 043/T1210 - "This session" for page JavaScript on a loopback site (D-043-3, FR-624..FR-627, US2
+ * scenarios 1-7). The diagnostics question is unchanged and answered first; these cases grant it as
+ * the site's checkbox so only the script's own question is in play, except where they say otherwise.
+ */
+describe("043 a scripts grant for evaluate on a loopback site", () => {
+  const LOCAL = "http://localhost:3001";
+  const OTHER_LOCAL = "http://localhost:3002";
+  const PUBLIC = "https://example.com";
+  let fake: ReturnType<typeof installChrome>;
+
+  beforeEach(() => {
+    fake = installChrome();
+    fake.url.value = `${LOCAL}/app`;
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const evaluate = (call: { callId?: string; sessionId?: string } = {}) =>
+    request("evaluate", { expression: "document.title" }, call);
+  const ran = (): number => fake.fakeDebugger.commands.filter((command) => command.method === "Runtime.evaluate").length;
+
+  /** The script's own question is up (not the diagnostics one); its id. */
+  async function scriptQuestion(prompts: AgentPromptController): Promise<string> {
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ tool: "evaluate" }));
+    expect(prompts.current()?.kind).toBeUndefined();
+    return prompts.current()?.promptId ?? "";
+  }
+
+  it("offers this session, records a scripts grant from the card, and runs 20 later scripts unasked (SC-282)", async () => {
+    const { runner, prompts, siteModes, store, raised } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+
+    const first = runner.run(evaluate());
+    const id = await scriptQuestion(prompts);
+    expect(raised.at(-1)).toMatchObject({ kind: "effect", site: LOCAL, choices: ["once", "session", "deny"] });
+    prompts.decide(id, true, undefined, undefined, undefined, true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: LOCAL, kind: "scripts", source: "browser" }),
+    ]);
+    // A session answer is not a mode: the site still asks every other session.
+    expect((await siteModes.get(LOCAL)).mode).toBe("ask");
+
+    const asked = raised.length;
+    for (let index = 0; index < 20; index += 1) {
+      const response = await runner.run(evaluate({ callId: `call-${index + 2}` }));
+      expect(response.outcome, `call ${index + 2}`).toBe("ok");
+      expect(prompts.current(), `call ${index + 2}`).toBeUndefined();
+    }
+    expect(raised.length).toBe(asked);
+    expect(ran()).toBe(21);
+  });
+
+  it("records the client as the source when the agent's client answered this session", async () => {
+    const { runner, prompts, siteModes, store } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+
+    const first = runner.run(evaluate());
+    const id = await scriptQuestion(prompts);
+    expect(prompts.decideByCall("call-1", id, "session", "client", "session-h1")).toBe(true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: LOCAL, kind: "scripts", source: "client" }),
+    ]);
+  });
+
+  it("still asks another session, another loopback origin, and a session the runtime no longer knows", async () => {
+    const { runner, prompts, siteModes, store } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+    await siteModes.set(OTHER_LOCAL, { diagnosticsGranted: true });
+    await store.add("session-h1", AGENT, { site: LOCAL, kind: "scripts", source: "browser" });
+    await store.add("session-gone", AGENT, { site: LOCAL, kind: "scripts", source: "browser" });
+
+    for (const sessionId of ["session-h2", "session-gone"]) {
+      const pending = runner.run(evaluate({ sessionId }));
+      prompts.decide(await scriptQuestion(prompts), false);
+      await expect(pending, sessionId).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    }
+
+    fake.url.value = `${OTHER_LOCAL}/app`;
+    const elsewhere = runner.run(evaluate());
+    await scriptQuestion(prompts);
+    expect(prompts.current()).toMatchObject({ site: OTHER_LOCAL });
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(elsewhere).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    expect(ran()).toBe(0);
+  });
+
+  it("is not admitted by a page-actions or a diagnostics grant for the same session and origin (FR-626)", async () => {
+    const { runner, prompts, siteModes, store } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+    await store.add("session-h1", AGENT, { site: LOCAL, kind: "page-actions", source: "browser" });
+    await store.add("session-h1", AGENT, { site: LOCAL, kind: "diagnostics", source: "browser" });
+
+    const pending = runner.run(evaluate());
+    prompts.decide(await scriptQuestion(prompts), false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    expect(ran()).toBe(0);
+  });
+
+  it("asks again once the session's grants are cleared (its end, 031 FR-469)", async () => {
+    const { runner, prompts, siteModes, store } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+    await store.add("session-h1", AGENT, { site: LOCAL, kind: "scripts", source: "browser" });
+    await expect(runner.run(evaluate())).resolves.toMatchObject({ outcome: "ok" });
+
+    await store.clearSession("session-h1");
+
+    const pending = runner.run(evaluate({ callId: "call-2" }));
+    prompts.decide(await scriptQuestion(prompts), false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+  });
+
+  it("treats a session answer off loopback as once, records nothing and says so (FR-627)", async () => {
+    for (const site of [PUBLIC, "http://localhost.example.com", "http://127.0.0.1.nip.io", "http://[::ffff:7f00:1]"]) {
+      fake.url.value = `${site}/app`;
+      const diagnostics: string[] = [];
+      const { runner, prompts, siteModes, store, raised } = harness(
+        { reportDiagnostic: (code) => diagnostics.push(code) },
+        { timeoutMs: 5_000 },
+      );
+      await siteModes.set(site, { diagnosticsGranted: true });
+
+      const first = runner.run(evaluate());
+      const id = await scriptQuestion(prompts);
+      expect(raised.at(-1)?.choices, site).toEqual(["once", "deny"]);
+      // The panel offers no This session there; a card that sent it anyway gets a once.
+      prompts.decide(id, true, undefined, undefined, undefined, true);
+      await expect(first, site).resolves.toMatchObject({ outcome: "ok" });
+
+      expect(await store.list("session-h1", AGENT), site).toEqual([]);
+      expect(diagnostics, site).toContain("agent.session-grant.not-applicable");
+
+      const second = runner.run(evaluate({ callId: "call-2" }));
+      prompts.decide(await scriptQuestion(prompts), false);
+      await expect(second, site).resolves.toMatchObject({ outcome: "denied" });
+      // The granted checkbox keeps the tab attached; the next site's runner starts from nothing.
+      await runner.releaseAll();
+    }
+  });
+
+  it("records nothing when the tab left the site while the owner read the question", async () => {
+    const { runner, prompts, siteModes, store } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+
+    const pending = runner.run(evaluate());
+    const id = await scriptQuestion(prompts);
+    fake.url.value = `${PUBLIC}/landing`;
+    prompts.decide(id, true, undefined, undefined, undefined, true);
+
+    await expect(pending).resolves.toMatchObject({ outcome: "stale", reason: "stale-context" });
+    expect(await store.list("session-h1", AGENT)).toEqual([]);
+    expect(ran()).toBe(0);
+  });
+
+  it("runs the script as a once when the grant cannot be recorded", async () => {
+    const diagnostics: string[] = [];
+    const { runner, prompts, siteModes } = harness(
+      {
+        reportDiagnostic: (code) => diagnostics.push(code),
+        scriptsGrants: {
+          covers: async () => false,
+          add: async () => {
+            throw new Error("QUOTA_BYTES quota exceeded");
+          },
+        },
+      },
+      { timeoutMs: 5_000 },
+    );
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+
+    const first = runner.run(evaluate());
+    prompts.decide(await scriptQuestion(prompts), true, undefined, undefined, undefined, true);
+    await expect(first).resolves.toMatchObject({ outcome: "ok" });
+    expect(diagnostics).toContain("agent.session-grant.not-recorded");
+    expect(ran()).toBe(1);
+  });
+
+  it("keeps the diagnostics question as it was, and its session answer is no scripts grant", async () => {
+    const { runner, prompts, store, raised } = harness({}, { timeoutMs: 5_000 });
+
+    const pending = runner.run(evaluate());
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    expect(raised.at(-1)).toMatchObject({ kind: "diagnostics", site: LOCAL, choices: ["once", "session", "deny"] });
+    prompts.decide(prompts.current()?.promptId ?? "", true, undefined, undefined, undefined, true);
+
+    // The script's own question is still asked, now with This session too.
+    await scriptQuestion(prompts);
+    expect(raised.at(-1)).toMatchObject({ kind: "effect", site: LOCAL, choices: ["once", "session", "deny"] });
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    expect(await store.list("session-h1", AGENT)).toEqual([
+      expect.objectContaining({ site: LOCAL, kind: "diagnostics" }),
+    ]);
+  });
+
+  it("is asked nothing under skip-checks, as before, and records nothing", async () => {
+    const { runner, prompts, siteModes, store } = harness();
+    await siteModes.set(LOCAL, { diagnosticsGranted: true, mode: "skip-checks" });
+
+    await expect(runner.run(evaluate())).resolves.toMatchObject({ outcome: "ok" });
+    expect(prompts.current()).toBeUndefined();
+    expect(await store.list("session-h1", AGENT)).toEqual([]);
   });
 });

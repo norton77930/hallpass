@@ -178,6 +178,12 @@ describe("T283 prompt-waiting", () => {
       const card = (grants: unknown) => ({ ...base, sessions: [{ sessionId: SESSION, agentId: "agent-0", tabs: [], grants }] });
       const grant = { site: "https://shop.test", kind: "page-actions", source: "client" };
       expectAccepted(panel, card([grant, { ...grant, kind: "diagnostics", source: "browser" }]), "two grants");
+      // 043 R-583: page JavaScript on a loopback site, a kind of its own.
+      expectAccepted(
+        panel,
+        card([{ site: "http://localhost:3001", kind: "scripts", source: "client" }, grant]),
+        "a scripts grant beside a page-actions one",
+      );
       expectAccepted(panel, { ...base, sessions: [{ sessionId: SESSION, agentId: "agent-0", tabs: [] }] }, "a 0.20 card with none");
       const max = contractExport<number>("AGENT_SESSION_GRANTS_SHOWN");
       expectAccepted(panel, card(Array.from({ length: max }, () => grant)), "grants at the bound");
@@ -185,7 +191,8 @@ describe("T283 prompt-waiting", () => {
       expectRejected(panel, card([]), "an empty list, which is no grants and is sent as none");
       expectRejected(panel, card([{ ...grant, grantedAt: 1 }]), "a grant with an undeclared field");
       expectRejected(panel, card([{ ...grant, source: "terminal" }]), "a source outside client|browser");
-      expectRejected(panel, card([{ ...grant, kind: "always" }]), "a kind outside page-actions|diagnostics");
+      expectRejected(panel, card([{ ...grant, kind: "always" }]), "a kind outside page-actions|diagnostics|scripts");
+      expectRejected(panel, card([{ ...grant, kind: "script" }]), "a kind that is almost scripts");
       expectRejected(panel, card([{ ...grant, site: "https://shop.test/path" }]), "a site that is not an origin");
     });
   });

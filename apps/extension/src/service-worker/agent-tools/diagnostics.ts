@@ -9,6 +9,7 @@ import {
   type AgentToolName,
   type SiteMode,
 } from "@hallpass/contracts";
+import { isLoopbackSite } from "@hallpass/domain";
 import { getTabSnapshot, watchTabUpdates, type TabUpdate } from "../../chrome-adapters/tabs.js";
 import type { DebuggerAdapter } from "../../chrome-adapters/debugger.js";
 import { createInputAttachments, type AgentInputAttachments } from "./input.js";
@@ -16,8 +17,8 @@ import { siteOfUrl, type SiteModeStore } from "../site-mode-store.js";
 import type { AgentSessionContexts } from "./context.js";
 import { ownershipRefusal, type TabOwnershipLookup } from "./ownership.js";
 import { decideGate, type StatedPlan } from "./gate.js";
-import type { DiagnosticsGrants } from "./page-action-grants.js";
-import { noAnswerResponse, type AgentPromptController } from "./prompts.js";
+import { recordScriptsGrant, type DiagnosticsGrants, type ScriptsGrants } from "./page-action-grants.js";
+import { noAnswerResponse, type AgentPromptController, type PromptDecision } from "./prompts.js";
 import { readTabAddress, siteMovedAnswer, stillOnOrigin, type ReadTabAddress } from "./site-recheck.js";
 import type { AgentToolRequest } from "./stop.js";
 import { summariseToolCall } from "./summaries.js";
@@ -77,6 +78,12 @@ export type AgentDiagnosticsDeps = {
    * holds one for the site is not asked; absent, a session answer is the once it otherwise is.
    */
   diagnosticsGrants?: DiagnosticsGrants;
+  /**
+   * 043 R-584, R-585: the session's "This session" answers to the `evaluate` effect question on a
+   * loopback site. A session that holds one for the site is not asked that question; absent, a
+   * session answer is the once it otherwise is. Never read for the diagnostics question above.
+   */
+  scriptsGrants?: ScriptsGrants;
   /**
    * 031 R-461: the card's Always on this site - the same stored grant the checkbox sets. The runtime
    * hands in its own setter so the panel hears about it; the default writes the site mode store.
@@ -450,6 +457,20 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
   }
 
   /**
+   * Whether this session answered This session to page JavaScript on the site (043 R-584). Read only
+   * for a loopback site (R-582) the mode would ask about; unreadable is no.
+   */
+  async function scriptsGranted(sessionId: string, site: string, mode: SiteMode): Promise<boolean> {
+    if (mode === "skip-checks" || !isLoopbackSite(site)) return false;
+    try {
+      return (await deps.scriptsGrants?.covers(sessionId, site)) === true;
+    } catch {
+      deps.reportDiagnostic?.("agent.session-grant.read-failed");
+      return false;
+    }
+  }
+
+  /**
    * The diagnostics question (031 R-460, D-031-9): may the debugger be attached to this site for
    * this call? Resolves `"recorded"` when the owner allowed it with This session or Always on this
    * site and the answer was stored, `"once"` for any other yes - Allow once, or a lasting answer that
@@ -549,6 +570,12 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
       }
     }
 
+    /**
+     * 043 R-585: the script question's Allow, held until the site has been read again below - a
+     * "This session" for a site the tab has left by then is not recorded (REVIEW.md "nothing is
+     * marked delivered or recorded before the site re-check passes").
+     */
+    let scriptsAnswer: PromptDecision | undefined;
     if (tool === "evaluate") {
       const decision = decideGate({
         sessionId: request.sessionId,
@@ -558,6 +585,8 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
         tool,
         args,
         ...(deps.statedPlan ? { plan: deps.statedPlan(site) } : {}),
+        // 043 R-584: this session's scripts grant for a loopback site answers the script question.
+        scriptsGrantCovers: await scriptsGranted(request.sessionId, site, record.mode),
       });
       if (decision.decision === "refuse") return answer(callId, "failed", decision.reason);
       if (decision.decision === "admit" && decision.step !== undefined) {
@@ -590,6 +619,7 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
         if (asked.rememberMode) {
           await deps.siteModes.set(site, { mode: asked.rememberMode as SiteMode, session: request.sessionId });
         }
+        scriptsAnswer = asked;
       }
     }
 
@@ -610,6 +640,11 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
         await refresh(tabId);
         return siteMovedAnswer(callId);
       }
+    }
+
+    if (scriptsAnswer !== undefined) {
+      // 043 R-585, FR-625, FR-627: "This session" becomes a scripts grant only on a loopback site.
+      await recordScriptsGrant(deps.scriptsGrants, request.sessionId, site, tool, scriptsAnswer, deps.reportDiagnostic);
     }
 
     if (!(await ensureAttached(tabId, site))) {

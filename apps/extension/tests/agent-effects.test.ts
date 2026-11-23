@@ -2750,6 +2750,18 @@ describe("031 session grants for page actions", () => {
     await expect(second).resolves.toMatchObject({ outcome: "denied" });
   });
 
+  // 043 FR-626: a scripts grant ("This session" for page JavaScript) is no page-actions grant.
+  it("asks about a click when the session holds only a scripts grant for the site", async () => {
+    const { runner, prompts, store } = grantsHarness();
+    await store.add("session-h1", AGENT, { site: SITE, kind: "scripts", source: "browser" });
+
+    const click = runner.run(clickRequest());
+    await vi.waitFor(() => expect(prompts.current()).toBeDefined());
+    expect(prompts.current()).toMatchObject({ site: SITE, tool: "click" });
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(click).resolves.toMatchObject({ outcome: "denied" });
+  });
+
   it("asks another session on the same site, whatever this session was granted", async () => {
     const { runner, prompts, store } = grantsHarness();
     await store.add("session-h1", AGENT, { site: SITE, kind: "page-actions", source: "browser" });

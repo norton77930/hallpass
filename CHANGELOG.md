@@ -5,6 +5,18 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.27.0 — 2026-11-23
+
+- **"This session" for page scripts on your own dev site.** On `localhost`, `127.0.0.1` or `[::1]` (any port,
+  http or https), the question for running a script on the page (`evaluate`) now also offers *This session*,
+  in the side panel and in the terminal. Answer it once and that agent session runs later scripts on that
+  site without asking, until the session ends; the session card lists it as "page scripts". It covers
+  scripts only: clicks and typing on the site still ask, another session still asks, and every other site
+  still asks for every script. Look-alike hosts such as `app.localhost` or `127.0.0.1.nip.io` do not count.
+- **The terminal says how to stop being asked.** When a question in the terminal has no *This session*
+  choice, it now names the two places that stop the questions for that site: *Always allow on &lt;site&gt;* on
+  the side panel, or *Skip checks* for the site on the settings page.
+
 ## 0.26.5 — 2026-11-22
 
 - **One agent pointer on the page, always.** If the extension was reloaded while an agent held a tab, the

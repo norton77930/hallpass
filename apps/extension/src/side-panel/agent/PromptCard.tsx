@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import { AGENT_SITE_PLAN_COVERED_TOOLS, type AgentPanelState } from "@hallpass/contracts";
+import { isLoopbackSite } from "@hallpass/domain";
 import { lookup } from "../../locales/catalog.js";
 import { TARGET_ROLE_KEYS, TOOL_SUMMARY_KEYS, UPLOAD_DELIVERY_SUMMARY_KEYS } from "../agent-panel-keys.js";
 import { isTargetRole, TARGET_UNREADABLE } from "../../target-role.js";
@@ -501,8 +502,13 @@ function QuestionCard(props: PromptCardProps): ReactElement | null {
     // the set a 017 site plan admits, `dialog` included. Page JavaScript, uploads, a forced leave
     // and closing a tab are asked each time, so their card has no such button. An unknown frame site
     // has no origin to store a grant under (FR-464), as it has none for "always".
+    // 043 FR-624, D-043-3: and page JavaScript whose deciding site (the frame's, else the page's) is
+    // loopback (R-582) - the worker's `clientChoicesFor` offers the client the same, and records it
+    // as a scripts grant only under that same rule.
     const sessionCovered =
-      !frameUnknown && (AGENT_SITE_PLAN_COVERED_TOOLS as readonly string[]).includes(prompt.tool);
+      !frameUnknown &&
+      ((AGENT_SITE_PLAN_COVERED_TOOLS as readonly string[]).includes(prompt.tool) ||
+        (prompt.tool === "evaluate" && prompt.kind === undefined && isLoopbackSite(frameSite ?? prompt.site)));
     const answer = (allow: boolean, scope: "once" | "session" | "always" = "once"): void => {
       props.send({
         type: "ui.agent.effect-decide",

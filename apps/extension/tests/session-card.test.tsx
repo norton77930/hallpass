@@ -1008,4 +1008,25 @@ describe("031 T925 session card grants", () => {
     expect(grants[1]).toContain("Chrome");
     expect(grants.join("")).not.toMatch(/terminal|this session|page actions/);
   });
+
+  // 043 T1212 (FR-628, R-583): a scripts grant is its own line, with where it was given.
+  it("shows a scripts grant as its own line beside a page-actions grant on the same site", () => {
+    const LOCAL = "http://localhost:3001";
+    const local = [
+      { site: LOCAL, kind: "page-actions" as const, source: "browser" as const },
+      { site: LOCAL, kind: "scripts" as const, source: "client" as const },
+    ];
+    renderShell();
+    project(port, { ...IDLE, sessions: [{ ...SESSION, grants: local }] });
+    const rows = [...only().querySelectorAll<HTMLElement>(".agent-session-sites > li")];
+    expect(rows).toHaveLength(1);
+    const lines = [...(rows[0]?.querySelectorAll(".agent-session-grant") ?? [])].map((entry) => entry.textContent);
+    expect(lines).toEqual(["page actions" + "Chrome", "page scripts" + "Terminal"]);
+    cleanup();
+
+    renderShell("zh-TW");
+    project(port, { ...IDLE, sessions: [{ ...SESSION, grants: local }] });
+    const zh = [...only().querySelectorAll(".agent-session-grant")].map((entry) => entry.textContent ?? "");
+    expect(zh[1]).toBe("頁面腳本" + "終端機");
+  });
 });

@@ -784,6 +784,51 @@ describe("031 This session button", () => {
     }
   });
 
+  // 043 T1212 (FR-624, D-043-3, D-043-5): page JavaScript on a loopback deciding site has it too.
+  it("is on the card of a script on a loopback site, and sends allow with session", () => {
+    for (const site of ["http://localhost:3001", "https://localhost", "http://127.0.0.1:8080", "http://[::1]:3000"]) {
+      project(port, { ...IDLE, prompt: { promptId: `prompt-${site}`, site, tool: "evaluate" as const, argsSummary: "x" } });
+      expect(labels(), site).toEqual([ui("agent.allowOnce"), ui("agent.allowSession"), ui("agent.allowAlways"), ui("agent.refuse")]);
+    }
+    // A loopback frame inside another site's page decides for itself (030 R-444).
+    project(port, {
+      ...IDLE,
+      prompt: { promptId: "prompt-lf", site: SITE, frame: { site: "http://localhost:3001" }, tool: "evaluate" as const, argsSummary: "x" },
+    });
+    expect(labels()).toContain(ui("agent.allowSession"));
+
+    fireEvent.click(screen.getByRole("button", { name: ui("agent.allowSession") }));
+    expect(port.sent.at(-1)).toEqual({ type: "ui.agent.effect-decide", payload: { promptId: "prompt-lf", allow: true, session: true } });
+  });
+
+  it("is not on the card of a script anywhere else, nor of uploads, a forced leave or a tab close on loopback", () => {
+    for (const [site, frame] of [
+      ["https://example.com", undefined],
+      ["http://app.localhost", undefined],
+      ["http://localhost.example.com", undefined],
+      ["http://127.0.0.1.nip.io", undefined],
+      ["http://[::ffff:7f00:1]", undefined],
+      ["http://127.0.0.2", undefined],
+      ["http://localhost:3001", { site: "https://pay.example.com" }],
+      ["http://localhost:3001", { unknown: true as const }],
+    ] as const) {
+      project(port, {
+        ...IDLE,
+        prompt: { promptId: `prompt-${site}-${JSON.stringify(frame)}`, site, ...(frame ? { frame } : {}), tool: "evaluate" as const, argsSummary: "x" },
+      });
+      expect(labels(), `${site} ${JSON.stringify(frame)}`).not.toContain(ui("agent.allowSession"));
+    }
+    for (const extra of [
+      { tool: "file_upload" as const },
+      { tool: "upload_image" as const },
+      { tool: "navigate" as const, kind: "beforeunload-force" as const },
+      { tool: "tabs_close" as const },
+    ]) {
+      project(port, { ...IDLE, prompt: { promptId: `prompt-l-${extra.tool}`, site: "http://localhost:3001", argsSummary: "x", ...extra } });
+      expect(labels(), extra.tool).not.toContain(ui("agent.allowSession"));
+    }
+  });
+
   it("leaves the transition and upload-directory cards as they were", () => {
     project(port, {
       ...IDLE,

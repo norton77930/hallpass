@@ -19,6 +19,8 @@ Sent once, when a question is raised for a call that came from this host.
 | `choices` | array of `"once" \| "session" \| "deny"` | at least `once` and `deny` |
 | `boundMs` | number | 120 000 |
 
+043 adds the optional `alwaysInBrowser: true` (effect questions only) and the host's hint sentence: see `specs/043-evaluate-consent/contracts/prompt-raised-043.md`.
+
 ## Host -> worker: `prompt-answer`
 
 Sent only when the owner chose an option in the client (`accept` with a valid `choice`).

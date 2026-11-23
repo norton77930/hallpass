@@ -328,6 +328,7 @@ export const messages = {
   // 031 FR-475, R-458, 036 FR-546: the kinds of a session grant, shown as a mark and the kind on the site's row.
   "agent.session.grantKind.page-actions": "page actions",
   "agent.session.grantKind.diagnostics": "diagnostics",
+  "agent.session.grantKind.scripts": "page scripts",
   // 014 FR-178: the second control, and the line for a press that found nothing running.
   "agent.session.interrupt": "Interrupt",
   "agent.session.nothingToInterrupt": "Nothing was running, so nothing changed.",

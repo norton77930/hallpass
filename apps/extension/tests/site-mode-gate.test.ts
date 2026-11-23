@@ -408,3 +408,84 @@ describe("030 a plan covers only its own site", () => {
     ).toEqual({ decision: "admit" });
   });
 });
+
+/**
+ * 043/T1208 - a session's scripts grant (R-584, D-043-3): "This session" for page JavaScript on a
+ * loopback site. It answers the `evaluate` question where the gate would otherwise ask, on a known
+ * loopback site, and nothing else: no other tool reads it, an unknown site still asks (030 FR-464),
+ * and `skip-checks` was admitting already.
+ */
+describe("043 scripts grant", () => {
+  const LOCAL = "http://localhost:3001";
+  const MODES: readonly SiteMode[] = ["ask", "follow-a-plan", "skip-checks"];
+
+  it("admits evaluate under ask and follow-a-plan on the loopback site it covers", () => {
+    for (const mode of ["ask", "follow-a-plan"] as const) {
+      expect(decideGate({ ...base, site: LOCAL, mode, tool: "evaluate", scriptsGrantCovers: true }), mode).toEqual({
+        decision: "admit",
+      });
+      // Without it, exactly as before.
+      expect(decideGate({ ...base, site: LOCAL, mode, tool: "evaluate" }), mode).toEqual({ decision: "prompt" });
+      expect(decideGate({ ...base, site: LOCAL, mode, tool: "evaluate", scriptsGrantCovers: false }), mode).toEqual({
+        decision: "prompt",
+      });
+    }
+    // A stated plan that names this evaluate still admits it as that step, so the batch's count stays true.
+    const scripted = plan({ site: LOCAL, steps: [{ tool: "evaluate", args: base.args }] });
+    expect(
+      decideGate({ ...base, site: LOCAL, mode: "follow-a-plan", tool: "evaluate", plan: scripted, scriptsGrantCovers: true }),
+    ).toEqual({ decision: "admit", step: 0 });
+  });
+
+  it("prompts on an unknown deciding site whatever the flag says", () => {
+    for (const mode of MODES) {
+      expect(decideGate({ ...base, site: null, mode, tool: "evaluate", scriptsGrantCovers: true }), mode).toEqual({
+        decision: "prompt",
+      });
+    }
+  });
+
+  it("is worth nothing on a site that is not loopback, however the caller computed it", () => {
+    for (const site of [base.site, "https://example.com", "http://localhost.example.com", "http://127.0.0.2"]) {
+      for (const mode of ["ask", "follow-a-plan"] as const) {
+        expect(decideGate({ ...base, site, mode, tool: "evaluate", scriptsGrantCovers: true }), `${site} ${mode}`).toEqual({
+          decision: "prompt",
+        });
+      }
+    }
+  });
+
+  it("is ignored for every other tool, and changes nothing under skip-checks", () => {
+    const argsFor = (tool: AgentToolName): Record<string, unknown> =>
+      tool === "navigate"
+        ? { tabId: 7, url: `${LOCAL}/next`, force: true }
+        : tool === "dialog"
+          ? { tabId: 7, action: "accept" }
+          : base.args;
+    let compared = 0;
+    for (const mode of MODES) {
+      for (const tool of AGENT_TOOL_NAMES) {
+        const input: GateInput = { ...base, site: LOCAL, mode, tool, args: argsFor(tool) };
+        const covered = decideGate({ ...input, scriptsGrantCovers: true });
+        if (tool === "evaluate" && mode !== "skip-checks") {
+          expect(covered, `${mode} ${tool}`).toEqual({ decision: "admit" });
+        } else {
+          expect(covered, `${mode} ${tool}`).toEqual(decideGate(input));
+        }
+        compared += 1;
+      }
+    }
+    expect(compared).toBe(MODES.length * AGENT_TOOL_NAMES.length);
+    expect(decideGate({ ...base, site: LOCAL, mode: "skip-checks", tool: "evaluate", scriptsGrantCovers: true })).toEqual({
+      decision: "admit",
+    });
+  });
+
+  it("and the site plan still never covers evaluate, on loopback too (017 FR-255)", () => {
+    for (const mode of ["ask", "follow-a-plan"] as const) {
+      expect(decideGate({ ...base, site: LOCAL, mode, tool: "evaluate", sitePlanCovers: true }), mode).toEqual({
+        decision: "prompt",
+      });
+    }
+  });
+});

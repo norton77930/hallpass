@@ -277,3 +277,57 @@ describe("T964 a site revoke forgets that site's grants in every session", () =>
     await expect(createSessionGrantStore({ session: undefined }).forgetSite(A)).resolves.toBeUndefined();
   });
 });
+
+/**
+ * 043/T1206 - a third kind, `scripts`: the "This session" answer to page JavaScript on a loopback
+ * site (R-583, FR-625, FR-626). It is its own kind, so neither of the other two ever answers for it
+ * and it answers for neither; it goes with its session, its agent and its site as the others do.
+ */
+describe("T1206 the scripts grant is a kind of its own", () => {
+  const LOCAL = "http://localhost:3001";
+
+  it("covers only its own kind, session, agent and exact origin, and reads back after a restart", async () => {
+    const session = fakeArea();
+    await createSessionGrantStore({ session, now: () => T1 }).add("s1", AGENT, { site: LOCAL, kind: "scripts", source: "client" });
+
+    const restarted = createSessionGrantStore({ session });
+
+    expect(await restarted.covers("s1", AGENT, LOCAL, "scripts")).toBe(true);
+    expect(await restarted.list("s1", AGENT)).toEqual([{ sessionId: "s1", site: LOCAL, kind: "scripts", source: "client", grantedAt: T1 }]);
+    // FR-626: a scripts grant is no page-actions grant, and no diagnostics grant either.
+    expect(await restarted.covers("s1", AGENT, LOCAL, "page-actions")).toBe(false);
+    expect(await restarted.covers("s1", AGENT, LOCAL, "diagnostics")).toBe(false);
+    expect(await restarted.covers("s1", AGENT, "http://localhost:3002", "scripts")).toBe(false);
+    expect(await restarted.covers("s2", AGENT, LOCAL, "scripts")).toBe(false);
+    expect(await restarted.covers("s1", OTHER_AGENT, LOCAL, "scripts")).toBe(false);
+  });
+
+  it("is never covered by a page-actions or a diagnostics grant for the same session and origin", async () => {
+    const store = createSessionGrantStore({ session: fakeArea(), now: () => T1 });
+    await store.add("s1", AGENT, { site: LOCAL, kind: "page-actions", source: "browser" });
+    await store.add("s1", AGENT, { site: LOCAL, kind: "diagnostics", source: "browser" });
+
+    expect(await store.covers("s1", AGENT, LOCAL, "scripts")).toBe(false);
+    expect(await store.covers("s1", AGENT, LOCAL, "page-actions")).toBe(true);
+  });
+
+  it("goes with its session's end, its agent's unpair and its site's revoke", async () => {
+    const store = createSessionGrantStore({ session: fakeArea(), now: () => T1 });
+    await store.add("s1", AGENT, { site: LOCAL, kind: "scripts", source: "client" });
+    await store.add("s2", OTHER_AGENT, { site: LOCAL, kind: "scripts", source: "browser" });
+    await store.add("s3", AGENT, { site: "http://127.0.0.1:8080", kind: "scripts", source: "client" });
+    await store.add("s4", OTHER_AGENT, { site: "http://[::1]:3000", kind: "scripts", source: "client" });
+
+    await store.clearSession("s1");
+    expect(await store.covers("s1", AGENT, LOCAL, "scripts")).toBe(false);
+    expect(await store.covers("s2", OTHER_AGENT, LOCAL, "scripts")).toBe(true);
+
+    await store.clearAgent(AGENT);
+    expect(await store.covers("s3", AGENT, "http://127.0.0.1:8080", "scripts")).toBe(false);
+    expect(await store.covers("s4", OTHER_AGENT, "http://[::1]:3000", "scripts")).toBe(true);
+
+    await store.forgetSite(LOCAL);
+    expect(await store.covers("s2", OTHER_AGENT, LOCAL, "scripts")).toBe(false);
+    expect(await store.covers("s4", OTHER_AGENT, "http://[::1]:3000", "scripts")).toBe(true);
+  });
+});

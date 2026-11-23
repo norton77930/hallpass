@@ -311,6 +311,7 @@ export const messages: Record<MessageKey, string> = {
   // 031 FR-475、R-458、036 FR-546：工作階段授權的種類，在網站那一列以勾號加種類顯示。
   "agent.session.grantKind.page-actions": "頁面操作",
   "agent.session.grantKind.diagnostics": "診斷",
+  "agent.session.grantKind.scripts": "頁面腳本",
   // 014 FR-178：停止旁邊的第二個控制，以及按下時什麼都沒在跑的那一行。
   "agent.session.interrupt": "中斷",
   "agent.session.nothingToInterrupt": "沒有進行中的動作",

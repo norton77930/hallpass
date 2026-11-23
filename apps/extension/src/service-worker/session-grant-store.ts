@@ -10,7 +10,9 @@
  * Entries are only ever added. Adding the same session, site and kind again keeps the first entry
  * (its `grantedAt` and `source` stand): a grant is a fact about when and how the owner first said
  * yes, and a repeat must not rewrite that. Coverage is exact-origin and exact-kind within one
- * session: a `diagnostics` grant never satisfies a page action and the other way round.
+ * session: a `diagnostics` grant never satisfies a page action and the other way round, and a
+ * `scripts` grant (043 R-583: page JavaScript on a loopback site) answers neither and is answered by
+ * neither.
  *
  * Each session's record names its agent, so an unpair clears by agent even for a session this worker
  * has forgotten since a restart, and a read answers only for the agent it was recorded for: another
@@ -30,7 +32,7 @@ export const SESSION_GRANT_NOT_RECORDED = "session-grant-not-recorded";
 /** Per-session grants. `chrome.storage.session`: dies with the browser, cleared with the session. */
 export const AGENT_SESSION_GRANTS_KEY = "agentSessionGrants";
 
-export type SessionGrantKind = "page-actions" | "diagnostics";
+export type SessionGrantKind = "page-actions" | "diagnostics" | "scripts";
 export type SessionGrantSource = "client" | "browser";
 
 export type SessionGrant = {
@@ -79,7 +81,7 @@ export type SessionGrantStore = {
   /** The agent was unpaired: every grant recorded for it goes, whether or not its session is known. */
   clearAgent(agentId: string): Promise<void>;
   /**
-   * The owner revoked the site (032 R-487, FR-490): every grant of either kind for exactly this
+   * The owner revoked the site (032 R-487, FR-490): every grant of any kind for exactly this
    * origin goes, in every session and for every agent; grants on other sites stay.
    */
   forgetSite(site: string): Promise<void>;
@@ -111,7 +113,7 @@ function isStoredGrant(value: unknown): value is StoredGrant {
   const record = value as Record<string, unknown>;
   return (
     typeof record.site === "string" &&
-    (record.kind === "page-actions" || record.kind === "diagnostics") &&
+    (record.kind === "page-actions" || record.kind === "diagnostics" || record.kind === "scripts") &&
     (record.source === "client" || record.source === "browser") &&
     typeof record.grantedAt === "number"
   );

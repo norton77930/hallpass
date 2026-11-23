@@ -195,7 +195,9 @@ on A raises its card.
   are: press (all click variants and the coordinate equivalents), type, key, scroll, hover, drag, form
   filling, accepting a page dialog, and the same steps inside a batch.
 - **FR-255**: Running page JavaScript and putting files or screenshots into a page MUST keep their own
-  consent unchanged on approved sites.
+  consent unchanged on approved sites. (Amended by 043 for loopback (D-043-3): on `localhost`,
+  `127.0.0.1` and `[::1]` the page JavaScript question also offers *this session*, a scripts grant of its
+  own kind; a site plan still never covers page JavaScript.)
 - **FR-256**: Actions on origins not in the plan, and actions by any other session, MUST behave
   exactly as without the plan.
 - **FR-257**: Interaction with remembered site modes: a site set to "do not ask" is unchanged; a site
@@ -275,3 +277,4 @@ on A raises its card.
 | --- | --- | --- |
 | 2026-10-03 | Reading recorded, no FR text changed: FR-251/FR-259's "lists every site" is shown in the owner's script when an origin has an internationalised label - the panel renders `https://例え.jp (xn--r8jz45g.jp)`, Unicode first and the ASCII host always beside it, so a look-alike label cannot pass as a familiar name; a label that does not decode cleanly (or decodes to control, format or space characters) is shown as the ASCII origin alone. Display only: the stored plan, the gate and every panel command keep the canonical ASCII origin. The same rule covers the per-action consent card, the plan card, activity lines and the site and transition lists. | 017 coverage follow-up, code review 2026-10-03 |
 | 2026-10-03 | Reading recorded, no FR text changed: FR-259/FR-260 read the session's plan the way FR-254 admits under it - only while the session still belongs to the agent the plan was approved for; a session id re-announced by another agent shows no plan and marks nothing already approved. Unticked sites on the card survive the card leaving and regaining the question slot (R-247). | 017 coverage follow-ups (review M1) |
+| 2026-11-23 | FR-255 amended by 043 for loopback (D-043-3, D-043-5): on `localhost`, `127.0.0.1` and `[::1]` the page JavaScript question also offers *this session*, recorded as a scripts grant that admits only that session's page JavaScript on that origin. The site plan is unchanged: it never covers page JavaScript, uploads or a forced leave, on any site. | spec 043 US2, owner 2026-11-23 |

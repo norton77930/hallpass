@@ -437,3 +437,61 @@ describe("032 a site change and a site plan in the client", () => {
     expect(formOf(h).field.enumNames).toEqual(["Allow once", "Allow on this site for this session", "Deny"]);
   });
 });
+
+/**
+ * 043 T1202 (R-580, R-581, contracts/prompt-raised-043.md): an effect question the side-panel card
+ * would answer with "Always allow on <site>" says so in the client's message when the client has no
+ * "this session" choice to offer. Text only: the choices, enum and enumNames stay what the worker sent.
+ */
+describe("043 the hint on where to stop being asked", () => {
+  const capabilities: ClientCapabilities = { elicitation: { form: {} } };
+  const SITE = "http://localhost:3001";
+  const BASE = `Hallpass: allow Claude Code (hallpass) to run a script on the page on ${SITE}?`;
+  const HINT =
+    ` To stop these questions on ${SITE}, choose "Always allow on ${SITE}" on the Hallpass side panel,` +
+    ` or set ${SITE} to "Skip checks" on the Hallpass settings page.` +
+    ` Either one lets every action on ${SITE} run without asking.`;
+  const effect = (overrides: Partial<PromptRaisedFrame> = {}): PromptRaisedFrame =>
+    raised({ site: SITE, action: "run a script on the page", choices: ["once", "deny"], ...overrides });
+  const formOf = (h: Harness) => {
+    const params = h.asked[0]! as Extract<ElicitRequest["params"], { requestedSchema: unknown }>;
+    const field = params.requestedSchema.properties.choice as { enum: string[]; enumNames: string[]; description: string };
+    return { message: params.message, field };
+  };
+
+  it("appends the hint for an effect question flagged alwaysInBrowser that offers no session", async () => {
+    const h = await harness(capabilities, () => accept("once"));
+
+    await expect(h.consent.raised(effect({ alwaysInBrowser: true }), h.route)).resolves.toBe("answered");
+
+    const { message, field } = formOf(h);
+    expect(message).toBe(BASE + HINT);
+    expect(field.enum).toEqual(["once", "deny"]);
+    expect(field.enumNames).toEqual(["Allow once", "Deny"]);
+    expect(field.description).toBe("once: Allow once; deny: Deny");
+  });
+
+  it("leaves the message alone when the question offers session", async () => {
+    const h = await harness(capabilities, () => accept("once"));
+
+    await h.consent.raised(effect({ alwaysInBrowser: true, choices: ["once", "session", "deny"] }), h.route);
+
+    expect(formOf(h).message).toBe(BASE);
+  });
+
+  it("leaves the message alone when the worker did not flag it", async () => {
+    const h = await harness(capabilities, () => accept("once"));
+
+    await h.consent.raised(effect(), h.route);
+
+    expect(formOf(h).message).toBe(BASE);
+  });
+
+  it("leaves a diagnostics question without the flag as it was", async () => {
+    const h = await harness(capabilities, () => accept("once"));
+
+    await h.consent.raised(effect({ kind: "diagnostics" }), h.route);
+
+    expect(formOf(h).message).toBe(BASE);
+  });
+});

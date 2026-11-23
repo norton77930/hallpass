@@ -264,7 +264,9 @@ external agent stays above both tabs.
 - **Questions in the agent's own client.** When an action needs your yes and the agent's MCP client
   supports form elicitation, the question is also asked there, with three choices: allow once, allow
   on this site for this session, deny. A move to a site you have not decided about and a site plan
-  are asked there too, with *this session* or *deny*. Long-lived choices — always allow, skip checks, diagnostics
+  are asked there too, with *this session* or *deny*. A question about running page JavaScript has no
+  *this session*, except on your own machine (`localhost`, `127.0.0.1`, `[::1]`), where both the client
+  and the card offer it for that agent session and that site only. Long-lived choices — always allow, skip checks, diagnostics
   always on — can only be made in Chrome. An unanswered question waits up to 120 seconds and the
   toolbar icon shows a badge while it waits; after that the agent is told nothing was done and to ask
   you to answer in Chrome, then retry.

@@ -80,7 +80,20 @@ function messageOf(frame: PromptRaisedFrame, agentLabel: string): string {
     const sites = frame.sites ?? [frame.site];
     return `Hallpass: allow ${agentLabel} to act on these sites for this session: ${sites.join(", ")}?`;
   }
-  return `Hallpass: allow ${agentLabel} to ${frame.action} on ${frame.site}?`;
+  const question = `Hallpass: allow ${agentLabel} to ${frame.action} on ${frame.site}?`;
+  // 043 R-580/R-581: a question that offers no "this session" says where the long-lived decision lives.
+  return frame.alwaysInBrowser === true && !frame.choices.includes("session")
+    ? `${question} ${alwaysInBrowserHint(frame.site)}`
+    : question;
+}
+
+/** 043 R-581: both places that stop the questions on one site, and what that costs. A sentence, not a choice (FR-622). */
+function alwaysInBrowserHint(site: string): string {
+  return (
+    `To stop these questions on ${site}, choose "Always allow on ${site}" on the Hallpass side panel, ` +
+    `or set ${site} to "Skip checks" on the Hallpass settings page. ` +
+    `Either one lets every action on ${site} run without asking.`
+  );
 }
 
 /** The form for one raised question: one required `choice`, offering exactly what the worker did. */

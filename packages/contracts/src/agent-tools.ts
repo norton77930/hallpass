@@ -3606,8 +3606,18 @@ export const promptRaisedFrameSchema = z
     action: z.string().min(1).max(200),
     choices: z.array(z.enum(PROMPT_CHOICES)).min(2).max(3),
     boundMs: z.number().int().positive(),
+    /**
+     * 043 R-580 (contracts/prompt-raised-043.md): the side-panel card for this question offers
+     * "Always allow on <site>" - an effect question whose deciding site is known. The host adds its
+     * hint to the client's message from this, so the worker, which decides the card's buttons,
+     * and the host stay in step. Literal true when present; only on `kind: "effect"`.
+     */
+    alwaysInBrowser: z.literal(true).optional(),
   })
   .superRefine((frame, context) => {
+    if (frame.alwaysInBrowser !== undefined && frame.kind !== "effect") {
+      context.addIssue({ code: "custom", path: ["alwaysInBrowser"], message: "alwaysInBrowser is only for an effect question" });
+    }
     if ((frame.kind === "transition") !== (frame.from !== undefined)) {
       context.addIssue({ code: "custom", path: ["from"], message: "from is required for a transition and only for one" });
     }
@@ -4282,7 +4292,8 @@ const agentSessionViewSchema = z.strictObject({
     .array(
       z.strictObject({
         site: siteOriginSchema,
-        kind: z.enum(["page-actions", "diagnostics"]),
+        // 043 R-583: `scripts` is "This session" for page JavaScript on one loopback origin.
+        kind: z.enum(["page-actions", "diagnostics", "scripts"]),
         source: z.enum(["client", "browser"]),
       }),
     )

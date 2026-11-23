@@ -65,9 +65,11 @@ export const TARGET_ROLE_KEYS: Record<TargetRole, string> = Object.fromEntries(
 ) as Record<TargetRole, string>;
 
 /** 031 FR-475, R-458: what a session grant allows (the contract's own values). */
-export const SESSION_GRANT_KIND_KEYS: Record<"page-actions" | "diagnostics", string> = {
+export const SESSION_GRANT_KIND_KEYS: Record<"page-actions" | "diagnostics" | "scripts", string> = {
   "page-actions": "agent.session.grantKind.page-actions",
   diagnostics: "agent.session.grantKind.diagnostics",
+  // 043 R-583, FR-628: page JavaScript on a loopback site.
+  scripts: "agent.session.grantKind.scripts",
 };
 
 /** 036 FR-546, FR-556: where a grant or an answer was given, as a name - Chrome or the terminal. */

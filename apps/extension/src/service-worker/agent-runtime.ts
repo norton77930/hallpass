@@ -121,8 +121,10 @@ import { createSessionGrantStore } from "./session-grant-store.js";
 import {
   diagnosticsGrantsFrom,
   pageActionGrantsFrom,
+  scriptsGrantsFrom,
   type DiagnosticsGrants,
   type PageActionGrants,
+  type ScriptsGrants,
 } from "./agent-tools/page-action-grants.js";
 import { createScreenshotSpaceStore } from "./screenshot-space-store.js";
 import { shownText } from "./shown-text.js";
@@ -1155,6 +1157,27 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
       },
     };
   })();
+  /**
+   * 043 R-583: the same store's `scripts` grants - "This session" for page JavaScript on a loopback
+   * site - for the `evaluate` effect question, under the same rules and cleared with the others.
+   */
+  const scriptsSessionGrants: ScriptsGrants = (() => {
+    const view = scriptsGrantsFrom(sessionGrantStore, (sessionId) => sessions.get(sessionId)?.agentId);
+    return {
+      async covers(sessionId, site) {
+        try {
+          return await view.covers(sessionId, site);
+        } catch {
+          reportTestDiagnostic("agent.session-grant.read-failed");
+          return false;
+        }
+      },
+      async add(sessionId, site, source) {
+        await view.add(sessionId, site, source);
+        notify();
+      },
+    };
+  })();
   /** A session's grants are over (it ended, or its agent was unpaired). Never throws. */
   async function endSessionGrants(sessionIds: readonly string[]): Promise<void> {
     for (const sessionId of sessionIds) {
@@ -1771,6 +1794,8 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
     attachments,
     // 031 R-460, R-461: the diagnostics question's This session and Always on this site.
     diagnosticsGrants: diagnosticsSessionGrants,
+    // 043 R-584, R-585: the evaluate effect question's This session on a loopback site.
+    scriptsGrants: scriptsSessionGrants,
     async grantDiagnostics(site) {
       await siteModes.set(site, { diagnosticsGranted: true });
       notify();
@@ -3586,7 +3611,7 @@ export function composeAgentRuntime(options: AgentRuntimeOptions = {}): AgentRun
         startedAt?: string;
         colour?: (typeof AGENT_SESSION_COLOURS)[number];
         sitePlan?: { origins: string[] };
-        grants?: Array<{ site: string; kind: "page-actions" | "diagnostics"; source: "client" | "browser" }>;
+        grants?: Array<{ site: string; kind: "page-actions" | "diagnostics" | "scripts"; source: "client" | "browser" }>;
         site?: string;
       }> = [];
       for (const [id, session] of sessions) {

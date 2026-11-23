@@ -9,6 +9,7 @@ import {
   type PromptChoice,
   type SiteMode,
 } from "@hallpass/contracts";
+import { isLoopbackSite } from "@hallpass/domain";
 import { STEP_SEPARATOR } from "./stop.js";
 import { shownOptional, shownText } from "../shown-text.js";
 
@@ -501,20 +502,29 @@ const SESSION_OR_DENY: readonly PromptChoice[] = ["session", "deny"];
 /**
  * What the client may answer (031 R-457, D-031-8): `session` only for a page action a session grant
  * can cover, on a site that is known - a frame whose site could not be established has nothing to
- * hold a grant for (030 FR-458). Everything else is once or deny.
+ * hold a grant for (030 FR-458). Since 043 (R-585, D-043-3) also for page JavaScript whose deciding
+ * site is loopback (R-582): a `scripts` grant of its own kind holds it. Everything else is once or deny.
  */
 function clientChoicesFor(
   tool: AgentToolName,
   frame: AgentEffectPrompt["frame"],
   kind: AgentEffectPrompt["kind"],
+  site: string,
 ): PromptChoice[] {
   // 032 FR-485: the transition card has no "once"; its Continue is already session-bounded.
   if (kind === "transition") return [...SESSION_OR_DENY];
   // D-031-9: a diagnostics question is about debugging access to one known site, which a session
   // grant of its own kind can hold - whichever of the three tools asked it.
   if (kind === "diagnostics") return ["once", "session", "deny"];
+  const frameUnknown = frame !== undefined && "unknown" in frame;
   const covered = (AGENT_SITE_PLAN_COVERED_TOOLS as readonly AgentToolName[]).includes(tool);
-  return covered && !(frame !== undefined && "unknown" in frame) ? ["once", "session", "deny"] : ["once", "deny"];
+  if (covered && !frameUnknown) return ["once", "session", "deny"];
+  // 043 R-585: the deciding site is the frame's when the frame decides (030 R-444), else the page's.
+  const decidingSite = frame !== undefined && "site" in frame ? frame.site : site;
+  if (tool === "evaluate" && kind === undefined && !frameUnknown && isLoopbackSite(decidingSite)) {
+    return ["once", "session", "deny"];
+  }
+  return ["once", "deny"];
 }
 
 /** The action as the client's form says it: the worker's own summary, bounded by the frame (≤ 200). */
@@ -685,7 +695,7 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
       const askable =
         CLIENT_ASKABLE_KINDS.includes(full.kind) && (full.kind !== "transition" || full.transition !== undefined);
       const terminal = askable
-        ? { callId: routableCallId, choices: clientChoicesFor(full.tool, full.frame, full.kind) }
+        ? { callId: routableCallId, choices: clientChoicesFor(full.tool, full.frame, full.kind, full.site) }
         : undefined;
       return new Promise<PromptDecision>((resolve) => {
         const active = arm({ kind: promptKind ?? "ask", callId: routableCallId, sessionId }, (timer) => ({
@@ -718,6 +728,11 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
                   kind: full.kind === "diagnostics" ? "diagnostics" : "effect",
                   // The site the card decides: a frame's own when the frame decides (030 R-445).
                   site: full.frame !== undefined && "site" in full.frame ? full.frame.site : full.site,
+                  // 043 R-580: an effect card on a known site offers "Always allow on <site>"
+                  // (PromptCard `frameUnknown`); the host's hint names that choice.
+                  ...(full.kind !== "diagnostics" && !(full.frame !== undefined && "unknown" in full.frame)
+                    ? { alwaysInBrowser: true as const }
+                    : {}),
                 },
           );
         }
@@ -824,7 +839,8 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
             ...(rememberDirectory && !diagnosticsQuestion ? { rememberDirectory: true } : {}),
             ...(grantDiagnostics === true && diagnosticsQuestion ? { grantDiagnostics: true as const } : {}),
             // 031 R-456: and for "this session". Whether it may become a grant is the runner's
-            // call - only a covered page action on a known site can hold one.
+            // call - only a covered page action on a known site can hold one, or (043 R-585) page
+            // JavaScript on a loopback site.
             ...(session ? { session: true as const } : {}),
             answeredFrom: "browser" as const,
           }
@@ -858,7 +874,8 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
       }
       if (!terminal.choices.includes(choice)) {
         // contracts/terminal-consent.md: a choice the question did not offer is ignored, and the
-        // card keeps waiting. A `session` for page JavaScript is never read as a grant (R-457).
+        // card keeps waiting. A `session` for page JavaScript off loopback is never read as a grant
+        // (R-457, 043 FR-627): it was not offered.
         deps.reportDiagnostic?.("agent.prompt.choice-not-offered");
         return false;
       }

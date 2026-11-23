@@ -1,4 +1,5 @@
 import { AGENT_SITE_PLAN_COVERED_TOOLS, type AgentToolName } from "@hallpass/contracts";
+import { isLoopbackSite } from "@hallpass/domain";
 import type { SessionGrantStore } from "../session-grant-store.js";
 import type { PromptAnswerSource, PromptDecision } from "./prompts.js";
 
@@ -68,6 +69,33 @@ export function diagnosticsGrantsFrom(
   };
 }
 
+/**
+ * 043 R-583: the same view for a session's `scripts` grants - the "This session" answer to the
+ * `evaluate` effect question on a loopback site (D-043-3). It answers that question and nothing else:
+ * no page action reads it, and neither a page-actions nor a diagnostics grant answers it (FR-626).
+ * The same liveness and agent rules as the page-actions view. Whether the site is loopback is the
+ * caller's check (`diagnostics.ts`) and the gate's (`gate.ts`); this view only reads and writes.
+ */
+export type ScriptsGrants = PageActionGrants;
+
+export function scriptsGrantsFrom(
+  store: Pick<SessionGrantStore, "covers" | "add">,
+  agentOf: (sessionId: string) => string | undefined,
+): ScriptsGrants {
+  return {
+    async covers(sessionId, site) {
+      const agentId = agentOf(sessionId);
+      if (agentId === undefined) return false;
+      return store.covers(sessionId, agentId, site, "scripts");
+    },
+    async add(sessionId, site, source) {
+      const agentId = agentOf(sessionId);
+      if (agentId === undefined) return;
+      await store.add(sessionId, agentId, { site, kind: "scripts", source });
+    },
+  };
+}
+
 /** Whether a grant may stand in for the card on this tool (R-457): the 017 covered set, exactly. */
 export function isGrantCoveredTool(tool: AgentToolName): boolean {
   return (AGENT_SITE_PLAN_COVERED_TOOLS as readonly AgentToolName[]).includes(tool);
@@ -114,6 +142,34 @@ export async function recordSessionGrant(
   } catch {
     // The owner said yes to this action, which runs; only the "for the rest of the session" part
     // is lost, and the next action asks again - the safe direction.
+    reportDiagnostic?.("agent.session-grant.not-recorded");
+  }
+}
+
+/**
+ * 043 R-585, FR-625, FR-627: the same for the `evaluate` effect question's "This session" - a
+ * `scripts` grant, written only for an Allow with `session`, only for `evaluate`, only for a known
+ * site that is loopback (R-582). Anywhere else the answer is the once it otherwise is and nothing is
+ * written: the panel and the client are not offered it there, so a `session` that arrives anyway is
+ * one this worker never offered (031 R-456 holds). A write that fails leaves the yes as a once.
+ */
+export async function recordScriptsGrant(
+  grants: ScriptsGrants | undefined,
+  sessionId: string,
+  site: string | null,
+  tool: AgentToolName,
+  asked: PromptDecision,
+  reportDiagnostic?: (code: string) => void,
+): Promise<void> {
+  if (asked.decision !== "allow" || asked.session !== true) return;
+  if (grants === undefined || site === null || tool !== "evaluate" || !isLoopbackSite(site)) {
+    reportDiagnostic?.("agent.session-grant.not-applicable");
+    return;
+  }
+  try {
+    await grants.add(sessionId, site, asked.answeredFrom ?? "browser");
+  } catch {
+    // As `recordSessionGrant`: this script runs on the owner's yes; the next one asks again.
     reportDiagnostic?.("agent.session-grant.not-recorded");
   }
 }
