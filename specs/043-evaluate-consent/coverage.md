@@ -24,11 +24,18 @@ fixtures are all loopback, so the "no *This session* off loopback" rule is pinne
 code-reviewer on the US2 diff: no Important finding. Follow-ups:
 
 - N1 test gaps: the catch for a failed grant read (`agent.session-grant.read-failed`) and the runtime wiring of
-  `scriptsGrants` have no unit test (the packaged run covers the wiring end to end).
+  `scriptsGrants` have no unit test (the packaged run covers the wiring end to end). Fixed by #84: unit tests in
+  `agent-diagnostics-gate.test.ts` (an unreadable grant asks and reports) and `agent-runtime-wiring.test.ts` (a
+  This session answer admits the next `evaluate` through the runtime).
 - N2 the grant read on the `evaluate` path is an unbounded `chrome.storage.session` wait, the same shape as its
   siblings.
 - N3 the frame-decides branch of the offer is unreachable for `evaluate`; whoever adds a frame-targeted `evaluate`
   must make the gate and the recorder use the frame's site too.
-- P1 (pre-existing) the site mode is read before the diagnostics question and used after it.
+- P1 (pre-existing) the site mode is read before the diagnostics question and used after it. Fixed by #87: an
+  `evaluate` that asked the diagnostics question reads the site mode again once it is answered; unit
+  `agent-diagnostics-gate.test.ts` (both directions of a mode change while the question stood, and one read when
+  nothing is asked).
 - Wording: the Recent activity row of an effect question says "Page actions" for every effect, `evaluate` included
-  (`agent.activity.consentQuestion.effect`); it predates 043.
+  (`agent.activity.consentQuestion.effect`); it predates 043. Fixed by #88: an `evaluate` effect question's row
+  says "Page scripts" (`question: "script"`); unit `prompts.test.ts`, `session-card.test.tsx`, contract
+  `agent-tools.test.ts`; packaged `agent-scripts-session-043` reads both rows.

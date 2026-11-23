@@ -645,6 +645,60 @@ describe("T018 agent runtime wiring", () => {
     expect(fake.session.agentSessionGrants ?? {}).toEqual({});
   });
 
+  /**
+   * 043 R-584, R-585 (#84): the runtime hands the scripts grant store to the diagnostics runner, so a
+   * This session answer on a loopback evaluate question lets the same session's next evaluate run
+   * without a question. The runner's own tests inject the store; this is the one that fails when the
+   * composition stops passing it.
+   */
+  it("runs a session's next evaluate on a loopback site unasked after its This session answer (#84)", async () => {
+    const LOCAL = "http://localhost:3001";
+    fake.tabs[0]!.url = `${LOCAL}/app`;
+    const sent: Array<{ command: { method: string }; tabId: number }> = [];
+    const chromeWithDebugger = (globalThis as { chrome: Record<string, unknown> }).chrome;
+    (chromeWithDebugger.tabs as Record<string, unknown>).onUpdated = { addListener() {}, removeListener() {} };
+    chromeWithDebugger.debugger = {
+      async getTargets() {
+        return [];
+      },
+      async attach() {},
+      async detach() {},
+      async sendCommand(target: { tabId: number }, method: string) {
+        sent.push({ tabId: target.tabId, command: { method } });
+        return method === "Runtime.evaluate" ? { result: { type: "string", value: "Local page" } } : {};
+      },
+      onEvent: { addListener() {} },
+      onDetach: { addListener() {} },
+    };
+    const { port, runtime } = await pairedRuntime();
+    await runtime.tabs.adopt("session-h1", 7);
+    await runtime.siteModes.set(LOCAL, { diagnosticsGranted: true });
+    const ranScripts = (): number => sent.filter((entry) => entry.command.method === "Runtime.evaluate").length;
+    const answers = (callId: string) =>
+      port.sent.filter((message) => (message as { callId?: string; outcome?: string }).callId === callId && "outcome" in (message as object));
+    const raisedFor = (callId: string) =>
+      port.sent.filter((message) => (message as { type?: string; callId?: string }).type === "prompt-raised" && (message as { callId?: string }).callId === callId);
+
+    port.emit({ callId: "call-e1", sessionId: "session-h1", tool: "evaluate", args: { tabId: 7, expression: "document.title" } });
+    await vi.waitFor(() => expect(runtime.prompts.current()).toMatchObject({ tool: "evaluate", site: LOCAL }));
+    expect(raisedFor("call-e1")).toHaveLength(1);
+    const promptId = runtime.prompts.current()?.promptId ?? "";
+    port.emit({ type: "prompt-answer", sessionId: "session-h1", callId: "call-e1", promptId, choice: "session" });
+    await vi.waitFor(() => expect(answers("call-e1")).toEqual([expect.objectContaining({ outcome: "ok" })]));
+
+    await vi.waitFor(() =>
+      expect(fake.session.agentSessionGrants).toEqual({
+        "session-h1": { agentId: "agent-1", grants: [{ site: LOCAL, kind: "scripts", source: "client", grantedAt: expect.any(Number) }] },
+      }),
+    );
+
+    port.emit({ callId: "call-e2", sessionId: "session-h1", tool: "evaluate", args: { tabId: 7, expression: "document.title" } });
+    await vi.waitFor(() => expect(answers("call-e2")).toEqual([expect.objectContaining({ outcome: "ok" })]));
+    expect(raisedFor("call-e2"), "the second evaluate asked again").toEqual([]);
+    expect(runtime.prompts.current()).toBeUndefined();
+    expect(ranScripts()).toBe(2);
+  });
+
   it("shows none of another agent's grants on the card of a session greeted under the same id after a restart", async () => {
     // What a restarted worker finds: a grant recorded for this session id, under another agent.
     fake.session.agentSessionGrants = {

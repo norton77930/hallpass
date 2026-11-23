@@ -451,7 +451,12 @@ describe("T191 session card", () => {
     expect(activityText({ ...consent, channel: "browser", answer: "always", question: "site-plan" }, en)).toBe(
       `Site plan · ${WIKI} · Always allowed in Chrome`,
     );
-    for (const question of ["effect", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"] as const) {
+    // #88: a page-script answer says page scripts, in both languages, and a click still says page actions.
+    const script = { ...consent, question: "script", site: "http://localhost:3001" } as const;
+    expect(activityText(script, en)).toBe("Page scripts · http://localhost:3001 · Allowed for this session in the terminal");
+    expect(activityText(script, zh)).toBe("頁面腳本 · http://localhost:3001 · 允許這個工作階段（在終端機）");
+    expect(activityText({ ...script, question: "effect" }, en)).toContain("Page actions");
+    for (const question of ["effect", "script", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"] as const) {
       for (const answer of ["once", "session", "always", "deny"] as const) {
         for (const channel of ["client", "browser"] as const) {
           const line = activityText({ ...consent, question, channel, answer }, en);

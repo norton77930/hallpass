@@ -974,6 +974,45 @@ describe("032 a settled question reports its conclusion", () => {
     expect(concluded).toEqual([conclusion("effect", "browser", "once", A)]);
   });
 
+  it("names an evaluate effect question a script question, whatever the answer or the site, and a click an effect (#88)", async () => {
+    const { prompts, concluded } = controller({ timeoutMs: 1_000 });
+    const script = (extra: Record<string, unknown> = {}) =>
+      effect(prompts, { tool: "evaluate", argsSummary: "run a script in the page", ...extra });
+
+    const first = script({ site: "http://localhost:3001" });
+    prompts.decide(open(prompts), true, undefined, undefined, undefined, true);
+    await first;
+    const second = script();
+    prompts.decide(open(prompts), false);
+    await second;
+    const third = script({ site: "http://localhost:3001" });
+    prompts.decideByCall("call-1", open(prompts), "session", "client");
+    await third;
+    const fourth = script({ frame: { site: A } });
+    prompts.decide(open(prompts), true, "follow-a-plan");
+    await fourth;
+    const click = effect(prompts);
+    prompts.decide(open(prompts), true);
+    await click;
+    vi.useFakeTimers();
+    try {
+      const unanswered = script();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(unanswered).resolves.toMatchObject({ decision: "timed-out" });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(concluded).toEqual([
+      conclusion("script", "browser", "session", "http://localhost:3001"),
+      conclusion("script", "browser", "deny"),
+      conclusion("script", "client", "session", "http://localhost:3001"),
+      conclusion("script", "browser", "always", A),
+      conclusion("effect", "browser", "once"),
+      conclusion("script", "none", "timed-out"),
+    ]);
+  });
+
   it("reports a diagnostics question: once, session, always for the grant checkbox", async () => {
     const { prompts, concluded } = controller();
     const first = effect(prompts, { kind: "diagnostics" });

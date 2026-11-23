@@ -186,7 +186,7 @@ export type PromptSettled = {
  */
 export type PromptConclusion = {
   sessionId: string;
-  question: "effect" | "diagnostics" | "transition" | "site-plan" | "plan" | "upload-directory" | "dialog";
+  question: "effect" | "script" | "diagnostics" | "transition" | "site-plan" | "plan" | "upload-directory" | "dialog";
   site: string;
   channel: PromptAnswerSource | "none";
   answer: "once" | "session" | "always" | "deny" | "timed-out";
@@ -563,7 +563,10 @@ export function createAgentPromptController(deps: AgentPromptDeps = {}): AgentPr
     if (effect !== undefined) {
       question =
         effect.kind === undefined
-          ? "effect"
+          ? // 043 #88: an `evaluate`'s effect question is about page JavaScript, whatever its answer or site.
+            effect.tool === "evaluate"
+            ? "script"
+            : "effect"
           : effect.kind === "dialog-accept" || effect.kind === "beforeunload-force"
             ? "dialog"
             : effect.kind;

@@ -347,6 +347,7 @@ export const messages: Record<MessageKey, string> = {
   "agent.activity.consentAnswered": "{answer}（{place}）",
   "agent.activity.consentTimedOut": "沒有回答（逾時）",
   "agent.activity.consentQuestion.effect": "頁面操作",
+  "agent.activity.consentQuestion.script": "頁面腳本",
   "agent.activity.consentQuestion.diagnostics": "診斷",
   "agent.activity.consentQuestion.transition": "換網站",
   "agent.activity.consentQuestion.site-plan": "網站計畫",

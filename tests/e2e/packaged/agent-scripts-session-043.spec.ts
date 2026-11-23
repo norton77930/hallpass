@@ -10,6 +10,7 @@ import {
   localeFromEnv,
   openCard,
   openSidePanel,
+  showAllActivity,
   waitForAgentPanel,
   type SidePanelDriver,
 } from "../fixtures/side-panel-driver.js";
@@ -42,8 +43,10 @@ const NO_CARD_WINDOW_MS = 1_500;
  *   1. `evaluate` on a loopback site at `ask`, diagnostics already granted, raises the effect card, and
  *      the card offers Allow once, This session and Refuse (FR-624) - screenshot.
  *   2. This session: the call answers with the page's value; a second `evaluate` raises no card (FR-625).
- *   3. The session card lists the new "page scripts" grant line (FR-628) - screenshot.
- *   4. A `click` by the same session on the same site still raises a card (FR-626).
+ *   3. The session card lists the new "page scripts" grant line (FR-628) - screenshot - and its Recent
+ *      activity row for the answer says Page scripts, not Page actions (#88).
+ *   4. A `click` by the same session on the same site still raises a card (FR-626), and its activity row
+ *      still says Page actions (#88).
  *   5. A second paired session's `evaluate` on that site still raises a card (FR-625: per session).
  *
  * The look-alike hosts of scenario 6 and the grant's end with the session are unit-test claims (SC-283);
@@ -158,6 +161,15 @@ test.describe("043 scripts session grant", () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       await panelShot(panel, "043-us2-2-session-card-scripts-grant.png");
 
+      // #88: the activity row for the This session answer names page scripts, and no row says Page actions yet.
+      await expect
+        .poll(() => consentRows(panel, sessionId), { timeout: 15_000, message: "no consent row on the session card" })
+        .toEqual([expect.stringContaining(ui("agent.activity.consentQuestion.script"))]);
+      expect((await consentRows(panel, sessionId))[0], "the row names the site").toContain("127.0.0.1");
+      expect(await consentRows(panel, sessionId), "the script answer's row says Page actions").not.toContainEqual(
+        expect.stringContaining(ui("agent.activity.consentQuestion.effect")),
+      );
+
       // ============ (4) the scripts grant does not admit a page action (FR-626) ============
       const buttonRef = await refFor(live, tab, (node) => node.role === "button" && node.name === "Safe action");
       await refuseConsent(
@@ -166,6 +178,21 @@ test.describe("043 scripts session grant", () => {
         live,
         "click on the site where only a scripts grant stands",
       );
+      // #88: the refused click's row still says Page actions, and the script row is as it was.
+      await expect
+        .poll(() => consentRows(panel, sessionId), { timeout: 15_000, message: "no Page actions row for the click" })
+        .toEqual(
+          expect.arrayContaining([
+            expect.stringContaining(ui("agent.activity.consentQuestion.effect")),
+            expect.stringContaining(ui("agent.activity.consentQuestion.script")),
+          ]),
+        );
+      const afterClick = await consentRows(panel, sessionId);
+      expect(afterClick, "one row per settled question").toHaveLength(2);
+      expect(
+        afterClick.find((row) => row.includes(ui("agent.activity.consentQuestion.script"))),
+        "the script row never says Page actions",
+      ).not.toContain(ui("agent.activity.consentQuestion.effect"));
 
       // ============ (5) the grant is per session (FR-625) ============
       second = await startMcpClient({ clientName: "Claude Code" });
@@ -336,6 +363,20 @@ async function sessionIds(panel: SidePanelDriver): Promise<string[]> {
   return (await panel.evaluatePanel(
     "[...document.querySelectorAll('[data-session-id]')].map((card)=>card.getAttribute('data-session-id'))",
   )) as string[];
+}
+
+/**
+ * The text of the session card's consent activity rows (032 FR-494): the ones that open with a question's
+ * name. Every row is shown first (036 FR-550), since only the newest three are on screen otherwise.
+ */
+async function consentRows(panel: SidePanelDriver, sessionId: string): Promise<string[]> {
+  await openCard(panel, sessionId);
+  await showAllActivity(panel);
+  const names = ["agent.activity.consentQuestion.effect", "agent.activity.consentQuestion.script"].map(ui);
+  const rows = (await panel.evaluatePanel(
+    `[...(document.querySelector(${JSON.stringify(cardSelector(sessionId))})?.querySelectorAll('.agent-session-activity .agent-activity-text')??[])].map((p)=>(p.textContent??'').trim())`,
+  )) as string[];
+  return rows.filter((row) => names.some((name) => row.startsWith(name)));
 }
 
 /** Whether the session card's row for the site carries the "page scripts" grant (FR-628), and where it was given. */

@@ -4149,7 +4149,8 @@ const agentActivityItemBaseSchema = z.strictObject({
    */
   message: z.string().max(4000).optional(),
   /** 032 FR-494: which question was settled (present exactly when the kind is `consent`). */
-  question: z.enum(["effect", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"]).optional(),
+  /** 043 #88: `script` is the effect question of an `evaluate` (page JavaScript); every other effect is `effect`. */
+  question: z.enum(["effect", "script", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"]).optional(),
   /** 032: where the answer came from - the agent's own client, the browser panel, or nowhere (a timeout). */
   channel: z.enum(["client", "browser", "none"]).optional(),
   /** 032: what the owner answered, or `timed-out` when nobody did in the time the question stays open. */

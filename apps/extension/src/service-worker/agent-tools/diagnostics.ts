@@ -577,16 +577,22 @@ export function createAgentDiagnostics(deps: AgentDiagnosticsDeps): AgentDiagnos
      */
     let scriptsAnswer: PromptDecision | undefined;
     if (tool === "evaluate") {
+      /**
+       * #87: the diagnostics question may have stood for its whole bound, and the owner may have
+       * changed the site's mode meanwhile (REVIEW.md "State read before an await"); that change
+       * applies to this call. A call that asked nothing keeps its single read.
+       */
+      const mode = askedForGrant ? (await deps.siteModes.get(site)).mode : record.mode;
       const decision = decideGate({
         sessionId: request.sessionId,
         tabId,
         site,
-        mode: record.mode,
+        mode,
         tool,
         args,
         ...(deps.statedPlan ? { plan: deps.statedPlan(site) } : {}),
         // 043 R-584: this session's scripts grant for a loopback site answers the script question.
-        scriptsGrantCovers: await scriptsGranted(request.sessionId, site, record.mode),
+        scriptsGrantCovers: await scriptsGranted(request.sessionId, site, mode),
       });
       if (decision.decision === "refuse") return answer(callId, "failed", decision.reason);
       if (decision.decision === "admit" && decision.step !== undefined) {

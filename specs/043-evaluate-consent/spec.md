@@ -177,3 +177,4 @@ and a review (R2, REVIEW.md "a change to how consent, a grant or a permission ru
 | --- | --- | --- |
 | 2026-11-23 | Initial specification | owner 2026-11-23 |
 | 2026-11-23 | FR-623 resolved to option A (D-043-5); US2 approved (D-043-3, D-043-4) | owner 2026-11-23 |
+| 2026-11-23 | Wording fix (#88): the Recent activity row of an `evaluate` effect question reads "Page scripts" (`question: "script"` in the activity item), every other effect still "Page actions"; no change to any requirement | follow-up #88 |

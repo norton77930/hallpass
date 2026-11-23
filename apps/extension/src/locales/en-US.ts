@@ -368,6 +368,7 @@ export const messages = {
   "agent.activity.consentAnswered": "{answer} {place}",
   "agent.activity.consentTimedOut": "No answer (timed out)",
   "agent.activity.consentQuestion.effect": "Page actions",
+  "agent.activity.consentQuestion.script": "Page scripts",
   "agent.activity.consentQuestion.diagnostics": "Diagnostics",
   "agent.activity.consentQuestion.transition": "Site change",
   "agent.activity.consentQuestion.site-plan": "Site plan",

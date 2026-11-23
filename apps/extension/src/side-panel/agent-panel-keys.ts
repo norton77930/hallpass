@@ -122,6 +122,7 @@ type ConsentItem = { [K in "question" | "channel" | "answer"]-?: NonNullable<Age
 
 export const CONSENT_QUESTION_KEYS: Record<ConsentItem["question"], string> = {
   effect: "agent.activity.consentQuestion.effect",
+  script: "agent.activity.consentQuestion.script",
   diagnostics: "agent.activity.consentQuestion.diagnostics",
   transition: "agent.activity.consentQuestion.transition",
   "site-plan": "agent.activity.consentQuestion.site-plan",

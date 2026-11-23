@@ -384,3 +384,4 @@ that the next action works normally.
 | Date | Change | Origin |
 | --- | --- | --- |
 | 2026-11-23 | D-031-8 and FR-470 amended by 043 for loopback (D-043-3, D-043-5): on `localhost`, `127.0.0.1` and `[::1]` the page JavaScript question offers *this session* in the agent's client and on the card, recorded as a scripts grant for that session and origin that ends with the session (FR-469). Every other site, and uploads, a forced leave and closing a tab everywhere, are unchanged. | spec 043 US2, owner 2026-11-23 |
+| 2026-11-23 | R-460 fix: an `evaluate` that asked the diagnostics question gates its script under the site mode in force once that question is answered, read again then, so a mode the owner changed while the question stood applies to the call (both directions). A call that asked nothing reads the mode once, as before. | #87 (043 review P1) |

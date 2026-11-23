@@ -347,7 +347,7 @@ describe("032 activity item kind consent", () => {
 
   it("accepts a consent line of site, question, channel and answer, with no outcome", () => {
     expect(parses(line)).toBe(true);
-    for (const question of ["effect", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"]) {
+    for (const question of ["effect", "script", "diagnostics", "transition", "site-plan", "plan", "upload-directory", "dialog"]) {
       expect(parses({ ...line, question }), question).toBe(true);
     }
     for (const answer of ["once", "session", "always", "deny"]) {

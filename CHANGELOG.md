@@ -5,6 +5,16 @@ What each Hallpass release changed, newest first. Every release is on the
 the same every time unless a section says otherwise: reinstall the host (`install.ps1` from the
 zip, or `npm run agent-host:install` from source) and reload the extension.
 
+## 0.27.1 — 2026-11-23
+
+- **A site setting changed while a question is open now applies to that call.** When an agent runs a script
+  on a page (`evaluate`) and Hallpass first asks whether diagnostics may attach, the site's setting is read
+  again after you answer. Setting the site back to *Ask every time* while that question was open now makes
+  the script ask too; before, that one call still ran under the earlier *Skip checks* (#87).
+- **Recent activity names page scripts.** On the session card, the activity row for a page-script question
+  now reads "Page scripts" instead of "Page actions", matching the "page scripts" grant line (#88).
+- More tests around the page-scripts grant of 0.27.0 (#84).
+
 ## 0.27.0 — 2026-11-23
 
 - **"This session" for page scripts on your own dev site.** On `localhost`, `127.0.0.1` or `[::1]` (any port,

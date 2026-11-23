@@ -1196,6 +1196,30 @@ describe("043 a scripts grant for evaluate on a loopback site", () => {
     expect(ran()).toBe(1);
   });
 
+  it("asks the script's question and reports a read failure when the scripts grant cannot be read (#84)", async () => {
+    const diagnostics: string[] = [];
+    const { runner, prompts, siteModes, raised } = harness(
+      {
+        reportDiagnostic: (code) => diagnostics.push(code),
+        scriptsGrants: {
+          covers: async () => {
+            throw new Error("storage unavailable");
+          },
+          add: async () => {},
+        },
+      },
+      { timeoutMs: 5_000 },
+    );
+    await siteModes.set(LOCAL, { diagnosticsGranted: true });
+
+    const pending = runner.run(evaluate());
+    prompts.decide(await scriptQuestion(prompts), false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    expect(raised.at(-1)).toMatchObject({ kind: "effect", site: LOCAL });
+    expect(diagnostics).toContain("agent.session-grant.read-failed");
+    expect(ran()).toBe(0);
+  });
+
   it("keeps the diagnostics question as it was, and its session answer is no scripts grant", async () => {
     const { runner, prompts, store, raised } = harness({}, { timeoutMs: 5_000 });
 
@@ -1221,5 +1245,77 @@ describe("043 a scripts grant for evaluate on a loopback site", () => {
     await expect(runner.run(evaluate())).resolves.toMatchObject({ outcome: "ok" });
     expect(prompts.current()).toBeUndefined();
     expect(await store.list("session-h1", AGENT)).toEqual([]);
+  });
+});
+
+/**
+ * #87 (031 R-460, 043 review P1) - the diagnostics question can stand for as long as its card's
+ * bound, and the owner may change the site's mode on the settings page meanwhile. The mode a script
+ * is gated under is the one in force once that question is answered, not the one read before it; a
+ * call that asks nothing reads the mode once, as before.
+ */
+describe("#87 a site mode changed while the diagnostics question stood", () => {
+  let fake: ReturnType<typeof installChrome>;
+
+  beforeEach(() => {
+    fake = installChrome();
+  });
+
+  afterEach(() => {
+    delete (globalThis as { chrome?: unknown }).chrome;
+  });
+
+  const evaluate = () => request("evaluate", { expression: "document.title" });
+  const ran = (): number => fake.fakeDebugger.commands.filter((command) => command.method === "Runtime.evaluate").length;
+
+  async function allowDiagnosticsOnce(prompts: AgentPromptController): Promise<void> {
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    prompts.decide(prompts.current()?.promptId ?? "", true);
+  }
+
+  it("asks the script's question when the site went from skip-checks to ask", async () => {
+    const { runner, prompts, siteModes, raised } = harness({}, { timeoutMs: 5_000 });
+    await siteModes.set(SITE, { mode: "skip-checks" });
+
+    const pending = runner.run(evaluate());
+    let settled: AgentNativeResponse | undefined;
+    void pending.then((response) => (settled = response));
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    await siteModes.set(SITE, { mode: "ask" });
+    await allowDiagnosticsOnce(prompts);
+
+    // Either the script's own question is up or the call has already returned: it must be the question.
+    await vi.waitFor(() => expect(settled ?? (prompts.current()?.kind === undefined ? prompts.current() : undefined)).toBeDefined());
+    expect(settled).toBeUndefined();
+    expect(prompts.current()).toMatchObject({ tool: "evaluate" });
+    expect(raised.at(-1)).toMatchObject({ kind: "effect", site: SITE });
+    expect(ran()).toBe(0);
+
+    prompts.decide(prompts.current()?.promptId ?? "", false);
+    await expect(pending).resolves.toMatchObject({ outcome: "denied", reason: "owner-denied" });
+    expect(ran()).toBe(0);
+  });
+
+  it("runs the script unasked when the site went from ask to skip-checks (the latest setting applies)", async () => {
+    const { runner, prompts, siteModes, raised } = harness({}, { timeoutMs: 5_000 });
+
+    const pending = runner.run(evaluate());
+    await vi.waitFor(() => expect(prompts.current()).toMatchObject({ kind: "diagnostics" }));
+    await siteModes.set(SITE, { mode: "skip-checks" });
+    await allowDiagnosticsOnce(prompts);
+
+    await expect(pending).resolves.toMatchObject({ outcome: "ok" });
+    expect(raised.map((question) => question.kind)).toEqual(["diagnostics"]);
+    expect(ran()).toBe(1);
+  });
+
+  it("reads the site mode once when no diagnostics question is asked", async () => {
+    const { runner, prompts, siteModes } = harness();
+    await siteModes.set(SITE, { diagnosticsGranted: true, mode: "skip-checks" });
+    const get = vi.spyOn(siteModes, "get");
+
+    await expect(runner.run(evaluate())).resolves.toMatchObject({ outcome: "ok" });
+    expect(prompts.current()).toBeUndefined();
+    expect(get).toHaveBeenCalledTimes(1);
   });
 });
